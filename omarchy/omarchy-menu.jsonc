@@ -10,10 +10,10 @@
   "stream.program": {"icon": "\uf26c", "label": "Program Window", "description": "Confidence monitor (fullscreen on the TV)", "action": "stream-engine-launch-or-focus --program"},
   "stream.go-live": {"icon": "\uf111", "label": "Go Live", "description": "Switch the show to live mode", "checked": "streamctl get show.mode | grep -qx 'show.mode = live'", "action": "streamctl mode live || omarchy-notification-send -u critical 'stream-engine' 'Go live failed: is the engine running?'"},
   "stream.brb": {"icon": "\uf0f4", "label": "BRB", "description": "Toggle live and be-right-back", "checked": "streamctl get show.mode | grep -qx 'show.mode = brb'", "action": "streamctl brb || omarchy-notification-send -u critical 'stream-engine' 'BRB failed: is the engine running?'"},
-  "stream.layout": {"icon": "\uf009", "label": "Layout", "description": "Switch the UI layout"},
+  "stream.layout": {"icon": "\uf009", "label": "Layout", "description": "One window, or spread over 2 or 3 screens"},
   "stream.layout.show-3disp": {"icon": "\uf0db", "label": "Show (3 displays)", "action": "streamctl fire ui.layout name=show-3disp || omarchy-notification-send -u critical 'stream-engine' 'Layout switch failed: is the engine running?'"},
   "stream.layout.show-2disp": {"icon": "\uf0db", "label": "Show (2 displays)", "action": "streamctl fire ui.layout name=show-2disp || omarchy-notification-send -u critical 'stream-engine' 'Layout switch failed: is the engine running?'"},
-  "stream.layout.build": {"icon": "\uf0ad", "label": "Build", "action": "streamctl fire ui.layout name=build || omarchy-notification-send -u critical 'stream-engine' 'Layout switch failed: is the engine running?'"},
+  "stream.layout.single": {"icon": "\uf2d0", "label": "One window", "action": "streamctl fire ui.layout name=single || omarchy-notification-send -u critical 'stream-engine' 'Layout switch failed: is the engine running?'"},
   "stream.preflight": {"icon": "\uf046", "label": "Preflight", "description": "Run the preflight checklist in a terminal", "action": "omarchy-launch-floating-terminal-with-presentation streamctl preflight"},
   "stream.panic": {"icon": "\uf071", "label": "Panic", "description": "Stop all effects, safe lights, safe mix", "action": "streamctl panic || omarchy-notification-send -u critical 'stream-engine' 'PANIC failed: is the engine running?'"},
 }

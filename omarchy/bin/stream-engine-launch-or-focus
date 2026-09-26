@@ -3,7 +3,7 @@
 #
 #   stream-engine-launch-or-focus                  main window (app-id `stream-engine`)
 #   stream-engine-launch-or-focus --program        confidence window (app-id `stream-engine.program`)
-#   stream-engine-launch-or-focus --layout build   extra arguments go to `stream-engine ui`
+#   stream-engine-launch-or-focus --layout show-2disp   extra arguments go to `stream-engine ui`
 #
 # Matches the Wayland app-id exactly: `omarchy-launch-or-focus` also matches window titles as a
 # word regex, and every stream-engine window is titled "stream-engine" (so is a terminal sitting

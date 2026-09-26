@@ -6,7 +6,7 @@
 #
 # action            default               what it does
 # palette           Ctrl+K                Command palette
-# mode.toggle       Tab                   Toggle Show/Build mode
+# mode.toggle       Tab                   Jump between Live and Scenes
 # scene.preview.N   1 … 9                 Scene N to preview
 # take              Enter                 Take (preview to program)
 # scene.program.N   Shift+1 … Shift+9     Scene N direct to program
@@ -15,7 +15,7 @@
 # redo              Ctrl+Shift+Z          Redo
 # clean             Ctrl+.                Clean (clear chat effects)
 # panic             hold Ctrl+Esc         Panic (always hold-to-confirm)
-# layout.next       Ctrl+L                Switch to the next layout
+# layout.next       Ctrl+L                Next screen setup (one window, 2 or 3 screens)
 # search            Ctrl+F                Search library / chat
 # zoom.in           Ctrl+= / Ctrl+Plus    Zoom in
 # zoom.out          Ctrl+-                Zoom out

@@ -260,3 +260,12 @@ gpu = false
 through the runtime decoders by `tests/fixtures.rs`. Record real ones with
 `streamctl do "midi.record xtouch 20 file=/path/fixture.txt"`. `tests/voice_e2e.rs` speaks commands
 with espeak-ng and checks the recognized intents (`-- --ignored`, needs the model).
+
+### Hardware acceptance
+
+`scripts/acceptance-surfaces.sh` walks through the M7/M8 checks on the real surfaces with the
+running engine and the example mappings: the HYPE preset from the deck, the X-TOUCH, FBV
+footswitch A, voice, a keybind and chat (each must arrive with its own origin), the X-TOUCH
+encoder 1 LED ring following a value set elsewhere, and the Main cue list from the deck's LX GO
+key (page MIX) and from the X-TOUCH fader (fader start). Pass step names to run a subset
+(`scripts/acceptance-surfaces.sh deck fbv`); `TIMEOUT` (default 45 s) bounds each wait.

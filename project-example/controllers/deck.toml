@@ -79,6 +79,11 @@ toggle = "audio.bus.tts.mute"
 label = "TTS"
 icon = "chat"
 color = "red"
+[page.mix.key.4]
+# the Main cue list: next cue (starts the list; fades, follows and waits run from the file)
+do = ["lights.go main"]
+label = "LX GO"
+icon = "play"
 [page.mix.key.5]
 do = ["audio.play airhorn"]
 label = "HORN"

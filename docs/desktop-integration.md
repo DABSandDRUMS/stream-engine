@@ -84,7 +84,7 @@ files, so nothing needs restarting.
   `streamCommand`, `socket`, `openCommand`, `preflightIntervalSec`, `retryIntervalSec`,
   `hideWhenOffline`. Place it with `--bar` or `omarchy plugin enable stream-engine.status`.
 - **Menu** (`~/.config/omarchy/extensions/omarchy-menu.jsonc`): a *Stream* submenu with Open UI,
-  Program Window, Go Live, BRB, Layout (show-3disp / show-2disp / build via
+  Program Window, Go Live, BRB, Layout (single / show-2disp / show-3disp via
   `streamctl fire ui.layout name=…`), Preflight (in a terminal), and Panic. Existing entries with
   the same ids are never overwritten.
 - **Font hook** (`~/.config/omarchy/hooks/font-set.d/stream-engine`): on `omarchy font set` it
