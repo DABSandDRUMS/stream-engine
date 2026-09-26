@@ -208,6 +208,8 @@ pub struct App {
     info_conn: u64,
     project_root: Option<std::path::PathBuf>,
     last_frame_ms: f32,
+    /// Engine unreachable: since when, and the "Start Stream Engine" click.
+    pub down: views::status::EngineDown,
 }
 
 impl App {
@@ -242,6 +244,7 @@ impl App {
             info_conn: 0,
             project_root: None,
             last_frame_ms: 0.0,
+            down: Default::default(),
         }
     }
 
@@ -650,7 +653,9 @@ impl App {
             .exact_size(64.0)
             .frame(egui::Frame::new().fill(self.t.bg).inner_margin(egui::Margin { left: 28, right: 20, top: 0, bottom: 0 }).stroke(egui::Stroke::NONE))
             .show(ui, |ui| views::status::ui(self, ui));
-        if self.page == Page::Live {
+        if views::status::engine_down(self) {
+            views::status::engine_down_ui(self, ui);
+        } else if self.page == Page::Live {
             views::live::ui(self, ui);
         } else {
             self.page_ui(ui);

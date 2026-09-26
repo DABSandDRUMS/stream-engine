@@ -36,6 +36,7 @@ pub mod icon {
     pub const PLAY: &str = "\u{f04b}";
     pub const PAUSE: &str = "\u{f04c}";
     pub const STOP: &str = "\u{f04d}";
+    pub const POWER: &str = "\u{f011}";
     pub const SEARCH: &str = "\u{f002}";
     pub const CONSOLE: &str = "\u{f120}";
     pub const TRACE: &str = "\u{f126}";

@@ -39,13 +39,16 @@ For a development install into `~/.local` use `packaging/dev-install.sh`.
 
 ## Enable the engine
 
-```sh
-stream-engine new ~/stream-project
-mkdir -p ~/.config/stream-engine
-echo "project = \"$HOME/stream-project\"" > ~/.config/stream-engine/engine.toml
-systemctl --user enable --now stream-engine
-streamctl status
-```
+Open **Stream Engine** from the app launcher. If the engine isn't running yet, the window says
+so and its **Start Stream Engine** button runs `systemctl --user enable --now stream-engine`
+(the same thing by hand). On its first start with no project configured, the engine creates the
+starter project `~/stream-project` from `/usr/share/stream-engine/project-example` (or adopts a
+project already there) and saves `project = "…"` in `~/.config/stream-engine/engine.toml`. Then
+Settings → **Get started** walks through cameras, Twitch and OBS.
+
+To use another folder: `stream-engine new <dir>` and set `project = "<dir>"` in
+`~/.config/stream-engine/engine.toml` before the first start. `streamctl status` checks the
+engine from a terminal.
 
 The UI is launched on demand (`stream-engine ui`, the desktop entry, the bar widget, or the
 keybind); closing it never affects output.

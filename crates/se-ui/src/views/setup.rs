@@ -175,7 +175,12 @@ fn checklist(app: &mut App, ui: &mut egui::Ui, st: &mut State) {
 
         // 1. cameras
         let (cam_st, cam_text) = camera_status(app);
+        let any_cams = !cameras(app).is_empty();
         step(ui, &t, 1, cam_st, "Cameras", &cam_text, |ui| {
+            if !any_cams {
+                // nothing to name yet: the blurb says to plug them in; they appear by themselves
+                return;
+            }
             let label = if st.cameras_open { "Hide cameras" } else { "Name your cameras" };
             if widgets::button_ex(
                 ui,

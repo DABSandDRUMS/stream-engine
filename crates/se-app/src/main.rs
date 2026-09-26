@@ -135,6 +135,35 @@ fn resolve_project(arg: Option<PathBuf>) -> Result<PathBuf> {
     )
 }
 
+/// First run (PLAN §15.9): no project configured yet → create the starter project at
+/// `~/stream-project` from the installed template (or adopt one already there) and remember it
+/// in `engine.toml`, so a fresh install works with nothing but `systemctl --user enable --now`.
+fn first_run_project() -> Result<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from).context("HOME is not set")?;
+    let dir = home.join("stream-project");
+    if !dir.join("project.toml").exists() {
+        if dir.read_dir().is_ok_and(|mut d| d.next().is_some()) {
+            bail!("{} exists but isn't a stream-engine project; set `project = \"...\"` in {}", dir.display(), config_dir().join("engine.toml").display());
+        }
+        let tpl = share_dir().join("project-example");
+        copy_dir(&tpl, &dir).with_context(|| format!("copy template {}", tpl.display()))?;
+        eprintln!("first run: created the starter project {}", dir.display());
+    }
+    write_engine_project(&dir)?;
+    Ok(dir)
+}
+
+/// Set `project = "<dir>"` in engine.toml, keeping any other settings and comments there.
+fn write_engine_project(dir: &Path) -> Result<()> {
+    let path = config_dir().join("engine.toml");
+    std::fs::create_dir_all(config_dir())?;
+    let mut doc: toml_edit::DocumentMut = std::fs::read_to_string(&path).unwrap_or_default().parse().with_context(|| format!("parse {}", path.display()))?;
+    doc["project"] = toml_edit::value(dir.display().to_string());
+    std::fs::write(&path, doc.to_string()).with_context(|| format!("write {}", path.display()))?;
+    eprintln!("first run: project = {:?} saved in {}", dir.display().to_string(), path.display());
+    Ok(())
+}
+
 fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
     std::fs::create_dir_all(dst)?;
     for e in std::fs::read_dir(src)? {
@@ -157,8 +186,12 @@ fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Daemon { project, dev, socket, http, osc, no_restore, data_dir } => {
             let et = engine_toml();
+            let project = match resolve_project(project) {
+                Ok(p) => p,
+                Err(_) => first_run_project()?,
+            };
             daemon::run(daemon::DaemonOpts {
-                project: resolve_project(project)?,
+                project,
                 dev,
                 socket,
                 http: http.or(et.http).unwrap_or_else(|| "127.0.0.1:7870".parse().unwrap()),

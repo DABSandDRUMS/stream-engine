@@ -1341,7 +1341,7 @@ Each milestone ends with a **live smoke run**: the actual app, real devices, out
 - [ ] **Ko-fi** account with the webhook URL set to `https://<domain>/hooks/kofi`; verification token stored as a Worker secret.
 - [ ] **Cloudflare** account with the owner's domain; Workers Free plan is enough (Durable Objects SQLite, WebSocket Hibernation).
 - [ ] YouTube account signed into the CEF profile (Premium = ad-free player).
-- [ ] Keyring available on the machine (Secret Service).
+- [x] Keyring available on the machine (Secret Service: gnome-keyring; the API token is stored there).
 
 ### 28.3 Owner info needed later (not needed for the foundation)
 1. **DMX fixture list** (model, DMX mode, start address), before M7; RDM discovery is attempted first.

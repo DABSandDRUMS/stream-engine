@@ -137,12 +137,71 @@ fn friendly(app: &App, check: &str, status: &str, detail: &str) -> Option<String
     })
 }
 
+/// The engine connection went away: when, and the result of a "Start" click.
+#[derive(Default)]
+pub struct EngineDown {
+    since: Option<std::time::Instant>,
+    starting: Option<std::time::Instant>,
+    result: std::sync::Arc<std::sync::Mutex<Option<Result<(), String>>>>,
+}
+
+/// True when the engine has been unreachable long enough to say so (not a reconnect blip).
+pub fn engine_down(app: &mut App) -> bool {
+    if app.m.connected {
+        app.down = EngineDown::default();
+        return false;
+    }
+    let since = *app.down.since.get_or_insert_with(std::time::Instant::now);
+    since.elapsed().as_secs_f32() > 3.0
+}
+
+/// The page shown while the engine isn't running: one button starts it (and keeps it starting
+/// at login) through the systemd user service.
+pub fn engine_down_ui(app: &mut App, ui: &mut egui::Ui) {
+    let t = app.t.clone();
+    egui::CentralPanel::default().frame(egui::Frame::new().fill(t.bg).inner_margin(32)).show(ui, |ui| {
+        ui.add_space((ui.available_height() * 0.2).max(0.0));
+        let result = app.down.result.lock().map(|r| r.clone()).unwrap_or(None);
+        let starting = app.down.starting.is_some_and(|s| s.elapsed().as_secs() < 20) && !matches!(result, Some(Err(_)));
+        let (title, body) = match (&result, starting) {
+            (Some(Err(e)), _) => ("Stream Engine didn't start", format!("{e}\nTry again, or restart the computer.")),
+            (_, true) => ("Starting Stream Engine…", "This takes a few seconds.".to_string()),
+            _ => {
+                ("Stream Engine isn't running", "It normally starts by itself when you log in. Start it now; it will start by itself from now on.".to_string())
+            }
+        };
+        let clicked = widgets::empty_state(ui, &t, icon::POWER, title, &body, (!starting).then_some("Start Stream Engine"));
+        if starting {
+            ui.vertical_centered(|ui| ui.spinner());
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+        }
+        if clicked {
+            app.down.starting = Some(std::time::Instant::now());
+            let slot = app.down.result.clone();
+            if let Ok(mut r) = slot.lock() {
+                *r = None;
+            }
+            std::thread::spawn(move || {
+                let out = std::process::Command::new("systemctl").args(["--user", "enable", "--now", "stream-engine"]).output();
+                let r = match out {
+                    Ok(o) if o.status.success() => Ok(()),
+                    Ok(o) => Err(String::from_utf8_lossy(&o.stderr).trim().to_string()),
+                    Err(e) => Err(format!("Couldn't run systemctl: {e}")),
+                };
+                if let Ok(mut s) = slot.lock() {
+                    *s = Some(r);
+                }
+            });
+        }
+    });
+}
+
 /// Every current warning, most severe first.
 pub fn warnings(app: &App) -> Vec<Warning> {
     let mut w = Vec::new();
     let on_air = streaming(app) || app.m.get("show.live_since").and_then(Value::as_i64).unwrap_or(0) > 0;
     if !app.m.connected {
-        w.push(Warning { text: "The engine isn't running. It restarts by itself; waiting…".into(), fail: true, open: None, setup: false });
+        w.push(Warning { text: "Stream Engine isn't running.".into(), fail: true, open: None, setup: false });
         return w;
     }
     for (a, v) in app.m.under("health") {

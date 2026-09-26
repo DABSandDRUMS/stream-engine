@@ -1,10 +1,8 @@
 post_install() {
   cat <<'EOF'
-==> stream-engine: first-time setup (as your user, not root):
-      stream-engine new ~/stream-project
-      mkdir -p ~/.config/stream-engine
-      echo 'project = "'"$HOME"'/stream-project"' > ~/.config/stream-engine/engine.toml
-      systemctl --user enable --now stream-engine
+==> stream-engine: open "Stream Engine" from your app launcher and press "Start Stream Engine"
+    (or, as your user: systemctl --user enable --now stream-engine). The first start creates
+    your starter project in ~/stream-project; Settings → Get started does the rest.
     Device access (Stream Deck, ENTTEC DMX USB PRO → /dev/dmx-usb-pro) comes from
     /usr/lib/udev/rules.d/70-stream-engine.rules; pacman's udev hook already reloaded and
     re-triggered attached devices.
