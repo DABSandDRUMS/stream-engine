@@ -103,8 +103,8 @@ pub fn write_file(root: &Path, rel: &str, content: &str) {
     std::fs::write(p, content).unwrap();
 }
 
-pub fn example_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../project-example")
+pub fn template(kind: &str, name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../templates/patches").join(kind).join(name)
 }
 
 pub fn copy_dir(from: &Path, to: &Path) {

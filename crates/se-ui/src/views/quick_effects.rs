@@ -1,8 +1,5 @@
-//! Scenes → Quick effects (§15.5): the console for quick effects — one tap that makes
-//! something happen on stream (a shake, a flash, confetti, lights, a sound). Quick effects are
-//! made for the owner in the project files; here he tries them, turns the few knobs each one
-//! exposes, reads what it does and sees where it can be fired (assigning happens in
-//! Inputs → Buttons & pedals).
+//! Quick-effect operation. A new project contains no effect definitions or assignments.
+//! Configured effects can be assigned in Buttons & pedals.
 //!
 //! Left: every quick effect with its pad color, what it does in one line and where it's used
 //! (search when there are many), plus any whose file has a mistake. Right: the selected one —
@@ -414,7 +411,7 @@ fn view(app: &mut App, ui: &mut egui::Ui, st: &mut State, now: f64) {
                                 &t,
                                 icon::BOLT,
                                 "No quick effects yet",
-                                "A quick effect is one tap that makes something happen on stream: a shake, a flash, confetti, lights or a sound. They're made for you — ask for the look you want.",
+                                "This project starts with no effect definitions or assignments. Existing definitions from your presets folder appear here.",
                                 None,
                             );
                         });
@@ -490,7 +487,7 @@ fn list_panel(ui: &mut egui::Ui, t: &Theme, st: &mut State, list: &[Item]) {
             ui.add_space(spacing::M);
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new(icon::INFO).color(t.text_faint));
-                ui.label(RichText::new("New quick effects are made for you — ask for the look you want.").size(type_scale::SMALL + 0.5).color(t.text_dim));
+                ui.label(RichText::new("Effects only run when you trigger or explicitly assign them.").size(type_scale::SMALL + 0.5).color(t.text_dim));
             });
         },
     );
@@ -548,9 +545,12 @@ fn editor(app: &mut App, ui: &mut egui::Ui, t: &Theme, st: &mut State, it: &Item
     if let Some(msg) = &it.broken {
         ui.add_space(spacing::M);
         let body = if it.listed {
-            format!("{} It keeps working the way it was before the mistake. Ask for it to be fixed, or go back to an earlier version.", plain_error(msg))
+            format!(
+                "{} The previous valid version remains available. Correct the definition in your project's presets folder, or restore an earlier version.",
+                plain_error(msg)
+            )
         } else {
-            format!("{} It can't run until that's fixed. Ask for it to be fixed, or go back to an earlier version.", plain_error(msg))
+            format!("{} Correct the definition in your project's presets folder, or restore an earlier version.", plain_error(msg))
         };
         if widgets::callout(ui, t, Tone::Warn, icon::WARN, "This quick effect's file has a mistake", &body, Some("Open History")) {
             app.open_view(ViewId::History);
@@ -718,7 +718,7 @@ fn knobs_card(app: &mut App, ui: &mut egui::Ui, t: &Theme, st: &mut State, it: &
         |ui| {
             ui.set_width(ui.available_width());
             if it.knobs.is_empty() {
-                widgets::hint(ui, t, "Try it to see what it does. If you'd like to adjust something about it, ask for a knob.");
+                widgets::hint(ui, t, "This definition has no exposed controls. Knobs are configured in the effect's project file.");
                 return;
             }
             let gap = spacing::M;

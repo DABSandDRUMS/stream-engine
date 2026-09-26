@@ -173,13 +173,25 @@ fn redeem_of_a_reject_preset_that_is_already_active_is_refunded_not_fulfilled() 
 
 #[test]
 fn ad_break_switches_mode_and_returns() {
-    let mut c = core();
+    let config = Config::build(&[file("project", "project", "[policy]\nad_break_mode = true")]);
+    let mut c = Core::new(config, 1_000 * MS);
     live(&mut c);
     c.submit(ev("twitch.ad_break", Value::map().with("duration", 2).with("automatic", false), None));
     run(&mut c, 10);
     assert_eq!(c.mode_str(), "ad_break");
     run(&mut c, 2_100);
     assert_eq!(c.mode_str(), "live");
+}
+
+#[test]
+fn ad_break_events_do_not_program_a_blank_project() {
+    let mut c = Core::new(Config::default(), 1_000 * MS);
+    live(&mut c);
+    c.submit(ev("twitch.ad_break", Value::map().with("duration", 2), None));
+    let output = run(&mut c, 2_100);
+    assert_eq!(c.mode_str(), "live");
+    assert!(output.iter().any(|o| matches!(o, Output::Event(e) if e.ty == "twitch.ad_break")), "ad events remain available for explicit rules");
+    assert!(!output.iter().any(|o| matches!(o, Output::Event(e) if e.ty == "mode.enter.ad_break")));
 }
 
 #[test]

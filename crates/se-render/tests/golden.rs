@@ -59,7 +59,7 @@ nodes = [{ src = "cam_b", rect = [0, 0, 1, 1] }]
     write_file(root, "transitions/zoomblur.toml", "kind = \"shader\"\nshader = \"transitions/zoomblur.wgsl\"\nms = 1000\nstrength = 0.4\n");
     write_file(root, "transitions/zoomblur.wgsl", se_render::pipelines::builtin_transition_wgsl("zoomblur").unwrap());
     write_file(root, "transitions/glitchy.toml", "kind = \"combined\"\nshader = \"glitch\"\nms = 1000\nease = \"linear\"\nstrength = 1.5\nblock = 24.0\n");
-    copy_dir(&example_dir().join("patches/aurora"), &root.join("patches/aurora"));
+    copy_dir(&template("shader", "aurora"), &root.join("patches/aurora"));
     d
 }
 

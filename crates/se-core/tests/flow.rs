@@ -8,6 +8,65 @@ fn file(kind: &str, name: &str, src: &str) -> SourceFile {
     SourceFile { kind: kind.into(), name: name.into(), path: format!("{kind}/{name}.toml"), table: toml::from_str(src).unwrap() }
 }
 
+#[test]
+fn deleting_show_content_retires_runtime_without_touching_survivors() {
+    let files = [
+        file("scenes", "gone", "key = 1\nset = { \"scene_level\" = 0.7 }\n[canvas.wide]\nnodes = [{ src = \"camera\" }]"),
+        file("scenes", "keep", "key = 2"),
+        file(
+            "presets",
+            "gone",
+            "toggle = true\nfx = [{ name = \"shake\", amount = 0.8 }]\nset = { \"removed_level\" = 0.9 }\ndo = [\"wait 1s\", \"set late_level 1\"]",
+        ),
+        file("presets", "keep", "toggle = true\nset = { \"kept_level\" = 0.4 }"),
+        file("rules", "gone", "when = \"test.deleted\"\ndo = [\"wait 1s\", \"set late_rule 1\"]"),
+    ];
+    let mut c = Core::new(Config::build(&files), 0);
+    for name in ["gone", "keep"] {
+        c.submit(Input::Command { cmd: Command::new(Origin::Ui, Op::PresetFire { name: name.into(), payload: Value::Null }) });
+    }
+    c.submit(Input::Event { event: Event::new("test.deleted", Origin::System, Value::Null) });
+    run(&mut c, 100);
+    assert_eq!(c.get("show.scene.program").and_then(Value::as_str), Some("gone"));
+    assert_eq!(c.get("fx.shake.active"), Some(&Value::Bool(true)));
+    let before_delete = c.runtime_state();
+
+    let remaining = Config::build(&[files[1].clone(), files[3].clone()]);
+    c.apply_config(remaining.clone());
+    run(&mut c, 1100);
+    assert_eq!(c.get("show.scene.program").and_then(Value::as_str), Some("keep"));
+    assert_eq!(c.get("show.scene.preview").and_then(Value::as_str), Some("keep"));
+    assert_eq!(c.active_presets(), [("keep".into(), None)]);
+    assert!(c.get("preset.gone.active").is_none());
+    assert_eq!(c.get("fx.shake.active"), Some(&Value::Bool(false)));
+    for address in ["scene_level", "removed_level", "fx.shake.amount", "late_level", "late_rule"] {
+        assert!(c.get(address).is_none_or(|v| v.as_f64().is_none_or(|v| v == 0.0)), "{address}: {:?}", c.get(address));
+    }
+    assert_eq!(f(&c, "kept_level"), 0.4);
+
+    let mut restored = Core::new(remaining, 0);
+    restored.restore(&before_delete);
+    run(&mut restored, 10);
+    assert_eq!(restored.get("show.scene.program").and_then(Value::as_str), Some("keep"));
+    assert_eq!(restored.active_presets(), [("keep".into(), None)]);
+    assert_eq!(f(&restored, "kept_level"), 0.4);
+    assert!(restored.get("removed_level").is_none());
+    assert!(restored.get("fx.shake.amount").is_none());
+
+    c.apply_config(Config::default());
+    run(&mut c, 10);
+    assert_eq!(c.get("show.scene.program").and_then(Value::as_str), Some(""));
+    assert_eq!(c.get("show.scene.preview").and_then(Value::as_str), Some(""));
+    assert!(c.active_presets().is_empty());
+    let mut blank = Core::new(Config::default(), 0);
+    blank.restore(&before_delete);
+    run(&mut blank, 10);
+    assert_eq!(blank.get("show.scene.program").and_then(Value::as_str), Some(""));
+    assert_eq!(blank.get("show.scene.preview").and_then(Value::as_str), Some(""));
+    assert!(blank.active_presets().is_empty());
+    assert!(blank.get("kept_level").is_none());
+}
+
 fn project() -> Vec<SourceFile> {
     vec![
         file(

@@ -678,11 +678,17 @@ impl App {
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         let t = self.t.clone();
         egui::Panel::left("nav")
-            .exact_size(232.0)
+            .exact_size(212.0)
             .resizable(false)
-            .frame(egui::Frame::new().fill(t.chrome).inner_margin(egui::Margin { left: 12, right: 12, top: 18, bottom: 14 }))
+            .frame(egui::Frame::new().fill(t.chrome).inner_margin(egui::Margin { left: 12, right: 12, top: 20, bottom: 16 }))
             .show(ui, |ui| {
-                ui.add_space(4.0);
+                let rail = ui.max_rect();
+                ui.painter().vline(rail.right() + 11.5, rail.y_range(), egui::Stroke::new(1.0, t.border));
+                ui.horizontal(|ui| {
+                    ui.add_space(12.0);
+                    ui.label(egui::RichText::new("Workspace").size(se_ui_kit::theme::type_scale::SMALL).color(t.text_dim));
+                });
+                ui.add_space(12.0);
                 let setup_left = views::setup::steps_left(self);
                 for p in Page::ALL {
                     if p == Page::Settings || p.master() != Master::Edit {
@@ -692,18 +698,20 @@ impl App {
                     if se_ui_kit::widgets::nav_item(ui, &t, p.icon(), p.label(), self.page == p, badge).clicked() {
                         self.page = p;
                     }
-                    ui.add_space(2.0);
+                    ui.add_space(4.0);
                 }
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-                    let (dot, text) = if self.m.connected { (t.green, "Engine running".to_string()) } else { (t.bright_red, "Engine not running".to_string()) };
+                    let (dot, text) = if self.m.connected { (t.green, "Engine running") } else { (t.bright_red, "Engine not running") };
                     ui.horizontal(|ui| {
-                        ui.add_space(10.0);
-                        let (r, _) = ui.allocate_exact_size(egui::vec2(8.0, 16.0), egui::Sense::hover());
-                        ui.painter().circle_filled(r.center(), 4.0, dot);
+                        ui.add_space(12.0);
+                        let (r, _) = ui.allocate_exact_size(egui::vec2(6.0, 16.0), egui::Sense::hover());
+                        ui.painter().circle_filled(r.center(), 3.0, dot);
                         ui.label(egui::RichText::new(text).size(se_ui_kit::theme::type_scale::SMALL).color(t.text_dim));
                     });
-                    ui.add_space(10.0);
-                    let badge = (setup_left > 0).then(|| (setup_left.to_string(), t.accent));
+                    ui.add_space(12.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+                    let badge = (setup_left > 0).then(|| (setup_left.to_string(), t.text_dim));
                     if se_ui_kit::widgets::nav_item(ui, &t, Page::Settings.icon(), Page::Settings.label(), self.page == Page::Settings, badge).clicked() {
                         self.page = Page::Settings;
                     }
@@ -711,43 +719,40 @@ impl App {
             });
     }
 
-    /// An Edit page: title, one-line blurb, tabs, then the selected tab's view.
+    /// Content pages share a 24-point gutter, title rhythm, and optional tab row.
     fn page_ui(&mut self, ui: &mut egui::Ui) {
         let t = self.t.clone();
         let page = self.page;
         let tabs = page.tabs();
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin { left: 32, right: 32, top: 26, bottom: 20 })).show(
-            ui,
-            |ui| {
-                se_ui_kit::widgets::page_header(ui, &t, page.label(), page.blurb(), |ui| {
-                    if matches!(page, Page::Scenes | Page::Lights) {
-                        views::history::undo_button(self, ui);
-                    }
-                });
-                let idx = &mut self.tab[page as usize];
-                *idx = (*idx).min(tabs.len().saturating_sub(1));
-                if tabs.len() > 1 {
-                    let labels: Vec<&str> = tabs.iter().map(|(_, l)| *l).collect();
-                    se_ui_kit::widgets::tabs(ui, &t, idx, &labels);
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin::same(24))).show(ui, |ui| {
+            se_ui_kit::widgets::page_header(ui, &t, page.label(), page.blurb(), |ui| {
+                if matches!(page, Page::Scenes | Page::Lights) {
+                    views::history::undo_button(self, ui);
                 }
-                let v = tabs[*idx].0;
-                if self.is_popped_out(&Panel::View(v).id()) {
-                    let back = se_ui_kit::widgets::empty_state(
-                        ui,
-                        &t,
-                        icon::EXPAND,
-                        "Open in its own window",
-                        "This part is showing in a separate window.",
-                        Some("Bring it back here"),
-                    );
-                    if back {
-                        self.dock_back(&Panel::View(v).id());
-                    }
-                    return;
+            });
+            let idx = &mut self.tab[page as usize];
+            *idx = (*idx).min(tabs.len().saturating_sub(1));
+            if tabs.len() > 1 {
+                let labels: Vec<&str> = tabs.iter().map(|(_, l)| *l).collect();
+                se_ui_kit::widgets::tabs(ui, &t, idx, &labels);
+            }
+            let v = tabs[*idx].0;
+            if self.is_popped_out(&Panel::View(v).id()) {
+                let back = se_ui_kit::widgets::empty_state(
+                    ui,
+                    &t,
+                    icon::EXPAND,
+                    "Open in its own window",
+                    "This part is showing in a separate window.",
+                    Some("Bring it back here"),
+                );
+                if back {
+                    self.dock_back(&Panel::View(v).id());
                 }
-                self.view_ui(v, ui);
-            },
-        );
+                return;
+            }
+            self.view_ui(v, ui);
+        });
     }
 
     fn main_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -755,15 +760,10 @@ impl App {
         if self.page.master() == Master::Edit {
             self.last_edit = self.page;
         }
-        // full-width top bar: brand, master tabs, stream state and controls
+        // Brand/navigation sit above a separate operational toolbar.
         egui::Panel::top("topbar")
-            .exact_size(64.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(self.t.chrome)
-                    .inner_margin(egui::Margin { left: 18, right: 20, top: 0, bottom: 0 })
-                    .stroke(egui::Stroke::new(1.0, self.t.border)),
-            )
+            .exact_size(100.0)
+            .frame(egui::Frame::new().fill(self.t.chrome).inner_margin(egui::Margin { left: 24, right: 24, top: 0, bottom: 0 }))
             .show(ui, |ui| views::status::ui(self, ui));
         if self.page.master() == Master::Edit {
             self.sidebar(ui);

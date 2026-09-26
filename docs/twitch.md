@@ -153,9 +153,10 @@ published or rules see it:
   cleared by `clean`. Bot replies, alerts, TTS, and the queue are not effects.
 - **Rules** triggered by viewers can add `role = "vip"` (minimum role) and `approval = true`
   (the firing waits in `policy.pending` for `mod.approve`).
-- **Ad breaks**: `twitch.ad_break` switches to mode `ad_break` (from any mode but those in
-  `ad_break_skip`, default offline) and back to the previous mode after the break unless someone
-  changed the mode meanwhile.
+- **Ad breaks**: opt in with `[policy] ad_break_mode = true` to have `twitch.ad_break` switch
+  to mode `ad_break` (from any mode but those in `ad_break_skip`, default offline), then return
+  after the break unless someone changed the mode meanwhile. By default the event is available
+  to your rules without changing the show mode.
 - **Audit**: every decision is a `policy.accepted|rejected|filtered|pending|approved` event and
   an `audit` row (query `audit`).
 

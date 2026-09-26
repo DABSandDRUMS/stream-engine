@@ -1423,7 +1423,7 @@ fn list(app: &mut App, ui: &mut egui::Ui, t: &Theme) {
                     icon::BOLT,
                     "No reactions yet",
                     "A reaction does something by itself when something happens, like firing Hype when someone cheers.",
-                    None,
+                    Some("New reaction"),
                 ) {
                     first = true;
                 }
@@ -1572,7 +1572,7 @@ fn editor(app: &mut App, ui: &mut egui::Ui, t: &Theme) {
                 icon::BOLT,
                 "Pick a reaction to change it",
                 "Or make a new one with New reaction: choose what happens, then what Stream Engine does.",
-                None,
+                Some("New reaction"),
             );
         });
         if new {

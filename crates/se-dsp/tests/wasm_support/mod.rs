@@ -13,10 +13,10 @@ pub fn host() -> &'static WasmHost {
     &HOST
 }
 
-/// The built example patch `project-example/patches/ringmod/main.wasm`.
+/// The built, opt-in ring-modulator template.
 pub fn ringmod() -> WasmModule {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../project-example/patches/ringmod/main.wasm");
-    let bytes = std::fs::read(path).expect("ringmod main.wasm (run project-example/patches/ringmod/build.sh)");
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../templates/patches/dsp/ringmod/main.wasm");
+    let bytes = std::fs::read(path).expect("ringmod main.wasm (run templates/patches/dsp/ringmod/build.sh)");
     host().compile(&bytes).expect("ringmod compiles")
 }
 

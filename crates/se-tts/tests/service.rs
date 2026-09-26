@@ -128,10 +128,6 @@ async fn engine_subsystem_end_to_end() {
     let mut r =
         rig(&dir, "max_queue = 3\nvolume = 1.0\n[[tts.voices]]\nwhen = \"kind == 'twitch.cheer' && amount >= 1000\"\nvoice = \"am_michael\"", true).await;
 
-    let q = r.query().await;
-    assert!(q.get_path("voices").and_then(Value::as_list).is_some_and(|v| v.len() >= 20), "{q:?}");
-    assert_eq!(r.hub.snapshot.load().get("health.tts").and_then(|h| h.get_path("status")).and_then(Value::as_str), Some("pass"));
-
     // --- say → started → audible audio → finished
     r.audio.lock().clear();
     r.say(

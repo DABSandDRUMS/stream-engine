@@ -579,6 +579,26 @@ impl Core {
         self.state.declare(addr::MODE, mm);
         self.set_sys(addr::MODE, Value::Str(cur_mode));
 
+        // Clear cached scene ids before removing addresses compacts the state tree.
+        for i in std::mem::take(&mut self.scene_layer) {
+            self.state.set_scene(i, None);
+        }
+        // Deleting a definition also retires its runtime work; surviving definitions keep theirs.
+        self.preset_queue.retain(|(name, _)| config.presets.contains_key(name));
+        let removed: Vec<String> = self.config.presets.keys().filter(|name| !config.presets.contains_key(*name)).cloned().collect();
+        for name in &removed {
+            self.release_preset(name, None, false);
+        }
+        self.state.remove_overrides_where(|o| !configured_owner(&config, &o.key));
+        self.scheduled.retain(|s| s.0.ctx.key.as_deref().is_none_or(|key| configured_owner(&config, key)));
+        for trigger in self.triggers.values_mut() {
+            trigger.instances.retain(|i| configured_owner(&config, &i.key));
+            trigger.queued.retain(|i| configured_owner(&config, &i.key));
+        }
+        for name in &removed {
+            self.state.remove_prefix(&format!("preset.{name}"));
+        }
+
         // scenes: declare node params, drop removed scenes
         let new_prefixes: Vec<String> = config.scenes.keys().map(|s| format!("scene.{s}")).collect();
         for old in std::mem::take(&mut self.scene_prefixes) {
@@ -591,12 +611,24 @@ impl Core {
             declare_scene(&mut self.state, s);
         }
         let program = self.state.get(addr::PROGRAM).and_then(Value::as_str).unwrap_or("").to_string();
-        if (program.is_empty() || !config.scenes.contains_key(&program)) && !config.scenes.is_empty() {
-            let first = first_scene(&config);
-            self.set_sys(addr::PROGRAM, Value::Str(first.clone()));
-            if !config.scenes.contains_key(self.state.get(addr::PREVIEW).and_then(Value::as_str).unwrap_or("")) {
-                self.set_sys(addr::PREVIEW, Value::Str(first));
-            }
+        if !config.scenes.contains_key(&program) {
+            self.set_sys(addr::PROGRAM, Value::Str(first_scene(&config)));
+        }
+        if !config.scenes.contains_key(self.state.get(addr::PREVIEW).and_then(Value::as_str).unwrap_or("")) {
+            let program = self.state.get(addr::PROGRAM).cloned().unwrap_or_else(|| Value::Str(String::new()));
+            self.set_sys(addr::PREVIEW, program);
+        }
+        if self.transition.as_ref().is_some_and(|t| !config.scenes.contains_key(&t.from) || !config.scenes.contains_key(&t.to)) {
+            self.transition = None;
+            self.set_sys(addr::TR_ACTIVE, Value::Bool(false));
+            self.set_sys(addr::TR_PROGRESS, Value::Float(1.0));
+            self.set_sys(addr::TR_FROM, Value::Str(String::new()));
+        }
+        self.rebind_triggers();
+        for trigger in self.triggers.values_mut() {
+            let (level, active) = trigger.tick(now);
+            self.state.set_base(trigger.env_id, Value::Float(level));
+            self.state.set_base(trigger.active_id, Value::Bool(active));
         }
 
         // presets: `preset.<name>.active`
@@ -690,7 +722,7 @@ impl Core {
         self.config = config;
         self.config.errors.extend(timeline_errors);
         self.apply_scene_layer();
-        let _ = now;
+        self.runtime_dirty = true;
     }
 
     fn refresh_caps(&mut self) {
@@ -2346,6 +2378,13 @@ impl Core {
             self.set_sys(a, v.clone());
         }
         for (a, o) in &rs.overrides {
+            let missing_address = a.strip_prefix("scene.").and_then(|s| s.split('.').next()).is_some_and(|name| !self.config.scenes.contains_key(name))
+                || a.strip_prefix("preset.").and_then(|s| s.split('.').next()).is_some_and(|name| !self.config.presets.contains_key(name));
+            let missing_scene =
+                matches!(a.as_str(), addr::PROGRAM | addr::PREVIEW) && o.value.as_str().is_none_or(|name| !self.config.scenes.contains_key(name));
+            if missing_address || missing_scene || !configured_owner(&self.config, &o.key) {
+                continue;
+            }
             let i = self.state.ensure(a, &zero_of(&o.value));
             self.state.put_override(i, o.clone());
         }
@@ -2384,7 +2423,11 @@ impl Core {
         let mode = self.mode_str().to_string();
         self.policy.restored(&mode, now);
         self.events.push_back((
-            Event::new("engine.restored", Origin::System, Value::map().with("mode", rs.mode.clone()).with("scene", rs.program.clone())),
+            Event::new(
+                "engine.restored",
+                Origin::System,
+                Value::map().with("mode", self.mode_str()).with("scene", self.state.get(addr::PROGRAM).cloned().unwrap_or_default()),
+            ),
             Ctx::default(),
         ));
     }
@@ -2597,6 +2640,20 @@ pub fn scene_order(c: &Config) -> Vec<String> {
 
 fn first_scene(c: &Config) -> String {
     scene_order(c).into_iter().next().unwrap_or_default()
+}
+
+/// Runtime ownership keys outlive files in persisted state; never revive a deleted definition.
+fn configured_owner(config: &Config, key: &str) -> bool {
+    if let Some(name) = key.strip_prefix("preset:") {
+        return config.presets.contains_key(name.split('#').next().unwrap_or(name));
+    }
+    if let Some(name) = key.strip_prefix("scene:") {
+        return config.scenes.contains_key(name);
+    }
+    if let Some(name) = key.strip_prefix("rule:") {
+        return config.rules.iter().any(|rule| rule.name == name);
+    }
+    true
 }
 
 /// Declare the addressable parameters of a scene's nodes (§4.3).

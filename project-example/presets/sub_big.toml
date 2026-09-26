@@ -1,5 +1,0 @@
-label = "SUB BIG"
-color = "#957fb8"
-hold = "6s"
-fx = [{ name = "patch.sub_meteors" }, { name = "rgb_split", hold = "3s" }]
-lights = { cue = "flash_accent" }

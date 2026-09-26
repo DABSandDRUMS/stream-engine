@@ -1,0 +1,177 @@
+<!doctype html>
+<!-- Poll overlay (state `twitch.poll`). Browser test: /patches/poll/index.html?token=<token>, then
+     streamctl set twitch.poll '{"id":"p1","title":"Next groove?","active":true,"ends_at":<unix s + 60>,
+       "choices":[{"id":"a","title":"Funk","votes":12},{"id":"b","title":"Metal","votes":7}]}' -->
+<html>
+<head>
+<meta charset="utf-8">
+<title>poll</title>
+<style>
+  :root { --accent: #7aa2f7; --fg: #fff; --bg: rgba(18, 20, 31, .88); --font: "Inter", "Noto Sans", sans-serif; }
+  html, body { margin: 0; width: 100%; height: 100%; background: transparent; overflow: hidden; }
+  body { font-family: var(--font); color: var(--fg); display: flex; flex-direction: column; justify-content: flex-end; padding: 2.5vh; box-sizing: border-box; }
+  #card {
+    position: relative; display: flex; flex-direction: column; gap: 2vh; padding: 3.2vh 3.6vh 4vh; border-radius: 3vh; background: var(--bg); overflow: hidden;
+    box-shadow: 0 1.5vh 4vh rgba(0, 0, 0, .45), inset 0 0 0 .5vh color-mix(in srgb, var(--accent) 60%, transparent);
+    text-shadow: 0 .3vh 1vh rgba(0, 0, 0, .5); transition: opacity .45s ease, transform .45s cubic-bezier(.2, 1.1, .3, 1);
+  }
+  #card.hidden { opacity: 0; transform: translateY(6vh); }
+  .head { display: flex; align-items: center; justify-content: space-between; gap: 2vh; }
+  .chip { padding: .5vh 1.6vh; border-radius: 1.2vh; background: var(--accent); color: #111; text-shadow: none; font-size: 3.4vh; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+  .status { font-size: 3.8vh; font-weight: 600; opacity: .85; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .title { font-size: 6.2vh; font-weight: 800; line-height: 1.15; overflow-wrap: anywhere; max-height: 15vh; overflow: hidden; }
+  .choices { display: flex; flex-direction: column; gap: 1.4vh; }
+  .choice { position: relative; height: 8.4vh; border-radius: 1.6vh; background: rgba(255, 255, 255, .08); overflow: hidden; transition: opacity .4s; }
+  .fill { position: absolute; inset: 0 auto 0 0; width: 0; background: color-mix(in srgb, var(--accent) 55%, transparent); transition: width .8s cubic-bezier(.2, 1, .3, 1); }
+  .row { position: absolute; inset: 0; display: flex; align-items: center; justify-content: space-between; gap: 2vh; padding: 0 2.2vh; font-size: 4.3vh; font-weight: 600; }
+  .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pct { font-weight: 800; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .votes { font-weight: 500; opacity: .7; margin-left: 1.2vh; }
+  .choice.win { box-shadow: inset 0 0 0 .5vh var(--accent); }
+  .choice.win .fill { background: var(--accent); }
+  .choice.win .name::before { content: "✓ "; }
+  .choice.lose { opacity: .5; }
+  .foot { font-size: 3.4vh; opacity: .75; }
+  .time { position: absolute; left: 0; bottom: 0; height: .9vh; width: 100%; background: var(--accent); transform-origin: left; transition: transform .3s linear; }
+</style>
+</head>
+<body>
+<div id="card" class="hidden"></div>
+<script src="/engine.js"></script>
+<script src="/web/overlay.js"></script>
+<script>
+  "use strict";
+  const O = Overlay;
+  const se = Engine.connect();
+  const ID = se.patch ? se.patch.id : "{{id}}";
+  const card = document.getElementById("card");
+  const P = O.params(se, {
+    result_seconds: 12, show_votes: true, accent: "#7aa2f7", text_color: "#ffffff", card_bg: [0.07, 0.08, 0.12, 0.88], font: "",
+  }, (_, k) => { apply(); if (k === "result_seconds") update(); else render(); });
+  let poll = null;       // the `twitch.poll` map
+  let activeId = "";     // last poll seen running (its end is timed from when we saw it end)
+  let endedAt = 0, endedId = "", hideTimer = 0;
+
+  function apply() {
+    const r = document.documentElement.style;
+    r.setProperty("--accent", O.cssColor(P.accent) || "#7aa2f7");
+    r.setProperty("--fg", O.cssColor(P.text_color) || "#fff");
+    r.setProperty("--bg", O.cssColor(P.card_bg) || "rgba(18,20,31,.88)");
+    if (P.font) r.setProperty("--font", P.font);
+  }
+  apply();
+
+  // `patch.poll.showing` keeps the overlay placed ([overlays.poll] `when`) during the result
+  function show(on) {
+    card.classList.toggle("hidden", !on);
+    // write only once the engine's value is known (it arrives with the first state batch)
+    const cur = se.value(`patch.${ID}.showing`);
+    if (se.patch && se.connected && cur !== undefined && cur !== on) se.set(`patch.${ID}.showing`, on).catch(() => {});
+  }
+
+  const fmt = s => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  const plural = (n, one, many) => `${O.fmtNum(n)} ${n === 1 ? one : many}`;
+
+  function statusText(p) {
+    if (p.active) {
+      const left = Math.max(0, Math.ceil((Number(p.ends_at) || 0) - Date.now() / 1000));
+      return Number(p.ends_at) > 0 ? `${fmt(left)} left` : "Vote now";
+    }
+    return String(p.status || "").toLowerCase() === "terminated" ? "Ended early" : "Final results";
+  }
+
+  // time bar: share of the poll's length still left
+  function timeLeft(p) {
+    const span = (Number(p.ends_at) || 0) - (Number(p.started_at) || 0);
+    const left = (Number(p.ends_at) || 0) - Date.now() / 1000;
+    return p.active && span > 0 ? Math.max(0, Math.min(1, left / span)) : 0;
+  }
+
+  // The card is built once per poll (same choices) and updated in place, so the bars animate.
+  let built = "", els = null;
+  function build(p, choices) {
+    card.replaceChildren();
+    els = { status: O.h("span", "status"), title: O.h("div", "title"), foot: O.h("div", "foot"), time: O.h("div", "time"), rows: [] };
+    const head = O.h("div", "head");
+    head.append(O.h("span", "chip", "Poll"), els.status);
+    const list = O.h("div", "choices");
+    for (const c of choices) {
+      const r = { el: O.h("div", "choice"), fill: O.h("div", "fill"), name: O.h("span", "name", String(c.title || "")), pct: O.h("span", "pct"), votes: O.h("span", "votes") };
+      const row = O.h("div", "row");
+      row.append(r.name, r.pct);
+      r.el.append(r.fill, row);
+      list.appendChild(r.el);
+      els.rows.push(r);
+    }
+    card.append(head, els.title, list, els.foot, els.time);
+  }
+
+  function render() {
+    const p = poll;
+    if (!p || !p.id) return;
+    const choices = Array.isArray(p.choices) ? p.choices : [];
+    const key = `${p.id}|${choices.map(c => c.id).join(",")}`;
+    if (key !== built) {
+      build(p, choices);
+      built = key;
+    }
+    const total = choices.reduce((a, c) => a + (Number(c.votes) || 0), 0);
+    const best = Math.max(0, ...choices.map(c => Number(c.votes) || 0));
+    els.status.textContent = statusText(p);
+    els.title.textContent = String(p.title || "");
+    choices.forEach((c, i) => {
+      const r = els.rows[i];
+      const votes = Number(c.votes) || 0;
+      r.name.textContent = String(c.title || "");
+      r.fill.style.width = `${total > 0 ? (votes / total) * 100 : 0}%`;
+      r.pct.textContent = `${total > 0 ? Math.round((votes / total) * 100) : 0}%`;
+      r.votes.textContent = O.fmtNum(votes);
+      if (P.show_votes) r.pct.appendChild(r.votes);
+      const ended = !p.active && best > 0;
+      r.el.classList.toggle("win", ended && votes === best);
+      r.el.classList.toggle("lose", ended && votes !== best);
+    });
+    els.foot.textContent = plural(total, "vote", "votes");
+    els.time.style.transform = `scaleX(${timeLeft(p)})`;
+  }
+
+  function update() {
+    clearTimeout(hideTimer);
+    const p = poll;
+    if (!p || !p.id) return show(false);
+    render();
+    if (p.active) {
+      activeId = p.id;
+      endedAt = 0;
+      return show(true);
+    }
+    if (String(p.status || "").toLowerCase() === "archived") return show(false);
+    if (endedId !== p.id || !endedAt) {
+      endedId = p.id;
+      endedAt = activeId === p.id ? Date.now() : (Number(p.ends_at) || 0) * 1000;
+    }
+    const left = endedAt + Number(P.result_seconds) * 1000 - Date.now();
+    if (left <= 0) return show(false);
+    show(true);
+    hideTimer = setTimeout(() => show(false), left);
+  }
+
+  se.state("twitch.poll", (_, v) => {
+    // `streamctl set twitch.poll '{…}'` (testing) stores JSON text
+    if (typeof v === "string") try { v = JSON.parse(v); } catch { v = null; }
+    poll = v && typeof v === "object" && !Array.isArray(v) ? v : null;
+    update();
+  });
+  // after (re)connecting, settle once the engine's `showing` value has arrived
+  let known = false;
+  se.state(`patch.${ID}.showing`, () => { if (!known) { known = true; update(); } });
+  se.onconnect = () => { known = false; };
+  // the clock and time bar tick while the poll runs
+  setInterval(() => {
+    if (!poll || !poll.active || !els) return;
+    els.status.textContent = statusText(poll);
+    els.time.style.transform = `scaleX(${timeLeft(poll)})`;
+  }, 250);
+</script>
+</body>
+</html>

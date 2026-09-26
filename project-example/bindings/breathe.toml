@@ -1,5 +1,0 @@
-# Slow breathing on the vignette, always on.
-target = "fx.vignette.amount"
-signal = "lfo.breathe"
-range = [0.1, 0.25]
-mode = "replace"

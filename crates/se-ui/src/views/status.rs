@@ -1,12 +1,12 @@
-//! Top bar (§15.4, every page): on-air state + time, what the show is doing (in plain words), a
-//! single "all good / needs attention" pill with the list behind it, Clear chat effects,
-//! Emergency stop (hold), and the one big Go live / End stream button.
+//! Application header: brand and master navigation above a quiet operational toolbar.
+//! Status is text-first, with color reserved for the on-air tally and actionable warnings.
+//! Stream controls, health details, Clear chat effects, and Emergency stop remain directly accessible.
 
 use crate::app::{App, ViewId};
 use crate::panels::Panel;
 use egui::{Align, Layout, RichText};
 use se_proto::{Op, Value};
-use se_ui_kit::theme::{font_bold, font_semibold, mix, radius, type_scale};
+use se_ui_kit::theme::{font_semibold, type_scale};
 use se_ui_kit::widgets::{self, Kind, Size, Tone, icon};
 
 /// Something the streamer should know about, in plain words, with where to fix it.
@@ -532,19 +532,21 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     let mode = app.m.str("show.mode").to_string();
     let since = app.m.get("show.live_since").and_then(Value::as_i64).unwrap_or(0);
     let on_air = streaming(app) || since > 0;
-    ui.horizontal_centered(|ui| {
-        // ---- brand + master tabs ------------------------------------------------------------
-        ui.label(RichText::new(icon::LIVE).size(18.0).color(t.accent));
-        ui.label(RichText::new("Stream Engine").font(font_bold(17.0)).color(t.fg));
-        ui.add_space(18.0);
+    let row_spacing = ui.spacing().item_spacing.y;
+    ui.spacing_mut().item_spacing.y = 0.0;
+    ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 48.0), Layout::left_to_right(Align::Center), |ui| {
+        ui.spacing_mut().item_spacing.y = row_spacing;
+        // ---- brand + master navigation ------------------------------------------------------
+        ui.label(RichText::new("Stream Engine").font(font_semibold(16.0)).color(t.fg));
+        ui.add_space(28.0);
         let setup_left = crate::views::setup::steps_left(app);
         let clips = app.m.f("clips.pending").max(0.0) as usize;
         let tabs: Vec<(&str, &str, Option<(String, egui::Color32)>)> = crate::app::Master::ALL
             .iter()
             .map(|m| {
                 let badge = match m {
-                    crate::app::Master::Edit if setup_left > 0 => Some((setup_left.to_string(), t.accent)),
-                    crate::app::Master::Clipping if clips > 0 => Some((clips.to_string(), t.accent)),
+                    crate::app::Master::Edit if setup_left > 0 => Some((setup_left.to_string(), t.text_dim)),
+                    crate::app::Master::Clipping if clips > 0 => Some((clips.to_string(), t.text_dim)),
                     _ => None,
                 };
                 (m.icon(), m.label(), badge)
@@ -554,25 +556,34 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         if let Some(i) = widgets::master_tabs(ui, &t, cur, &tabs) {
             app.open_master(crate::app::Master::ALL[i]);
         }
-        ui.add_space(18.0);
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if widgets::hold_button(ui, &t, "Emergency stop", t.bright_red, 0.8) {
+                app.m.command(Op::Panic);
+            }
+            let clean = widgets::button_ex(ui, &t, Some(icon::BROOM), "Clear chat effects", Kind::Ghost, Size::Medium, 0.0, app.m.connected);
+            if clean.on_hover_text(format!("Remove every effect viewers triggered from chat ({})", app.keys_label("clean"))).clicked() {
+                app.m.command(Op::Clean);
+            }
+        });
+    });
+    let divider = ui.cursor().top();
+    ui.painter().hline(ui.max_rect().x_range(), divider, egui::Stroke::new(1.0, t.border));
+    ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 52.0), Layout::left_to_right(Align::Center), |ui| {
+        ui.spacing_mut().item_spacing.y = row_spacing;
         // ---- on-air state -------------------------------------------------------------------
         let (txt, color) = if !app.m.connected {
             ("Engine offline".to_string(), t.bright_red)
         } else if on_air {
             let time = if since > 0 { format!("  {}", hms((now_ms() - since) / 1000)) } else { String::new() };
-            (format!("ON AIR{time}"), t.tally_program())
+            (format!("On air{time}"), t.tally_program())
         } else {
             ("Off air".to_string(), t.text_dim)
         };
-        let fid = font_bold(type_scale::BODY);
-        let g = ui.painter().layout_no_wrap(txt, fid, color);
-        let (r, _) = ui.allocate_exact_size(egui::vec2(g.size().x + 34.0, 36.0), egui::Sense::hover());
-        let fill = if on_air { t.tally_program() } else { t.surface };
-        ui.painter().rect_filled(r, radius::PILL, fill);
-        let fg = if on_air { egui::Color32::WHITE } else { color };
-        ui.painter().circle_filled(egui::pos2(r.left() + 15.0, r.center().y), 4.5, fg);
-        ui.painter().galley_with_override_text_color(egui::pos2(r.left() + 26.0, r.center().y - g.size().y / 2.0), g, fg);
-        ui.add_space(4.0);
+        let g = ui.painter().layout_no_wrap(txt, font_semibold(type_scale::SMALL), t.fg);
+        let (r, _) = ui.allocate_exact_size(egui::vec2(g.size().x + 18.0, 32.0), egui::Sense::hover());
+        ui.painter().circle_filled(egui::pos2(r.left() + 3.0, r.center().y), 3.0, color);
+        ui.painter().galley(egui::pos2(r.left() + 14.0, r.center().y - g.size().y / 2.0), g, t.fg);
+        ui.add_space(12.0);
 
         // ---- show mode (plain words; only once something is happening) --------------------------
         if app.m.connected && (on_air || (mode != "offline" && !mode.is_empty())) {
@@ -603,13 +614,12 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         } else if checks > 0 {
             (plural(checks, "thing to check", "things to check"), t.yellow)
         } else if setup > 0 {
-            ("Finish setting up".to_string(), t.accent)
+            ("Finish setting up".to_string(), t.text_dim)
         } else {
-            ("All good".to_string(), t.green)
+            ("All good".to_string(), t.text_dim)
         };
-        let resp = widgets::pill(ui, &t, if warns.is_empty() { icon::CHECK } else { icon::WARN }, &text, se_ui_kit::widgets::LedState::Idle);
-        ui.painter().rect_stroke(resp.rect, radius::PILL, egui::Stroke::new(1.0, mix(t.border, c, 0.7)), egui::StrokeKind::Inside);
-        let resp = resp.on_hover_text("Click to see details");
+        ui.label(RichText::new(if fails > 0 || checks > 0 { icon::WARN } else { icon::CHECK }).size(type_scale::SMALL).color(c));
+        let resp = widgets::button_ex(ui, &t, None, &text, Kind::Ghost, Size::Small, 0.0, true).on_hover_text("Click to see details");
         egui::Popup::menu(&resp).show(|ui| {
             ui.set_min_width(420.0);
             if warns.is_empty() {
@@ -640,16 +650,16 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         }
         if app.m.connected && mode == "rehearsal" {
             let viewers = if app.m.b("show.rehearsal.simulating") { "Pretend viewers cheer, follow and chat now and then. " } else { "" };
-            widgets::badge(ui, &t, "Practice run: nothing goes out", t.accent).on_hover_text(format!(
+            ui.label(RichText::new("Practice run").size(type_scale::SMALL).color(t.text_dim)).on_hover_text(format!(
                 "{viewers}The stream doesn't start, the lights show the practice in the Lights view (your room lights keep their look), and nothing is changed on Twitch. Pick another mode to finish."
             ));
         }
 
-        // ---- right side: big actions ------------------------------------------------------------
+        // ---- right side: stream actions, separated from routine utilities --------------------
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let obs_ok = app.m.b("obs.link");
             if on_air {
-                let r = widgets::button_ex(ui, &t, Some(icon::STOP), "End stream", Kind::Danger, Size::Large, 150.0, app.m.connected);
+                let r = widgets::button_ex(ui, &t, Some(icon::STOP), "End stream", Kind::Danger, Size::Medium, 124.0, app.m.connected);
                 egui::Popup::menu(&r).show(|ui| {
                     ui.set_min_width(260.0);
                     ui.label(RichText::new("End the stream?").font(font_semibold(type_scale::LARGE)));
@@ -672,31 +682,24 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                     open_obs(app);
                 }
             } else {
-                let r = widgets::button_ex(ui, &t, Some(icon::LIVE), "Go live", Kind::Live, Size::Large, 150.0, app.m.connected);
+                let r = widgets::button_ex(ui, &t, Some(icon::LIVE), "Go live", Kind::Primary, Size::Medium, 124.0, app.m.connected);
                 if r.on_hover_text("Checks that everything is ready, then starts").clicked() {
                     open_golive(app);
                 }
             }
             if on_air && mode != "live" && app.m.connected {
-                if widgets::button_ex(ui, &t, Some(icon::LIVE), "Go live", Kind::Primary, Size::Large, 0.0, true).clicked() {
+                if widgets::button_ex(ui, &t, Some(icon::LIVE), "Go live", Kind::Secondary, Size::Medium, 0.0, true).clicked() {
                     set_mode(app, "live");
                 }
             } else if on_air
                 && mode == "live"
-                && widgets::button_ex(ui, &t, Some(icon::PAUSE), "Be right back", Kind::Secondary, Size::Large, 0.0, true).clicked()
+                && widgets::button_ex(ui, &t, Some(icon::PAUSE), "Be right back", Kind::Secondary, Size::Medium, 0.0, true).clicked()
             {
                 set_mode(app, "brb");
             }
-            ui.add_space(8.0);
-            if widgets::hold_button(ui, &t, "Emergency stop", t.bright_red, 0.8) {
-                app.m.command(Op::Panic);
-            }
-            let clean = widgets::button_ex(ui, &t, Some(icon::BROOM), "Clear chat effects", Kind::Ghost, Size::Medium, 0.0, app.m.connected);
-            if clean.on_hover_text(format!("Remove every effect viewers triggered from chat ({})", app.keys_label("clean"))).clicked() {
-                app.m.command(Op::Clean);
-            }
         });
     });
+    ui.spacing_mut().item_spacing.y = row_spacing;
     let r = ui.max_rect();
     ui.painter().hline(r.x_range(), r.bottom() - 0.5, egui::Stroke::new(1.0, t.border));
     if app.golive.open {

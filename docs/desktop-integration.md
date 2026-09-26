@@ -27,7 +27,7 @@ The package installs:
 |---|---|
 | `/usr/bin/stream-engine`, `/usr/bin/streamctl` | engine/UI binary and CLI |
 | `/usr/bin/stream-engine-launch-or-focus` | focus the UI window by exact app-id, or launch it (`--program` for the confidence window) |
-| `/usr/share/stream-engine/{web,project-example,scripts}` | engine data (`share_dir()` = `<exe>/../share/stream-engine`) |
+| `/usr/share/stream-engine/{web,project-example,templates,scripts}` | engine data (`share_dir()` = `<exe>/../share/stream-engine`) |
 | `/usr/share/stream-engine/omarchy/` | the Omarchy extras below, with their installer |
 | `/usr/lib/stream-engine/` | CEF web host `stream-engine-web` + CEF runtime (found via `<share>/../../lib/stream-engine`) |
 | `/usr/lib/obs-plugins/stream-engine.so`, `/usr/share/obs/obs-plugins/stream-engine/` | OBS plugin |
@@ -46,12 +46,31 @@ starter project `~/stream-project` from `/usr/share/stream-engine/project-exampl
 project already there) and saves `project = "…"` in `~/.config/stream-engine/engine.toml`. Then
 Settings → **Get started** walks through cameras, Twitch and OBS.
 
+New projects are **blank production workspaces**, not demo shows. The starter keeps camera and
+device declarations, canvas/output setup, neutral audio routing, safety limits, unassigned
+controllers, and screen layouts. MIDI declarations do not assume an e-drum map. Fixture profiles
+are a library, not installed lights; DMX output and RDM discovery start disabled, and lighting
+panic defaults to blackout until explicitly configured. No
+scenes, presets, overlays, patches, rules, bindings, timelines, alerts, rewards, chat commands,
+lighting looks/effects/cue lists, audio inserts, or automatic ducking are installed. Recording,
+indexing/transcription, clip processing/ranking, rehearsal simulation, voice/TTS and automatic
+ad-break mode changes are opt-in. Create show content explicitly in its editor; patch templates
+remain available through **New patch** and `patch.new`. Existing projects are adopted as-is,
+never reset by first-run setup.
+
 To use another folder: `stream-engine new <dir>` and set `project = "<dir>"` in
 `~/.config/stream-engine/engine.toml` before the first start. `streamctl status` checks the
 engine from a terminal.
 
 The UI is launched on demand (`stream-engine ui`, the desktop entry, the bar widget, or the
 keybind); closing it never affects output.
+
+The native Rust UI uses shared semantic theme tokens: neutral page/card/sidebar surfaces,
+consistent 6-point control and 8-point card radii, outlined secondary actions, and
+high-contrast primary actions. Omarchy still supplies the live accent, light/dark mode,
+and font; color is reserved for focus, selection and meaningful status rather than every
+button. The component hierarchy follows [shadcn's theme-token model](https://ui.shadcn.com/docs/theming)
+without adding a web frontend.
 
 ## Going live
 

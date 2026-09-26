@@ -1,0 +1,131 @@
+<!doctype html>
+<!-- Ad break card. Browser test: /patches/ad_break/index.html?token=<token>, then
+     `streamctl mode live && streamctl sim ad_break duration=30`. -->
+<html>
+<head>
+<meta charset="utf-8">
+<title>ad_break</title>
+<style>
+  :root { --accent: #7aa2f7; --fg: #fff; --card: rgba(18, 20, 31, .72); --font: "Inter", "Noto Sans", sans-serif; }
+  html, body { margin: 0; width: 100%; height: 100%; background: transparent; overflow: hidden; }
+  body { font-family: var(--font); color: var(--fg); display: flex; align-items: center; justify-content: center; }
+  #card {
+    position: relative; display: flex; flex-direction: column; align-items: center; gap: 2.2vh;
+    min-width: 46vw; max-width: 80vw; padding: 5vh 6vh 6vh; border-radius: 3vh; background: var(--card); overflow: hidden;
+    box-shadow: 0 2vh 6vh rgba(0, 0, 0, .45), inset 0 0 0 .35vh color-mix(in srgb, var(--accent) 60%, transparent);
+    text-shadow: 0 .4vh 1.6vh rgba(0, 0, 0, .55); animation: rise .8s cubic-bezier(.2, 1.2, .3, 1) both;
+  }
+  #title { font-size: 9vh; font-weight: 800; letter-spacing: .02em; line-height: 1.05; text-align: center; }
+  #time { font-size: 20vh; font-weight: 900; font-variant-numeric: tabular-nums; color: var(--accent); line-height: 1; }
+  #time.done { font-size: 7vh; font-weight: 700; animation: pulse 1.4s ease-in-out infinite; }
+  #time:empty, #song:empty, #subtitle:empty { display: none; }
+  #subtitle { font-size: 4vh; opacity: .88; text-align: center; }
+  #song { font-size: 3.2vh; opacity: .8; max-width: 70vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #bar { position: absolute; left: 0; bottom: 0; height: 1vh; width: 100%; background: var(--accent); transform-origin: left; transform: scaleX(0); }
+  @keyframes pulse { 50% { opacity: .55; } }
+  @keyframes rise { from { opacity: 0; transform: translateY(4vh) scale(.97); } to { opacity: 1; transform: none; } }
+</style>
+</head>
+<body>
+<div id="card">
+  <div id="title"></div>
+  <div id="time"></div>
+  <div id="subtitle"></div>
+  <div id="song"></div>
+  <div id="bar"></div>
+</div>
+<script src="/engine.js"></script>
+<script src="/web/overlay.js"></script>
+<script>
+  "use strict";
+  const O = Overlay;
+  const se = Engine.connect();
+  const $ = id => document.getElementById(id);
+  const ID = se.patch ? se.patch.id : "{{id}}";
+  const P = O.params(se, {
+    title: "Back in a moment", subtitle: "Short ad break. Thanks for sticking around!", done_text: "Almost back…",
+    show_song: true, accent: "#7aa2f7", text_color: "#ffffff", card_bg: [0.07, 0.08, 0.12, 0.72], font: "",
+  }, apply);
+  let deadline = 0, total = 1, song = "", by = "";
+
+  function apply() {
+    const r = document.documentElement.style;
+    r.setProperty("--accent", O.cssColor(P.accent) || "#7aa2f7");
+    r.setProperty("--fg", O.cssColor(P.text_color) || "#fff");
+    r.setProperty("--card", O.cssColor(P.card_bg) || "rgba(18,20,31,.72)");
+    if (P.font) r.setProperty("--font", P.font);
+    $("title").textContent = P.title;
+    $("subtitle").textContent = P.subtitle;
+    $("song").textContent = P.show_song && song ? `♪ ${song}${by ? ` · requested by ${by}` : ""}` : "";
+  }
+  apply();
+
+  // the deadline lives in the engine so a reloaded page continues the same countdown
+  let unsaved = false;
+  function persist() {
+    if (!se.connected) {
+      unsaved = true;
+      return;
+    }
+    unsaved = false;
+    se.set(`patch.${ID}.deadline`, deadline).catch(() => {});
+  }
+  se.onconnect = () => { if (unsaved) persist(); };
+
+  // `patch.ad_break.trigger seconds=90`: a later, longer ad extends the running countdown
+  function start(p) {
+    const secs = Number((p || {}).seconds);
+    if (!(secs > 0)) return;
+    const now = Date.now(), end = now + secs * 1000;
+    deadline = deadline > now ? Math.max(deadline, end) : end;
+    total = Math.max(1000, deadline - now);
+    persist();
+  }
+
+  function stop() {
+    if (!deadline) return;
+    deadline = 0;
+    persist();
+  }
+
+  function fmt(ms) {
+    const s = Math.ceil(ms / 1000);
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = String(s % 60).padStart(2, "0");
+    return h ? `${h}:${String(m).padStart(2, "0")}:${ss}` : `${m}:${ss}`;
+  }
+
+  function frame() {
+    const left = deadline ? Math.max(0, deadline - Date.now()) : 0;
+    const el = $("time");
+    if (!deadline) {
+      el.textContent = "";
+      el.classList.remove("done");
+    } else if (left <= 0) {
+      el.textContent = P.done_text;
+      el.classList.add("done");
+    } else {
+      el.textContent = fmt(left);
+      el.classList.remove("done");
+    }
+    $("bar").style.transform = `scaleX(${deadline ? Math.min(1, left / total) : 0})`;
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  se.on(`patch.${ID}.trigger`, e => start(e.payload));
+  se.on("mode.exit.ad_break", stop);
+  se.state(`patch.${ID}.deadline`, (_, v) => {
+    const d = Number(v) || 0;
+    if (d === deadline) return;
+    if (d > Date.now()) {
+      deadline = d;
+      total = Math.max(total, d - Date.now());
+    } else if (d === 0) {
+      deadline = 0;
+    }
+  });
+  se.state("queue.now.title", (_, v) => { song = v || ""; apply(); });
+  se.state("queue.now.user", (_, v) => { by = v || ""; apply(); });
+</script>
+</body>
+</html>

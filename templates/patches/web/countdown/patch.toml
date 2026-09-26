@@ -1,0 +1,20 @@
+# "Starting soon" countdown for `preshow`. Starts on entering preshow (`minutes`), on
+# `patch.{{id}}.trigger minutes=10` / `target=20:00`, or counts to `target` (local HH:MM)
+# when set. The deadline is kept in `patch.{{id}}.deadline`, so a reload continues.
+kind        = "web"
+entry       = "index.html"
+layer       = "overlay"
+label       = "{{label}}"
+description = "Starting-soon countdown with now-playing"
+fps         = 30
+params.minutes    = { type = "float",  default = 5.0, range = [0.1, 180.0], unit = "min", description = "Length when started without a target" }
+params.target     = { type = "string", default = "", description = "Count to this local time (HH:MM); empty = use `minutes`" }
+params.title      = { type = "string", default = "Starting soon" }
+params.subtitle   = { type = "string", default = "" }
+params.done_text  = { type = "string", default = "Here we go!" }
+params.show_song  = { type = "bool",   default = true }
+params.deadline   = { type = "float",  default = 0.0, description = "Unix ms the countdown ends (set by the page)" }
+params.accent     = { type = "color",  default = "#7aa2f7" }
+params.text_color = { type = "color",  default = "#ffffff" }
+params.font       = { type = "string", default = "" }
+trigger = { attack = "0ms", hold = "100ms", release = "0ms", retrigger = "replace" }

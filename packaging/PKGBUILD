@@ -162,7 +162,7 @@ package() {
 
   # Engine data: share_dir() resolves <exe>/../share/stream-engine.
   install -d "$share"
-  cp -dr --no-preserve=ownership web project-example omarchy "$share/"
+  cp -dr --no-preserve=ownership web project-example templates omarchy "$share/"
   rm -r "$share/omarchy/bin"
   if _se_have scripts scripts; then
     cp -dr --no-preserve=ownership scripts "$share/"

@@ -1,27 +1,13 @@
-# Bus settings and effect chains (docs/audio.md, effect reference: docs/audio-effects.md).
-# Every effect is addressable: audio.bus.<bus>.fx.<name>.<param>, .wet, .dry, .bypass;
-# `trigger = …` makes it a one-shot fired by presets/rules (`trigger audio.bus.music.fx.stutter`).
+# Neutral bus gains. Add inserts and trigger effects explicitly in the Sound view.
 
 [buses.band]
 gain = 0.0
-fx = [
-  # rumble filter on the room mix
-  { name = "lowcut", kind = "svf", mode = "hp", cutoff = 30.0 },
-]
 
 [buses.music]
-gain = -3.0
-fx = [
-  # tempo-synced beat repeat: fired by presets/stutter.toml
-  { name = "stutter", kind = "stutter", division = "1/8", quantize = "1/16", trigger = { attack = "5ms", hold = "2s", release = "60ms", retrigger = "replace" } },
-  # DJ filter knob (MIDI/bindings: audio.bus.music.fx.filter.filter, -1..1)
-  { name = "filter", kind = "djfilter" },
-  # dsp patch (patches/ringmod): inaudible until `trigger patch.ringmod`
-  { name = "ringmod", patch = "ringmod" },
-]
+gain = 0.0
 
 [buses.sfx]
-gain = -2.0
+gain = 0.0
 
 [buses.tts]
 gain = 0.0

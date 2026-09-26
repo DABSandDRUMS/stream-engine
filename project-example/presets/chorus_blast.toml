@@ -1,5 +1,0 @@
-label = "CHORUS"
-color = "#98bb6c"
-hold = "4s"
-fx = [{ name = "zoom_pulse" }, { name = "patch.sparks" }]
-lights = { cue = "chase_fast", hold = "4s" }

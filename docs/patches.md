@@ -28,6 +28,12 @@ Templates live in `<share>/templates/patches/<kind>/<template>/` (list them with
 `shader/effect`, `shader/transition`, `particles/default`, `web/default`, `dsp/default`.
 Text files may use `{{id}}` and `{{label}}` placeholders.
 
+New projects contain no patch instances. Reusable effects are available on demand as
+`shader/aurora`, `particles/sparks`, `dsp/ringmod`, and
+`script/confetti`, `script/hype_meter`, `script/sub_meteors`; choosing one creates a patch
+only in the current project. For example:
+`streamctl do patch.new id=ringmod kind=dsp template=ringmod`.
+
 Other actions: `patch.reload [id]` (re-read from disk; no id = all), `patch.disable <id>`,
 `patch.enable <id>` (also resumes a suspended script), `patch.open <id>` (editor). The editor
 is `editor=` from the action, else `$STREAM_ENGINE_EDITOR`, `omarchy-launch-editor`, `$VISUAL`,

@@ -1,7 +1,8 @@
 # Chatbot, alerts, goals, stats, and overlays
 
 Operator and author guide for `se-bot` (§14.3) and `se-alerts` (§14.1–14.2, §12.1 veto and
-deletion sync), plus the overlay patches in `project-example/patches/`.
+deletion sync), plus optional web overlay templates. New projects contain no commands,
+timers, alerts, goals, or placed overlays. Examples below are opt-in configuration.
 
 Everything is plain TOML in the project, hot-reloaded, and editable from the UI
 (**Views → Chatbot** and **Views → Alerts, goals & stats**). UI and chat edits are written back
@@ -50,7 +51,7 @@ the Twitch adapter), then cooldowns (global and per user; mods and the broadcast
 as actor, so chat priority, chat caps, `chat_ttl`, and `[policy] effect_modes` apply exactly as
 for rules; the broadcaster's own commands run at preset priority.
 
-**Built-ins** (`commands/mod.toml` in the example; rename or re-gate freely):
+**Built-in command handlers** (available to assign explicitly; no chat commands are installed):
 
 | builtin | chat | notes |
 |---|---|---|
@@ -126,7 +127,7 @@ count / sub months / redeem cost), `tier` (1–3), `money` (`$5.00`), `message`,
 plus `event.<payload field>` and state addresses. Templates can also use payload fields directly
 (`{months}`, `{viewers}`, `{count}`, `{gifter}`); text fields are content-filtered.
 
-### Queue policy — `[queue]` (one per project, `alerts/queue.toml` in the example)
+### Queue policy — `[queue]` (optionally configure in `alerts/queue.toml`)
 
 | key | default | |
 |---|---|---|
@@ -222,11 +223,11 @@ filled.
 
 ## Overlay patches
 
-Web patches (`kind = "web"`, `layer = "overlay"`) in `project-example/patches/`, rendered by the
-engine's CEF and placed with `[overlays.<id>]` in `project.toml` (canvases, per-canvas `rect`,
-`when`, `z`). They load `/engine.js` and `/web/overlay.js` (DOM-only rendering of viewer text,
-emotes, badges, money/number formatting, params). Every param is `patch.<id>.<param>` and can
-also be overridden with `?param=value` in the URL.
+Optional templates live in `templates/patches/web/`. Choose one in **New patch** to create
+an instance, then explicitly place it in a scene or configure `[overlays.<id>]` (canvases,
+per-canvas `rect`, `when`, `z`). Nothing is created or placed by project setup.
+The pages use `/engine.js` and `/web/overlay.js` for DOM-only rendering of viewer text,
+emotes and badges. Parameters are addressable as `patch.<id>.<param>`.
 
 | patch | shows | notable params |
 |---|---|---|
@@ -246,40 +247,16 @@ card is up, so the result stays placed after `twitch.*.active` turns off, and tu
 the card is gone. Start them from Community → Twitch → Polls & predictions
 (`twitch.poll.start`, `twitch.prediction.start`, …, docs/twitch.md).
 
-Two more web patches in the example are scene sources, not overlays (`layer = "source"`,
-placed as scene nodes):
+Two optional web templates are scene sources rather than overlays:
 
 | patch | shows | notable params |
 |---|---|---|
 | `nowplaying` | the current song request beside the YouTube player (`queue.now.*`, `queue.position`) — docs/song-requests.md | `label`, `show_requester`, `align` |
 | `ad_break` | the ad break card: "Back in a moment", a countdown of the Twitch ad, now playing | `title`, `subtitle`, `done_text`, `show_song` |
-| `terminal_title` | win31 DOS title box with a countdown bar (scene `starting_soon`, mode `preshow`) | `title`, `count_to` (minutes / clock time), `minutes`, `clock_time` |
-| `terminal_chat` | chat typed out as `C:\CHAT\NAME>` commands, alert lines (`alert.show`), deletion-synced | `prompt`, `lines`, `show_alerts` |
-| `terminal_boot` | BIOS/DOS boot typed out when `starting_soon` comes on | `brand` |
-
-The three `terminal_*` pieces are the worked example of porting a browser-source page:
-docs/patches.md, "Bringing your own overlay pages".
-
-### Ad breaks in the example project
-
-When Twitch starts an ad, the policy switches the mode to `ad_break` and back when it ends
-(`[policy] ad_break_mode`, docs/twitch.md). `rules/modes.toml` does the rest:
-
-- `mode.enter.ad_break`: remember the program scene in `patch.ad_break.return_scene`, then
-  `scene.cut ad_break` (aurora background + the `ad_break` card; no cameras).
-- `twitch.ad_break` (in mode `ad_break`): `patch.ad_break.trigger seconds={duration}` starts the
-  countdown; a second ad during the break extends it. The page keeps the deadline in
-  `patch.ad_break.deadline`, so a reload continues. Set by hand (`streamctl mode ad_break`),
-  the card shows only the text.
-- `mode.exit.ad_break`: cut back to the remembered scene (`duo` if none). Going back to `brb`
-  leaves the scene to the brb rule.
-
-The `ad_break` and `brb` scenes keep the music up with a scene-layer `set` (`audio.duck.depth
-= 0`, `audio.bus.music.gain = 0`), which lapses when the scene changes. Alerts wait during the
-break (`pause_modes`), chat effects are paused (`[policy] effect_modes`), and the chat box is
-hidden (its `when`). Try it: `streamctl mode live && streamctl sim ad_break duration=30`.
 
 Testing a page in a normal browser: open
 `http://127.0.0.1:<http port>/patches/<id>/index.html?token=<API token>` and fire simulator
 events (`streamctl sim gift_bomb count=50`, `streamctl sim chat message='hi Kappa'`).
-Alert sounds are `assets/sounds/alert_*.wav` (synthesized chimes; replace freely).
+No alert sounds are installed. Add your own files under `assets/sounds/` and configure
+the alert's sound, voice, and actions explicitly. Automatic ad-break mode switching is
+off unless `[policy] ad_break_mode = true`; scene changes require your own rules.

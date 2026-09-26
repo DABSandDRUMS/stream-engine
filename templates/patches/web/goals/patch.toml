@@ -1,0 +1,13 @@
+# Goal bars for `[goals.*]` in project.toml (progress persists across streams in the DB).
+kind        = "web"
+entry       = "index.html"
+layer       = "overlay"
+label       = "{{label}}"
+description = "Progress bars for sub/bit/follower goals"
+size        = [720, 200]
+fps         = 30
+params.goal       = { type = "string", default = "", description = "Goal name to show (empty = all, stacked)" }
+params.accent     = { type = "color",  default = "#9ece6a" }
+params.bar_bg     = { type = "color",  default = [0.05, 0.06, 0.1, 0.7] }
+params.text_color = { type = "color",  default = "#ffffff" }
+params.font       = { type = "string", default = "" }

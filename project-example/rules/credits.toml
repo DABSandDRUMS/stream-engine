@@ -1,6 +1,0 @@
-# End of stream (§15.8): entering `outro` rolls the credits patch. The page queries the
-# session's subs, cheers, raids, tips, follows, and top chatters when it is triggered.
-[[rule]]
-name = "outro credits"
-when = "mode.enter.outro"
-do = ["patch.credits.trigger"]

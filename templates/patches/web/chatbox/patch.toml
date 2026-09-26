@@ -1,0 +1,19 @@
+# Chat box: policy-filtered chat (the engine's `chat.message` feed) with badges and Twitch +
+# 7TV/BTTV/FFZ emotes; deleted messages and banned/timed-out users vanish (`chat.delete`,
+# `chat.purge`, `chat.clear`). Placement: [overlays.{{id}}] in project.toml.
+kind        = "web"
+entry       = "index.html"
+layer       = "overlay"
+label       = "{{label}}"
+description = "Live chat with badges and emotes, deletion-synced"
+size        = [460, 700]
+fps         = 30
+params.max_messages  = { type = "int",    default = 14, range = [1, 60] }
+params.fade_after    = { type = "float",  default = 0.0, range = [0.0, 600.0], unit = "s", description = "Hide messages after this long (0 = never)" }
+params.hide_commands = { type = "bool",   default = true, description = "Hide !commands" }
+params.hide_users    = { type = "string", default = "nightbot,streamelements,streamlabs", description = "Comma-separated names never shown" }
+params.show_badges   = { type = "bool",   default = true }
+params.font_size     = { type = "int",    default = 22, range = [10, 60], unit = "px" }
+params.bg            = { type = "color",  default = [0.05, 0.06, 0.1, 0.55], description = "Message background" }
+params.text_color    = { type = "color",  default = "#e6e9f5" }
+params.font          = { type = "string", default = "" }

@@ -1264,12 +1264,13 @@ pub(crate) mod tests {
         Config::build(&files)
     }
 
-    pub fn example_config() -> Config {
+    fn starter_config() -> Config {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../project-example");
         let mut files = Vec::new();
         files.push(("project".to_string(), "project".to_string(), std::fs::read_to_string(root.join("project.toml")).unwrap()));
-        for kind in ["scenes", "transitions", "presets"] {
-            for e in std::fs::read_dir(root.join(kind)).unwrap().flatten() {
+        for kind in ["scenes", "transitions", "presets", "sources"] {
+            let Ok(entries) = std::fs::read_dir(root.join(kind)) else { continue };
+            for e in entries.flatten() {
                 let p = e.path();
                 if p.extension().is_some_and(|x| x == "toml") {
                     files.push((kind.to_string(), p.file_stem().unwrap().to_string_lossy().to_string(), std::fs::read_to_string(&p).unwrap()));
@@ -1284,35 +1285,15 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn example_project_plans_cleanly() {
-        let c = example_config();
+    fn starter_has_no_programmed_visual_content() {
+        let c = starter_config();
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../project-example");
-        let manifests: Vec<Arc<Manifest>> = se_patch::scan(&root).into_iter().filter_map(Result::ok).map(Arc::new).collect();
+        let manifests: Vec<Arc<Manifest>> = se_patch::scan(&root).into_iter().map(|m| Arc::new(m.unwrap())).collect();
+        assert!(manifests.is_empty(), "patches are created explicitly from templates");
+        assert!(c.scenes.is_empty() && c.presets.is_empty());
         let p = Plan::build(&c, &manifests, root);
         assert!(p.errors.is_empty(), "{:?}", p.errors);
-        let duo = p.scene("duo").unwrap();
-        assert_eq!(duo.layouts[TALL].nodes.len(), 2);
-        let wide_cam = &duo.layouts[WIDE].nodes[1];
-        assert_eq!(p.state.name(wide_cam.rect), "scene.duo.node.cam_wide.rect.wide");
-        assert_eq!(p.state.name(wide_cam.opacity), "scene.duo.node.cam_wide.opacity");
-        assert_eq!(wide_cam.fx.len(), 1);
-        assert!(wide_cam.fx[0].when.is_some());
-        assert_eq!(p.effects[wide_cam.fx[0].effect].name, "vhs");
-        // node-attached effect params use the core's node-local addresses when configured
-        assert_eq!(wide_cam.fx[0].params[0], ParamSrc::Const(1.0));
-        assert_eq!(p.state.name(wide_cam.fx[0].enabled.unwrap()), "scene.duo.node.cam_wide.fx.vhs.enabled");
-        // one source entry per name, shared by every placement
-        assert_eq!(p.sources.iter().filter(|s| s.name == "cam_kit").count(), 1);
-        assert_eq!(p.canvases[WIDE].width, 1920);
-        assert_eq!(p.canvases[TALL].height, 1920);
-        assert_eq!(p.canvases[PREVIEW].width, 960);
-        assert!(p.transition_index.contains_key("morph"));
-        assert!(p.transition_index.contains_key("cut"));
-        assert_eq!(p.transition("fade").kind, TrKind::Shader);
-        assert_eq!(p.transition("zoomblur").params.len(), 1);
-        assert_eq!(p.transition("no-such").name, "fade");
-        let atlas: Vec<&str> = p.atlas_sources().iter().map(|i| p.sources[*i as usize].name.as_str()).collect();
-        assert!(atlas.contains(&"cam_kit") && atlas.contains(&"youtube") && atlas.contains(&"patch.aurora"));
+        assert!(p.scenes.is_empty(), "creating a project must not create a show");
     }
 
     #[test]

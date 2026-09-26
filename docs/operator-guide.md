@@ -99,10 +99,9 @@ viewers will see it.
 
 ### Quick effects
 
-Open **Scenes → Quick effects**. A quick effect is one tap that makes something happen: a screen
-shake, a flash, confetti, a light look, a sound — or all of them at once. Quick effects are made
-for you; here you try them, tune them and see where they're used. Want a new one? Ask for the
-look you want.
+Open **Scenes → Quick effects** to operate definitions from your project's `presets/`
+folder. The list starts empty; nothing is installed, run, or assigned automatically.
+Definitions and exposed knobs are configured in those project files.
 
 Your quick effects are on the left with their pad color, what they do in one line and how many
 places fire them (a search box appears when there are more than eight). Click one to open it:
@@ -120,8 +119,8 @@ places fire them (a search box appears when there are more than eight). Click on
   chat commands, timelines and rewards. Set up physical controls in **Inputs → Buttons &
   pedals** (the button next to the list takes you there).
 - If a quick effect's file has a mistake (for example a knob whose lowest setting is above its
-  highest), it says **Needs a fix** in the list and explains what's wrong. Ask for it to be
-  fixed, or go back to an earlier version in **Settings → History**.
+  highest), it says **Needs a fix** in the list and explains what's wrong. Correct its
+  project file, or go back to an earlier version in **Settings → History**.
 
 ### Transitions
 

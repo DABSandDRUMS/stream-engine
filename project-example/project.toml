@@ -1,7 +1,7 @@
-# stream-engine starter project.
+# Blank stream-engine project: device setup only; add show content from the UI when needed.
 # Everything here is plain TOML: edit by hand or in the UI (comments are preserved).
 schema = 1
-name = "drum stream"
+name = "New project"
 start_mode = "offline"
 
 [canvas.wide]
@@ -13,11 +13,6 @@ fps = 60
 width = 1080
 height = 1920
 fps = 60
-
-# Extra LFOs (built-ins: lfo.slow, lfo.mid, lfo.fast, lfo.beat, lfo.bar, lfo.random)
-[lfo.breathe]
-shape = "sine"
-rate = "0.05hz"
 
 [safety]
 # Chat-originated overrides expire after this long.
@@ -47,24 +42,6 @@ deck = { kind = "hid", label = "Stream Deck Original V2", usb = "0fd9:006d" }
 xtouch = { kind = "midi", label = "X-TOUCH MINI", usb = "1397:00b3" }
 fbv = { kind = "midi", label = "FBV Express Mk II", usb = "0e41:5055" }
 
-# Goals (§14.1): progress is kept in the runtime DB across streams; edit targets here or in
-# the UI (Views → Alerts). `counts` = follows | subs | sub_points | bits | tips | gifts | raids,
-# or a custom `when = "event.pattern"` + optional `if` + `add = "expression"`.
-[goals.subs]
-label = "Sub goal"
-counts = "subs"
-target = 50
-
-[goals.bits]
-label = "Bits for a new cymbal"
-counts = "bits"
-target = 25000
-
-[goals.followers]
-label = "Follower goal"
-counts = "follows"
-target = 100
-
 # Stats (§14.1): `stats.*` labels, top chatters, credits.
 [stats]
 # Simulator events count too (marked; purge them from Views → Alerts after testing).
@@ -78,78 +55,21 @@ exclude_broadcaster = true
 custom_file = "commands/custom.toml"
 mods_bypass_cooldowns = true
 
-# Overlay placement (layer = "overlay" patches are drawn over every canvas; web pages are
-# fit into `rect`). Omit a canvas from `canvases` to keep an overlay off it.
-[overlays.alertbox]
-canvases = ["wide", "tall"]
-rect.wide = [0.25, 0.04, 0.5, 0.42]
-rect.tall = [0.05, 0.08, 0.9, 0.3]
-z = 30
-
-[overlays.chatbox]
-canvases = ["wide"]
-rect.wide = [0.755, 0.34, 0.235, 0.62]
-when = "mode == 'live' || mode == 'rehearsal'"
-z = 20
-
-[overlays.goals]
-canvases = ["wide"]
-rect.wide = [0.01, 0.015, 0.3, 0.1]
-when = "mode != 'offline' && scene != 'starting_soon'"
-z = 10
-
-[overlays.labels]
-canvases = ["wide"]
-rect.wide = [0.0, 0.955, 1.0, 0.045]
-when = "mode == 'live' || mode == 'brb' || mode == 'ad_break' || mode == 'rehearsal'"
-z = 10
-
-[overlays.eventlist]
-canvases = ["wide"]
-rect.wide = [0.01, 0.4, 0.2, 0.45]
-when = "mode == 'brb' || mode == 'ad_break'"
-z = 10
-
-# The starting_soon scene (preshow) has its own countdown in its title box.
-[overlays.countdown]
-canvases = ["wide", "tall"]
-when = "mode == 'preshow' && scene != 'starting_soon'"
-z = 40
-
-[overlays.credits]
-canvases = ["wide", "tall"]
-when = "mode == 'outro'"
-z = 50
-
-# Twitch polls and predictions: on screen while one runs, then the result for a few seconds
-# (the page keeps `patch.<id>.showing` on for that). `rect` has the pages' `size` aspect.
-[overlays.poll]
-canvases = ["wide"]
-rect.wide = [0.015, 0.52, 0.3, 0.4]
-when = "twitch.poll.active || patch.poll.showing"
-z = 15
-
-[overlays.prediction]
-canvases = ["wide"]
-rect.wide = [0.015, 0.13, 0.3, 0.3407]
-when = "twitch.prediction.active || patch.prediction.showing"
-z = 15
-
-# Recording (§18): the Clipping tab edits this destination; OBS records into a folder per show.
+# Recording (§18): automatic capture and indexing are opt-in.
 [recording]
 dir = "~/Videos/Stream Engine"
-auto = true
+auto = false
 modes = ["preshow", "live"]
 snapshot_project = true
 
 [recording.index]
-enabled = true
-transcript = true
+enabled = false
+transcript = false
 
-# Clips (§18): hype markers during the show, clip job after it (docs/clips.md).
+# Clips (§18): processing and ranking are opt-in (docs/clips.md).
 [clips]
-auto_process = true        # queue the clip job when the session closes
-auto_rank = true           # use omp when available; deterministic ranking otherwise
+auto_process = false       # opt in to processing when the session closes
+auto_rank = false          # opt in to automatic ranking
 encoder = "auto"           # NVENC, libx264 when OBS holds every NVENC session
 tall_source = "auto"       # tall canvas recording when present, else a 9:16 crop of the wide one
 tall_crop_center = 0.5
@@ -163,41 +83,24 @@ preroll_max = "30s"
 clip_votes = 3             # unique `!clip` voters that force a marker
 
 [clips.audio]
-drop = ["music", "program"]   # talk clips omit these; requested-song clips keep music + performance
+drop = []                  # keep all selected feeds; talk-track exclusions are opt-in
 transcribe = ["mic", "band"]  # first role with a track is transcribed for captions
 
 # Voice push-to-talk (§10.1, docs/controllers.md): hold a `ptt` deck key / MIDI button or bind
 # `streamctl do voice.ptt start|stop`. Whisper runs locally; the model downloads once to
 # ~/.local/share/stream-engine/models/whisper/. Risky intents wait for "confirm".
 [voice]
-enabled = true
+enabled = false
 device = "default"          # ALSA capture PCM (PipeWire default source)
 model = "base.en"           # tiny.en | base.en | small.en | /path/to/ggml-model.bin
 max_seconds = 12
 confirm = ["panic", "mode", "clean"]
 
-# Rehearsal (§17.2, docs/extras.md): mode `rehearsal` is a practice run. OBS won't start the
-# stream, Twitch actions are dry runs, DMX outputs without `rehearsal = true` hold their last
-# look, and the simulator plays pretend viewers.
+# Rehearsal (§17.2, docs/extras.md): simulated viewer events are opt-in.
 [rehearsal]
-simulate = true
+simulate = false
 every = "20s"               # about one event this often (random 0.5–1.5×)
 presets = []                # simulator presets to draw from; empty = the built-in mix
-
-# Giveaways (§14.1): chat-entry giveaways with weighted entries; run them from the Giveaway view
-# or `giveaway.open|close|draw|reset`. A viewer's weight = best role weight + sub_month_bonus ×
-# months subscribed, capped at max_weight.
-[giveaway]
-keyword = "!join"
-platforms = ["twitch"]      # add "tiktok" to accept TikTok chat entries
-weights = { everyone = 1.0, follower = 1.0, sub = 2.0, vip = 2.0, mod = 1.0 }
-sub_month_bonus = 0.05
-max_weight = 5.0
-exclude_roles = ["owner"]
-exclude_users = ["nightbot", "streamelements", "streamlabs", "moobot", "fossabot", "sery_bot"]
-announce = true
-announce_open = "Giveaway open: {title}! Type {keyword} in chat to enter."
-announce_winner = "Congratulations @{user}, you won {title}! ({chance} chance)"
 
 # Song requests (§13, docs/song-requests.md). The queue policy (who may request, limits,
 # blocklists, approval, vote-skip) is edited in the UI (Views → Song requests) and kept in the
@@ -221,18 +124,9 @@ crossfade = "400ms"         # visual crossfade between the player's two slots
 # url = "wss://relay.example.com/link"
 # queue_url = "https://relay.example.com/queue"   # default: derived from url
 
-# Text to speech (§14.4): Kokoro-82M on the CPU; download the voices with `streamctl do tts.model.fetch`.
-# Alerts speak policy-filtered text after the veto window; first matching voice rule wins.
+# Text to speech (§14.4) is opt-in; no voice rules are installed.
 [tts]
-enabled = true
-voice = "af_heart"
-speed = 1.0
-volume = 0.9
-max_chars = 300
-
-[[tts.voices]]
-when = "kind == 'tip' || (kind == 'twitch.cheer' && amount >= 1000) || tier >= 2"
-voice = "am_michael"
+enabled = false
 
 # TikTok LIVE events (best effort, unofficial; docs/tiktok.md). Off unless enabled.
 [tiktok]
@@ -268,7 +162,6 @@ grace_hours = 24
 # timecode out (`[timecode_out]` in a timeline file) is generated.
 [timecode]
 mtc_in = "studio24c"        # MIDI input (controllers/*.toml id or ALSA name glob, e.g. "*24c*")
-ltc_in = "input.ltc.0"      # audio tap: channel 0 of [audio.inputs.ltc]
 ltc_level = -12.0           # LTC out level, dBFS
 ltc_latency = "0ms"         # audio output latency compensation for LTC out
 mtc_latency = "0ms"         # receiver latency compensation for MTC out
@@ -283,15 +176,7 @@ mtc_latency = "0ms"         # receiver latency compensation for MTC out
 name = "16r"
 rate_hz = 50
 writable = ["**"]
-panic_snapshot = "safe"   # store it once: streamctl do mixer.snapshot.store snapshot=safe
 touch_release = true
-
-# mic.talking (0/1) from the vocal mic's input meter, for ducking bindings.
-[mixer.talk]
-channel = "VocalMic"
-threshold_db = -38
-attack = "40ms"
-hold = "600ms"
 
 # Twitch (§11, docs/twitch.md). Paste the Client ID of your app from dev.twitch.tv/console
 # (Category "Other", Client Type "Public", OAuth redirect http://localhost), then authorize in
@@ -304,12 +189,6 @@ emotes = ["7tv", "bttv", "ffz"]
 latency = "2.5s"              # viewer-side latency estimate for chat → screen alignment
 ad_warning = "60s"            # twitch.ad.upcoming this long before a scheduled ad
 
-# Chat picks the next transition: `!transition <name>` (commands/show.toml) votes for a minute;
-# the next take that doesn't name one uses the winner (docs/render.md#choosing-the-transition).
-[transition_vote]
-window = "60s"
-choices = ["fade", "morph", "zoomblur", "glitch", "morph_glitch"]
-
 # Policy for chat-, bits-, and points-originated actions (§12.1, docs/twitch.md#policy).
 [policy]
 effect_modes = ["live", "rehearsal"]   # chat effects only run in these modes
@@ -317,7 +196,7 @@ follower_min_age = "10m"               # follow age before a viewer counts as a 
 blocklist = []                         # words (`word`, `word*`, `*word*`); homoglyph/leet/spacing-proof
 max_len = 300                          # user text is cut to this many characters
 approval_ttl = "10m"                   # unanswered approvals are rejected (and refunded)
-ad_break_mode = true                   # twitch.ad_break → mode ad_break and back
+ad_break_mode = false                  # opt in to automatic ad-break mode changes
 
 [policy.veto]
 ms = "3s"          # large alerts with user text wait this long for a mod (mod.reject kills the text)

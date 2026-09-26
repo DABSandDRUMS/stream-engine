@@ -71,7 +71,7 @@ fn particles_overlay_follows_its_envelope() {
     let root = dir.path();
     write_file(root, "project.toml", PROJECT);
     write_file(root, "scenes/s.toml", "[canvas.wide]\nnodes = [{ src = \"color:#000000\" }]\n[canvas.tall]\nnodes = [{ src = \"color:#000000\" }]\n");
-    copy_dir(&example_dir().join("patches/sparks"), &root.join("patches/sparks"));
+    copy_dir(&template("particles", "sparks"), &root.join("patches/sparks"));
     let mut h = Harness::new(root);
     assert!(h.reports.lock().patches.iter().all(|(_, r)| r.is_ok()), "{:?}", h.reports.lock().patches);
     h.set("show.scene.program", "s");

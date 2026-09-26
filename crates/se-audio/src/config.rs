@@ -246,7 +246,7 @@ struct Raw {
     inputs: BTreeMap<String, RawInput>,
     buses: BTreeMap<String, RawBus>,
     slots: BTreeMap<String, RawSlot>,
-    duck: RawDuck,
+    duck: Option<RawDuck>,
     sounds: BTreeMap<String, RawSound>,
     monitor: Option<RawMonitor>,
     playback: Option<RawPlayback>,
@@ -659,7 +659,8 @@ pub fn parse(section: &toml::Table, fragments: &BTreeMap<String, toml::Table>) -
             return Err(format!("inputs.{}: bad bus `{}`", i.name, i.bus));
         }
     }
-    let d = raw.duck;
+    // A duck section is an explicit opt-in; blank projects never change levels automatically.
+    let d = raw.duck.unwrap_or_else(|| RawDuck { targets: Some(Vec::new()), signals: Some(Vec::new()), keys: Some(Vec::new()), ..Default::default() });
     let duck = DuckDef {
         targets: d.targets.unwrap_or_else(|| vec!["music".into()]),
         depth_db: d.depth.unwrap_or(-12.0).clamp(-60.0, 0.0),
@@ -862,7 +863,23 @@ mod tests {
         assert_eq!(c.route_slot("tts"), c.bus_index("tts"));
         assert_eq!(c.route_slot("sfx.alert"), c.bus_index("sfx"));
         assert_eq!(c.route_slot("timecode.ltc"), None, "timecode slots are direct-only");
-        assert_eq!(c.duck.targets, vec!["music"]);
+        assert!(c.duck.targets.is_empty());
+    }
+
+    #[test]
+    fn ducking_requires_explicit_configuration() {
+        let blank = AudioConfig::default();
+        assert!(blank.duck.targets.is_empty() && blank.duck.signals.is_empty() && blank.duck.keys.is_empty());
+        assert!(blank.inputs.iter().all(|i| i.fx.is_empty()) && blank.buses.iter().all(|b| b.fx.is_empty()));
+
+        let opted_in = parse(&t("[duck]"), &BTreeMap::new()).unwrap();
+        assert_eq!(opted_in.duck.targets, ["music"]);
+        assert_eq!(opted_in.duck.signals, ["mic.talking"]);
+        assert_eq!(opted_in.duck.keys, ["tts"]);
+
+        let manual = parse(&t("[duck]\ntargets = [\"game\"]\nsignals = []\nkeys = []"), &BTreeMap::new()).unwrap();
+        assert_eq!(manual.duck.targets, ["game"]);
+        assert!(manual.duck.signals.is_empty() && manual.duck.keys.is_empty());
     }
 
     #[test]

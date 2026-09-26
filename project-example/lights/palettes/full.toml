@@ -1,5 +1,0 @@
-kind = "intensity"
-label = "Full"
-
-[set]
-all = { intensity = 1.0 }

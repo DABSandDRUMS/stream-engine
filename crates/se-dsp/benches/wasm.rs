@@ -71,7 +71,7 @@ fn bench(name: &str, module: &WasmModule) {
 fn main() {
     let host = WasmHost::new().expect("wasm host");
     let copy = host.compile(&wat::parse_str(COPY).expect("wat")).expect("compile copy");
-    let ringmod_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../project-example/patches/ringmod/main.wasm");
+    let ringmod_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../templates/patches/dsp/ringmod/main.wasm");
     let ringmod = host.compile(&std::fs::read(ringmod_path).expect("ringmod main.wasm")).expect("compile ringmod");
     bench("copy", &copy);
     bench("ringmod", &ringmod);

@@ -90,6 +90,8 @@ struct LightsState {
     knobs: HashMap<String, KnobMove>,
     /// A quick effect just made here: open it in Scenes → Quick effects.
     open_quick: Option<String>,
+    /// Explicitly open the rig file for fixture, output and safety setup.
+    open_setup: bool,
 }
 
 impl LightsState {
@@ -201,6 +203,7 @@ pub fn ui(app: &mut App, ui: &mut Ui) {
         st.refresh_soon(now);
     }
     let open_quick = st.open_quick.take();
+    let open_setup = std::mem::take(&mut st.open_setup);
     ui.data_mut(|d| d.insert_temp(id, st));
     for op in out {
         app.m.command(op);
@@ -208,6 +211,9 @@ pub fn ui(app: &mut App, ui: &mut Ui) {
     if let Some(preset) = open_quick {
         let ctx = ui.ctx().clone();
         crate::views::quick_effects::open(app, &ctx, &preset);
+    }
+    if open_setup {
+        app.open_in_editor("lights/rig.toml", None);
     }
 }
 
@@ -226,9 +232,13 @@ pub fn overview_strip(app: &mut App, ui: &mut Ui) {
     if !out.is_empty() {
         st.refresh_soon(now);
     }
+    let open_setup = std::mem::take(&mut st.open_setup);
     ui.data_mut(|d| d.insert_temp(id, st));
     for op in out {
         app.m.command(op);
+    }
+    if open_setup {
+        app.open_in_editor("lights/rig.toml", None);
     }
 }
 
@@ -253,7 +263,8 @@ fn strip(m: &Model, t: &Theme, st: &mut LightsState, ui: &mut Ui, out: &mut Vec<
             return;
         }
         if rig.fixtures.is_empty() {
-            one_liner(ui, "Your lights aren't set up yet. Send us your fixture list and we'll set them up.");
+            one_liner(ui, "No lights are patched yet.");
+            st.open_setup = widgets::button_ex(ui, t, Some(icon::SETTINGS), "Set up lights", Kind::Secondary, Size::Small, 0.0, m.connected).clicked();
             return;
         }
         let cx = Cx { m, t, rig: &rig, output: None, on_air, now };
@@ -364,7 +375,7 @@ fn strip_looks(cx: &Cx, st: &mut LightsState, ui: &mut Ui, out: &mut Vec<Op>) {
     let t = cx.t;
     let pals = cx.m.q_list("lights.palettes");
     if pals.is_empty() {
-        widgets::hint(ui, t, "No looks yet. They're made for you together with your lights.");
+        widgets::hint(ui, t, "No looks yet. Add your own under lights/palettes/.");
         return;
     }
     const MIN_W: f32 = 112.0;
@@ -462,7 +473,14 @@ fn view(m: &Model, t: &Theme, st: &mut LightsState, ui: &mut Ui, out: &mut Vec<O
     if rig.fixtures.is_empty() {
         widgets::panel(ui, t, |ui| {
             ui.set_width(ui.available_width());
-            widgets::empty_state(ui, t, icon::LIGHT, "Your lights aren't set up yet", "Send us your fixture list and we'll set them up.", None);
+            st.open_setup = widgets::empty_state(
+                ui,
+                t,
+                icon::LIGHT,
+                "No lights are patched yet",
+                "Add your fixtures to lights/rig.toml in your editor. Device outputs and safety settings stay available; no looks are created automatically.",
+                Some("Set up lights"),
+            );
         });
         return;
     }
@@ -1094,7 +1112,7 @@ fn looks_card(cx: &Cx, st: &mut LightsState, ui: &mut Ui, out: &mut Vec<Op>) {
                     t,
                     icon::PALETTE,
                     "No looks yet",
-                    "Your looks are made for you together with your lights. Tell us which ones you'd like.",
+                    "Add a look file under lights/palettes/ with the colors and brightness you want. Looks only run when you turn them on.",
                     None,
                 );
                 return;
@@ -1258,7 +1276,7 @@ fn cuelists_card(cx: &Cx, st: &mut LightsState, ui: &mut Ui, out: &mut Vec<Op>) 
                     t,
                     icon::LIST,
                     "No cue lists yet",
-                    "Cue lists are made for you together with your lights. Tell us what you'd like to step through.",
+                    "Add a cue list under lights/cuelists/ to define the steps you want. Nothing runs until you start it.",
                     None,
                 );
                 return;

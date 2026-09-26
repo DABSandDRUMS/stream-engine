@@ -4,7 +4,7 @@
 # of its four USB MIDI ports; all four are read). The numbers below follow Line 6's own worked
 # example (footswitch A–D → CC 1–4, pedal → CC 7). If your unit was programmed differently:
 #   * watch `streamctl query controllers.midi.monitor '{"device":"fbv"}'` while stomping, then edit `cc`, or
-#   * `streamctl do "midi.learn preset.hype"` and stomp the switch: the switch is declared here and mapped.
+#   * use MIDI Learn in the Controllers view to assign an action.
 # Undeclared messages still arrive as signals `midi.fbv.cc.<n>` / events `midi.fbv.note.<n>`.
 kind = "midi"
 match = "FBV Express Mk II*"
@@ -28,21 +28,4 @@ switch = "momentary"
 [control.pedal]
 cc = 7
 
-[[map]]
-control = "fs_a"
-preset = "hype"
-[[map]]
-control = "fs_b"
-preset = "confetti"
-[[map]]
-control = "fs_c"
-do = ["scene.next", "scene.take"]
-[[map]]
-control = "fs_d"
-ptt = true
-
-# Use the pedal anywhere a signal fits, e.g. ride the front wash during rehearsal:
-# [[binding]]
-# target = "lights.group.front.intensity"
-# signal = "midi.fbv.pedal"
-# scope = "mode.rehearsal"
+# Controls are unassigned. Map them explicitly in the Controllers view.

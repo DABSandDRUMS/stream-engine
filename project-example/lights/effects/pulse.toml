@@ -1,9 +1,0 @@
-# Dimmer breathing on the beat: one sine cycle per beat, 60 % depth, all heads in phase.
-label = "Beat pulse"
-kind = "dimmer_sine"
-targets = ["all"]
-unit = "beats"
-rate = 1.0
-size = 0.6
-spread = 0.0
-order = "x"

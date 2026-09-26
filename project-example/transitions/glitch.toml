@@ -1,7 +1,0 @@
-# Blocky RGB glitch crossfade (adapted from gl-transitions "GlitchMemories", MIT).
-label = "Glitch"
-kind = "shader"
-shader = "glitch"
-ms = 600
-strength = 1.0
-block = 16.0

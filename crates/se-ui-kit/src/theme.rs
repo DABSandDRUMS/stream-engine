@@ -34,18 +34,17 @@ pub struct Theme {
     pub chrome: Color32,
     /// Cards and panels on the page.
     pub surface: Color32,
-    /// Hovered or raised surface, inputs.
+    /// Hovered controls and muted supporting surfaces.
     pub surface_hi: Color32,
     /// Hairline borders and dividers.
     pub border: Color32,
     /// Secondary text.
     pub text_dim: Color32,
-    /// Hints, placeholders, disabled.
+    /// Hints, placeholders, and disabled controls.
     pub text_faint: Color32,
     /// Text on the accent color.
     pub on_accent: Color32,
-    /// Recessed wells: slider rails, switch tracks, meters, input fields. Contrasts with both
-    /// `surface` and `surface_hi`.
+    /// Input fields and quiet tracks for sliders, switches, and meters.
     pub inset: Color32,
 }
 
@@ -76,21 +75,55 @@ fn luminance(c: Color32) -> f32 {
     (0.2126 * c.r() as f32 + 0.7152 * c.g() as f32 + 0.0722 * c.b() as f32) / 255.0
 }
 
+/// Relative luminance in linear sRGB, used for readable semantic foreground pairs.
+fn relative_luminance(c: Color32) -> f32 {
+    let channel = |v: u8| {
+        let v = v as f32 / 255.0;
+        if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+    };
+    0.2126 * channel(c.r()) + 0.7152 * channel(c.g()) + 0.0722 * channel(c.b())
+}
+
+pub(crate) fn contrasting_foreground(background: Color32) -> Color32 {
+    if relative_luminance(background) > 0.179 { Color32::BLACK } else { Color32::WHITE }
+}
+
+/// Keep a little of the desktop theme's warmth, without tinting every app surface.
+fn neutralize(c: Color32) -> Color32 {
+    let gray = (luminance(c) * 255.0).round() as u8;
+    mix(Color32::from_gray(gray), c, 0.12)
+}
+
+fn readable(color: Color32, background: Color32, ratio: f32) -> Color32 {
+    let background_luminance = relative_luminance(background);
+    let contrast = |candidate| {
+        let candidate = relative_luminance(candidate);
+        (candidate.max(background_luminance) + 0.05) / (candidate.min(background_luminance) + 0.05)
+    };
+    let target = if background_luminance > 0.179 { Color32::BLACK } else { Color32::WHITE };
+    if contrast(color) >= ratio {
+        return color;
+    }
+    let (mut low, mut high) = (0.0, 1.0);
+    for _ in 0..8 {
+        let amount = (low + high) * 0.5;
+        if contrast(mix(color, target, amount)) < ratio {
+            low = amount;
+        } else {
+            high = amount;
+        }
+    }
+    mix(color, target, high)
+}
+
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct ColorsToml {
     mode: Option<String>,
     accent: Option<String>,
-    selection: Option<String>,
     muted: Option<String>,
     background: Option<String>,
-    dark_background: Option<String>,
-    darker_background: Option<String>,
-    lighter_background: Option<String>,
     foreground: Option<String>,
-    dark_foreground: Option<String>,
-    light_foreground: Option<String>,
-    bright_foreground: Option<String>,
     red: Option<String>,
     yellow: Option<String>,
     orange: Option<String>,
@@ -112,7 +145,7 @@ pub fn hex(s: &str) -> Option<Color32> {
 }
 
 impl Default for Theme {
-    /// Fallback (Kanagawa-like) used when no Omarchy theme is present.
+    /// Neutral fallback used when no Omarchy theme is present.
     fn default() -> Self {
         Theme::parse(include_str!("default_colors.toml"))
     }
@@ -122,25 +155,31 @@ impl Theme {
     pub fn parse(src: &str) -> Theme {
         let c: ColorsToml = toml::from_str(src).unwrap_or_default();
         let g = |v: &Option<String>, d: Color32| v.as_deref().and_then(hex).unwrap_or(d);
-        let bg = g(&c.background, Color32::from_rgb(0x1f, 0x1f, 0x28));
-        let fg = g(&c.foreground, Color32::from_rgb(0xdc, 0xd7, 0xba));
-        let light = c.mode.as_deref().map(|m| m == "light").unwrap_or(luminance(bg) > 0.5);
-        let accent = g(&c.accent, fg);
-        // Surfaces step from the page background toward the foreground; the chrome (sidebar,
-        // top bar) steps the other way so the page reads as the brightest plane.
+        let source_bg = g(&c.background, Color32::from_rgb(0x18, 0x18, 0x1b));
+        let light = c.mode.as_deref().map(|m| m == "light").unwrap_or(luminance(source_bg) > 0.5);
+        let bg = neutralize(source_bg);
+        let default_fg = if light { Color32::from_gray(24) } else { Color32::from_gray(244) };
+        let fg = readable(neutralize(g(&c.foreground, default_fg)), bg, 7.0);
+        // Semantic surfaces share one neutral ramp; theme accents belong to selection and focus,
+        // not every panel. Light cards are paper; dark cards step gently above the page.
+        let surface = if light { mix(bg, Color32::WHITE, 0.6) } else { mix(bg, fg, 0.025) };
+        let surface_hi = mix(surface, fg, if light { 0.045 } else { 0.055 });
+        let accent = readable(g(&c.accent, fg), surface_hi, 3.0);
+        let text_dim = readable(mix(fg, surface_hi, 0.32), surface_hi, 4.5);
+        let text_faint = readable(mix(fg, surface_hi, 0.48), surface_hi, 4.5);
         let away = if light { Color32::WHITE } else { Color32::BLACK };
         Theme {
             light,
             bg,
-            bg_dark: g(&c.dark_background, mix(bg, away, 0.25)),
-            bg_darker: g(&c.darker_background, mix(bg, away, 0.45)),
-            bg_light: g(&c.lighter_background, mix(bg, fg, 0.06)),
+            bg_dark: mix(bg, away, 0.12),
+            bg_darker: mix(bg, away, 0.24),
+            bg_light: surface_hi,
             fg,
-            fg_dim: mix(fg, bg, 0.38),
-            fg_bright: g(&c.bright_foreground, fg),
+            fg_dim: text_dim,
+            fg_bright: fg,
             accent,
-            selection: g(&c.selection, mix(bg, accent, 0.25)),
-            muted: g(&c.muted, mix(fg, bg, 0.7)),
+            selection: mix(surface_hi, accent, 0.08),
+            muted: neutralize(g(&c.muted, mix(fg, bg, 0.7))),
             red: g(&c.red, Color32::from_rgb(0xc3, 0x40, 0x43)),
             yellow: g(&c.yellow, Color32::from_rgb(0xc0, 0xa3, 0x6e)),
             green: g(&c.green, Color32::from_rgb(0x76, 0x94, 0x6a)),
@@ -149,14 +188,14 @@ impl Theme {
             magenta: g(&c.magenta, Color32::from_rgb(0x95, 0x7f, 0xb8)),
             orange: g(&c.orange, Color32::from_rgb(0xc1, 0x71, 0x58)),
             bright_red: g(&c.bright_red, g(&c.red, Color32::RED)),
-            chrome: mix(bg, away, if light { 0.5 } else { 0.35 }),
-            surface: mix(bg, fg, 0.045),
-            surface_hi: mix(bg, fg, 0.085),
-            border: mix(bg, fg, 0.13),
-            text_dim: mix(fg, bg, 0.38),
-            text_faint: mix(fg, bg, 0.58),
-            on_accent: if luminance(accent) > 0.55 { mix(bg, Color32::BLACK, 0.3) } else { Color32::WHITE },
-            inset: mix(bg, away, 0.32),
+            chrome: if light { mix(bg, fg, 0.018) } else { mix(bg, away, 0.12) },
+            surface,
+            surface_hi,
+            border: mix(surface, fg, if light { 0.14 } else { 0.12 }),
+            text_dim,
+            text_faint,
+            on_accent: contrasting_foreground(accent),
+            inset: if light { surface } else { mix(bg, away, 0.08) },
         }
     }
 
@@ -177,35 +216,35 @@ impl Theme {
         v.override_text_color = Some(self.fg);
         v.panel_fill = self.bg;
         v.window_fill = self.surface;
-        v.extreme_bg_color = mix(self.bg, if self.light { Color32::WHITE } else { Color32::BLACK }, 0.2);
+        v.extreme_bg_color = self.inset;
         v.faint_bg_color = self.surface;
         v.code_bg_color = self.surface_hi;
         v.text_edit_bg_color = Some(self.inset);
         v.hyperlink_color = self.accent;
         v.warn_fg_color = self.yellow;
         v.error_fg_color = self.bright_red;
-        v.selection.bg_fill = mix(self.bg, self.accent, 0.3);
-        v.selection.stroke = Stroke::new(1.0, self.accent);
-        v.text_cursor.stroke = Stroke::new(2.0, self.accent);
+        v.selection.bg_fill = self.selection;
+        v.selection.stroke = Stroke::new(1.0, self.fg);
+        v.text_cursor.stroke = Stroke::new(1.5, self.accent);
         v.window_stroke = Stroke::new(1.0, self.border);
         v.window_corner_radius = CornerRadius::same(radius::CARD);
-        v.menu_corner_radius = CornerRadius::same(radius::CONTROL + 2);
-        v.window_shadow = egui::Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(90) };
-        v.popup_shadow = egui::Shadow { offset: [0, 8], blur: 22, spread: 0, color: Color32::from_black_alpha(85) };
+        v.menu_corner_radius = CornerRadius::same(radius::CARD);
+        v.window_shadow = egui::Shadow { offset: [0, 4], blur: 16, spread: 0, color: Color32::from_black_alpha(if self.light { 24 } else { 56 }) };
+        v.popup_shadow = egui::Shadow { offset: [0, 4], blur: 12, spread: 0, color: Color32::from_black_alpha(if self.light { 24 } else { 56 }) };
         v.indent_has_left_vline = false;
         v.striped = false;
         v.slider_trailing_fill = true;
         v.handle_shape = egui::style::HandleShape::Circle;
         v.interact_cursor = Some(egui::CursorIcon::PointingHand);
         let r = CornerRadius::same(radius::CONTROL);
-        // `bg_fill` paints slider rails and other recessed parts, `weak_bg_fill` paints buttons
-        let lift = mix(self.surface_hi, self.fg, 0.07);
+        // Plain egui controls use the same quiet outline and neutral hover as kit controls.
+        let hover = mix(self.surface_hi, self.fg, 0.025);
         for (w, fill, stroke) in [
             (&mut v.widgets.noninteractive, self.surface, self.border),
-            (&mut v.widgets.inactive, self.surface_hi, self.border),
-            (&mut v.widgets.hovered, lift, mix(self.border, self.fg, 0.18)),
-            (&mut v.widgets.active, mix(self.surface_hi, self.accent, 0.2), self.accent),
-            (&mut v.widgets.open, mix(self.surface_hi, self.accent, 0.12), self.accent),
+            (&mut v.widgets.inactive, self.surface, self.border),
+            (&mut v.widgets.hovered, hover, mix(self.border, self.fg, 0.14)),
+            (&mut v.widgets.active, self.surface_hi, self.accent),
+            (&mut v.widgets.open, self.selection, self.border),
         ] {
             w.bg_fill = self.inset;
             w.weak_bg_fill = fill;
@@ -223,8 +262,8 @@ impl Theme {
             s.visuals = v.clone();
             s.animation_time = crate::motion::egui_animation_time(reduced);
             s.spacing.item_spacing = egui::vec2(spacing::S, spacing::S);
-            s.spacing.button_padding = egui::vec2(spacing::M + 2.0, spacing::S);
-            s.spacing.interact_size.y = 32.0;
+            s.spacing.button_padding = egui::vec2(spacing::M, spacing::S);
+            s.spacing.interact_size.y = 34.0;
             s.spacing.slider_rail_height = 4.0;
             s.spacing.window_margin = Margin::same(spacing::L as i8);
             s.spacing.menu_margin = Margin::same(6);
@@ -279,20 +318,20 @@ pub mod spacing {
 
 /// Corner radii (points).
 pub mod radius {
-    pub const CONTROL: u8 = 8;
-    pub const CARD: u8 = 12;
-    pub const TILE: u8 = 10;
+    pub const CONTROL: u8 = 6;
+    pub const CARD: u8 = 8;
+    pub const TILE: u8 = 8;
     pub const PILL: u8 = 255;
 }
 
 /// Type scale (points).
 pub mod type_scale {
-    pub const SMALL: f32 = 12.5;
-    pub const BODY: f32 = 14.5;
-    pub const LARGE: f32 = 16.5;
+    pub const SMALL: f32 = 12.0;
+    pub const BODY: f32 = 14.0;
+    pub const LARGE: f32 = 16.0;
     pub const HEADING: f32 = 20.0;
     pub const TITLE: f32 = 26.0;
-    pub const DISPLAY: f32 = 34.0;
+    pub const DISPLAY: f32 = 32.0;
 }
 
 /// Font family names installed by [`install_font`].
@@ -441,7 +480,6 @@ mod tests {
     fn parses_omarchy_colors() {
         let t = Theme::parse("mode = \"light\"\nbackground = \"#ffffff\"\nred = \"#ff0000\"\n");
         assert!(t.light);
-        assert_eq!(t.bg, Color32::WHITE);
         assert_eq!(t.red, Color32::from_rgb(255, 0, 0));
         assert_eq!(hex("#11223344"), Some(Color32::from_rgba_unmultiplied(0x11, 0x22, 0x33, 0x44)));
     }

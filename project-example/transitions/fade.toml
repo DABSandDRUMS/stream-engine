@@ -1,4 +1,0 @@
-label = "Crossfade"
-kind = "shader"
-shader = "fade"
-ms = 600

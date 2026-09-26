@@ -1,7 +1,0 @@
-# Tempo-synced beat repeat on the music bus (YouTube/music), locked to beat.bpm/beat.phase:
-# captures a 1/8 note at the next 1/16 and loops it for 2 s, then crossfades back.
-label = "STUTTER"
-color = "#ffa066"
-hold = "2s"
-conflict = "replace"
-fx = [{ name = "audio.bus.music.fx.stutter" }]

@@ -6,10 +6,14 @@ the Stream Deck and voice control lights with no special path. Cue lists, palett
 plain TOML files under `lights/` in the project; they hot-reload when saved (a broken file is logged
 and the last good version keeps running).
 
-Looks and cue lists are made by developers in these files. The app's **Lights** page is a
-console for using them: turn looks on and off, run cue lists (Go / Back / Stop), move the few
-**knobs** each one declares (§2.7), set the overall brightness and blackout, and watch a live
-stage picture. There is no programmer or patching in the app; those stay here and in `streamctl`.
+Lighting programming is opt-in: a blank project has no patched fixtures, looks, cue lists or
+effects. The app's **Lights → Set up lights** button opens `lights/rig.toml` in your editor;
+add the fixtures and outputs you actually use (§2.2). Create looks under `lights/palettes/`
+and cue lists under `lights/cuelists/` when wanted. Nothing starts merely because a file exists.
+The app is a console for using those files: turn looks on and off, run cue lists (Go / Back /
+Stop), move the **knobs** each one declares (§2.7), set overall brightness and blackout, and
+watch a live stage picture. Detailed patching and programmer controls remain available in the
+files and `streamctl`; safety controls work without any authored show.
 
 ```
 lights/
@@ -379,10 +383,8 @@ version):
   next firing and every reload use it. The app sends `save = false` while a slider is dragged and
   saves when it's released (or, for colours, once the picker is still for 0.6 s).
 
-The example project's colour looks expose Color + Brightness, `accent` and `half` Brightness,
-`chase` a beat-based Speed choice + Brightness, `chase_fast` Speed + Brightness, `main` Front
-light + Pulse strength, `warm_duo` Brightness. (The strobe's speed is a knob on the `strobe`
-quick effect, which sets `lights.effect.strobe.rate`, so the `strobe` cue list has none.)
+No looks or cue lists are installed by default. Knobs are configured only on looks and
+cue lists you explicitly create after patching the real fixtures.
 
 ---
 

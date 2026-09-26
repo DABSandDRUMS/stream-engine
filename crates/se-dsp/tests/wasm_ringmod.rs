@@ -1,4 +1,4 @@
-//! Offline render tests of the example `dsp` patch `project-example/patches/ringmod`
+//! Offline render tests of the opt-in `dsp` template `templates/patches/dsp/ringmod`
 //! (null test, known outputs, beat sync, tremolo gate) and click-free hot swap in an `FxSlot`.
 #![cfg(feature = "wasm")]
 

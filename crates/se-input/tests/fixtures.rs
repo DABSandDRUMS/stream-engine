@@ -1,7 +1,7 @@
 //! Replays recorded/protocol fixture streams through the same decoding used at runtime, and
-//! checks the example project's controllers files.
+//! checks the blank project's unassigned controller declarations.
 
-use se_input::config::{self, Action, Parsed};
+use se_input::config::{self, Parsed};
 use se_input::deck::proto;
 use se_input::midi::controls::{Decoder, Ev};
 use se_input::midi::parse::Parser;
@@ -63,9 +63,6 @@ fn xtouch_mini_mc_stream_names_every_control() {
     assert_eq!(fader[3], 1.0);
     // no auto-created controls: the profile covers the whole surface
     assert!(dec.defs.iter().all(|d| !d.auto));
-    // the example maps: btn.1 fires hype, enc.1 adjusts the RGB split, the fader is a pickup binding
-    assert!(cfg.maps.iter().any(|m| m.control == "btn.1" && m.action == Action::Preset("hype".into())));
-    assert!(cfg.maps.iter().any(|m| m.control == "enc.1" && m.target.as_deref() == Some("fx.rgb_split.amount")));
     assert_eq!(cfg.init, vec![vec![0xB0, 0x7F, 0x01]]);
 }
 
@@ -80,12 +77,12 @@ fn fbv_footswitch_fires_once_and_pedal_is_continuous() {
         evs.iter().filter(|(n, _)| n == "pedal").filter_map(|(_, e)| if let Ev::Value { value, .. } = e { Some(*value) } else { None }).collect();
     assert_eq!(pedal.first().copied(), Some(0.0));
     assert_eq!(pedal.last().copied(), Some(1.0));
-    assert!(cfg.maps.iter().any(|m| m.control == "fs_a" && m.action == Action::Preset("hype".into())));
 }
 
 #[test]
 fn edrum_notes_map_to_pads_and_mtc_is_not_a_control() {
-    let cfg = device("studio24c.toml");
+    let t: toml::Table = "kind = \"midi\"\nmatch = \"Studio 24c*\"\n[drums]\ngm = true\nchannel = 10\n".parse().unwrap();
+    let Parsed::Midi(cfg) = config::parse_file("studio24c", "controllers/studio24c.toml", &t).unwrap() else { panic!() };
     assert_eq!(cfg.drums.get(&36).map(String::as_str), Some("kick"));
     assert_eq!(cfg.drums.get(&38).map(String::as_str), Some("snare"));
     assert_eq!(cfg.drums.get(&42).map(String::as_str), Some("hat_closed"));
@@ -137,23 +134,24 @@ fn streamdeck_reports_give_key_edges() {
 }
 
 #[test]
-fn example_project_controllers_all_parse() {
+fn starter_controllers_decode_without_assigning_actions() {
     let dir = example("");
-    let mut n = 0;
     for e in std::fs::read_dir(&dir).unwrap().flatten() {
         let p = e.path();
         if p.extension().is_some_and(|x| x == "toml") {
             let t: toml::Table = std::fs::read_to_string(&p).unwrap().parse().unwrap();
             let stem = p.file_stem().unwrap().to_string_lossy().to_string();
-            config::parse_file(&stem, &format!("controllers/{stem}.toml"), &t).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
-            n += 1;
+            assert!(!t.contains_key("binding"), "{stem} must not assign a parameter");
+            match config::parse_file(&stem, &format!("controllers/{stem}.toml"), &t).unwrap() {
+                Parsed::Midi(m) => {
+                    assert!(m.maps.is_empty(), "{stem} must not assign an action");
+                    assert!(m.drums.is_empty(), "{stem} must not assume a drum module");
+                }
+                Parsed::Deck(d) => assert!(d.pages.iter().all(|p| p.keys.is_empty()), "{stem} must not assign a key"),
+                _ => panic!("{stem} must be a device declaration"),
+            }
         }
     }
-    assert!(n >= 4);
-    let t: toml::Table = std::fs::read_to_string(example("deck.toml")).unwrap().parse().unwrap();
-    let Parsed::Deck(d) = config::parse_file("deck", "controllers/deck.toml", &t).unwrap() else { panic!() };
-    assert_eq!(d.pages.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), vec!["show", "mix", "fx", "songs"]);
-    assert_eq!(d.page("show").unwrap().keys[&5].action, Action::Preset("hype".into()));
 }
 
 #[test]

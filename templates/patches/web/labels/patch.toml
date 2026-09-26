@@ -1,0 +1,15 @@
+# Recent/top labels from `stats.*` (latest follower, top cheerer, …) as a ticker or a row.
+kind        = "web"
+entry       = "index.html"
+layer       = "overlay"
+label       = "{{label}}"
+description = "Latest follower/sub/tip and top cheerer labels"
+size        = [1920, 48]
+fps         = 30
+params.fields     = { type = "string", default = "latest.follow.user=Latest follower, latest.sub.user=Latest sub, latest.tip.user=Latest tip, top.cheer.session.user=Top cheer today, top.cheer.alltime.user=Top cheer ever, latest.raid.user=Last raid", description = "Comma-separated `stats path=Label` items" }
+params.layout     = { type = "enum",   default = "row", options = ["row", "ticker"], description = "All at once, or one at a time" }
+params.interval   = { type = "float",  default = 6.0, range = [2.0, 60.0], unit = "s", description = "Ticker: time per label" }
+params.accent     = { type = "color",  default = "#7aa2f7" }
+params.bg         = { type = "color",  default = [0.05, 0.06, 0.1, 0.75] }
+params.text_color = { type = "color",  default = "#ffffff" }
+params.font       = { type = "string", default = "" }

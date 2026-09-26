@@ -29,21 +29,71 @@ impl Drop for Engine {
     }
 }
 
-fn copy_dir(src: &Path, dst: &Path) {
-    std::fs::create_dir_all(dst).unwrap();
-    for e in std::fs::read_dir(src).unwrap().flatten() {
-        if e.path().extension().is_some_and(|x| x == "toml") {
-            std::fs::copy(e.path(), dst.join(e.file_name())).unwrap();
-        }
-    }
-}
-
-/// A project with the example's commands and alerts.
+/// Only these tests opt in to commands, alert reactions and queue policy.
 fn project(dir: &Path) {
     std::fs::write(dir.join("project.toml"), PROJECT).unwrap();
-    let ex = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../project-example");
-    copy_dir(&ex.join("commands"), &dir.join("commands"));
-    copy_dir(&ex.join("alerts"), &dir.join("alerts"));
+    std::fs::create_dir_all(dir.join("commands")).unwrap();
+    std::fs::create_dir_all(dir.join("alerts")).unwrap();
+    std::fs::write(
+        dir.join("commands/test.toml"),
+        r#"[[command]]
+name = "!discord"
+reply = "Join the Discord: https://discord.gg/xxxx"
+
+[[command]]
+name = "!addcom"
+builtin = "addcom"
+role = "mod"
+min_args = 2
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("alerts/test.toml"),
+        r#"
+[queue]
+pause_modes = ["ad_break", "brb"]
+veto_window = "3s"
+gift_window = "3s"
+
+[[alert]]
+name = "gift"
+when = "twitch.gift"
+title = "{user} gifted {count} subs!"
+sound = "alert_gift"
+duration = "7s"
+priority = 60
+[[alert.variation]]
+name = "bomb"
+if = "event.count >= 50"
+title = "{user} DROPPED {count} GIFT SUBS!"
+duration = "12s"
+priority = 95
+
+[[alert]]
+name = "cheer"
+when = "twitch.cheer"
+title = "{user} cheered {amount} bits!"
+message = "{message}"
+duration = "4s"
+priority = 20
+
+[[alert]]
+name = "raid"
+when = "twitch.raid"
+title = "{user} raided"
+duration = "7s"
+priority = 60
+
+[[alert]]
+name = "follow"
+when = "twitch.follow"
+title = "{user} followed"
+duration = "4s"
+priority = 10
+"#,
+    )
+    .unwrap();
 }
 
 async fn start(dir: &Path, db: se_store::Db) -> Engine {

@@ -210,15 +210,24 @@ pub fn pads(app: &mut App, ui: &mut egui::Ui) {
     let t = app.t.clone();
     let (_, items) = pad_items(app);
     if items.is_empty() {
-        if widgets::empty_state(
-            ui,
-            &t,
-            icon::BOLT,
-            "No quick effects yet",
-            "One tap that makes something happen on stream: a shake, a flash, lights, a sound.",
-            Some("Make a quick effect"),
-        ) {
-            app.open_view(ViewId::QuickEffects);
+        let deck_page = app.m.q("controllers.page").is_some_and(|p| p.get_path("keys").is_some());
+        let (title, body, action, view) = if deck_page {
+            (
+                "No buttons assigned",
+                "This Stream Deck page is blank. Assign a scene, quick effect or action to a key in Buttons & pedals.",
+                "Assign buttons",
+                ViewId::Controllers,
+            )
+        } else {
+            (
+                "No quick effects yet",
+                "Create an effect when you're ready. Nothing is added or triggered automatically.",
+                "Make a quick effect",
+                ViewId::QuickEffects,
+            )
+        };
+        if widgets::empty_state(ui, &t, icon::BOLT, title, body, Some(action)) {
+            app.open_view(view);
         }
         return;
     }

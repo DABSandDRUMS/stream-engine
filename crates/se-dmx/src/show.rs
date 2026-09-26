@@ -187,42 +187,18 @@ impl Show {
 mod tests {
     use super::*;
 
-    /// The starter project's lights files load cleanly with the real parser.
     #[test]
-    fn project_example_lights_load_without_errors() {
+    fn starter_preserves_setup_without_programming_lights() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../project-example");
         let project = se_store::Project::open(&root).unwrap();
         let loaded = project.load();
         let cfg = se_core::Config::build(&loaded.files);
         let show = Show::load(&cfg, &Show::empty());
-        assert!(show.has_rig);
         assert!(show.errors.is_empty(), "{:#?}", show.errors);
-        for name in ["chase_fast", "blackout", "flash_accent", "strobe", "safe", "warm_duo", "chase", "main"] {
-            assert!(show.lists.contains_key(name), "cue list `{name}` (used by presets/scenes/docs)");
-        }
-        let par = show.rig.head("par1").expect("placeholder RGB par");
-        assert_eq!(show.rig.fixtures[show.rig.heads[par].fixture].address, 1);
-        assert!(!show.palette_users("warm").is_empty());
-        // the example looks and cue lists ship their knobs
-        let knobs = |k: &[crate::knobs::Bound]| k.iter().map(|b| b.knob.label.clone()).collect::<Vec<_>>();
-        assert_eq!(knobs(&show.palettes["warm"].knobs), ["Color", "Brightness"]);
-        assert_eq!(knobs(&show.lists["chase_fast"].knobs), ["Speed", "Brightness"]);
-        assert_eq!(knobs(&show.lists["main"].knobs), ["Front light", "Pulse strength"]);
-        let decl = show.declarations();
-        assert!(decl.iter().any(|(a, m)| a == "lights.par1.intensity" && m.merge == se_proto::Merge::Htp));
-        assert!(decl.iter().any(|(a, _)| a == "lights.group.front.color"));
-        assert!(decl.iter().any(|(a, _)| a == "lights.cuelist.main.master"));
-        assert!(decl.iter().any(|(a, _)| a == "lights.effect.chase.size"));
-        // the whole example renders (all effects running)
-        let (plan, errs) = crate::engine::Plan::build(show.rig.clone(), show.effects.clone());
-        assert!(errs.is_empty(), "{errs:?}");
-        let mut e = crate::engine::Engine::new(std::sync::Arc::new(plan));
-        let names: Vec<String> = show.effects.iter().map(|x| format!("lights.effect.{}.active", x.name)).collect();
-        let vals: Vec<(&str, se_proto::Value)> =
-            names.iter().map(|n| (n.as_str(), se_proto::Value::Bool(true))).chain([("lights.par1.intensity", se_proto::Value::Float(1.0))]).collect();
-        let snap = crate::engine::tests::snapshot(&vals, &[("beat.phase", 0.25)]);
-        for k in 1..50u64 {
-            e.render(&snap, k * 22_727_273);
-        }
+        assert!(show.rig.fixtures.is_empty(), "setup must not patch imaginary fixtures");
+        assert!(show.palettes.is_empty() && show.lists.is_empty() && show.effects.is_empty(), "lighting programming is opt-in");
+        let declarations = show.declarations();
+        assert!(declarations.iter().any(|(a, _)| a == "lights.blackout"), "blank projects retain safety controls");
+        assert!(declarations.iter().any(|(a, _)| a == "lights.master"), "blank projects retain master control");
     }
 }

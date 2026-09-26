@@ -1,7 +1,0 @@
-# Sampler sounds for `audio.play {sound}` (presets: `sound = "airhorn"`). Files in
-# assets/sounds/ are also available by file name without an entry here.
-[sounds.airhorn]
-file = "assets/sounds/airhorn.wav"
-gain = -4.0
-bus = "sfx"
-voices = 2

@@ -388,8 +388,10 @@ threshold = -30
 /// counts the new trigger with the previous payload.
 #[test]
 fn dsp_patch_payload_is_delivered_before_the_trigger_edge() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../project-example");
-    let r = Rig::with_root("[buses.band]\nfx = [{ name = \"ringmod\", patch = \"ringmod\" }]", &root);
+    let project = tempfile::tempdir().unwrap();
+    let share = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    se_patch::templates::create(&share, project.path(), "ringmod", "dsp", "ringmod").unwrap();
+    let r = Rig::with_root("[buses.band]\nfx = [{ name = \"ringmod\", patch = \"ringmod\" }]", project.path());
     let pos = |addr: &str| r.built.params.iter().position(|p| p.addr == addr).unwrap_or_else(|| panic!("{addr} not bound"));
     let active = pos("patch.ringmod.active");
     for f in se_core::triggers::PAYLOAD_FIELDS.iter().map(|f| format!("patch.ringmod.payload.{f}")).chain(["patch.ringmod.payload.user_color".to_string()]) {

@@ -1,5 +1,5 @@
 //! The component library. Every screen is built from these, so the whole app shares one look:
-//! calm surfaces, clear hierarchy, big obvious targets, plain words (§15.1).
+//! neutral surfaces, clear hierarchy, consistent targets, plain words (§15.1).
 
 use crate::motion;
 use crate::theme::{Theme, font, font_bold, font_medium, font_mono, font_semibold, mix, radius, spacing, type_scale};
@@ -121,9 +121,6 @@ pub fn led_color(t: &Theme, s: LedState) -> Color32 {
 pub fn led(ui: &mut Ui, t: &Theme, s: LedState) -> Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
     let c = led_color(t, s);
-    if s != LedState::Idle {
-        ui.painter().circle_filled(rect.center(), 6.0, c.gamma_multiply(0.22));
-    }
     ui.painter().circle_filled(rect.center(), 3.5, c);
     resp
 }
@@ -132,9 +129,9 @@ pub fn led(ui: &mut Ui, t: &Theme, s: LedState) -> Response {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
-    /// The one main action on a screen (accent fill).
+    /// The one main action on a screen (contrasting neutral fill).
     Primary,
-    /// Normal action (surface fill).
+    /// Normal action (subtle outline).
     Secondary,
     /// Low-emphasis (text only until hovered).
     Ghost,
@@ -156,35 +153,34 @@ impl Size {
         match self {
             Size::Small => 28.0,
             Size::Medium => 36.0,
-            Size::Large => 48.0,
+            Size::Large => 40.0,
         }
     }
     fn text(self) -> f32 {
         match self {
-            Size::Small => type_scale::SMALL + 0.5,
+            Size::Small => type_scale::SMALL,
             Size::Medium => type_scale::BODY,
-            Size::Large => type_scale::LARGE + 1.0,
+            Size::Large => type_scale::BODY,
         }
     }
 }
 
-/// (fill, text, border) of a button kind, lifted by `hover` and pushed down by `press` (0–1).
+/// Semantic (fill, foreground, border), with flat hover and pressed feedback.
 fn kind_colors(t: &Theme, kind: Kind, hover: f32, press: f32, enabled: bool) -> (Color32, Color32, Color32) {
     if !enabled {
         let solid = kind != Kind::Ghost;
         return (if solid { t.surface_hi } else { Color32::TRANSPARENT }, t.text_faint, if solid { t.border } else { Color32::TRANSPARENT });
     }
-    let (fill, text, stroke) = match kind {
-        Kind::Primary => (mix(t.accent, Color32::WHITE, 0.10 * hover), t.on_accent, Color32::TRANSPARENT),
-        Kind::Secondary => (mix(t.surface_hi, t.fg, 0.07 * hover), t.fg, mix(t.border, t.fg, 0.16 * hover)),
-        Kind::Ghost => (t.surface_hi, t.fg, Color32::TRANSPARENT),
-        Kind::Danger => (mix(t.surface, t.bright_red, 0.18 + 0.10 * hover), mix(t.fg, t.bright_red, 0.55), mix(t.border, t.bright_red, 0.5 + 0.2 * hover)),
-        Kind::Live => (mix(t.tally_program(), Color32::WHITE, 0.10 * hover), Color32::WHITE, Color32::TRANSPARENT),
-    };
-    let fill = mix(fill, Color32::BLACK, 0.14 * press);
-    // a ghost button is only a surface while it is hovered or held
-    let fill = if kind == Kind::Ghost { fill.gamma_multiply(hover.max(press)) } else { fill };
-    (fill, text, stroke)
+    match kind {
+        Kind::Primary => (mix(t.fg, t.bg, 0.1 * hover + 0.08 * press), t.bg, Color32::TRANSPARENT),
+        Kind::Secondary => (mix(t.surface, t.fg, 0.04 * hover + 0.035 * press), t.fg, mix(t.border, t.fg, 0.12 * hover + 0.08 * press)),
+        Kind::Ghost => (mix(t.surface_hi, t.fg, 0.035 * press).gamma_multiply(hover.max(press)), t.fg, Color32::TRANSPARENT),
+        Kind::Danger => (mix(t.surface, t.red, 0.055 + 0.04 * hover + 0.035 * press), mix(t.red, t.fg, 0.4), mix(t.border, t.red, 0.3)),
+        Kind::Live => {
+            let fill = mix(t.tally_program(), t.bg, 0.06 * hover + 0.06 * press);
+            (fill, contrast(fill), Color32::TRANSPARENT)
+        }
+    }
 }
 
 /// Hover and press amounts (0–1, eased) of an interactive widget.
@@ -202,9 +198,9 @@ pub(crate) fn focus_ring(ui: &Ui, t: &Theme, resp: &Response, rect: Rect, corner
     let k = motion::t(ui.ctx(), resp.id.with("focus"), resp.has_focus(), motion::BASE);
     if k > 0.0 {
         ui.painter().rect_stroke(
-            rect.expand(3.0),
-            CornerRadius::same(corner.saturating_add(3)),
-            Stroke::new(2.0, t.accent.gamma_multiply(k)),
+            rect.expand(2.0),
+            CornerRadius::same(corner.saturating_add(2)),
+            Stroke::new(1.5, t.accent.gamma_multiply(k)),
             StrokeKind::Middle,
         );
     }
@@ -281,17 +277,15 @@ pub fn button_ex(ui: &mut Ui, t: &Theme, icon: Option<&str>, label: &str, kind: 
 fn button_impl(ui: &mut Ui, t: &Theme, icon: Option<&str>, label: &str, a11y: &str, kind: Kind, size: Size, min_width: f32, enabled: bool) -> Response {
     let enabled = enabled && ui.is_enabled();
     let parts = icon_text(ui, icon, label, font_medium(size.text()), t.fg);
-    let pad = if size == Size::Small { 10.0 } else { 16.0 };
+    let pad = if size == Size::Small { 10.0 } else { 14.0 };
     let w = (parts.2 + pad * 2.0).max(min_width).max(size.height());
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, size.height()), sense(enabled));
     if ui.is_rect_visible(rect) {
         let (h, p) = hover_press(ui, &resp, enabled);
         let (fill, fg, stroke) = kind_colors(t, kind, h, p, enabled);
-        // pressed buttons sink by a pixel
-        let r = rect.translate(Vec2::new(0.0, p));
         let painter = ui.painter();
-        painter.rect(r, CornerRadius::same(radius::CONTROL), fill, Stroke::new(1.0, stroke), StrokeKind::Inside);
-        paint_icon_text(painter, r.center(), parts, fg);
+        painter.rect(rect, CornerRadius::same(radius::CONTROL), fill, Stroke::new(1.0, stroke), StrokeKind::Inside);
+        paint_icon_text(painter, rect.center(), parts, fg);
         focus_ring(ui, t, &resp, rect, radius::CONTROL);
     }
     resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, a11y));
@@ -319,8 +313,8 @@ pub fn icon_button_ex(ui: &mut Ui, t: &Theme, icon: &str, tooltip: &str, kind: K
     r.on_hover_text(tooltip)
 }
 
-/// Choice chip (pick one or several from a set: event kinds, filters, lights). Selected =
-/// accent tint + accent border; unselected = the secondary look.
+/// Choice chip (pick one or several from a set: event kinds, filters, lights). Selection has
+/// a quiet theme tint and a defined edge, without becoming a primary action.
 pub fn chip(ui: &mut Ui, t: &Theme, icon: &str, label: &str, selected: bool) -> Response {
     let enabled = ui.is_enabled();
     let parts = icon_text(ui, Some(icon), label, font_medium(type_scale::SMALL + 0.5), t.fg);
@@ -328,13 +322,12 @@ pub fn chip(ui: &mut Ui, t: &Theme, icon: &str, label: &str, selected: bool) -> 
     if ui.is_rect_visible(rect) {
         let (h, p) = hover_press(ui, &resp, enabled);
         let s = motion::t(ui.ctx(), resp.id.with("selected"), selected, motion::BASE);
-        let fill = mix(mix(t.surface_hi, t.fg, 0.06 * h), mix(t.surface, t.accent, 0.18 + 0.08 * h), s);
-        let stroke = mix(mix(t.border, t.fg, 0.14 * h), t.accent, s);
-        let r = rect.translate(Vec2::new(0.0, p));
+        let fill = mix(mix(t.surface, t.fg, 0.035 * h + 0.03 * p), t.selection, s);
+        let stroke = mix(mix(t.border, t.fg, 0.12 * h), mix(t.border, t.accent, 0.45), s);
         let painter = ui.painter();
-        painter.rect(r, CornerRadius::same(radius::PILL), mix(fill, Color32::BLACK, 0.12 * p), Stroke::new(1.0, stroke), StrokeKind::Inside);
-        paint_icon_text(painter, r.center(), parts, mix(mix(t.text_dim, t.fg, 0.4 + 0.3 * h), t.fg, s));
-        focus_ring(ui, t, &resp, rect, radius::PILL);
+        painter.rect(rect, CornerRadius::same(radius::CONTROL), fill, Stroke::new(1.0, stroke), StrokeKind::Inside);
+        paint_icon_text(painter, rect.center(), parts, mix(mix(t.text_dim, t.fg, 0.4 + 0.3 * h), t.fg, s));
+        focus_ring(ui, t, &resp, rect, radius::CONTROL);
     }
     cursor(resp, enabled)
 }
@@ -388,18 +381,17 @@ pub fn hold_button(ui: &mut Ui, t: &Theme, label: &str, color: Color32, hold_sec
     };
     if ui.is_rect_visible(rect) {
         let (h, p) = hover_press(ui, &resp, enabled);
-        let r = rect.translate(Vec2::new(0.0, p));
+        let r = rect;
         let cr = CornerRadius::same(radius::CONTROL);
         let painter = ui.painter();
         let base = if enabled { color } else { t.text_faint };
-        painter.rect(r, cr, mix(t.surface, base, 0.14 + 0.08 * h), Stroke::new(1.0, mix(t.border, base, 0.6 + 0.2 * h)), StrokeKind::Inside);
+        painter.rect(r, cr, mix(t.surface, base, 0.06 + 0.04 * h + 0.03 * p), Stroke::new(1.0, mix(t.border, base, 0.35)), StrokeKind::Inside);
         if prog > 0.0 {
-            painter.rect_filled(Rect::from_min_size(r.min, Vec2::new(r.width() * prog, r.height())), cr, base);
+            painter.rect_filled(Rect::from_min_size(r.min, Vec2::new(r.width() * prog, r.height())), cr, mix(t.surface, base, 0.16));
         }
         // the ring: a faint track that fills clockwise from the top
         let c = Pos2::new(r.left() + 16.0 + RING, r.center().y);
-        let on_fill = prog * r.width() > 16.0 + RING;
-        let ring_c = if on_fill { Color32::WHITE } else { base };
+        let ring_c = base;
         painter.circle_stroke(c, RING, Stroke::new(2.0, ring_c.gamma_multiply(0.35)));
         if prog > 0.0 {
             let n = (prog * 32.0).ceil().max(2.0) as usize;
@@ -411,13 +403,7 @@ pub fn hold_button(ui: &mut Ui, t: &Theme, label: &str, color: Color32, hold_sec
                 .collect();
             painter.add(egui::Shape::line(pts, Stroke::new(2.0, ring_c)));
         }
-        let fg = if !enabled {
-            t.text_faint
-        } else if prog > 0.5 {
-            Color32::WHITE
-        } else {
-            mix(t.fg, color, 0.5)
-        };
+        let fg = if enabled { t.fg } else { t.text_faint };
         let gp = Pos2::new(c.x + RING + spacing::S, r.center().y - galley.size().y / 2.0);
         painter.galley_with_override_text_color(gp, galley, fg);
         focus_ring(ui, t, &resp, rect, radius::CONTROL);
@@ -429,8 +415,8 @@ pub fn hold_button(ui: &mut Ui, t: &Theme, label: &str, color: Color32, hold_sec
 
 // ---- toggles, tabs, inputs -----------------------------------------------------------------------
 
-/// On/off switch: the knob slides, the track fades to the accent, the knob stretches while
-/// pressed. Returns the response (`changed()` when flipped).
+/// On/off switch: a fixed round thumb slides between neutral tracks. Press feedback stays flat.
+/// Returns the response (`changed()` when flipped).
 pub fn toggle(ui: &mut Ui, t: &Theme, on: &mut bool) -> Response {
     let enabled = ui.is_enabled();
     let (rect, mut resp) = ui.allocate_exact_size(Vec2::new(40.0, 22.0), sense(enabled));
@@ -442,12 +428,11 @@ pub fn toggle(ui: &mut Ui, t: &Theme, on: &mut bool) -> Response {
         let k = motion::t(ui.ctx(), resp.id.with("on"), *on, motion::SLOW);
         let (h, p) = hover_press(ui, &resp, enabled);
         let painter = ui.painter();
-        let track = mix(mix(t.inset, t.fg, 0.06 * h), mix(t.accent, Color32::WHITE, 0.08 * h), k);
-        painter.rect(rect, CornerRadius::same(radius::PILL), track, Stroke::new(1.0, mix(mix(t.border, t.fg, 0.15 * h), t.accent, k)), StrokeKind::Inside);
-        let stretch = 5.0 * p;
-        let x = egui::lerp(rect.left() + 11.0..=rect.right() - 11.0, k) + (0.5 - k) * stretch;
-        let knob = Rect::from_center_size(Pos2::new(x, rect.center().y), Vec2::new(16.0 + stretch, 16.0));
-        painter.rect_filled(knob, CornerRadius::same(radius::PILL), mix(t.fg, t.on_accent, k));
+        let track = mix(mix(t.border, t.fg, 0.04 * h + 0.03 * p), mix(t.fg, t.bg, 0.08 * h + 0.06 * p), k);
+        painter.rect_filled(rect, CornerRadius::same(radius::PILL), track);
+        let x = egui::lerp(rect.left() + 11.0..=rect.right() - 11.0, k);
+        let knob = Rect::from_center_size(Pos2::new(x, rect.center().y), Vec2::splat(16.0));
+        painter.rect_filled(knob, CornerRadius::same(radius::PILL), mix(if t.light { Color32::WHITE } else { t.fg }, t.bg, k));
         focus_ring(ui, t, &resp, rect, radius::PILL);
     }
     resp.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, enabled, *on, ""));
@@ -478,7 +463,7 @@ pub fn tabs(ui: &mut Ui, t: &Theme, selected: &mut usize, labels: &[&str]) -> bo
         let mut bar = None;
         for (i, label) in labels.iter().enumerate() {
             let on = *selected == i;
-            let fid = if on { font_semibold(type_scale::BODY + 0.5) } else { font_medium(type_scale::BODY + 0.5) };
+            let fid = font_medium(type_scale::BODY);
             let galley = ui.painter().layout_no_wrap(label.to_string(), fid, t.fg);
             let (rect, resp) = ui.allocate_exact_size(Vec2::new(galley.size().x, 34.0), Sense::click());
             let h = motion::t(ui.ctx(), resp.id.with("hover"), resp.hovered(), motion::FAST);
@@ -498,7 +483,7 @@ pub fn tabs(ui: &mut Ui, t: &Theme, selected: &mut usize, labels: &[&str]) -> bo
             let id = ui.id().with("underline");
             let l = x0 + motion::value(ui.ctx(), id.with(0), r.left() - x0, motion::SLOW);
             let rr = x0 + motion::value(ui.ctx(), id.with(1), r.right() - x0, motion::SLOW);
-            ui.painter().rect_filled(Rect::from_min_max(Pos2::new(l, r.bottom() - 3.0), Pos2::new(rr, r.bottom())), CornerRadius::same(2), t.accent);
+            ui.painter().rect_filled(Rect::from_min_max(Pos2::new(l, r.bottom() - 2.0), Pos2::new(rr, r.bottom())), CornerRadius::same(1), t.accent);
         }
     });
     let r = ui.min_rect();
@@ -507,7 +492,7 @@ pub fn tabs(ui: &mut Ui, t: &Theme, selected: &mut usize, labels: &[&str]) -> bo
     changed
 }
 
-/// Segmented control (small choice between 2–4 options); the raised pill glides to the pick.
+/// Segmented control (small choice between 2–4 options); the selected surface glides to the pick.
 /// Returns true when changed.
 pub fn segmented(ui: &mut Ui, t: &Theme, selected: &mut usize, labels: &[&str]) -> bool {
     let mut changed = false;
@@ -519,12 +504,12 @@ pub fn segmented(ui: &mut Ui, t: &Theme, selected: &mut usize, labels: &[&str]) 
     let base = ui.next_auto_id();
     ui.skip_ahead_auto_ids(1);
     let (rect, _) = ui.allocate_exact_size(Vec2::new(total, 32.0), Sense::hover());
-    ui.painter().rect_filled(rect, CornerRadius::same(radius::CONTROL), t.inset);
+    ui.painter().rect_filled(rect, CornerRadius::same(radius::CONTROL), t.surface_hi);
     if let Some(w) = widths.get(*selected) {
         let x = motion::value(ui.ctx(), base.with("pill-x"), widths[..*selected].iter().sum(), motion::SLOW);
         let pw = motion::value(ui.ctx(), base.with("pill-w"), *w, motion::SLOW);
         let pill = Rect::from_min_size(Pos2::new(rect.left() + 3.0 + x, rect.top() + 3.0), Vec2::new(pw, rect.height() - 6.0));
-        ui.painter().rect(pill, CornerRadius::same(radius::CONTROL - 2), t.surface_hi, Stroke::new(1.0, t.border), StrokeKind::Inside);
+        ui.painter().rect_filled(pill, CornerRadius::same(radius::CONTROL - 2), t.surface);
     }
     let mut x = rect.left() + 3.0;
     for (i, (label, w)) in labels.iter().zip(&widths).enumerate() {
@@ -548,23 +533,23 @@ pub fn segmented(ui: &mut Ui, t: &Theme, selected: &mut usize, labels: &[&str]) 
 }
 
 /// The app's top-level switch (Overview / Edit / Clipping): icon + label per tab in one
-/// inset group, the selected one raised (the raised pill glides). `badges` may put a small
-/// count on a tab. Returns the clicked tab (only when it changed).
+/// muted group with a flat selected surface. `badges` may put a small count on a tab.
+/// Returns the clicked tab (only when it changed).
 pub fn master_tabs(ui: &mut Ui, t: &Theme, selected: usize, tabs: &[(&str, &str, Option<(String, Color32)>)]) -> Option<usize> {
-    let fid = font_semibold(type_scale::BODY);
+    let fid = font_medium(type_scale::BODY);
     let parts: Vec<_> = tabs.iter().map(|(ic, label, _)| icon_text(ui, Some(ic), label, fid.clone(), t.fg)).collect();
     let badge_w = |b: &Option<(String, Color32)>| b.as_ref().map_or(0.0, |(s, _)| 10.0 + 8.0 * s.chars().count() as f32 + 12.0);
-    let widths: Vec<f32> = parts.iter().zip(tabs).map(|(p, (_, _, b))| p.2 + 36.0 + badge_w(b)).collect();
+    let widths: Vec<f32> = parts.iter().zip(tabs).map(|(p, (_, _, b))| p.2 + 28.0 + badge_w(b)).collect();
     let total: f32 = widths.iter().sum::<f32>() + 8.0;
     let base = ui.next_auto_id();
     ui.skip_ahead_auto_ids(1);
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(total, 40.0), Sense::hover());
-    ui.painter().rect_filled(rect, CornerRadius::same(radius::CONTROL + 2), t.inset);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(total, 36.0), Sense::hover());
+    ui.painter().rect_filled(rect, CornerRadius::same(radius::CONTROL), t.surface_hi);
     if let Some(w) = widths.get(selected) {
         let x = motion::value(ui.ctx(), base.with("pill-x"), widths[..selected].iter().sum(), motion::SLOW);
         let pw = motion::value(ui.ctx(), base.with("pill-w"), *w, motion::SLOW);
         let pill = Rect::from_min_size(Pos2::new(rect.left() + 4.0 + x, rect.top() + 4.0), Vec2::new(pw, rect.height() - 8.0));
-        ui.painter().rect(pill, CornerRadius::same(radius::CONTROL), t.surface_hi, Stroke::new(1.0, t.border), StrokeKind::Inside);
+        ui.painter().rect_filled(pill, CornerRadius::same(radius::CONTROL - 2), t.surface);
     }
     let mut x = rect.left() + 4.0;
     let mut clicked = None;
@@ -583,8 +568,8 @@ pub fn master_tabs(ui: &mut Ui, t: &Theme, selected: usize, tabs: &[(&str, &str,
         if let Some((txt, bc)) = badge {
             let bw = badge_w(badge) - 12.0;
             let br = Rect::from_center_size(Pos2::new(r.left() + content_w + bw / 2.0 - 6.0, r.center().y), Vec2::new(bw, 20.0));
-            ui.painter().rect_filled(br, CornerRadius::same(10), *bc);
-            ui.painter().text(br.center(), Align2::CENTER_CENTER, txt, font_bold(type_scale::SMALL), t.on_accent);
+            ui.painter().rect_filled(br, CornerRadius::same(4), mix(t.surface_hi, *bc, 0.08));
+            ui.painter().text(br.center(), Align2::CENTER_CENTER, txt, font_medium(type_scale::SMALL), mix(*bc, t.fg, 0.55));
         }
         focus_ring(ui, t, &resp, r, radius::CONTROL);
         if cursor(resp, true).clicked() && !on {
@@ -620,7 +605,7 @@ pub fn labeled_slider(ui: &mut Ui, t: &Theme, label: &str, value: &mut f32, rang
 pub fn page_header(ui: &mut Ui, t: &Theme, title: &str, subtitle: &str, actions: impl FnOnce(&mut Ui)) {
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
-            ui.label(RichText::new(title).font(font_bold(type_scale::TITLE)).color(t.fg));
+            ui.label(RichText::new(title).font(font_semibold(type_scale::TITLE)).color(t.fg));
             if !subtitle.is_empty() {
                 ui.add_space(2.0);
                 ui.label(RichText::new(subtitle).size(type_scale::BODY).color(t.text_dim));
@@ -668,7 +653,7 @@ pub fn card<R>(ui: &mut Ui, t: &Theme, icon: &str, title: &str, state: LedState,
         .inner_margin(egui::Margin::same(spacing::L as i8))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(icon).size(type_scale::LARGE).color(t.accent));
+                ui.label(RichText::new(icon).size(type_scale::LARGE).color(t.text_dim));
                 ui.label(RichText::new(title).font(font_semibold(type_scale::LARGE)).color(t.fg));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if state != LedState::Idle {
@@ -682,14 +667,14 @@ pub fn card<R>(ui: &mut Ui, t: &Theme, icon: &str, title: &str, state: LedState,
         .inner
 }
 
-/// Section label (small caps-style heading inside a page or card).
+/// Compact section heading inside a page or card.
 pub fn section(ui: &mut Ui, t: &Theme, icon: &str, title: &str) {
     ui.add_space(spacing::XS);
     ui.horizontal(|ui| {
         if !icon.is_empty() {
             ui.label(RichText::new(icon).size(type_scale::SMALL + 1.0).color(t.text_dim));
         }
-        ui.label(RichText::new(title).font(font_semibold(type_scale::SMALL + 0.5)).color(t.text_dim));
+        ui.label(RichText::new(title).font(font_medium(type_scale::SMALL)).color(t.text_dim));
     });
     ui.add_space(spacing::XS);
 }
@@ -705,6 +690,7 @@ pub fn details<R>(ui: &mut Ui, t: &Theme, id_salt: impl std::hash::Hash + std::f
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(g.size().x + 4.0, 24.0), Sense::click());
     let c = if resp.hovered() { t.fg } else { t.text_dim };
     ui.painter().galley_with_override_text_color(Pos2::new(rect.left(), rect.center().y - g.size().y / 2.0), g, c);
+    focus_ring(ui, t, &resp, rect, radius::CONTROL);
     if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
         open = !open;
         ui.data_mut(|d| d.insert_temp(id, open));
@@ -726,20 +712,22 @@ pub fn hint(ui: &mut Ui, t: &Theme, text: &str) -> Response {
     ui.label(RichText::new(text).size(type_scale::SMALL + 0.5).color(t.text_dim))
 }
 
-/// Friendly "nothing here yet" block: icon, one line, one sentence, optional action.
+/// Quiet setup empty state: an outlined icon tile, clear heading, supporting text, one action.
 pub fn empty_state(ui: &mut Ui, t: &Theme, icon: &str, title: &str, body: &str, action: Option<&str>) -> bool {
     let mut clicked = false;
     ui.vertical_centered(|ui| {
         ui.add_space(spacing::XL);
-        ui.label(RichText::new(icon).size(34.0).color(t.text_faint));
-        ui.add_space(spacing::S);
+        let (tile, _) = ui.allocate_exact_size(Vec2::splat(44.0), Sense::hover());
+        ui.painter().rect(tile, CornerRadius::same(radius::CARD), t.surface, Stroke::new(1.0, t.border), StrokeKind::Inside);
+        ui.painter().text(tile.center(), Align2::CENTER_CENTER, icon, font(18.0), t.text_dim);
+        ui.add_space(spacing::L);
         ui.label(RichText::new(title).font(font_semibold(type_scale::LARGE)).color(t.fg));
         if !body.is_empty() {
             ui.add_space(2.0);
-            ui.label(RichText::new(body).size(type_scale::BODY).color(t.text_dim));
+            ui.add(egui::Label::new(RichText::new(body).size(type_scale::BODY).color(t.text_dim)).wrap());
         }
         if let Some(a) = action {
-            ui.add_space(spacing::M);
+            ui.add_space(spacing::L);
             clicked = button(ui, t, a, Kind::Primary).clicked();
         }
         ui.add_space(spacing::XL);
@@ -754,30 +742,30 @@ pub fn badge(ui: &mut Ui, t: &Theme, text: &str, color: Color32) -> Response {
     let size = Vec2::new(galley.size().x + 28.0, 24.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
     let p = ui.painter();
-    p.rect_filled(rect, CornerRadius::same(radius::PILL), mix(t.surface, color, 0.16));
-    p.circle_filled(Pos2::new(rect.left() + 11.0, rect.center().y), 3.5, color);
-    p.galley_with_override_text_color(Pos2::new(rect.left() + 20.0, rect.center().y - galley.size().y / 2.0), galley, mix(color, t.fg, 0.35));
+    p.rect(rect, CornerRadius::same(radius::CONTROL), mix(t.surface, color, 0.06), Stroke::new(1.0, mix(t.border, color, 0.12)), StrokeKind::Inside);
+    p.circle_filled(Pos2::new(rect.left() + 11.0, rect.center().y), 3.0, color);
+    p.galley_with_override_text_color(Pos2::new(rect.left() + 20.0, rect.center().y - galley.size().y / 2.0), galley, mix(color, t.fg, 0.6));
     resp
 }
 
 /// Status pill: icon + text colored by health.
 pub fn pill(ui: &mut Ui, t: &Theme, icon: &str, text: &str, s: LedState) -> Response {
-    let c = if s == LedState::Idle { t.text_dim } else { led_color(t, s) };
+    let c = if s == LedState::Idle { t.text_dim } else { mix(led_color(t, s), t.fg, 0.4) };
     let parts = icon_text(ui, Some(icon), text, font_medium(type_scale::SMALL + 0.5), c);
     let size = Vec2::new(parts.2 + 24.0, 28.0);
     let (rect, resp) = ui.allocate_exact_size(size, sense(ui.is_enabled()));
     let (h, press) = hover_press(ui, &resp, ui.is_enabled());
-    let fill = mix(mix(t.surface, c, if s == LedState::Idle { 0.0 } else { 0.1 }), t.surface_hi, h * 0.85);
-    ui.painter().rect_filled(rect.translate(Vec2::new(0.0, press)), CornerRadius::same(radius::PILL), fill);
-    paint_icon_text(ui.painter(), rect.center() + Vec2::new(0.0, press), parts, c);
-    focus_ring(ui, t, &resp, rect, radius::PILL);
+    let fill = mix(t.surface, t.fg, 0.035 * h + 0.03 * press);
+    ui.painter().rect(rect, CornerRadius::same(radius::CONTROL), fill, Stroke::new(1.0, t.border), StrokeKind::Inside);
+    paint_icon_text(ui.painter(), rect.center(), parts, c);
+    focus_ring(ui, t, &resp, rect, radius::CONTROL);
     cursor(resp, ui.is_enabled())
 }
 
 /// A single-line text field with comfortable padding and the standard control height. Use it
 /// for every one-line input so fields line up with the buttons next to them.
 pub fn field<'t>(text: &'t mut dyn egui::TextBuffer) -> egui::TextEdit<'t> {
-    egui::TextEdit::singleline(text).margin(egui::Margin::symmetric(10, 8)).min_size(Vec2::new(0.0, 34.0)).vertical_align(Align::Center)
+    egui::TextEdit::singleline(text).margin(egui::Margin::symmetric(12, 8)).min_size(Vec2::new(0.0, 36.0)).vertical_align(Align::Center)
 }
 
 /// Tone of a [`callout`].
@@ -797,15 +785,15 @@ pub enum Tone {
 /// right. Returns true when the action was clicked.
 pub fn callout(ui: &mut Ui, t: &Theme, tone: Tone, icon: &str, title: &str, body: &str, action: Option<&str>) -> bool {
     let c = match tone {
-        Tone::Info => t.accent,
+        Tone::Info => t.text_dim,
         Tone::Warn => t.yellow,
         Tone::Danger => t.bright_red,
         Tone::Ok => t.green,
     };
     let mut clicked = false;
     egui::Frame::new()
-        .fill(mix(t.surface, c, 0.12))
-        .stroke(Stroke::new(1.0, mix(t.border, c, 0.45)))
+        .fill(mix(t.surface, c, if tone == Tone::Info { 0.0 } else { 0.035 }))
+        .stroke(Stroke::new(1.0, mix(t.border, c, if tone == Tone::Info { 0.0 } else { 0.18 })))
         .corner_radius(CornerRadius::same(radius::CARD))
         .inner_margin(egui::Margin::symmetric(16, 12))
         .show(ui, |ui| {
@@ -826,7 +814,7 @@ pub fn callout(ui: &mut Ui, t: &Theme, tone: Tone, icon: &str, title: &str, body
                     // a fixed-height slot: in a top-aligned row a right-to-left layout would
                     // otherwise claim all the remaining height
                     ui.allocate_ui_with_layout(Vec2::new(ui.available_width(), 40.0), Layout::right_to_left(Align::Center), |ui| {
-                        clicked = button(ui, t, a, if tone == Tone::Info { Kind::Primary } else { Kind::Secondary }).clicked();
+                        clicked = button(ui, t, a, Kind::Secondary).clicked();
                     });
                 }
             });
@@ -837,37 +825,31 @@ pub fn callout(ui: &mut Ui, t: &Theme, tone: Tone, icon: &str, title: &str, body
 /// Sidebar navigation item. `badge` shows a count/dot on the right.
 pub fn nav_item(ui: &mut Ui, t: &Theme, icon: &str, label: &str, selected: bool, badge: Option<(String, Color32)>) -> Response {
     let w = ui.available_width();
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 42.0), sense(ui.is_enabled()));
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 36.0), sense(ui.is_enabled()));
     let (hover, press) = hover_press(ui, &resp, ui.is_enabled());
     let sel = motion::t(ui.ctx(), resp.id.with("selected"), selected, motion::SLOW);
     let p = ui.painter();
     if sel > 0.0 || hover > 0.0 {
-        p.rect_filled(rect, CornerRadius::same(radius::CONTROL), mix(t.chrome, t.accent, 0.16 * sel + 0.06 * hover));
+        p.rect_filled(rect, CornerRadius::same(radius::CONTROL), mix(t.chrome, t.fg, 0.055 * sel + 0.035 * hover + 0.025 * press));
     }
     if sel > 0.0 {
         p.rect_filled(
-            Rect::from_min_size(rect.left_top() + Vec2::new(0.0, 10.0 + (1.0 - sel) * 10.0), Vec2::new(3.0, (rect.height() - 20.0) * sel)),
+            Rect::from_min_size(rect.left_top() + Vec2::new(0.0, 9.0 + (1.0 - sel) * 9.0), Vec2::new(2.0, (rect.height() - 18.0) * sel)),
             CornerRadius::same(2),
             t.accent.gamma_multiply(sel),
         );
     }
-    let c = mix(t.text_dim, t.fg, sel);
-    let y = rect.center().y + press;
-    p.text(Pos2::new(rect.left() + 26.0, y), Align2::CENTER_CENTER, icon, font(type_scale::LARGE), mix(c, t.accent, sel));
-    p.text(
-        Pos2::new(rect.left() + 48.0, y),
-        Align2::LEFT_CENTER,
-        label,
-        if selected { font_semibold(type_scale::BODY + 0.5) } else { font_medium(type_scale::BODY + 0.5) },
-        c,
-    );
+    let c = mix(t.text_dim, t.fg, (sel + 0.5 * hover).min(1.0));
+    let y = rect.center().y;
+    p.text(Pos2::new(rect.left() + 20.0, y), Align2::CENTER_CENTER, icon, font(type_scale::BODY), c);
+    p.text(Pos2::new(rect.left() + 40.0, y), Align2::LEFT_CENTER, label, font_medium(type_scale::BODY), c);
     if let Some((txt, col)) = badge {
-        let fid = font_semibold(type_scale::SMALL);
-        let g = ui.painter().layout_no_wrap(txt, fid, Color32::WHITE);
+        let fid = font_medium(type_scale::SMALL);
+        let g = ui.painter().layout_no_wrap(txt, fid, t.text_dim);
         let bw = (g.size().x + 12.0).max(20.0);
         let br = Rect::from_center_size(Pos2::new(rect.right() - 12.0 - bw / 2.0, rect.center().y), Vec2::new(bw, 20.0));
-        ui.painter().rect_filled(br, CornerRadius::same(radius::PILL), col);
-        ui.painter().galley_with_override_text_color(br.center() - g.size() / 2.0, g, contrast(col));
+        ui.painter().rect_filled(br, CornerRadius::same(4), mix(t.surface_hi, col, 0.08));
+        ui.painter().galley_with_override_text_color(br.center() - g.size() / 2.0, g, mix(col, t.fg, 0.55));
     }
     focus_ring(ui, t, &resp, rect, radius::CONTROL);
     cursor(resp, ui.is_enabled())
@@ -882,22 +864,22 @@ pub fn list_row(ui: &mut Ui, t: &Theme, icon: &str, title: &str, subtitle: &str,
     let sel = motion::t(ui.ctx(), resp.id.with("selected"), selected, motion::SLOW);
     let p = ui.painter();
     if sel > 0.0 || hover > 0.0 {
-        p.rect_filled(rect, CornerRadius::same(radius::CONTROL), mix(t.surface, t.accent, 0.14 * sel + 0.06 * hover));
+        p.rect_filled(rect, CornerRadius::same(radius::CONTROL), mix(mix(t.surface, t.fg, 0.035 * hover + 0.03 * press), t.selection, sel));
     }
     let mut x = rect.left() + 12.0;
     if !icon.is_empty() {
-        p.text(Pos2::new(x + 8.0, rect.center().y + press), Align2::CENTER_CENTER, icon, font(type_scale::BODY + 1.0), mix(t.text_dim, t.accent, sel));
+        p.text(Pos2::new(x + 8.0, rect.center().y), Align2::CENTER_CENTER, icon, font(type_scale::BODY), mix(t.text_dim, t.fg, sel));
         x += 28.0;
     }
     let right = rect.right() - 12.0;
     if !trailing.is_empty() {
-        p.text(Pos2::new(right, rect.center().y + press), Align2::RIGHT_CENTER, trailing, font(type_scale::SMALL + 0.5), t.text_dim);
+        p.text(Pos2::new(right, rect.center().y), Align2::RIGHT_CENTER, trailing, font(type_scale::SMALL), t.text_dim);
     }
     if subtitle.is_empty() {
-        p.text(Pos2::new(x, rect.center().y + press), Align2::LEFT_CENTER, title, font_medium(type_scale::BODY), t.fg);
+        p.text(Pos2::new(x, rect.center().y), Align2::LEFT_CENTER, title, font_medium(type_scale::BODY), t.fg);
     } else {
-        p.text(Pos2::new(x, rect.center().y - 9.0 + press), Align2::LEFT_CENTER, title, font_medium(type_scale::BODY), t.fg);
-        p.text(Pos2::new(x, rect.center().y + 10.0 + press), Align2::LEFT_CENTER, subtitle, font(type_scale::SMALL), t.text_dim);
+        p.text(Pos2::new(x, rect.center().y - 9.0), Align2::LEFT_CENTER, title, font_medium(type_scale::BODY), t.fg);
+        p.text(Pos2::new(x, rect.center().y + 10.0), Align2::LEFT_CENTER, subtitle, font(type_scale::SMALL), t.text_dim);
     }
     focus_ring(ui, t, &resp, rect, radius::CONTROL);
     cursor(resp, ui.is_enabled())
@@ -938,8 +920,7 @@ pub fn pad(
     let tint = color.unwrap_or(t.accent);
     let (hover, press) = hover_press(ui, &resp, ui.is_enabled());
     let lit = motion::t(ui.ctx(), resp.id.with("active"), active, motion::SLOW);
-    let fill = mix(mix(t.surface_hi, tint, 0.32 * lit), t.fg, 0.07 * hover);
-    let rect = rect.translate(Vec2::new(0.0, press));
+    let fill = mix(mix(t.surface, tint, 0.08 * lit), t.fg, 0.035 * hover + 0.03 * press);
     let r = CornerRadius::same(radius::TILE);
     let edge = mix(
         t.border,
@@ -949,16 +930,16 @@ pub fn pad(
         },
         lit,
     );
-    p.rect(rect, r, fill, Stroke::new(1.0 + lit, edge), StrokeKind::Inside);
-    // colored top strip = the preset's own color
+    p.rect(rect, r, fill, Stroke::new(1.0, edge), StrokeKind::Inside);
+    // A small color key identifies the user's preset without saturating the whole pad.
     if let Some(c) = color {
-        let strip = Rect::from_min_size(rect.min + Vec2::new(10.0, 0.0), Vec2::new(rect.width() - 20.0, 3.0));
-        p.rect_filled(strip, CornerRadius::same(2), c);
+        let strip = Rect::from_min_size(rect.min + Vec2::new(12.0, rect.height() - 3.0), Vec2::new(rect.width() - 24.0, 2.0));
+        p.rect_filled(strip, CornerRadius::same(1), c);
     }
-    let icon_c = if active { t.fg } else { color.unwrap_or(t.text_dim) };
-    p.text(rect.center_top() + Vec2::new(0.0, size.y * 0.36), Align2::CENTER_CENTER, icon, font((size.y * 0.24).clamp(14.0, 26.0)), icon_c);
-    let lf = font_semibold((size.y * 0.15).clamp(12.0, 15.5));
-    let galley = ui.painter().layout(label.to_string(), lf, t.fg, size.x - 12.0);
+    let icon_c = if active { t.fg } else { t.text_dim };
+    p.text(rect.center_top() + Vec2::new(0.0, size.y * 0.36), Align2::CENTER_CENTER, icon, font((size.y * 0.2).clamp(14.0, 22.0)), icon_c);
+    let lf = font_medium((size.y * 0.15).clamp(12.0, 14.0));
+    let galley = ui.painter().layout(label.to_string(), lf, t.fg, size.x - 16.0);
     let gp = Pos2::new(rect.center().x - galley.size().x / 2.0, rect.bottom() - size.y * 0.2 - galley.size().y / 2.0);
     ui.painter().galley(gp, galley, t.fg);
     if let Some(h) = hint {
@@ -977,10 +958,9 @@ pub fn pad(
     cursor(resp, ui.is_enabled())
 }
 
-/// Black or white, whichever reads better on `bg`.
+/// Black or white, whichever has the greater WCAG contrast on `bg`.
 pub fn contrast(bg: Color32) -> Color32 {
-    let l = 0.2126 * bg.r() as f32 + 0.7152 * bg.g() as f32 + 0.0722 * bg.b() as f32;
-    if l > 140.0 { Color32::from_rgb(20, 20, 24) } else { Color32::from_rgb(245, 245, 240) }
+    crate::theme::contrasting_foreground(bg)
 }
 
 /// Draw a texture thumbnail with a tally border and label.
@@ -998,7 +978,7 @@ pub fn video_frame(ui: &Ui, t: &Theme, rect: Rect, tex: Option<(egui::TextureId,
     }
     let p = ui.painter_at(rect.expand(3.0));
     let r = CornerRadius::same(radius::TILE);
-    p.rect_filled(rect, r, Color32::from_rgb(8, 9, 11));
+    p.rect_filled(rect, r, if tex.is_some() { Color32::from_rgb(8, 9, 11) } else { t.inset });
     if let Some((id, uv)) = tex {
         p.image(id, rect, uv, Color32::WHITE);
     } else {
@@ -1017,7 +997,7 @@ pub fn video_frame(ui: &Ui, t: &Theme, rect: Rect, tex: Option<(egui::TextureId,
         let g = ui.painter().layout_no_wrap(txt.to_string(), fid, Color32::WHITE);
         let chip = Rect::from_min_size(rect.left_top() + Vec2::new(8.0, 8.0), Vec2::new(g.size().x + 14.0, 22.0));
         p.rect_filled(chip, CornerRadius::same(6), c);
-        p.galley(chip.center() - g.size() / 2.0, g, Color32::WHITE);
+        p.galley_with_override_text_color(chip.center() - g.size() / 2.0, g, contrast(c));
     }
     let (w, c) = match tally {
         Some(s @ (LedState::Active | LedState::Armed | LedState::Error)) => (3.0, led_color(t, s)),

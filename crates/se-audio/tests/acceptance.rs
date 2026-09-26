@@ -1,5 +1,5 @@
-//! M4 acceptance, offline and deterministic, with the shipped project files: generated band
-//! audio → live analysis → the core with `bindings/bass_zoom.toml` and `rules/audio.toml`.
+//! Offline and deterministic: generated band audio → live analysis → explicitly configured
+//! reactive binding and kick-trigger rule.
 //!
 //! * the band's bass drives `fx.zoom_pulse.amount` with the same feel on a quiet (−20 dB) and
 //!   a loud rendition of the same song (binding `auto_normalize`);
@@ -9,7 +9,6 @@ use se_analysis::{AnalysisEvent, LiveAnalyzer, LiveConfig, OnsetClass, OnsetConf
 use se_core::config::{Config, SourceFile};
 use se_core::{Core, Input, Output};
 use se_proto::{Event, Meta, Origin, Value};
-use std::path::Path;
 
 const SR: f32 = 48000.0;
 const BPM: f32 = 120.0;
@@ -57,10 +56,33 @@ struct Run {
 }
 
 fn file(kind: &str, name: &str) -> SourceFile {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../project-example");
+    let src = match (kind, name) {
+        ("bindings", "bass_zoom") => {
+            r#"
+target = "fx.zoom_pulse.amount"
+signal = "band.bass"
+auto_normalize = "8s"
+gate = 0.2
+curve = "smoothstep"
+range = [0.0, 0.6]
+attack = "10ms"
+release = "180ms"
+mode = "replace"
+"#
+        }
+        ("rules", "audio") => {
+            r#"
+[[rule]]
+name = "kick punch"
+when = "band.kick"
+if = "event.velocity >= 0.5"
+do = ["trigger fx.zoom_pulse"]
+"#
+        }
+        _ => panic!("unknown fixture {kind}/{name}"),
+    };
     let path = format!("{kind}/{name}.toml");
-    let src = std::fs::read_to_string(root.join(&path)).unwrap();
-    SourceFile { kind: kind.into(), name: name.into(), path, table: toml::from_str(&src).unwrap() }
+    SourceFile { kind: kind.into(), name: name.into(), path, table: toml::from_str(src).unwrap() }
 }
 
 fn run(gain: f32) -> Run {
@@ -81,7 +103,7 @@ fn run(gain: f32) -> Run {
             }
         });
     }
-    // the core with the shipped binding and rule
+    // The core with an explicitly installed binding and rule.
     let cfg = Config::build(&[file("bindings", "bass_zoom"), file("rules", "audio")]);
     assert!(cfg.errors.is_empty(), "{:?}", cfg.errors);
     let mut core = Core::new(cfg, t0);

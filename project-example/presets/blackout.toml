@@ -1,6 +1,0 @@
-label = "BLACKOUT"
-color = "#111116"
-toggle = true
-confirm = true
-lights = { cue = "blackout" }
-set = { "fx.fade_to_black.amount" = 1.0 }

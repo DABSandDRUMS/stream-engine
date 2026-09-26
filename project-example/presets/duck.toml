@@ -1,6 +1,0 @@
-# Talk-over: duck the music bus by audio.duck.depth (attack/release in audio/duck.toml).
-# Press again to release.
-label = "DUCK"
-color = "#7fb4ca"
-toggle = true
-set = { "audio.duck.active" = true }

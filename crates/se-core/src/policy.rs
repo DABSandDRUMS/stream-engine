@@ -438,7 +438,7 @@ pub struct PolicyCfg {
     pub veto: VetoCfg,
     /// Items waiting for mod approval are rejected (and refunded) after this long.
     pub approval_ttl_ms: u64,
-    /// `twitch.ad_break` switches the mode to `ad_break` and back after the break.
+    /// Opt-in: `twitch.ad_break` switches the mode to `ad_break` and back after the break.
     pub ad_break_mode: bool,
     /// Modes an ad break never interrupts.
     pub ad_break_skip: Vec<String>,
@@ -475,7 +475,7 @@ impl Default for PolicyCfg {
             filter: FilterCfg::default(),
             veto: VetoCfg::default(),
             approval_ttl_ms: 10 * 60_000,
-            ad_break_mode: true,
+            ad_break_mode: false,
             ad_break_skip: vec!["offline".into()],
         }
     }
@@ -547,7 +547,7 @@ impl PolicyCfg {
                 drop_on_reject: on_reject,
             },
             approval_ttl_ms: f.approval_ttl.map(Dur::ms).unwrap_or(d.approval_ttl_ms).max(1000),
-            ad_break_mode: f.ad_break_mode.unwrap_or(true),
+            ad_break_mode: f.ad_break_mode.unwrap_or(d.ad_break_mode),
             ad_break_skip: f.ad_break_skip.unwrap_or(d.ad_break_skip),
         })
     }
@@ -1923,7 +1923,7 @@ mod tests {
 
     #[test]
     fn ad_break_switches_mode_and_back() {
-        let mut p = policy("", &[]);
+        let mut p = policy("[policy]\nad_break_mode = true", &[]);
         let mut out = Vec::new();
         p.screen(ev("twitch.ad_break", Value::map().with("duration", 90), None), S, "live", &mut out);
         assert_eq!(names(&out), ["mode ad_break", "deliver twitch.ad_break"]);

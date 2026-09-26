@@ -208,8 +208,15 @@ impl StateTree {
             k
         });
         self.index = self.params.iter().enumerate().map(|(i, p)| (p.addr.clone(), i)).collect();
-        self.is_dirty = vec![false; self.params.len()];
+        // Pending changes on surviving addresses still need resolving after ids move.
+        let mut i = 0;
+        self.is_dirty.retain(|_| {
+            let k = keep[i];
+            i += 1;
+            k
+        });
         self.dirty.clear();
+        self.dirty.extend(self.is_dirty.iter().enumerate().filter_map(|(i, dirty)| dirty.then_some(i)));
         self.generation += 1;
         before - self.params.len()
     }

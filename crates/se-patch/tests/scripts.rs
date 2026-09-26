@@ -139,7 +139,7 @@ const T: Duration = Duration::from_secs(3);
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sub_meteors_trigger_produces_draw_lists_and_flash() {
-    let ex = repo().join("project-example/patches/sub_meteors");
+    let ex = repo().join("templates/patches/script/sub_meteors");
     let toml = std::fs::read_to_string(ex.join("patch.toml")).unwrap();
     let lua = std::fs::read_to_string(ex.join("main.lua")).unwrap();
     let mut e = engine(&[("patches/sub_meteors/patch.toml", &toml), ("patches/sub_meteors/main.lua", &lua)]).await;
@@ -433,8 +433,8 @@ async fn folders_hot_load_disable_and_new_patch() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn example_confetti_and_hype_meter_run() {
-    let ex = repo().join("project-example/patches");
+async fn optional_confetti_and_hype_meter_templates_run() {
+    let ex = repo().join("templates/patches/script");
     let mut files: Vec<(String, String)> = Vec::new();
     for id in ["confetti", "hype_meter"] {
         for f in ["patch.toml", "main.lua"] {

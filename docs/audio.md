@@ -46,6 +46,12 @@ reported (`health.audio.config`, log) and the last good configuration stays live
 live: parameter changes flow through the state tree; structural changes (inputs, buses, chains,
 sounds) rebuild the graph and swap it in with a 25 ms crossfade.
 
+Blank projects capture no hardware and keep only the bus infrastructure and program safety
+limiter; they install no effect chains and do not lower any channel automatically.
+Ducking is opt-in: omit `[duck]` to leave it unconfigured,
+or add `[duck]` to use the music / microphone / TTS defaults shown below. For manual-only
+ducking, set `targets` explicitly and use `signals = []` and `keys = []`.
+
 ```toml
 quantum = 256              # frames per PipeWire cycle (32–2048); 64 for the drum monitor path
 rate = 48000
@@ -211,14 +217,13 @@ by the Mix view), `audio.devices` (PipeWire audio nodes), `analysis.grid {path}`
 ## Sounds
 
 `audio.play` looks up `[audio.sounds.<name>]`, then `assets/sounds/<name>.{wav,flac,ogg,mp3}`
-(any rate, mono or stereo, ≤ 60 s; resampled to 48 kHz at load; cached by mtime). The example's
-`assets/sounds/airhorn.wav` is synthesized for this project (additive brass chord with pitch
-scoop, formant filter and soft saturation) and is CC0.
+(any rate, mono or stereo, ≤ 60 s; resampled to 48 kHz at load; cached by mtime). New projects
+contain no sounds; add the files and any sampler settings explicitly.
 
 ## `dsp` patches (WebAssembly)
 
-A patch folder with `kind = "dsp"` and `main.wasm` (see `project-example/patches/ringmod/`,
-built from Rust with `./build.sh`, target `wasm32-unknown-unknown`). Modules are compiled ahead
+A patch folder with `kind = "dsp"` and `main.wasm` (see `templates/patches/dsp/ringmod/`,
+available through `patch.new`, built from Rust with `./build.sh`, target `wasm32-unknown-unknown`). Modules are compiled ahead
 of time on load (wasmtime/cranelift), have no imports, and implement ABI v1:
 `se_dsp_abi() -> 1`, `init(sample_rate, channels, max_frames) -> i32` (all allocation here),
 `input_buffer()`, `output_buffer()`, `params_buffer()`, `process(in, out, frames, params)` on

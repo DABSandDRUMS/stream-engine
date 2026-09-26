@@ -424,33 +424,4 @@ mod tests {
         let err = preset("set = { \"a.b\" = 1.0 }\n[[knob]]\nlabel = \"Speed\"\ntarget = \"a.b\"\nmin = 9\nmax = 1").unwrap_err();
         assert!(err.contains("`min` (9) must be smaller than `max` (1)"), "{err}");
     }
-
-    /// The example project's knobs parse and each built-in effect knob drives a real setting of
-    /// that effect within its range.
-    #[test]
-    fn example_knobs_drive_real_settings() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../project-example/presets");
-        let mut files = Vec::new();
-        for e in std::fs::read_dir(&dir).unwrap().flatten() {
-            let p = e.path();
-            let name = p.file_stem().unwrap().to_string_lossy().to_string();
-            let text = std::fs::read_to_string(&p).unwrap();
-            files.push(SourceFile { kind: "presets".into(), path: format!("presets/{name}.toml"), name, table: text.parse().unwrap() });
-        }
-        let c = Config::build(&files);
-        assert!(c.errors.is_empty(), "{:?}", c.errors);
-        let mut n = 0;
-        for (id, p) in &c.presets {
-            for k in &p.knobs {
-                n += 1;
-                let Some(rest) = k.target.strip_prefix("fx.") else { continue };
-                let (fx, param) = rest.split_once('.').unwrap();
-                let e = LIBRARY.iter().find(|e| e.name == fx).unwrap_or_else(|| panic!("{id}: no effect `{fx}`"));
-                let d = e.all_params().find(|x| x.name == param).unwrap_or_else(|| panic!("{id}: `{fx}` has no setting `{param}`"));
-                let (lo, hi) = (d.range[0] as f64, d.range[1] as f64);
-                assert!(k.min.unwrap() >= lo && k.max.unwrap() <= hi, "{id}: knob “{}” goes outside {lo}..{hi}", k.label);
-            }
-        }
-        assert!(n >= 5, "the example ships knobs");
-    }
 }
