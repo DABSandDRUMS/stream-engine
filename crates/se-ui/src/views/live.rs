@@ -137,9 +137,12 @@ fn on_air(app: &mut App, ui: &mut egui::Ui, geo: &Geometry) {
     let program = app.m.str("show.scene.program").to_string();
     let air_w = geo.air_w;
     let view = app.show.on_air;
+    let live = crate::views::status::on_air(app);
+    let (badge, vertical_badge, tally) =
+        if live { ("ON AIR", "ON AIR · VERTICAL", LedState::Active) } else { ("PROGRAM", "PROGRAM · VERTICAL", LedState::Idle) };
     ui.horizontal(|ui| {
-        ui.label(RichText::new("On air").font(font_semibold(type_scale::LARGE)).color(t.fg));
-        ui.label(RichText::new("What your viewers see").color(t.text_dim));
+        ui.label(RichText::new(if live { "On air" } else { "Program" }).font(font_semibold(type_scale::LARGE)).color(t.fg));
+        ui.label(RichText::new(if live { "What your viewers see" } else { "Current output · off air" }).color(t.text_dim));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let mut i = match view {
                 OnAirView::Main => 0,
@@ -156,12 +159,12 @@ fn on_air(app: &mut App, ui: &mut egui::Ui, geo: &Geometry) {
     let h = air_w * 9.0 / 16.0;
     match app.show.on_air {
         OnAirView::Main => {
-            monitor::monitor(app, ui, Canvas::Wide, &program, "ON AIR", Vec2::new(air_w, h), LedState::Active, hz);
+            monitor::monitor(app, ui, Canvas::Wide, &program, badge, Vec2::new(air_w, h), tally, hz);
         }
         OnAirView::Vertical => {
             ui.horizontal(|ui| {
                 ui.add_space((air_w - h * 9.0 / 16.0) / 2.0);
-                monitor::monitor(app, ui, Canvas::Tall, &program, "ON AIR · VERTICAL", Vec2::new(h * 9.0 / 16.0, h), LedState::Active, hz);
+                monitor::monitor(app, ui, Canvas::Tall, &program, vertical_badge, Vec2::new(h * 9.0 / 16.0, h), tally, hz);
             });
         }
         OnAirView::Both => {
@@ -169,8 +172,8 @@ fn on_air(app: &mut App, ui: &mut egui::Ui, geo: &Geometry) {
             let bh = ((air_w - geo.gap) / (16.0 / 9.0 + 9.0 / 16.0)).min(h);
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = geo.gap;
-                monitor::monitor(app, ui, Canvas::Wide, &program, "ON AIR", Vec2::new(bh * 16.0 / 9.0, bh), LedState::Active, hz);
-                monitor::monitor(app, ui, Canvas::Tall, &program, "VERTICAL", Vec2::new(bh * 9.0 / 16.0, bh), LedState::Active, hz);
+                monitor::monitor(app, ui, Canvas::Wide, &program, badge, Vec2::new(bh * 16.0 / 9.0, bh), tally, hz);
+                monitor::monitor(app, ui, Canvas::Tall, &program, "VERTICAL", Vec2::new(bh * 9.0 / 16.0, bh), tally, hz);
             });
         }
     }
@@ -337,7 +340,7 @@ fn scenes(app: &mut App, ui: &mut egui::Ui) {
     if list.is_empty() {
         widgets::panel(ui, &t, |ui| {
             ui.set_width(ui.available_width());
-            if widgets::empty_state(ui, &t, icon::LAYERS, "No scenes yet", "A scene is one arrangement of your cameras and overlays.", Some("Make a scene")) {
+            if widgets::empty_state(ui, &t, icon::LAYERS, "No scenes yet", "A scene is one arrangement of your sources as layers.", Some("Make a scene")) {
                 app.open_view(ViewId::Composition);
             }
         });
@@ -350,7 +353,7 @@ fn scenes(app: &mut App, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = gap;
             for (name, label, key) in &list {
-                let st = if *name == program {
+                let st = if *name == program && crate::views::status::on_air(app) {
                     LedState::Active
                 } else if *name == preview {
                     LedState::Armed
