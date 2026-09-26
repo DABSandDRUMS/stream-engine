@@ -6,6 +6,12 @@
 //! * subsystem actions (`lights.cue`, `queue.skip`, …) are routed to registered handlers;
 //! * real-time threads read the latest [`Snapshot`] without locking (`arc-swap`).
 
+pub mod ctx;
+pub mod draw;
+pub mod media;
+
+pub use ctx::EngineCtx;
+
 use arc_swap::ArcSwap;
 use parking_lot::{Mutex, RwLock};
 use se_core::{Core, Input, Output, RuntimeState};
@@ -136,6 +142,12 @@ pub struct Hub {
     /// Render-thread heartbeat (0 until the renderer runs).
     pub render_heartbeat: AtomicU64,
     unrouted_warned: Mutex<std::collections::HashSet<String>>,
+    /// CPU video frames from producers (web pages, media) to the renderer.
+    pub video: media::VideoSlots,
+    /// Audio sample rings from producers (web pages, media, TTS, sfx) to the audio graph.
+    pub audio: media::AudioSlots,
+    /// 2D draw lists from script patches to the renderer.
+    pub draw: draw::DrawSlots,
 }
 
 impl Hub {
@@ -154,6 +166,9 @@ impl Hub {
             core_heartbeat: AtomicU64::new(0),
             render_heartbeat: AtomicU64::new(0),
             unrouted_warned: Mutex::new(Default::default()),
+            video: Default::default(),
+            audio: Default::default(),
+            draw: Default::default(),
         });
         (hub, rx)
     }

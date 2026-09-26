@@ -13,6 +13,18 @@ pub enum Mode {
     Build,
 }
 
+/// Full-area views (§15.6), opened from the Views menu or the palette. Subsystems add a
+/// variant, a `views/<name>.rs` with `pub fn ui(app: &mut App, ui: &mut egui::Ui)`, and a
+/// line in [`App::view_ui`] / [`ViewId::ALL`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ViewId {
+    Sessions,
+}
+
+impl ViewId {
+    pub const ALL: &'static [(ViewId, &'static str, &'static str)] = &[(ViewId::Sessions, icon::SESSION, "Session review")];
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RailTab {
     Events,
@@ -45,6 +57,8 @@ pub struct App {
     pub library_filter: String,
     pub transition_choice: Option<String>,
     pub panic_armed_at: Option<f64>,
+    /// Open full-area view (replaces the mode layout's center while set).
+    pub view: Option<ViewId>,
     font: Option<String>,
 }
 
@@ -72,6 +86,7 @@ impl App {
             library_filter: String::new(),
             transition_choice: None,
             panic_armed_at: None,
+            view: None,
             font,
         }
     }
@@ -178,6 +193,18 @@ impl App {
                 widgets::pill(ui, &t, if name == "REC" { icon::REC } else { icon::LIVE }, &text, if active { LedState::Healthy } else { LedState::Idle });
             }
             ui.separator();
+            ui.menu_button(format!("{} views", icon::SEARCH), |ui| {
+                if ui.selectable_label(self.view.is_none(), "main").clicked() {
+                    self.view = None;
+                    ui.close();
+                }
+                for (v, ic, label) in ViewId::ALL {
+                    if ui.selectable_label(self.view == Some(*v), format!("{ic} {label}")).clicked() {
+                        self.view = Some(*v);
+                        ui.close();
+                    }
+                }
+            });
             egui::ComboBox::from_id_salt("mode").selected_text(format!("mode: {}", if mode.is_empty() { "?" } else { &mode })).show_ui(ui, |ui| {
                 let modes: Vec<String> = self.m.q_list("modes").iter().filter_map(|v| v.as_str().map(String::from)).collect();
                 for md in modes {
@@ -215,6 +242,12 @@ impl App {
                 ui.label(RichText::new(conn).small().color(if self.m.connected { t.fg_dim } else { t.bright_red }));
             });
         });
+    }
+
+    fn view_ui(&mut self, v: ViewId, ui: &mut egui::Ui) {
+        match v {
+            ViewId::Sessions => views::sessions::ui(self, ui),
+        }
     }
 
     fn palette(&mut self, ctx: &egui::Context) {
@@ -323,9 +356,12 @@ impl eframe::App for App {
         self.m.refresh(&["presets", "scenes", "active", "modes", "transitions", "sim.presets", "rules", "bindings", "errors"]);
         self.shortcuts(ctx);
         egui::Panel::top("status").exact_size(34.0).show(ui, |ui| self.status_bar(ui));
-        match self.mode {
-            Mode::Show => views::show::ui(self, ui),
-            Mode::Build => views::build::ui(self, ui),
+        match (self.view, self.mode) {
+            (Some(v), _) => {
+                egui::CentralPanel::default().show(ui, |ui| self.view_ui(v, ui));
+            }
+            (None, Mode::Show) => views::show::ui(self, ui),
+            (None, Mode::Build) => views::build::ui(self, ui),
         }
         self.palette(ctx);
         self.toasts(ctx);

@@ -47,6 +47,8 @@ libc = "0.2"
 eframe = { version = "0.36", default-features = false, features = ["wgpu", "wayland", "default_fonts"] }
 egui = "0.36"
 tempfile = "3"
+triple_buffer = "9"
+rtrb = "0.4"
 
 [profile.release]
 debug = 1

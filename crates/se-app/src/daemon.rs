@@ -138,6 +138,17 @@ pub fn run(opts: DaemonOpts) -> Result<()> {
     }
 
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().thread_name("se-io").build()?;
+    let (config_tx, config_rx) = tokio::sync::watch::channel(Arc::new(config.clone()));
+    let engine = se_hub::EngineCtx {
+        hub: hub.clone(),
+        db: db.clone(),
+        project_root: project.root().to_path_buf(),
+        data_dir: opts.data_dir.clone(),
+        share_dir: crate::share_dir(),
+        config: config_rx,
+        http: opts.http,
+        dev: opts.dev,
+    };
     let ctx = Ctx {
         hub: hub.clone(),
         db: db.clone(),
@@ -147,6 +158,8 @@ pub fn run(opts: DaemonOpts) -> Result<()> {
         config: Arc::new(Mutex::new(config)),
         session: session_shared,
         t0,
+        config_tx: Arc::new(config_tx),
+        engine,
     };
     let res = rt.block_on(async_main(ctx));
     hub.shutdown();
@@ -166,6 +179,9 @@ pub struct Ctx {
     pub config: Arc<Mutex<Config>>,
     pub session: Arc<Mutex<String>>,
     pub t0: u64,
+    /// Publishes each applied configuration to subsystems.
+    pub config_tx: Arc<tokio::sync::watch::Sender<Arc<Config>>>,
+    pub engine: se_hub::EngineCtx,
 }
 
 fn session_thread(root: PathBuf, id: String, start: LogRec, rx: crossbeam_channel::Receiver<SessionMsg>) {
@@ -318,6 +334,7 @@ async fn async_main(ctx: Ctx) -> Result<()> {
 
     // --- queries ---------------------------------------------------------------------------
     crate::queries::register(&ctx);
+    crate::queries::register_preflight(&ctx);
 
     // --- systemd readiness + watchdog -------------------------------------------------------
     let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
@@ -371,10 +388,10 @@ pub fn reload(ctx: &Ctx, paths: &[String]) {
         ctx.hub.log("error", "project", format!("{}: {}", e.file, e.msg));
     }
     *ctx.config.lock() = next.clone();
-    ctx.hub.submit(Input::Config { config: Box::new(next) });
+    ctx.hub.submit(Input::Config { config: Box::new(next.clone()) });
+    let _ = ctx.config_tx.send(Arc::new(next));
     ctx.hub.publish("project.errors", Value::Int(n as i64));
     ctx.hub.emit(Event::new("project.reloaded", Origin::System, Value::map().with("files", paths.to_vec()).with("errors", n)));
-    crate::subsystems::on_reload(ctx, paths);
     tracing::info!("project reloaded ({} changed, {n} errors)", paths.len());
 }
 

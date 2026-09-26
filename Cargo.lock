@@ -3175,6 +3175,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "rtrb"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9278fb35b3e730abe136e9b395b5b81b96d06b9f5478a50f0c8430a2237b22de"
+
+[[package]]
 name = "rusqlite"
 version = "0.40.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3390,13 +3396,16 @@ dependencies = [
  "arc-swap",
  "crossbeam-channel",
  "parking_lot",
+ "rtrb",
  "se-clock",
  "se-core",
  "se-proto",
+ "se-store",
  "serde_json",
  "tokio",
  "toml",
  "tracing",
+ "triple_buffer",
 ]
 
 [[package]]
@@ -4183,6 +4192,15 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
+]
+
+[[package]]
+name = "triple_buffer"
+version = "9.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e875ab7068a75b74f419da453927e05527c36f0001b3c7aad3ce443640683487"
+dependencies = [
+ "crossbeam-utils",
 ]
 
 [[package]]

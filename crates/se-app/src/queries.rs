@@ -45,3 +45,86 @@ pub fn register(ctx: &Ctx) {
         }),
     );
 }
+
+/// Preflight (§17.1): every subsystem publishes `health.<check>` = `{status, detail}`
+/// (`pass | warn | fail`); the engine adds disk, GPU, and idle-inhibitor checks.
+pub fn register_preflight(ctx: &Ctx) {
+    let hub = ctx.hub.clone();
+    let root = ctx.project.root().to_path_buf();
+    ctx.hub.register_query(
+        "preflight",
+        Arc::new(move |_, _| {
+            let hub = hub.clone();
+            let root = root.clone();
+            Box::pin(async move {
+                let mut items = Vec::new();
+                let snap = hub.snapshot.load();
+                let mut names: Vec<(&String, &usize)> = snap.index.iter().filter(|(a, _)| a.starts_with("health.")).collect();
+                names.sort();
+                for (a, i) in names {
+                    let v = &snap.values[*i];
+                    let status = v.get_path("status").and_then(Value::as_str).unwrap_or("warn").to_string();
+                    let detail = v.get_path("detail").map(|d| d.to_string()).unwrap_or_default();
+                    items.push(Value::map().with("name", a.trim_start_matches("health.")).with("status", status).with("detail", detail));
+                }
+                // disk space for recordings (project + ~/Videos)
+                let free_gb = disk_free_gb(&root);
+                items.push(check(
+                    "disk",
+                    if free_gb > 50.0 {
+                        "pass"
+                    } else if free_gb > 10.0 {
+                        "warn"
+                    } else {
+                        "fail"
+                    },
+                    format!("{free_gb:.0} GB free"),
+                ));
+                let idle = snap.bool("system.idle_inhibited");
+                let mode = snap.str("show.mode").unwrap_or("offline").to_string();
+                items.push(check(
+                    "idle_inhibitor",
+                    if idle || mode == "offline" { "pass" } else { "warn" },
+                    if idle { "stay-awake on".into() } else { "idle allowed (turns on at preshow)".to_string() },
+                ));
+                if let Some((temp, used, total)) = gpu_stats().await {
+                    let st = if temp > 85.0 || used / total > 0.9 {
+                        "fail"
+                    } else if temp > 78.0 || used / total > 0.8 {
+                        "warn"
+                    } else {
+                        "pass"
+                    };
+                    items.push(check("gpu", st, format!("{temp:.0} °C, VRAM {used:.0}/{total:.0} MB")));
+                }
+                Ok(Value::List(items))
+            })
+        }),
+    );
+}
+
+fn check(name: &str, status: &str, detail: String) -> Value {
+    Value::map().with("name", name).with("status", status).with("detail", detail)
+}
+
+fn disk_free_gb(p: &std::path::Path) -> f64 {
+    let Ok(c) = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()) else { return 0.0 };
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: valid NUL-terminated path and out pointer.
+    if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
+        return 0.0;
+    }
+    st.f_bavail as f64 * st.f_frsize as f64 / 1e9
+}
+
+/// `(temp °C, used MB, total MB)` from nvidia-smi.
+async fn gpu_stats() -> Option<(f64, f64, f64)> {
+    let out = tokio::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=temperature.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"])
+        .output()
+        .await
+        .ok()?;
+    let s = String::from_utf8(out.stdout).ok()?;
+    let v: Vec<f64> = s.lines().next()?.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+    (v.len() == 3).then(|| (v[0], v[1], v[2]))
+}

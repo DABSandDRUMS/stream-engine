@@ -16,6 +16,8 @@ arc-swap.workspace = true
 parking_lot.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
-
-[dev-dependencies]
+se-store.workspace = true
+triple_buffer = "9"
+rtrb = "0.4"
 toml.workspace = true
+
