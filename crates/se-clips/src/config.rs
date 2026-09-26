@@ -40,7 +40,7 @@ pub struct ClipsConfig {
     pub tall_size: [u32; 2],
     pub min_len: Dur,
     pub max_len: Dur,
-    /// Window for markers without a hype window (`stream marker`, deck "clip that").
+    /// Window for markers without a hype window (`streamctl marker`, deck "clip that").
     pub manual_preroll: Dur,
     pub manual_postroll: Dur,
     /// Marker score given to manual markers (hype markers carry their own).

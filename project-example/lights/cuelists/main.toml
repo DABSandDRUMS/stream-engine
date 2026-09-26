@@ -1,5 +1,5 @@
 # Show list: demonstrates tracking, fades, per-attribute timing, follow and wait.
-# Go/back/goto from the Lights view, deck, X-TOUCH or `stream lights.go main`.
+# Go/back/goto from the Lights view, deck, X-TOUCH or `streamctl do lights.go main`.
 # Tracking: each cue stores only what changes; everything else carries forward from earlier cues.
 label = "Main"
 priority = 200

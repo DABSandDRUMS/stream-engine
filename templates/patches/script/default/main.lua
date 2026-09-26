@@ -1,4 +1,4 @@
--- {{label}}: fire it with `stream do patch.{{id}}.trigger` or from a rule/preset.
+-- {{label}}: fire it with `streamctl do patch.{{id}}.trigger` or from a rule/preset.
 --
 -- Globals: params, palette, env (trigger envelope 0–1), time, trigger (last payload),
 -- signals, patch = { id, frame, resolution, aspect }.

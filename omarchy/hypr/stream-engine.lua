@@ -19,19 +19,19 @@ local main_monitor = "DP-1"
 local panel_monitor = "DP-2"
 local tv_monitor = "desc:Philips Consumer Electronics Company Philips FTV"
 
--- A `stream` CLI call that reports failure (engine down, command rejected) as a notification.
-local function stream(args, action)
-  return "stream " .. args .. " || omarchy-notification-send -u critical stream-engine "
+-- A `streamctl` CLI call that reports failure (engine down, command rejected) as a notification.
+local function streamctl(args, action)
+  return "streamctl " .. args .. " || omarchy-notification-send -u critical stream-engine "
     .. o.shell_quote(action .. " failed: is the engine running?")
 end
 
 hl.unbind("SUPER + CTRL + ALT + B")
 
 o.bind("SUPER + CTRL + ALT + S", "stream-engine UI", "stream-engine-launch-or-focus")
-o.bind("SUPER + CTRL + ALT + RETURN", "Stream: Take", stream("take", "Take"))
-o.bind("SUPER + CTRL + ALT + ESCAPE", "Stream: Panic", stream("panic", "Panic"))
-o.bind("SUPER + CTRL + ALT + C", "Stream: Clean", stream("clean", "Clean"))
-o.bind("SUPER + CTRL + ALT + B", "Stream: BRB", stream("brb", "BRB"))
+o.bind("SUPER + CTRL + ALT + RETURN", "Stream: Take", streamctl("take", "Take"))
+o.bind("SUPER + CTRL + ALT + ESCAPE", "Stream: Panic", streamctl("panic", "Panic"))
+o.bind("SUPER + CTRL + ALT + C", "Stream: Clean", streamctl("clean", "Clean"))
+o.bind("SUPER + CTRL + ALT + B", "Stream: BRB", streamctl("brb", "BRB"))
 
 -- Every stream-engine window shows video: keep it fully opaque (like Omarchy's media windows).
 o.window("^stream-engine(\\..+)?$", { tag = "-default-opacity" })

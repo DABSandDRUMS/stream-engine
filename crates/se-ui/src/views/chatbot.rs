@@ -358,13 +358,18 @@ fn tab_body(app: &mut App, ui: &mut egui::Ui, t: &Theme, form: &mut Form, files:
         widgets::segmented(ui, &t, &mut form.tab, &TABS);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             let health = app.m.get("health.bot").cloned().unwrap_or_default();
+            let twitch = crate::views::twitch::twitch_state(app);
             let (led, text) = match s(&health, "status") {
+                // the bot only answers once it can reach Twitch chat
+                "pass" if !twitch.connected() => (LedState::Armed, "Chat bot: Not connected"),
                 "pass" => (LedState::Healthy, "Chat bot: Working"),
                 "fail" => (LedState::Error, "Chat bot: Not connected"),
                 "" => (LedState::Idle, "Chat bot: Off"),
                 _ => (LedState::Armed, "Chat bot: Needs a look"),
             };
-            widgets::pill(ui, &t, if led == LedState::Healthy { icon::CHECK } else { icon::WARN }, text, led).on_hover_text(s(&health, "detail"));
+            let tip =
+                if twitch.connected() { s(&health, "detail").to_string() } else { format!("Connect Twitch so the bot can answer in chat. {}", twitch.body) };
+            widgets::pill(ui, &t, if led == LedState::Healthy { icon::CHECK } else { icon::WARN }, text, led).on_hover_text(tip);
         });
     });
     for e in errors {

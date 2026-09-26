@@ -129,7 +129,7 @@ fn backup(app: &mut App, ui: &mut Ui, t: &Theme, r: &Value) {
                         "fail" => "The last backup didn't work. Try Back up now.",
                         "warn" => "It's been a while. Back up now to be safe.",
                         _ if newest.is_none() => "Make the first one now.",
-                        _ => "Everything is saved. Backups wait while you're live.",
+                        _ => "Everything is saved. Backups wait while you're on air.",
                     };
                     ui.label(RichText::new(line).color(t.text_dim));
                 });
@@ -143,7 +143,7 @@ fn backup(app: &mut App, ui: &mut Ui, t: &Theme, r: &Value) {
                 widgets::hint(
                     ui,
                     t,
-                    "Restoring puts your settings and history back to how it was on that day. It has to be stopped first, so do it when you're not live.",
+                    "Restoring puts your settings and history back to how it was on that day. It has to be stopped first, so do it when you're off air.",
                 );
                 ui.add_space(spacing::XS);
                 for (n, step) in ["Stop Stream Engine.", "Unpack the backup over the current one.", "Start Stream Engine again."].iter().enumerate() {
@@ -259,7 +259,7 @@ fn recordings(app: &mut App, ui: &mut Ui, t: &Theme, r: &Value) {
                 if widgets::hold_button(ui, t, "Clean up old recordings", t.bright_red, 1.5) {
                     act(app, "retention.prune_recordings");
                 }
-                widgets::hint(ui, t, "Press and hold to delete the recordings above. Nothing is deleted while you're live or recording.");
+                widgets::hint(ui, t, "Press and hold to delete the recordings above. Nothing is deleted while you're on air or recording.");
             }
             ui.add_space(spacing::S);
             widgets::details(ui, t, "recordings-details", "Details", |ui| {

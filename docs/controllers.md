@@ -6,7 +6,7 @@ MTC for Timelines), and voice push-to-talk. Everything is configured in `control
 (hot-reloaded; a broken file keeps its last good version) and shown in **Views → Controllers**.
 
 The same preset can be fired from the deck, a MIDI button, a footswitch, voice, a keybind
-(`stream do "preset.fire hype"`), and chat (a rule) — they all end up as the same core command, with
+(`streamctl do "preset.fire hype"`), and chat (a rule) — they all end up as the same core command, with
 the controller's origin (`deck`, `midi`, `voice`) at manual priority in the trace.
 
 ## Stream Deck (`kind = "deck"`)
@@ -76,7 +76,7 @@ profile = "xtouch_mini_mc"       # generic | mcu | xtouch_mini_mc | hui
 # port = "*MIDI 1"               # only some ports of a multi-port device
 ```
 
-**Device identity.** `stream query controllers.midi.ports` lists every port with its device id
+**Device identity.** `streamctl query controllers.midi.ports` lists every port with its device id
 and USB path (the `usb-…` path from `/proc/asound/cards`). Two identical controllers match the
 same `match`; give each file a `usb =` (or `serial =`) and they stay apart across reboots and
 replugging (the engine warns when a `match` is ambiguous).
@@ -186,7 +186,7 @@ General MIDI drum map; add `36 = "kick"`-style overrides and `channel = 10`.
 
 ### Learn
 
-`stream do "midi.learn fx.rgb_split.amount"` (or the inspector's MIDI button, or the Controllers
+`streamctl do "midi.learn fx.rgb_split.amount"` (or the inspector's MIDI button, or the Controllers
 view), then move a control:
 
 * fader / knob / pedal → `[[binding]]` with `takeover = "pickup"` (`"jump"` on motor faders),
@@ -216,8 +216,8 @@ Hold a `ptt = true` key (deck or MIDI), hold the button in Views → Controllers
 
 ```lua
 -- ~/.config/hypr/bindings.lua: hold Super+Space to talk
-o.bind("SUPER", "space", "exec", "stream do 'voice.ptt start'")
-o.bind("SUPER", "space", "exec", "stream do 'voice.ptt stop'", { release = true })
+o.bind("SUPER", "space", "exec", "streamctl do 'voice.ptt start'")
+o.bind("SUPER", "space", "exec", "streamctl do 'voice.ptt stop'", { release = true })
 ```
 
 Audio is captured from an ALSA PCM only while talking (default `default` = PipeWire), then
@@ -258,5 +258,5 @@ gpu = false
 
 `crates/se-input/tests/fixtures/*.txt` hold MIDI/HID streams (`<ms> <hex>` per line) replayed
 through the runtime decoders by `tests/fixtures.rs`. Record real ones with
-`stream do "midi.record xtouch 20 file=/path/fixture.txt"`. `tests/voice_e2e.rs` speaks commands
+`streamctl do "midi.record xtouch 20 file=/path/fixture.txt"`. `tests/voice_e2e.rs` speaks commands
 with espeak-ng and checks the recognized intents (`-- --ignored`, needs the model).

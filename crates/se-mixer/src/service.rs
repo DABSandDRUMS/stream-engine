@@ -762,7 +762,7 @@ impl Service {
         let (snaps, _) = snapshots::load_all(&self.ctx.kind("mixes"), &self.prefix());
         if !snaps.contains_key(&self.cfg.panic_snapshot) {
             status = "warn";
-            detail.push_str(&format!("; no safe mix for panic (store one: `stream mixer.snapshot.store snapshot={}`)", self.cfg.panic_snapshot));
+            detail.push_str(&format!("; no safe mix for panic (store one: `streamctl do mixer.snapshot.store snapshot={}`)", self.cfg.panic_snapshot));
         }
         if s.unconfirmed > 0 {
             detail.push_str(&format!("; {} unconfirmed change(s)", s.unconfirmed));

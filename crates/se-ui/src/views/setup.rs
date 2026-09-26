@@ -291,7 +291,6 @@ fn checklist(app: &mut App, ui: &mut egui::Ui, st: &mut State) {
                 if relay {
                     return;
                 }
-                widgets::hint(ui, &t, "This needs a free Cloudflare account and your own web address. Save the same password here and on Cloudflare.");
                 show_me_how(
                     ui,
                     &t,
@@ -310,7 +309,7 @@ fn checklist(app: &mut App, ui: &mut egui::Ui, st: &mut State) {
                         act(app, "relay.secret.set", Value::map().with("secret", secret.trim()));
                         st.relay_shown = None;
                     }
-                    if widgets::button_ex(ui, &t, None, "Make one for me", Kind::Ghost, Size::Medium, 0.0, true).clicked()
+                    if widgets::button_ex(ui, &t, None, "Make one for me", Kind::Secondary, Size::Medium, 0.0, true).clicked()
                         && let Some(secret) = random_secret()
                     {
                         act(app, "relay.secret.set", Value::map().with("secret", secret.clone()));

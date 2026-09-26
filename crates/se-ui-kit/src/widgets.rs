@@ -205,9 +205,16 @@ fn icon_text(
 ) -> (Option<std::sync::Arc<egui::Galley>>, Option<std::sync::Arc<egui::Galley>>, f32, f32) {
     let ig = icon.filter(|i| !i.is_empty()).map(|i| ui.painter().layout_no_wrap(i.to_string(), fid.clone(), color));
     let lg = (!label.is_empty()).then(|| ui.painter().layout_no_wrap(label.to_string(), fid, color));
-    let w = ig.as_ref().map_or(0.0, |g| g.size().x) + lg.as_ref().map_or(0.0, |g| g.size().x) + if ig.is_some() && lg.is_some() { ICON_GAP } else { 0.0 };
+    let w = ig.as_ref().map_or(0.0, |g| ink(g).1) + lg.as_ref().map_or(0.0, |g| g.size().x) + if ig.is_some() && lg.is_some() { ICON_GAP } else { 0.0 };
     let h = ig.as_ref().map_or(0.0, |g| g.size().y).max(lg.as_ref().map_or(0.0, |g| g.size().y));
     (ig, lg, w, h)
+}
+
+/// (left overhang, painted width) of a galley: icon glyphs often draw outside their advance.
+fn ink(g: &egui::Galley) -> (f32, f32) {
+    let left = g.mesh_bounds.min.x.min(0.0);
+    let right = g.mesh_bounds.max.x.max(g.size().x);
+    (-left, right - left)
 }
 
 fn paint_icon_text(
@@ -219,8 +226,8 @@ fn paint_icon_text(
     let (ig, lg, w, _) = parts;
     let mut x = center.x - w / 2.0;
     if let Some(g) = ig {
-        let gw = g.size().x;
-        p.galley_with_override_text_color(Pos2::new(x, center.y - g.size().y / 2.0), g, color);
+        let (overhang, gw) = ink(&g);
+        p.galley_with_override_text_color(Pos2::new(x + overhang, center.y - g.size().y / 2.0), g, color);
         x += gw + ICON_GAP;
     }
     if let Some(g) = lg {
@@ -622,9 +629,11 @@ pub fn callout(ui: &mut Ui, t: &Theme, tone: Tone, icon: &str, title: &str, body
         .inner_margin(egui::Margin::symmetric(16, 12))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(icon).size(type_scale::LARGE).color(c));
-                ui.add_space(4.0);
+            ui.horizontal_top(|ui| {
+                // icon in a fixed slot, centred on the title line
+                let (slot, _) = ui.allocate_exact_size(Vec2::new(24.0, 22.0), Sense::hover());
+                ui.painter().text(slot.center(), Align2::CENTER_CENTER, icon, font(type_scale::LARGE), c);
+                ui.add_space(spacing::S);
                 let right = if action.is_some() { 200.0 } else { 0.0 };
                 ui.allocate_ui_with_layout(Vec2::new((ui.available_width() - right).max(120.0), 0.0), Layout::top_down(Align::Min), |ui| {
                     ui.label(RichText::new(title).font(font_semibold(type_scale::BODY + 0.5)).color(t.fg));
@@ -633,7 +642,9 @@ pub fn callout(ui: &mut Ui, t: &Theme, tone: Tone, icon: &str, title: &str, body
                     }
                 });
                 if let Some(a) = action {
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    // a fixed-height slot: in a top-aligned row a right-to-left layout would
+                    // otherwise claim all the remaining height
+                    ui.allocate_ui_with_layout(Vec2::new(ui.available_width(), 40.0), Layout::right_to_left(Align::Center), |ui| {
                         clicked = button(ui, t, a, if tone == Tone::Info { Kind::Primary } else { Kind::Secondary }).clicked();
                     });
                 }

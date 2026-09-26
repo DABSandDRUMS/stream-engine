@@ -8,15 +8,15 @@ import "Model.js" as Model
 // and pending approvals. Left click opens (or focuses) the UI, middle click the confidence
 // (program) window, right click the details popup.
 //
-// Data comes from the `stream` CLI: one long-running `stream --json watch` streams state changes;
+// Data comes from the `streamctl` CLI: one long-running `streamctl --json watch` streams state changes;
 // while it is not running (engine stopped or restarting) the widget polls
-// `stream --json query engine.info` every few seconds and restarts the watch once the engine
-// answers. `stream --json preflight` refreshes the full checklist periodically.
+// `streamctl --json query engine.info` every few seconds and restarts the watch once the engine
+// answers. `streamctl --json preflight` refreshes the full checklist periodically.
 Panel {
   id: root
   moduleName: "stream-engine.status"
 
-  readonly property string streamCommand: String(setting("streamCommand", "stream"))
+  readonly property string streamCommand: String(setting("streamCommand", "streamctl"))
   readonly property string socketPath: String(setting("socket", ""))
   readonly property string openCommand: String(setting("openCommand", "stream-engine-launch-or-focus"))
   readonly property int preflightIntervalSec: Math.max(5, Number(setting("preflightIntervalSec", 30)) || 30)

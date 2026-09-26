@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build release binaries and install them for the current user (development setup):
-#   ~/.local/bin/{stream-engine,stream,stream-engine-launch-or-focus}
+#   ~/.local/bin/{stream-engine,streamctl,stream-engine-launch-or-focus}
 #   ~/.config/systemd/user/stream-engine.service  (ExecStart → ~/.local/bin)
 #   ~/.config/stream-engine/engine.toml            (project path, if missing)
 #   ~/.local/share/applications/stream-engine{,-program}.desktop + icon
@@ -13,7 +13,14 @@ cargo build --release -p se-app -p se-cli
 mkdir -p "$HOME/.local/bin" "$HOME/.config/systemd/user" "$HOME/.config/stream-engine" \
   "$HOME/.local/share/applications" "$HOME/.local/share/icons/hicolor/scalable/apps"
 install -m755 target/release/stream-engine "$HOME/.local/bin/stream-engine"
-install -m755 target/release/stream "$HOME/.local/bin/stream"
+install -m755 target/release/streamctl "$HOME/.local/bin/streamctl"
+# The CLI was called `stream` before (clashes with ImageMagick's /usr/bin/stream): drop an old
+# copy of ours, never someone else's `stream`.
+old="$HOME/.local/bin/stream"
+if [ -x "$old" ] && [[ "$(timeout 5 "$old" --help 2>/dev/null || true)" == *stream-engine/engine.sock* ]]; then
+  rm -f "$old"
+  echo "removed the old CLI $old (now streamctl)"
+fi
 install -m755 omarchy/bin/stream-engine-launch-or-focus "$HOME/.local/bin/stream-engine-launch-or-focus"
 install -m644 packaging/stream-engine.desktop packaging/stream-engine-program.desktop "$HOME/.local/share/applications/"
 install -m644 packaging/stream-engine.svg "$HOME/.local/share/icons/hicolor/scalable/apps/stream-engine.svg"

@@ -1,7 +1,7 @@
 # {{label}} — GPU particles: `sim.wgsl` (compute) updates the particle buffer every frame,
 # `draw.wgsl` (vertex + fragment) renders one quad per particle. The engine prepends the
 # generated header plus the particles prelude (Particle struct, se_particles, SE_PARTICLE_COUNT,
-# se_hash). Fire it with `stream do patch.{{id}}.trigger`.
+# se_hash). Fire it with `streamctl do patch.{{id}}.trigger`.
 kind        = "particles"
 layer       = "overlay"
 label       = "{{label}}"

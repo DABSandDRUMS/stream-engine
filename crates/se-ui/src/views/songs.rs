@@ -342,13 +342,18 @@ fn up_next(app: &mut App, ui: &mut egui::Ui, form: &mut Form, q: &Value) {
         |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
+                // desired_width is the text area: leave room for the field's 10 px side margins,
+                // the gap and the 100 px button so the two sit side by side at one height.
+                let w = ui.available_width() - 100.0 - spacing::S - 24.0;
                 let r = ui.add(
                     se_ui_kit::widgets::field(&mut form.add)
                         .hint_text("Add a song: paste a YouTube link or type a name")
-                        .desired_width(ui.available_width() - 110.0),
+                        .desired_width(w)
+                        .min_size(Vec2::new(0.0, 36.0)),
                 );
                 let go = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 let ready = !form.add.trim().is_empty();
+                ui.add_space((ui.available_width() - 100.0).max(0.0));
                 if (widgets::button_ex(ui, &t, Some(icon::PLUS), "Add", Kind::Secondary, Size::Medium, 100.0, ready).clicked() || go) && ready {
                     act_ = Some(("queue.request", Value::map().with("text", form.add.trim())));
                     form.add.clear();

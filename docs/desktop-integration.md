@@ -25,7 +25,7 @@ The package installs:
 
 | Path | What |
 |---|---|
-| `/usr/bin/stream-engine`, `/usr/bin/stream` | engine/UI binary and CLI |
+| `/usr/bin/stream-engine`, `/usr/bin/streamctl` | engine/UI binary and CLI |
 | `/usr/bin/stream-engine-launch-or-focus` | focus the UI window by exact app-id, or launch it (`--program` for the confidence window) |
 | `/usr/share/stream-engine/{web,project-example,scripts}` | engine data (`share_dir()` = `<exe>/../share/stream-engine`) |
 | `/usr/share/stream-engine/omarchy/` | the Omarchy extras below, with their installer |
@@ -44,7 +44,7 @@ stream-engine new ~/stream-project
 mkdir -p ~/.config/stream-engine
 echo "project = \"$HOME/stream-project\"" > ~/.config/stream-engine/engine.toml
 systemctl --user enable --now stream-engine
-stream status
+streamctl status
 ```
 
 The UI is launched on demand (`stream-engine ui`, the desktop entry, the bar widget, or the
@@ -79,13 +79,13 @@ files, so nothing needs restarting.
   warn/fail count, pending approvals (song requests awaiting approval, alerts in their veto
   window, AutoMod-held messages, policy approvals). Left click opens/focuses the UI, middle
   click the program window, right click a details popup. It runs one
-  `stream --json watch` for live state, polls `stream --json query engine.info` while the engine
-  is down, and refreshes `stream --json preflight` every 30 s. Settings (shell.json entry):
+  `streamctl --json watch` for live state, polls `streamctl --json query engine.info` while the engine
+  is down, and refreshes `streamctl --json preflight` every 30 s. Settings (shell.json entry):
   `streamCommand`, `socket`, `openCommand`, `preflightIntervalSec`, `retryIntervalSec`,
   `hideWhenOffline`. Place it with `--bar` or `omarchy plugin enable stream-engine.status`.
 - **Menu** (`~/.config/omarchy/extensions/omarchy-menu.jsonc`): a *Stream* submenu with Open UI,
   Program Window, Go Live, BRB, Layout (show-3disp / show-2disp / build via
-  `stream fire ui.layout name=…`), Preflight (in a terminal), and Panic. Existing entries with
+  `streamctl fire ui.layout name=…`), Preflight (in a terminal), and Panic. Existing entries with
   the same ids are never overwritten.
 - **Font hook** (`~/.config/omarchy/hooks/font-set.d/stream-engine`): on `omarchy font set` it
   fires `omarchy.font_set {font}` so the UI switches fonts immediately; a no-op when the engine

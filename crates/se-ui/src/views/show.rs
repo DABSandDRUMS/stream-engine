@@ -235,7 +235,7 @@ pub fn pads(app: &mut App, ui: &mut egui::Ui) {
                 LedState::Idle
             };
             let hint = if i < 12 { app.keys_label(&format!("pad.{}", i + 1)) } else { String::new() };
-            let label = it.label.replace('_', " ");
+            let label = crate::views::live::nice(&it.label);
             let r = widgets::pad(ui, &t, size, &it.icon, &label, it.color, state, it.progress, Some(&hint));
             if let Some(cd) = it.cooldown {
                 // cooldown ring: arc around the pad edge proportional to the remaining cooldown

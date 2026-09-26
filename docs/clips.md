@@ -31,7 +31,7 @@ it closes when the score stays under 60 % of the threshold for 2 s (episodes wit
 ```
 
 (master-clock ns; the window starts 10–30 s before the peak) plus a Twitch stream marker
-(`twitch.marker {description}`). Manual markers — `stream marker [label]`, or a deck key /
+(`twitch.marker {description}`). Manual markers — `streamctl marker [label]`, or a deck key /
 voice command bound to `session.marker` ("clip that") — get a Twitch marker too and become a
 window from 30 s before to 8 s after the press.
 
@@ -46,7 +46,7 @@ markers give their window relative to the press (`start_ago`, `peak_ago`, `end_a
 ## After the show: the clip job
 
 Ending the show (`mode.set offline`) closes the session; the job is queued automatically
-(`[clips] auto_process`). Run it by hand with `stream do "clips.process session=<id>"` (no
+(`[clips] auto_process`). Run it by hand with `streamctl do "clips.process session=<id>"` (no
 session = the last closed one). One job runs at a time, niced, and resumes after a restart.
 
 1. **Markers → windows.** Overlapping marker windows merge (their scores add up).
@@ -91,11 +91,11 @@ timeline, recordings and clips). Clip cards: wide + vertical thumbnails (click t
 CLI:
 
 ```sh
-stream query clips '{"status": "ready"}'          # ranked review queue
-stream query clips.session '{"session": "20260925-200000"}'
-stream do "clips.approve id=3"
-stream do "clips.retrim id=3 in=1:02.5 out=1:31"  # recording time (s or m:ss.mmm)
-stream do "clips.upload id=3"
+streamctl query clips '{"status": "ready"}'          # ranked review queue
+streamctl query clips.session '{"session": "20260925-200000"}'
+streamctl do "clips.approve id=3"
+streamctl do "clips.retrim id=3 in=1:02.5 out=1:31"  # recording time (s or m:ss.mmm)
+streamctl do "clips.upload id=3"
 ```
 
 Retention keeps a session folder while it has queued jobs or clips that are unreviewed or

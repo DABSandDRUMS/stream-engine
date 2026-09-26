@@ -105,9 +105,9 @@ mix = { snapshot = "brb", fade = "3s" }
 ```
 
 ```sh
-stream mixer.snapshot.store snapshot=safe label=Safe       # capture the current mix
-stream mixer.snapshot.recall snapshot=brb fade=2s          # crossfade (fade=0: instant)
-stream mixer.panic                                         # stop fades, recall the safe mix
+streamctl do mixer.snapshot.store snapshot=safe label=Safe       # capture the current mix
+streamctl do mixer.snapshot.recall snapshot=brb fade=2s          # crossfade (fade=0: instant)
+streamctl do mixer.panic                                         # stop fades, recall the safe mix
 ```
 
 Recalls are overrides at the caller's priority with key `mixer:snapshot`; a newer recall

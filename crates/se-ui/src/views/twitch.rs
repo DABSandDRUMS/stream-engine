@@ -326,8 +326,17 @@ fn columns(ui: &mut egui::Ui, n: usize, mut body: impl FnMut(&mut egui::Ui, usiz
     });
 }
 
-fn not_connected_hint(ui: &mut egui::Ui, t: &Theme) {
-    widgets::hint(ui, t, "Connect Twitch (above) to use this.");
+/// "Set up Twitch first…" / "Connect Twitch first…", from the shared Twitch status.
+fn not_connected_words(app: &App) -> &'static str {
+    match twitch_state(app).next {
+        TwitchNext::SetUp => "Set up Twitch first (the button at the top of this page).",
+        TwitchNext::Waiting { .. } => "Finish connecting Twitch first (the code at the top of this page).",
+        _ => "Connect Twitch first (the button at the top of this page).",
+    }
+}
+
+fn not_connected_hint(ui: &mut egui::Ui, t: &Theme, app: &App) {
+    widgets::hint(ui, t, not_connected_words(app));
 }
 
 // ---- your stream ---------------------------------------------------------------------------------
@@ -443,7 +452,7 @@ fn ads(app: &mut App, ui: &mut egui::Ui) {
                 return;
             }
             if next < 0 {
-                widgets::hint(ui, &t, if authorized(app) { "No ad scheduled right now." } else { "Connect Twitch (above) to see your ad schedule." });
+                widgets::hint(ui, &t, if authorized(app) { "No ad scheduled right now." } else { not_connected_words(app) });
                 return;
             }
             ui.horizontal(|ui| {
@@ -514,7 +523,7 @@ fn channel_actions(app: &mut App, ui: &mut egui::Ui, form: &mut Form) {
         |ui| {
             ui.set_width(ui.available_width());
             if !ok {
-                not_connected_hint(ui, &t);
+                not_connected_hint(ui, &t, app);
                 ui.add_space(spacing::S);
             }
             let fw = (ui.available_width() - 190.0).clamp(140.0, 320.0);
@@ -872,7 +881,7 @@ fn poll(app: &mut App, ui: &mut egui::Ui, form: &mut Form) {
                 });
             });
             if !ok {
-                not_connected_hint(ui, &t);
+                not_connected_hint(ui, &t, app);
             }
         },
     );
@@ -969,7 +978,7 @@ fn prediction(app: &mut App, ui: &mut egui::Ui, form: &mut Form) {
                 });
             });
             if !ok {
-                not_connected_hint(ui, &t);
+                not_connected_hint(ui, &t, app);
             }
         },
     );

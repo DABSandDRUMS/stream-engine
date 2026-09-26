@@ -193,6 +193,22 @@ fn form_row(ui: &mut egui::Ui, t: &Theme, label: &str, help: &str, body: impl Fn
 fn setup(app: &mut App, ui: &mut egui::Ui, form: &mut Form, g: &Value) {
     let t = app.t.clone();
     let mut start = false;
+    // Viewers join from Twitch chat, so Twitch has to be connected first.
+    let tw = crate::views::twitch::twitch_state(app);
+    if !tw.connected() {
+        if widgets::callout(
+            ui,
+            &t,
+            tw.tone,
+            icon::UNLINK,
+            &tw.title,
+            "Viewers join from Twitch chat, so connect Twitch before starting a giveaway.",
+            tw.action(),
+        ) {
+            crate::views::twitch::twitch_do(app, ui.ctx(), &tw);
+        }
+        ui.add_space(spacing::L);
+    }
     widgets::titled(
         ui,
         &t,
@@ -229,8 +245,14 @@ fn setup(app: &mut App, ui: &mut egui::Ui, form: &mut Form, g: &Value) {
                 widgets::hint(ui, &t, &rules);
             }
             ui.add_space(spacing::L);
-            let ready = !form.keyword.trim().is_empty();
-            start = widgets::button_ex(ui, &t, Some(icon::GIFT), "Start giveaway", Kind::Primary, Size::Medium, 0.0, ready).clicked();
+            let ready = tw.connected() && !form.keyword.trim().is_empty();
+            let why = if !tw.connected() {
+                if tw.next == crate::views::twitch::TwitchNext::SetUp { "Set up Twitch first" } else { "Connect Twitch first" }
+            } else {
+                "Type the word people use to join"
+            };
+            start =
+                widgets::button_ex(ui, &t, Some(icon::GIFT), "Start giveaway", Kind::Primary, Size::Medium, 0.0, ready).on_disabled_hover_text(why).clicked();
         },
     );
     if start {

@@ -20,19 +20,19 @@ may *do* is decided by the policy pipeline in the core (`se_core::policy`, §12.
 
    The engine reloads it live; `health.twitch` changes from "no Client ID" to "not authorized".
 3. Authorize: in the UI **Twitch** view (or Settings) press *Authorize with Twitch*, or run
-   `stream twitch.auth.start`. The engine shows a code and a link
+   `streamctl do twitch.auth.start`. The engine shows a code and a link
    (`twitch.auth.user_code`, `twitch.auth.verification_uri`, also logged):
    open <https://www.twitch.tv/activate>, sign in as the **broadcaster**, enter the code, and
    approve the listed permissions. Within a few seconds `twitch.auth.status` becomes
    `authorized`, EventSub connects, rewards are created, emotes load.
 4. Optional bot account for chat replies: set `bot = true` (and `chat_as = "bot"`), then run
-   `stream twitch.auth.start account=bot` and approve while signed in as the bot account
+   `streamctl do twitch.auth.start account=bot` and approve while signed in as the bot account
    (use a private window). Make the bot a moderator in the channel for the higher chat rate
    limit (`chat_rate = 100`).
 
 Refresh tokens live only in the keyring (`stream-engine` / `twitch.refresh_token`,
 `twitch.bot_refresh_token`); access tokens are refreshed automatically and validated hourly.
-`stream twitch.auth.logout` forgets them.
+`streamctl do twitch.auth.logout` forgets them.
 
 Scopes requested (broadcaster): `user:read:chat user:write:chat bits:read
 channel:read:subscriptions channel:read:hype_train channel:read:redemptions
@@ -202,7 +202,7 @@ helix_url = "http://127.0.0.1:18090/helix"
 auth_url = "http://127.0.0.1:18090/oauth2"
 ```
 
-`stream twitch.auth.start`, then `curl http://127.0.0.1:18090/activate` plays the viewer entering
+`streamctl do twitch.auth.start`, then `curl http://127.0.0.1:18090/activate` plays the viewer entering
 the code. Fire events with `twitch event trigger channel.cheer -C 1000 -T websocket` (and
 `channel.subscribe`, `channel.subscription.gift -C 50`, `channel.channel_points_custom_reward_redemption.add
 -i <reward id> -n HYPE -C 2000`, `channel.ban`, `channel.poll.begin`, …); payloads the CLI can't

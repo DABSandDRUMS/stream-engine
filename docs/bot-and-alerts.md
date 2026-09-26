@@ -240,5 +240,5 @@ also be overridden with `?param=value` in the URL.
 
 Testing a page in a normal browser: open
 `http://127.0.0.1:<http port>/patches/<id>/index.html?token=<API token>` and fire simulator
-events (`stream sim gift_bomb count=50`, `stream sim chat message='hi Kappa'`).
+events (`streamctl sim gift_bomb count=50`, `streamctl sim chat message='hi Kappa'`).
 Alert sounds are `assets/sounds/alert_*.wav` (synthesized chimes; replace freely).

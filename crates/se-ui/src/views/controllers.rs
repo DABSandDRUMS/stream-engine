@@ -599,8 +599,11 @@ fn deck_key(
     dropped
 }
 
-fn drag_chip_width(ui: &egui::Ui, label: &str) -> f32 {
-    ui.painter().layout_no_wrap(label.to_string(), font_medium(type_scale::SMALL + 0.5), Color32::WHITE).size().x + 20.0 + 24.0 + ui.spacing().item_spacing.x
+/// Width of a [`widgets::chip`] with an icon (for [`flow`]).
+fn drag_chip_width(ui: &egui::Ui, glyph: &str, label: &str) -> f32 {
+    let f = font_medium(type_scale::SMALL + 0.5);
+    let w = |x: &str| ui.painter().layout_no_wrap(x.to_string(), f.clone(), Color32::WHITE).size().x;
+    w(glyph) + 7.0 + w(label) + 24.0 + ui.spacing().item_spacing.x
 }
 
 /// Lay out items of known widths in rows that fit the width (`horizontal_wrapped` doesn't wrap
@@ -620,23 +623,6 @@ fn flow(ui: &mut egui::Ui, widths: &[f32], mut draw: impl FnMut(&mut egui::Ui, u
     }
 }
 
-fn drag_chip(ui: &mut egui::Ui, t: &Theme, glyph: &str, label: &str, color: Option<Color32>) {
-    egui::Frame::new()
-        .fill(t.surface_hi)
-        .stroke(Stroke::new(1.0, t.border))
-        .corner_radius(CornerRadius::same(radius::CONTROL))
-        .inner_margin(egui::Margin::symmetric(10, 5))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
-                ui.label(RichText::new(glyph).color(color.unwrap_or(t.text_dim)));
-                // glyphs draw wider than their advance: explicit gap
-                ui.add_space(8.0);
-                ui.label(RichText::new(label).font(font_medium(type_scale::SMALL + 0.5)).color(t.fg));
-            });
-        });
-}
-
 fn palette(ui: &mut egui::Ui, t: &Theme, words: &Words) {
     widgets::panel(ui, t, |ui| {
         ui.set_width(ui.available_width());
@@ -645,23 +631,23 @@ fn palette(ui: &mut egui::Ui, t: &Theme, words: &Words) {
         ui.add_space(spacing::S);
         widgets::section(ui, t, "", "Quick effects");
         let presets = words.presets();
-        let widths: Vec<f32> = presets.iter().map(|(_, l)| drag_chip_width(ui, l)).collect();
+        let widths: Vec<f32> = presets.iter().map(|(_, l)| drag_chip_width(ui, icon::BOLT, l)).collect();
         flow(ui, &widths, |ui, n| {
             let (name, label) = &presets[n];
-            ui.dnd_drag_source(egui::Id::new(("deck.drag.preset", name)), Drop::Preset(name.clone()), |ui| drag_chip(ui, t, icon::BOLT, label, Some(t.accent)));
+            ui.dnd_drag_source(egui::Id::new(("deck.drag.preset", name)), Drop::Preset(name.clone()), |ui| chip(ui, t, icon::BOLT, label, false));
         });
         widgets::section(ui, t, "", "Scenes");
         let scenes = words.scenes();
-        let widths: Vec<f32> = scenes.iter().map(|(_, l)| drag_chip_width(ui, l)).collect();
+        let widths: Vec<f32> = scenes.iter().map(|(_, l)| drag_chip_width(ui, icon::LAYERS, l)).collect();
         flow(ui, &widths, |ui, n| {
             let (name, label) = &scenes[n];
-            ui.dnd_drag_source(egui::Id::new(("deck.drag.scene", name)), Drop::Scene(name.clone()), |ui| drag_chip(ui, t, icon::SCENE, label, None));
+            ui.dnd_drag_source(egui::Id::new(("deck.drag.scene", name)), Drop::Scene(name.clone()), |ui| chip(ui, t, icon::LAYERS, label, false));
         });
         widgets::section(ui, t, "", "Actions");
-        let widths: Vec<f32> = DECK_ACTIONS.iter().map(|(_, l)| drag_chip_width(ui, l)).collect();
+        let widths: Vec<f32> = DECK_ACTIONS.iter().map(|(_, l)| drag_chip_width(ui, icon::PLAY, l)).collect();
         flow(ui, &widths, |ui, n| {
             let (c, label) = DECK_ACTIONS[n];
-            ui.dnd_drag_source(egui::Id::new(("deck.drag.cmd", c)), Drop::Command(c.to_string()), |ui| drag_chip(ui, t, icon::PLAY, label, None));
+            ui.dnd_drag_source(egui::Id::new(("deck.drag.cmd", c)), Drop::Command(c.to_string()), |ui| chip(ui, t, icon::PLAY, label, false));
         });
     });
 }

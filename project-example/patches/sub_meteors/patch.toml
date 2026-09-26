@@ -1,5 +1,5 @@
 # Meteors rain down when someone subscribes (PLAN §6.2/§6.4).
-# Fire it: `stream do patch.sub_meteors.trigger tier=2`, or from a rule:
+# Fire it: `streamctl do patch.sub_meteors.trigger tier=2`, or from a rule:
 #   when = "twitch.sub"  do = ["patch.sub_meteors.trigger tier={event.tier}"]
 kind        = "script"
 entry       = "main.lua"

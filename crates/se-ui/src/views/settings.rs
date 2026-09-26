@@ -348,7 +348,9 @@ fn key_card(app: &mut App, ui: &mut Ui, t: &Theme, name: &str, row: Option<&Valu
         },
         |ui| {
             ui.set_width(ui.available_width());
-            ui.add(egui::Label::new(RichText::new(blurb).color(t.text_dim)).wrap());
+            ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                ui.add(egui::Label::new(RichText::new(blurb).color(t.text_dim)).wrap());
+            });
             ui.add_space(spacing::S);
             if row.is_none() {
                 offline(ui, t);
@@ -584,10 +586,10 @@ fn api_details(app: &mut App, ui: &mut Ui, t: &Theme, info: &Value) {
     ui.add_space(spacing::XS);
     ui.horizontal(|ui| {
         if widgets::button_ex(ui, t, Some(icon::COPY), "Copy master key", Kind::Secondary, Size::Small, 0.0, true)
-            .on_hover_text("Runs `stream token` on this computer")
+            .on_hover_text("Runs `streamctl token` on this computer")
             .clicked()
         {
-            match std::process::Command::new("stream").arg("token").output() {
+            match std::process::Command::new("streamctl").arg("token").output() {
                 Ok(o) if o.status.success() => {
                     ui.ctx().copy_text(String::from_utf8_lossy(&o.stdout).trim().to_string());
                     app.m.toast("Master key copied", false);
@@ -883,10 +885,12 @@ fn mods(app: &mut App, ui: &mut Ui, t: &Theme) {
         },
         |ui| {
             ui.set_width(ui.available_width());
-            ui.add(
-                egui::Label::new(RichText::new("Your moderators sign in with Twitch on your web helper and help with chat and songs.").color(t.text_dim))
-                    .wrap(),
-            );
+            ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                ui.add(
+                    egui::Label::new(RichText::new("Your moderators sign in with Twitch on your web helper and help with chat and songs.").color(t.text_dim))
+                        .wrap(),
+                );
+            });
             ui.add_space(spacing::S);
             let mut want = on;
             if widgets::toggle_row(ui, t, "Let mods help from their browser", "Needs the web helper password above.", &mut want).changed() {

@@ -39,7 +39,7 @@ repo="$(cd "$(dirname "$0")/.." && pwd)"
 bin_dir="${BIN_DIR:-$repo/target/release}"
 [[ -x "$bin_dir/stream-engine" ]] || bin_dir="$repo/target/debug"
 engine="$bin_dir/stream-engine"
-cli="$bin_dir/stream"
+cli="$bin_dir/streamctl"
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 2; }
 
 pid=""

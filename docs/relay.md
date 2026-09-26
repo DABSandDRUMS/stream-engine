@@ -24,7 +24,7 @@ without waking the Durable Object.
 Ko-fi payments stay buffered until the engine acknowledges them (`ack`), so a payment that
 arrives while the engine is offline — or while the link drops mid-delivery — is delivered on the
 next connection. The engine dedupes again on `message_id` and emits a `tip` event (same payload
-as `stream sim tip`); private supporters (`is_public: false`) arrive as "Anonymous" with no
+as `streamctl sim tip`); private supporters (`is_public: false`) arrive as "Anonymous" with no
 message. E-mail, shipping address and the verification token never leave the relay.
 
 Only one engine connection is active; a new one replaces the old (close code 4001).
@@ -49,7 +49,7 @@ npm test && npx wrangler deploy
 Then on the streaming machine:
 
 ```sh
-stream do relay.secret.set <the same RELAY_SECRET>   # keyring `relay.secret`; redacted from logs
+streamctl do relay.secret.set <the same RELAY_SECRET>   # keyring `relay.secret`; redacted from logs
 ```
 
 and in the project's `project.toml`:
@@ -79,7 +79,7 @@ npm run typecheck
 ```
 
 Point a dev engine at it with `[relay] url = "ws://127.0.0.1:8787/link"` (plain `ws://` is
-only accepted for localhost) and `stream do relay.secret.set <RELAY_SECRET from .dev.vars>`.
+only accepted for localhost) and `streamctl do relay.secret.set <RELAY_SECRET from .dev.vars>`.
 Simulate a Ko-fi payment:
 
 ```sh

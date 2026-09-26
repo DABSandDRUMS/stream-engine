@@ -721,7 +721,7 @@ Target: within one render frame of analysis latency.
 | MIDI | ALSA raw MIDI/sequencer (§10.2). On this machine: **Behringer X-TOUCH MINI** (MC mode: 8 endless encoders with LED rings, 16 + 2 buttons with LEDs, one **non-motorized** 60 mm fader), **Line 6 FBV Express Mk II** (foot controller: footswitches + expression pedal, USB MIDI; hands-free control while drumming), **Studio 24c MIDI DIN** in/out (for an e-drum module or other MIDI gear) | note events, CC signals; feedback out |
 | OSC | UDP server | events and signals; also part of the external API |
 | Voice | Push-to-talk (deck key) → Whisper via `candle` or `whisper-rs` → fixed command grammar; confirmation for risky commands | `voice.intent` events |
-| Keyboard | In-app shortcuts (§15.6) + global Hyprland keybinds calling the `stream` CLI (§16) | commands |
+| Keyboard | In-app shortcuts (§15.6) + global Hyprland keybinds calling the `streamctl` CLI (§16) | commands |
 | CLI / external API | §2.2 | commands, events |
 
 **Controller pages** (`controllers/*.toml`): the Stream Deck and MIDI controllers have pages/banks (e.g. "show", "mix", "fx", "songs"). The UI's preset pad grid mirrors the current deck page, so the screen and the deck always match.
@@ -994,7 +994,7 @@ One small service on the owner's domain; the only code we run off this machine.
 | `Ctrl+L` | Switch layout |
 | `Ctrl+F` | Search library / chat |
 
-Global (works when the UI isn't focused) through Hyprland binds → `stream` CLI (§16.3): Take, Panic, Clean, next scene, BRB toggle.
+Global (works when the UI isn't focused) through Hyprland binds → `streamctl` CLI (§16.3): Take, Panic, Clean, next scene, BRB toggle.
 
 ### 15.8 Key flows
 - **Go live:**
@@ -1025,7 +1025,7 @@ It then creates a starter project from `project-example` with working templates 
 
 ### 16.1 Packaging and services
 - **PKGBUILD** (Arch) installs:
-  - the binary and CLI
+  - the binary and the `streamctl` CLI (named `stream` until 2026-09-26; renamed because ImageMagick owns `/usr/bin/stream`)
   - the CEF runtime and the OBS plugin
   - a `stream-engine.service` systemd user unit (engine, `Restart=always`, `WatchdogSec`)
   - a `.desktop` entry (UI)
@@ -1048,7 +1048,7 @@ It then creates a starter project from `project-example` with working templates 
 - **Stream palette** (what viewers see) is **separate** from the UI theme. Per project it can be `follow_theme` (tracks the Omarchy theme; lights follow too) or fixed, so changing the desktop theme never changes the stream unless chosen.
 
 ### 16.3 Desktop integration
-- **Keybinds:** add to `~/.config/hypr/bindings.lua` with `o.bind(...)` calling the `stream` CLI (Take, Panic, Clean, BRB, open UI). Check existing binds first (`omarchy menu keybindings --print`) and `hl.unbind` any conflicts.
+- **Keybinds:** add to `~/.config/hypr/bindings.lua` with `o.bind(...)` calling the `streamctl` CLI (Take, Panic, Clean, BRB, open UI). Check existing binds first (`omarchy menu keybindings --print`) and `hl.unbind` any conflicts.
 - **Window rules:** app-ids `stream-engine` (main) and `stream-engine.<panel>` / `stream-engine.program` get rules via Omarchy's `o.window(match, rules)` helper, which wraps Hyprland 0.56.2's Lua `hl.window_rule`.
   - Omarchy's own rules already use the fields we need: `workspace`, `fullscreen`, `float`, `idle_inhibit`.
   - Default placement: main window on **DP-1**; panels/multiview on **DP-2** (WEH 3440×1440 @ 60 Hz); confidence/program window fullscreen on the **TV** (NVIDIA HDMI), falling back to DP-2 when the TV isn't connected.
@@ -1066,7 +1066,7 @@ It then creates a starter project from `project-example` with working templates 
 ## 17. Show operations and reliability
 
 ### 17.1 Preflight
-A checklist panel (and `stream preflight` in the CLI) with pass/warn/fail for:
+A checklist panel (and `streamctl preflight` in the CLI) with pass/warn/fail for:
 - expected devices present: the 4 AVMatrix HDMI cameras and the MSI capture camera with live signal, the USB camera, Studio 24c (16R mix present), DMX USB PRO, Stream Deck, X-TOUCH MINI, FBV Express; later the 16R on UCNET
 - OBS plugin connected and receiving frames on both canvases
 - Twitch token valid and EventSub connected; YouTube key valid and quota remaining
@@ -1159,7 +1159,7 @@ stream-engine/
     se-ui-kit/      # design system: Omarchy theme tokens, typography, custom widgets
     se-ui/          # egui application (pages + tabs, layouts, pop-outs)
     se-app/         # main binary: `daemon` and `ui` subcommands
-    se-cli/         # `stream` CLI (API client)
+    se-cli/         # `streamctl` CLI (API client)
   obs-plugin/       # C OBS module (CMake), GPL-compatible license
   relay/            # Cloudflare Worker + Durable Object (TypeScript): public queue page, Ko-fi webhook, engine link
   web/              # player page, engine.js client for web patches
@@ -1255,7 +1255,7 @@ Each milestone ends with a **live smoke run**: the actual app, real devices, out
 | # | Milestone | Scope | Acceptance |
 |---|---|---|---|
 | **M0** | Skeleton | Workspace, CI (fmt, clippy, tests), `tracing`, master clock, engine/UI process split, Unix-socket API skeleton, systemd unit with watchdog, project loader + hot reload + `toml_edit` writes + schema versioning, keyring | Engine runs as a user service; UI connects, disconnects, and reconnects; project hot-reloads; killing the engine restarts it |
-| **M1** | Core foundation | State tree + metadata + provenance, command API, events (causal ids), signals (LFOs), rules + expr, bindings, presets, modes, runtime-state persistence/restore, event log + sessions, simulator, WebSocket/OSC API with auth, `stream` CLI | `stream fire twitch.cheer bits=1000` → rule fires preset → param changes, observable over the API with a trace; `kill -9` the engine → state restored; session replay reproduces it |
+| **M1** | Core foundation | State tree + metadata + provenance, command API, events (causal ids), signals (LFOs), rules + expr, bindings, presets, modes, runtime-state persistence/restore, event log + sessions, simulator, WebSocket/OSC API with auth, `streamctl` CLI | `streamctl fire twitch.cheer bits=1000` → rule fires preset → param changes, observable over the API with a trace; `kill -9` the engine → state restored; session replay reproduces it |
 | **M2** | Video path + UI v0 | Device registry, V4L2 + MJPEG sources + camera controls, render graph, scenes/nodes, 2 canvases + preview, Take, morph + one shader transition, one effect at each attachment point incl. conditional, dmabuf export + UI import spike, **OBS plugin** (sources, health, fallback, start/stop), idle inhibitor, `se-ui-kit` with Omarchy theme/font, Show mode (status bar, preview/program, scenes, multiview), perf panel, confidence window | 2+ cameras in OBS at steady 60 fps on both canvases; Take with random transitions works; zero CPU readback on output and previews; UI follows `omarchy theme set` live; fallback scene on stale feed |
 | **M3** | Patches + Build mode | Loader, the four visual kinds (`shader`, `particles`, `script`, `web`; `dsp` comes in M12), input contract, Lua sandbox + budgets, WGSL header gen, CEF web source, templates + "New patch", preview/test routing, last-good-version reload, GPU device-loss recovery; Build mode (library, canvas editor, inspector with provenance, rules editor, trace, simulator, console) | Drop or create a patch → it appears and triggers; broken shader/script keeps the old version live; over-budget script suspended; web patch crash doesn't affect output; a scene built in the canvas editor round-trips to TOML with comments intact |
 | **M4** | Audio | PipeWire graph (Studio 24c as driver; realtime scheduling set up), `band` bus from the 24c (16R mix), buses → OBS nodes, ducking (manual/preset first), effect chains + built-in DSP library, live analysis → signals/events, binding shaping incl. auto-normalize, signal scopes, Mix strip | Bass from the band mix drives an effect param with the same feel across quiet/loud songs; kick events fire rules; a preset ducks music; a preset fires a tempo-synced stutter on the music bus with no clicks; PipeWire data loop confirmed `SCHED_FIFO`; no xruns in a 4 h soak |

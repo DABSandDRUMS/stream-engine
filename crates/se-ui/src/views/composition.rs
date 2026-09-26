@@ -10,7 +10,7 @@ use crate::views::{canvas, scene_edit};
 use egui::{Align, Layout, RichText, Vec2};
 use se_proto::{Op, Value};
 use se_ui_kit::canvas as kc;
-use se_ui_kit::theme::{font_medium, font_semibold, mix, radius, spacing, type_scale};
+use se_ui_kit::theme::{font_medium, font_semibold, spacing, type_scale};
 use se_ui_kit::widgets::{self, Kind, Size, icon};
 
 #[derive(Default)]
@@ -199,17 +199,11 @@ fn middle(app: &mut App, ui: &mut egui::Ui, scene: &str, h: f32, now: f64) {
     canvas::toolbar(app, ui);
     ui.add_space(spacing::S);
     if live {
-        egui::Frame::new().fill(mix(t.surface, t.tally_program(), 0.18)).corner_radius(radius::CONTROL).inner_margin(egui::Margin::symmetric(12, 6)).show(
-            ui,
-            |ui| {
-                ui.set_width(ui.available_width());
-                ui.label(RichText::new(format!("{}  This scene is on air: your viewers see every change right away.", icon::LIVE)).color(t.fg));
-            },
-        );
+        widgets::callout(ui, &t, widgets::Tone::Danger, icon::LIVE, "This scene is on air", "Your viewers see every change right away.", None);
         ui.add_space(spacing::S);
     }
     let layers_h = 250.0;
-    let avail = Vec2::new(ui.available_width(), (h - layers_h - 90.0 - if live { 40.0 } else { 0.0 }).max(200.0));
+    let avail = Vec2::new(ui.available_width(), (h - layers_h - 90.0 - if live { 80.0 } else { 0.0 }).max(200.0));
     canvas::editors(app, ui, scene, avail);
     ui.add_space(spacing::M);
     layers(app, ui, scene, now);

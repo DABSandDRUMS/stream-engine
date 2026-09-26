@@ -8,7 +8,7 @@
 #   btn.1–btn.8     top row buttons (LEDs)      btn.9–btn.16   bottom row buttons (LEDs)
 #   layer.a, layer.b                            fader          60 mm fader (not motorized)
 #
-# Two identical units: add `usb = "usb-0000:0a:00.0-2.2"` (see `stream query controllers.midi.ports`).
+# Two identical units: add `usb = "usb-0000:0a:00.0-2.2"` (see `streamctl query controllers.midi.ports`).
 kind = "midi"
 match = "X-TOUCH MINI*"
 profile = "xtouch_mini_mc"
@@ -124,7 +124,7 @@ page = "next"
 
 # The fader is not motorized: pickup = no effect until it passes the current value, so it
 # never jumps; raising it from zero also starts the list (fader_start). Release the override with
-# `stream release lights.cuelist.main.master`.
+# `streamctl release lights.cuelist.main.master`.
 [[binding]]
 target = "lights.cuelist.main.master"
 signal = "midi.xtouch.fader"

@@ -2,7 +2,7 @@
 # the default. Chords: "Ctrl+K", "Ctrl+Shift+Z", "Shift+1", "F5", "Ctrl+.", "hold Ctrl+Esc".
 # A list binds several chords; [] unbinds. Rebinding in Settings rewrites this file and keeps
 # comments. Global binds (Take, Panic, Clean, BRB when the UI isn't focused) live in Hyprland
-# (~/.config/hypr/bindings.lua → `stream` CLI).
+# (~/.config/hypr/bindings.lua → `streamctl` CLI).
 #
 # action            default               what it does
 # palette           Ctrl+K                Command palette

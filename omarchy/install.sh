@@ -6,7 +6,7 @@
 # By default it installs, into ~/.config/omarchy:
 #   plugins/stream-engine.status/         bar widget plugin (installed, not yet placed on the bar)
 #   extensions/omarchy-menu.jsonc         "Stream" menu entries, merged; existing ids are kept
-#   hooks/font-set.d/stream-engine        font-set hook → `stream fire omarchy.font_set`
+#   hooks/font-set.d/stream-engine        font-set hook → `streamctl fire omarchy.font_set`
 # Opt-in:
 #   --bar    place the widget in shell.json's bar layout (right section)
 #   --hypr   copy hypr/stream-engine.lua to ~/.config/hypr/ and require it from bindings.lua

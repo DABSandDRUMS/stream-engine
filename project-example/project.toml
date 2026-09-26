@@ -32,7 +32,7 @@ chat_caps = { "fx.*.amount" = [0.0, 0.6], "lights.*.intensity" = [0.0, 0.5], "li
 
 # Devices this show needs (preflight fails when one is missing). Match on any of:
 # identity (udev by-id/by-path name, globs ok), usb = "vendor:product", serial, port (ID_PATH),
-# name (glob). `stream query devices` lists what is connected and each identity.
+# name (glob). `streamctl query devices` lists what is connected and each identity.
 [devices.expected]
 vc42_1 = { kind = "camera", label = "VC42 HDMI 1 (kit)", identity = "pci-0000:05:00.0-video-index0" }
 vc42_2 = { kind = "camera", label = "VC42 HDMI 2 (wide)", identity = "pci-0000:05:00.0-video-index1" }
@@ -141,7 +141,7 @@ drop = ["music", "program"]   # tracks carrying these roles stay out of clips
 transcribe = ["mic", "band"]  # first role with a track is transcribed for captions
 
 # Voice push-to-talk (§10.1, docs/controllers.md): hold a `ptt` deck key / MIDI button or bind
-# `stream voice.ptt start|stop`. Whisper runs locally; the model downloads once to
+# `streamctl do voice.ptt start|stop`. Whisper runs locally; the model downloads once to
 # ~/.local/share/stream-engine/models/whisper/. Risky intents wait for "confirm".
 [voice]
 enabled = true
@@ -167,7 +167,7 @@ announce_winner = "Congratulations @{user}, you won {title}! ({chance} chance)"
 
 # Song requests (§13, docs/song-requests.md). The queue policy (who may request, limits,
 # blocklists, approval, vote-skip) is edited in the UI (Views → Song requests) and kept in the
-# runtime DB; the YouTube API key lives in the keyring (`stream do youtube.key.set <key>`).
+# runtime DB; the YouTube API key lives in the keyring (`streamctl do youtube.key.set <key>`).
 [songs]
 region = "US"               # country for region-restriction checks and search results
 daily_quota = 10000         # YouTube Data API units per Pacific day (Google default)
@@ -182,12 +182,12 @@ crossfade = "400ms"         # visual crossfade between the player's two slots
 # now_playing = "Now playing: {title} (requested by {user})"
 
 # Cloudflare relay (§14.6, docs/relay.md): public queue page + Ko-fi tips. Outbound only; the
-# shared secret is in the keyring (`stream do relay.secret.set <secret>`).
+# shared secret is in the keyring (`streamctl do relay.secret.set <secret>`).
 [relay]
 # url = "wss://relay.example.com/link"
 # queue_url = "https://relay.example.com/queue"   # default: derived from url
 
-# Text to speech (§14.4): Kokoro-82M on the CPU; download the voices with `stream do tts.model.fetch`.
+# Text to speech (§14.4): Kokoro-82M on the CPU; download the voices with `streamctl do tts.model.fetch`.
 # Alerts speak policy-filtered text after the veto window; first matching voice rule wins.
 [tts]
 enabled = true
@@ -249,7 +249,7 @@ mtc_latency = "0ms"         # receiver latency compensation for MTC out
 name = "16r"
 rate_hz = 50
 writable = ["**"]
-panic_snapshot = "safe"   # store it once: stream mixer.snapshot.store snapshot=safe
+panic_snapshot = "safe"   # store it once: streamctl do mixer.snapshot.store snapshot=safe
 touch_release = true
 
 # mic.talking (0/1) from the vocal mic's input meter, for ducking bindings.
@@ -261,7 +261,7 @@ hold = "600ms"
 
 # Twitch (§11, docs/twitch.md). Paste the Client ID of your app from dev.twitch.tv/console
 # (Category "Other", Client Type "Public", OAuth redirect http://localhost), then authorize in
-# the Twitch panel (or `stream twitch.auth.start`) with the device code. Tokens go to the keyring.
+# the Twitch panel (or `streamctl do twitch.auth.start`) with the device code. Tokens go to the keyring.
 [twitch]
 client_id = ""
 bot = false                   # true: authorize a second account for chat replies

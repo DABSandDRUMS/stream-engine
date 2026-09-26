@@ -5,7 +5,7 @@ events, and named queries; everything it does is a command or an action. This pa
 the built-in views read and send, so a subsystem shows up correctly by publishing these names.
 Missing data never breaks a view: it shows an explanatory empty state.
 
-## Status bar, Performance
+## Top bar, Performance
 
 | Read | Meaning |
 |---|---|
@@ -15,7 +15,7 @@ Missing data never breaks a view: it shows an explanatory empty state.
 | `perf.audio.{xruns,load,dsp_ms,quantum,rate,latency_ms}` | audio |
 | `health.<check>` = `{status: pass\|warn\|fail, detail}`, `project.errors`, `patch.<id>.error` | warnings list |
 
-## Show mode
+## Live page
 
 | Area | Reads | Sends |
 |---|---|---|
@@ -29,11 +29,12 @@ Missing data never breaks a view: it shows an explanatory empty state.
 | Mod | `policy.pending` entries with `kind = approval`, `twitch.automod.queue` = `[{message_id,user,text,category,level,reason}]` (+ count `twitch.automod.held`), query `audit` | `mod.approve|reject {id}`, `mod.automod.approve|deny {message_id}` |
 | Mix | `audio.bus.<b>.{gain (dB, Meta range),mute,ducked}`, signals `audio.<b>.level|peak`; `mixer.16r.{connected,channels}`, `mixer.16r.ch.<n>.{fader,mute,name,db}`, signal `mixer.16r.meter.ch.<n>` | `set` on gain/fader/mute |
 
-## Build mode
+## Scenes page and tools
 
 | Area | Reads | Sends |
 |---|---|---|
-| Library | queries `scenes`, `patches`, `presets`, `rules`, `bindings`, `project.files` (`[{kind,name,path}]`), `fx.*` state | opens views (`ViewId` whose name matches the kind) or `$EDITOR` |
+| Scenes (Layout) | queries `scenes`, `config.scenes`, `sources`, `patches`, `transitions`; `project.read {path: scenes/<s>.toml}` | `project.write {path, text}` (add/remove/reorder layers, layer and scene effects, transition pool/speed, new/duplicate/rename via `views/scene_edit.rs`), `project.write {path, delete}` |
+| Overlays & effects | queries `patches` (params with type/range/options), `patch.templates`; `patch.<id>.{state,error}` | `patch.enable|disable|reload|open|new`, `trigger patch.<id>`, `set_base patch.<id>.<param>` |
 | Canvas editor | `scene.<s>.node.<id>.{rect,crop,radius,z}.<canvas>`, `.visible` | `set` while dragging (live preview), `set_base` on release (→ `scenes/<s>.toml`, comments kept), `release` |
 | Inspector | `Get {pattern, meta: true}` for the selection, `Explain` | `set_base`, `trigger`, `midi.learn {target}` / `midi.learn.cancel` (state `controllers.learn.{active,target}`, events `midi.learned`, `midi.learn.timeout`) |
 | Modulate | query `bindings` (`file`), `config.bindings`, signals | `project.write` → `bindings/<name>.toml` |
@@ -46,7 +47,7 @@ Missing data never breaks a view: it shows an explanatory empty state.
 |---|---|
 | `twitch.auth.{status (none\|pending\|authorized\|expired\|error), login, user_code, verification_uri, expires_in_s, error, missing_scopes}` and the same under `twitch.auth.bot.*` | `twitch.auth.start|cancel|logout {account: broadcaster\|bot}` |
 | query `secrets.status` → `[{name,label,set}]` | `secrets.set {name,value}`, `secrets.delete {name}` (keyring; event `secrets.changed {name}`) |
-| query `api.info` → `{socket,http,ws,osc,token_set,devices:[{name,scope}]}` (the token itself is never served; the UI copies it via `stream token`) | `api.token.rotate`, `api.device.add {name,token,scope}`, `api.device.remove {name}` |
+| query `api.info` → `{socket,http,ws,osc,token_set,devices:[{name,scope}]}` (the token itself is never served; the UI copies it via `streamctl token`) | `api.token.rotate`, `api.device.add {name,token,scope}`, `api.device.remove {name}` |
 | layouts (`layouts/*.toml`, via `project.read`) | Screens: switch layout; "Show the program on the TV" writes `[confidence] enabled` with `project.write {path: layouts/<name>.toml, text}` |
 | Devices: queries `devices`, `sources`; `source.<name>.{signal,capturing,fps,dropped,cpu,position,duration,paused}`, `source.<name>.ctrl.<c>`; `health.{devices,sources}`, `mixer.16r.connected`; camera pictures from the atlas (`render.atlas.layout`) | `devices.rescan`, `devices.rename {id,label}`, `devices.expect {identity}`, `devices.forget {id}`, `source.assign {source,identity}`, `source.reopen|restart|save_controls {source}`, `set`/`release` on `source.<name>.ctrl.<c>` and `source.<name>.paused` |
 | Backups: query `retention`, `health.{backup,recordings}`, `retention.recordings.{used_gb,budget_gb}` | `retention.backup_now|scan|prune_sessions|prune_recordings` |
@@ -60,6 +61,6 @@ Missing data never breaks a view: it shows an explanatory empty state.
 
 ## Driving the UI from outside
 
-Events the running UI follows (e.g. `stream fire ui.layout name=build`): `ui.layout {name}`,
+Events the running UI follows (e.g. `streamctl fire ui.layout name=build`): `ui.layout {name}`,
 `ui.mode {mode: show|build}`, `ui.open {view}` (panel/view id: `performance`, `settings`,
 `console`, …), `omarchy.font_set {font}`.

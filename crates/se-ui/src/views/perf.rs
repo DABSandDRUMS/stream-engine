@@ -16,7 +16,7 @@ const HIST: usize = 300;
 /// Engine GPU budget per frame (ms).
 const GPU_BUDGET: f64 = 8.0;
 /// Widest the page gets on very large screens.
-const MAX_WIDTH: f32 = 2400.0;
+const MAX_WIDTH: f32 = f32::INFINITY;
 
 #[derive(Default)]
 pub struct PerfState {
@@ -166,13 +166,15 @@ fn summary(app: &App, ui: &mut Ui, t: &Theme) {
     let fails = warns.iter().filter(|w| w.fail && !w.setup).count();
     let checks = warns.iter().filter(|w| !w.fail && !w.setup).count();
     let setup = warns.iter().filter(|w| w.setup).count();
-    let head = if fails > 0 {
-        if fails == 1 { "1 problem needs a look".to_string() } else { format!("{fails} problems need a look") }
-    } else if checks > 0 {
-        if checks == 1 { "1 thing to check".to_string() } else { format!("{checks} things to check") }
-    } else {
-        "Stream Engine is running smoothly".to_string()
-    };
+    // same words as the top bar: "1 problem · 2 things to check"
+    let mut parts = Vec::new();
+    if fails > 0 {
+        parts.push(if fails == 1 { "1 problem".to_string() } else { format!("{fails} problems") });
+    }
+    if checks > 0 {
+        parts.push(if checks == 1 { "1 thing to check".to_string() } else { format!("{checks} things to check") });
+    }
+    let head = if parts.is_empty() { "Stream Engine is running smoothly".to_string() } else { parts.join(" · ") };
     widgets::panel(ui, t, |ui| {
         ui.set_width(ui.available_width());
         ui.label(RichText::new(head).font(font_semibold(type_scale::HEADING)).color(t.fg));
@@ -226,24 +228,28 @@ fn summary(app: &App, ui: &mut Ui, t: &Theme) {
 pub fn ui(app: &mut App, ui: &mut Ui) {
     let t = app.t.clone();
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        ui.set_max_width(ui.available_width().min(MAX_WIDTH));
-        summary(app, ui, &t);
-        ui.add_space(spacing::L);
-        let gaps = ui.spacing().item_spacing;
-        ui.spacing_mut().item_spacing.x = spacing::L;
-        let n = if ui.available_width() >= 2200.0 { 3 } else { 2 };
-        ui.columns(n, |cols| {
-            for c in cols.iter_mut() {
-                c.spacing_mut().item_spacing = gaps;
-            }
-            render(app, &mut cols[0], &t);
-            audio(app, &mut cols[1], &t);
-            obs(app, &mut cols[1], &t);
-            ui_card(app, &mut cols[if n == 3 { 2 } else { 0 }], &t);
+        // one width for the summary and the cards below it
+        let w = ui.available_width().min(MAX_WIDTH);
+        ui.allocate_ui_with_layout(Vec2::new(w, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+            ui.set_width(w);
+            summary(app, ui, &t);
+            ui.add_space(spacing::L);
+            let gaps = ui.spacing().item_spacing;
+            ui.spacing_mut().item_spacing.x = spacing::L;
+            let n = if ui.available_width() >= 2200.0 { 3 } else { 2 };
+            ui.columns(n, |cols| {
+                for c in cols.iter_mut() {
+                    c.spacing_mut().item_spacing = gaps;
+                }
+                render(app, &mut cols[0], &t);
+                audio(app, &mut cols[1], &t);
+                obs(app, &mut cols[1], &t);
+                ui_card(app, &mut cols[if n == 3 { 2 } else { 0 }], &t);
+            });
+            ui.spacing_mut().item_spacing = gaps;
+            other(app, ui, &t);
+            ui.add_space(spacing::XL);
         });
-        ui.spacing_mut().item_spacing = gaps;
-        other(app, ui, &t);
-        ui.add_space(spacing::XL);
     });
 }
 

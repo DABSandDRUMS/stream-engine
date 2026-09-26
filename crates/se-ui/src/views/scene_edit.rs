@@ -17,7 +17,7 @@ pub const EFFECTS: &[(&str, &str)] = &[
     ("vignette", "Vignette"),
     ("zoom_pulse", "Zoom pulse"),
     ("chroma_key", "Green screen"),
-    ("lut", "Color look (LUT)"),
+    ("lut", "Color look"),
 ];
 
 /// Friendly name of an effect id (`patch.aurora` → `Aurora`).

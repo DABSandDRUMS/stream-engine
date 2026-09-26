@@ -1,4 +1,4 @@
-//! `stream` — command-line client for the engine (§2.2). Anything clickable is scriptable:
+//! `streamctl` — command-line client for the engine (§2.2). Anything clickable is scriptable:
 //! Hyprland keybinds, Stream Deck fallbacks, and scripts all go through here.
 
 use anyhow::{Result, anyhow, bail};
@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 #[derive(Parser)]
-#[command(name = "stream", version, about = "Control the stream engine")]
+#[command(name = "streamctl", version, about = "Control the stream engine")]
 struct Cli {
     /// Engine socket (default $XDG_RUNTIME_DIR/stream-engine/engine.sock)
     #[arg(long, global = true)]
@@ -27,7 +27,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Fire an event: `stream fire twitch.cheer bits=1000 message='hi'`
+    /// Fire an event: `streamctl fire twitch.cheer bits=1000 message='hi'`
     Fire {
         event: String,
         args: Vec<String>,
@@ -35,12 +35,12 @@ enum Cmd {
         #[arg(long = "as")]
         user: Option<String>,
     },
-    /// Run a simulator preset: `stream sim gift_bomb count=50`
+    /// Run a simulator preset: `streamctl sim gift_bomb count=50`
     Sim {
         preset: String,
         args: Vec<String>,
     },
-    /// Any one-line command: `stream do "preset.fire hype"`
+    /// Any one-line command: `streamctl do "preset.fire hype"`
     Do {
         text: Vec<String>,
     },
@@ -80,7 +80,7 @@ enum Cmd {
     Marker {
         label: Option<String>,
     },
-    /// Read values: `stream get 'fx.*'`
+    /// Read values: `streamctl get 'fx.*'`
     Get {
         pattern: String,
         #[arg(long)]
@@ -94,12 +94,12 @@ enum Cmd {
     Trace {
         id: String,
     },
-    /// Named query: `stream query presets`
+    /// Named query: `streamctl query presets`
     Query {
         name: String,
         args: Option<String>,
     },
-    /// Stream events/changes: `stream watch --events 'twitch.*' --state 'show.*'`.
+    /// Stream events/changes: `streamctl watch --events 'twitch.*' --state 'show.*'`.
     /// With `--json`, one object per line: `{"event":{…}}`, `{"state":{"addr":value,…}}`,
     /// `{"signals":{"name":x,…}}`, `{"log":{"level","target","msg","ts"}}`. `--events=` (empty
     /// pattern) subscribes to no events.
@@ -146,7 +146,7 @@ fn print_value(v: &Value, json: bool) {
     }
 }
 
-/// One `stream --json watch` output line (see `Cmd::Watch`); `None` for messages watch ignores.
+/// One `streamctl --json watch` output line (see `Cmd::Watch`); `None` for messages watch ignores.
 fn watch_json(msg: &ServerMsg) -> Result<Option<serde_json::Value>> {
     use serde_json::{Map, json, to_value};
     Ok(Some(match msg {

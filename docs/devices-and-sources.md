@@ -19,7 +19,7 @@ Every device gets an identity that survives reboots and replugging:
 The AVMatrix VC42 exposes one PCI device with four capture nodes; its inputs are told apart by
 PCI path + input index, so `pci-0000:05:00.0-video-index0` is always HDMI 1.
 
-`stream query devices` prints the full registry: identities, device nodes, USB ids, and for
+`streamctl query devices` prints the full registry: identities, device nodes, USB ids, and for
 cameras every format × size × frame rate (DV timings for HDMI inputs), the current format,
 the HDMI input status, and the control names.
 

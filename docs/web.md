@@ -106,8 +106,8 @@ size = [1280, 720]
 | `web.<slot>.crashes` | renderer crashes since the engine started |
 | `web.<slot>.status` | `starting · loading · running · error · crashed · restarting · paused · unavailable` |
 | `web.<slot>.error` | same text as `patch.<id>.error` (also for `youtube`) |
-| query `web` (`stream query web`) | `{host: {state, pid, cef, chromium, gpu, installed, exe, restarts, health}, sources: [{slot, url (token redacted), size, frame_size, fps, target_fps, status, error, crashes, frames, latency_ms, audio_samples}]}` |
-| `web.reload [slot]` | reload one source (or all), bypassing the cache — `stream do web.reload patch.aurora` |
+| query `web` (`streamctl query web`) | `{host: {state, pid, cef, chromium, gpu, installed, exe, restarts, health}, sources: [{slot, url (token redacted), size, frame_size, fps, target_fps, status, error, crashes, frames, latency_ms, audio_samples}]}` |
+| `web.reload [slot]` | reload one source (or all), bypassing the cache — `streamctl do web.reload patch.aurora` |
 | `web.login [url]` | open the sign-in window (below) |
 
 Page `console.error` messages appear in the engine log as `web: <slot>: console: …` (at most 20
@@ -126,7 +126,7 @@ YouTube Premium to remove ads.
 Sign in once:
 
 ```sh
-stream do web.login                      # or: stream do web.login url=https://www.youtube.com/
+streamctl do web.login                      # or: streamctl do web.login url=https://www.youtube.com/
 ```
 
 This stops the off-screen host (web sources keep their last frame, status `paused`), and opens a

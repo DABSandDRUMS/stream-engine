@@ -21,7 +21,7 @@ Build deps: obs-studio 32 headers (libobs + obs-frontend-api CMake configs), sim
 
 ## One-time OBS setup (the owner does this once)
 
-Either run `stream do obs.setup` while OBS and the engine are running (it only **adds**
+Either run `streamctl do obs.setup` while OBS and the engine are running (it only **adds**
 `stream-engine: wide` to the main canvas's current program scene and `stream-engine: tall` to the
 current scene of the `Vertical` canvas, scaled to fill; it never removes, reorders, or changes
 anything else), or click it yourself:
@@ -39,7 +39,7 @@ anything else), or click it yourself:
    enable the tracks under Recording, and assign sources to tracks in **Advanced Audio Properties**.
    The plugin reports which sources feed which recording track (session meta `recordings[].tracks`).
 
-Check: `stream preflight` → `obs: pass — OBS 32.2.2, plugin 0.1.0: receiving wide + tall`.
+Check: `streamctl preflight` → `obs: pass — OBS 32.2.2, plugin 0.1.0: receiving wide + tall`.
 
 ## Fallback scene (§22)
 
@@ -51,7 +51,7 @@ fallback scene — main canvas through the frontend (studio mode aware), other c
 canvas switches back, unless the operator changed scenes in the meantime (then nothing is touched).
 The scene `Technical Difficulties` (dark background + text) is created in a canvas **only if it does
 not exist**; customize it freely — the plugin only looks it up by name. Manual control:
-`stream do obs.fallback.on|off`; `stream do obs.fallback.setup` creates missing fallback scenes
+`streamctl do obs.fallback.on|off`; `streamctl do obs.fallback.setup` creates missing fallback scenes
 without switching. The last engine config is persisted in
 `~/.config/obs-studio/plugin_config/stream-engine/config.json`, so the fallback works while the
 engine is down.

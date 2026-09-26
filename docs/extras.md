@@ -18,7 +18,7 @@ The UI opens **Setup wizard** by itself while `project.toml` lacks `[setup] done
    (`relay.secret.set`, with a generator for `npx wrangler secret put RELAY_SECRET`), remote mod
    switch, backup status.
 5. **Finish** — `setup.complete` writes `[setup] done = true` (comments preserved). *Skip setup*
-   does the same; `stream do setup.reopen` brings the wizard back.
+   does the same; `streamctl do setup.reopen` brings the wizard back.
 
 `stream-engine new <dir>` creates the starter project the wizard configures.
 
@@ -57,7 +57,7 @@ raids, tips, follows, and top chatters.
 Local TTS on the CPU (ONNX Runtime) with phonemes from `espeak-ng` run as a separate process.
 Audio goes to the `tts` audio slot → `tts` bus (ducks music per `[audio.duck]`).
 
-* Model: `stream do tts.model.fetch` (or the wizard) downloads the checksum-verified model and
+* Model: `streamctl do tts.model.fetch` (or the wizard) downloads the checksum-verified model and
   voices into `~/.local/share/stream-engine/models/kokoro/`; the packaged script is
   `/usr/share/stream-engine/scripts/fetch-tts-model.sh`.
 * Alerts call `tts.say {text, id, kind, user, amount, tier, voice?}` **after** the veto window
@@ -94,7 +94,7 @@ Local test with a fake Twitch: `cd relay && npx wrangler dev --port 8787 --var
 TWITCH_ID_BASE:http://127.0.0.1:8799 --var TWITCH_API_BASE:http://127.0.0.1:8799`, a dev engine
 linked to it (`[relay] url = "ws://127.0.0.1:8787/link"`), then
 `node test/e2e/mod-e2e.mjs --client-id <twitch.client_id> --broadcaster-id <twitch.broadcaster.id>
---stream "stream --socket …"`.
+--stream "streamctl --socket …"`.
 
 ## Backups and retention
 

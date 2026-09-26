@@ -3,8 +3,8 @@
 # The FBV sends whatever its internal FBV-Control preset says (each control on channel 1 of one
 # of its four USB MIDI ports; all four are read). The numbers below follow Line 6's own worked
 # example (footswitch A–D → CC 1–4, pedal → CC 7). If your unit was programmed differently:
-#   * watch `stream query controllers.midi.monitor '{"device":"fbv"}'` while stomping, then edit `cc`, or
-#   * `stream do "midi.learn preset.hype"` and stomp the switch: the switch is declared here and mapped.
+#   * watch `streamctl query controllers.midi.monitor '{"device":"fbv"}'` while stomping, then edit `cc`, or
+#   * `streamctl do "midi.learn preset.hype"` and stomp the switch: the switch is declared here and mapped.
 # Undeclared messages still arrive as signals `midi.fbv.cc.<n>` / events `midi.fbv.note.<n>`.
 kind = "midi"
 match = "FBV Express Mk II*"

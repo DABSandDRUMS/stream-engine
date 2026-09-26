@@ -102,7 +102,7 @@ impl Inner {
     }
 
     fn health(&self) -> (&'static str, String) {
-        let fetch_hint = format!("run `stream do tts.model.fetch` (or scripts/fetch-tts-model.sh --dir {})", self.cfg.model_dir.display());
+        let fetch_hint = format!("run `streamctl do tts.model.fetch` (or scripts/fetch-tts-model.sh --dir {})", self.cfg.model_dir.display());
         if !self.cfg.enabled {
             return ("warn", "disabled in project.toml ([tts] enabled = false)".into());
         }

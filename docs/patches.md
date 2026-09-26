@@ -3,13 +3,13 @@
 A **patch** is a folder in `project/patches/<id>/` with a `patch.toml` manifest and an entry
 file. Save a file and the engine reloads the patch in place — no rebuild, no restart. If the
 new version is broken, **the last good version keeps running** and the error (with its file
-and line) shows in the UI, in `stream get patch.<id>.error`, and in the log.
+and line) shows in the UI, in `streamctl get patch.<id>.error`, and in the log.
 
 Every patch gets the same addresses:
 
 | Address | What |
 |---|---|
-| `patch.<id>` | the trigger (fire with `stream do patch.<id>.trigger tier=2`, rules, presets, deck keys, chat) |
+| `patch.<id>` | the trigger (fire with `streamctl do patch.<id>.trigger tier=2`, rules, presets, deck keys, chat) |
 | `patch.<id>.env` / `.active` | trigger envelope 0–1 (attack/hold/release from the manifest) and whether it is running |
 | `patch.<id>.<param>` | every manifest param, typed from its `Meta` (the UI generates controls for them) |
 | `patch.<id>.state` | `loaded` · `error` · `suspended` · `disabled` |
@@ -19,11 +19,11 @@ Every patch gets the same addresses:
 ## 1. Create a patch
 
 - **UI:** *Views → Patches → New patch* (id, kind, template, "open in editor").
-- **CLI:** `stream do patch.new id=my_fx kind=script template=default open=true`
+- **CLI:** `streamctl do patch.new id=my_fx kind=script template=default open=true`
 - **By hand:** make `patches/my_fx/` with a `patch.toml` and the entry file — it appears as soon as `patch.toml` exists.
 
 Templates live in `<share>/templates/patches/<kind>/<template>/` (list them with
-`stream query patch.templates`): `script/default`, `script/burst`, `shader/default` (source),
+`streamctl query patch.templates`): `script/default`, `script/burst`, `shader/default` (source),
 `shader/effect`, `shader/transition`, `particles/default`, `web/default`, `dsp/default`.
 Text files may use `{{id}}` and `{{label}}` placeholders.
 
@@ -33,7 +33,7 @@ is `editor=` from the action, else `$STREAM_ENGINE_EDITOR`, `omarchy-launch-edit
 then `xdg-open`.
 
 Then (§6.5): route it (scene node `{ src = "patch.<id>" }`, overlay layer, effect, or
-transition), fire it from the simulator (`stream fire twitch.sub tier=2` with a rule), and bind
+transition), fire it from the simulator (`streamctl fire twitch.sub tier=2` with a rule), and bind
 params to signals.
 
 ## 2. Kinds and layers
@@ -151,7 +151,7 @@ end
 | `log.info(...)`, `log.warn(...)`, `log.error(...)`, `print(...)` | to the engine log (target `patch.<id>`) |
 | `require("module")` | load `module.lua` (dots = folders) from the patch folder, text only |
 
-Commands issued inside an event handler carry that event as their cause, so `stream trace`
+Commands issued inside an event handler carry that event as their cause, so `streamctl trace`
 shows the chain.
 
 ### Drawing (`draw.*`)
@@ -280,7 +280,7 @@ params in alphabetical order, each `slots()` floats (bool 0/1, enum = option ind
 
 ## 10. Troubleshooting
 
-- `stream query patches` — every patch with state, error (`error_file`, `error_line`), whether a previous version is still live, params with current values, and script stats.
-- `stream get 'patch.<id>.**'` — its addresses; `stream trace <id>` — what a trigger caused.
-- `health.patches` in `stream preflight` lists patches in `error`/`suspended`.
+- `streamctl query patches` — every patch with state, error (`error_file`, `error_line`), whether a previous version is still live, params with current values, and script stats.
+- `streamctl get 'patch.<id>.**'` — its addresses; `streamctl trace <id>` — what a trigger caused.
+- `health.patches` in `streamctl preflight` lists patches in `error`/`suspended`.
 - A disabled patch stays disabled across restarts (`patch.enable <id>`).

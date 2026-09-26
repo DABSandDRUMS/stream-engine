@@ -15,7 +15,7 @@ tts.say ─► normalize ─► queue ─► worker thread: espeak-ng ─► mis
 ## Setup
 
 1. `espeak-ng` (installed: 1.52). `health.tts` fails with a hint when it is missing.
-2. The model: `stream do tts.model.fetch`, the *Fetch / verify model* button in the TTS view, the
+2. The model: `streamctl do tts.model.fetch`, the *Fetch / verify model* button in the TTS view, the
    setup wizard, or directly:
 
    ```sh

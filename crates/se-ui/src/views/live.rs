@@ -46,8 +46,10 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         let body_h = ui.available_height();
         egui::ScrollArea::vertical().id_salt("live").auto_shrink([false, false]).show(ui, |ui| {
             ui.set_max_width(ui.available_width());
+            let top = ui.cursor().top();
             setup_banner(app, ui);
-            let geo = Geometry::new(ui.available_width(), body_h);
+            // height left for the page once the banner (if any) is drawn
+            let geo = Geometry::new(ui.available_width(), body_h - (ui.cursor().top() - top));
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = geo.gap;
                 ui.allocate_ui_with_layout(Vec2::new(geo.air_w, 0.0), Layout::top_down(Align::Min), |ui| on_air(app, ui, &geo));
@@ -93,13 +95,16 @@ impl Geometry {
     fn new(w: f32, body_h: f32) -> Geometry {
         let gap = spacing::L;
         let cap_w = (body_h * 0.44).clamp(240.0, 900.0) * 16.0 / 9.0;
-        let next_w = (w * 0.3).clamp(300.0, 520.0);
+        // Up next is always clearly smaller than On air
+        let next_w = (w * 0.3).clamp(300.0, 520.0).min((cap_w * 0.62).max(300.0));
         let rest = w - cap_w - next_w - 2.0 * gap;
         if rest >= 440.0 {
             return Geometry { gap, air_w: cap_w, next_w, fx_w: rest };
         }
+        // Narrower windows: the quick effects go under the scenes (the page scrolls; the
+        // Emergency stop and Switch stay in view).
         let air_w = (w - next_w - gap).min(cap_w);
-        let next_w = (w - air_w - gap).min(640.0);
+        let next_w = (w - air_w - gap).min(640.0).min((air_w * 0.62).max(300.0));
         Geometry { gap, air_w, next_w, fx_w: 0.0 }
     }
 }
@@ -117,24 +122,10 @@ fn setup_banner(app: &mut App, ui: &mut egui::Ui) {
         return;
     }
     let t = app.t.clone();
-    egui::Frame::new()
-        .fill(mix(t.surface, t.accent, 0.12))
-        .stroke(Stroke::new(1.0, mix(t.border, t.accent, 0.45)))
-        .corner_radius(radius::CARD)
-        .inner_margin(egui::Margin::symmetric(18, 12))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(icon::ROCKET).size(18.0).color(t.accent));
-                ui.label(RichText::new("Finish setting up").font(font_semibold(type_scale::BODY + 1.0)).color(t.fg));
-                ui.label(RichText::new(format!("{left} step{} left before your first stream.", if left == 1 { "" } else { "s" })).color(t.text_dim));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if widgets::button(ui, &t, "Continue setup", Kind::Primary).clicked() {
-                        app.open_view(ViewId::Setup);
-                    }
-                });
-            });
-        });
+    let body = format!("{left} step{} left before your first stream.", if left == 1 { "" } else { "s" });
+    if widgets::callout(ui, &t, widgets::Tone::Info, icon::ROCKET, "Finish setting up", &body, Some("Continue setup")) {
+        app.open_view(ViewId::Setup);
+    }
     ui.add_space(spacing::L);
 }
 
@@ -195,11 +186,20 @@ fn up_next(app: &mut App, ui: &mut egui::Ui, next_w: f32) {
     ui.add_space(spacing::S);
     let h = next_w * 9.0 / 16.0;
     let pv = app.preview_hz();
-    monitor::monitor(app, ui, Canvas::Preview, &preview, "UP NEXT", Vec2::new(next_w, h), LedState::Armed, pv);
+    let same = preview.is_empty() || preview == program;
+    if same {
+        // nothing picked: an empty frame that says what to do
+        let (r, _) = ui.allocate_exact_size(Vec2::new(next_w, h), Sense::hover());
+        let p = ui.painter();
+        p.rect(r, CornerRadius::same(radius::TILE), t.inset, Stroke::new(1.0, t.border), StrokeKind::Inside);
+        p.text(r.center() - Vec2::new(0.0, 12.0), Align2::CENTER_CENTER, icon::LAYERS, se_ui_kit::theme::font(22.0), t.text_faint);
+        p.text(r.center() + Vec2::new(0.0, 16.0), Align2::CENTER_CENTER, "Nothing picked yet: click a scene below", font_medium(type_scale::BODY), t.text_dim);
+    } else {
+        monitor::monitor(app, ui, Canvas::Preview, &preview, "UP NEXT", Vec2::new(next_w, h), LedState::Armed, pv);
+    }
     ui.add_space(spacing::M);
     transition_picker(app, ui, next_w);
     ui.add_space(spacing::S);
-    let same = preview.is_empty() || preview == program;
     let label = if same { "Choose a scene below".to_string() } else { format!("Switch to {}", nice(&preview)) };
     let busy = app.m.b("show.transition.active");
     let r = widgets::button_ex(ui, &t, Some(icon::PLAY), &label, Kind::Primary, Size::Large, next_w, !same && !busy);
@@ -261,12 +261,34 @@ fn pool_names(app: &App, scene: &str) -> Vec<String> {
 }
 
 /// `zoom_blur` → `Zoom blur`.
+/// Display name from an id or label: `zoom_blur` → `Zoom blur`, `brb` → `BRB`,
+/// `youtube` → `YouTube`. Acronyms and brand names keep their usual spelling everywhere.
 pub fn nice(s: &str) -> String {
-    let mut c = s.replace(['_', '-'], " ");
-    if let Some(f) = c.get_mut(0..1) {
-        f.make_ascii_uppercase();
-    }
-    c
+    const ACRONYMS: &[&str] =
+        &["brb", "obs", "hdmi", "dmx", "tts", "rgb", "lut", "bpm", "fx", "ui", "usb", "dj", "vhs", "ptt", "tv", "fps", "sfx", "eq", "msi", "led", "uv"];
+    const BRANDS: &[(&str, &str)] =
+        &[("youtube", "YouTube"), ("tiktok", "TikTok"), ("twitch", "Twitch"), ("kofi", "Ko-fi"), ("xtouch", "X-TOUCH"), ("streamdeck", "Stream Deck")];
+    s.replace(['_', '-'], " ")
+        .split_whitespace()
+        .enumerate()
+        .map(|(i, w)| {
+            let l = w.to_lowercase();
+            if let Some((_, b)) = BRANDS.iter().find(|(k, _)| *k == l) {
+                return b.to_string();
+            }
+            if ACRONYMS.contains(&l.as_str()) {
+                return l.to_uppercase();
+            }
+            let mut w = w.to_string();
+            if i == 0
+                && let Some(f) = w.get_mut(0..1)
+            {
+                f.make_ascii_uppercase();
+            }
+            w
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 // ---- scenes ------------------------------------------------------------------------------------
@@ -321,7 +343,7 @@ fn scenes(app: &mut App, ui: &mut egui::Ui) {
         return;
     }
     let gap = 12.0;
-    let tile_w = 260.0_f32.min((ui.available_width() - gap * (list.len() as f32 - 1.0)) / list.len() as f32).max(140.0);
+    let tile_w = 300.0_f32.min((ui.available_width() - gap * (list.len() as f32 - 1.0)) / list.len() as f32).max(140.0);
     let thumb_h = tile_w * 9.0 / 16.0;
     egui::ScrollArea::horizontal().id_salt("scenes").show(ui, |ui| {
         ui.horizontal(|ui| {
@@ -381,7 +403,9 @@ fn sources(app: &mut App, ui: &mut egui::Ui) {
         ui.label(RichText::new("Everything the engine can put on screen").color(t.text_dim));
     });
     ui.add_space(spacing::S);
-    let h = (ui.available_width() / 14.0).clamp(96.0, 150.0);
+    // tiles share the width (16:9), within sensible heights
+    let n = monitor::atlas_tiles(app).len().max(1) as f32;
+    let h = ((ui.available_width() - (n - 1.0) * 8.0) / n * 9.0 / 16.0).clamp(96.0, 220.0);
     monitor::multiview(app, ui, h);
 }
 
@@ -414,8 +438,12 @@ fn rail_panel(app: &mut App, ui: &mut egui::Ui) {
 fn sound_bar(app: &mut App, ui: &mut egui::Ui) {
     let t = app.t.clone();
     let buses = mix::buses(app);
-    ui.horizontal_centered(|ui| {
+    // vertically centre the row in the dock
+    let chip_h = 66.0;
+    ui.add_space(((ui.available_height() - chip_h) / 2.0).max(0.0));
+    ui.horizontal_top(|ui| {
         ui.vertical(|ui| {
+            ui.set_height(chip_h);
             ui.label(RichText::new("Sound").font(font_semibold(type_scale::LARGE)).color(t.fg));
             if widgets::button_ex(ui, &t, Some(icon::SLIDERS), "Mixer", Kind::Secondary, Size::Small, 0.0, true).on_hover_text("Open the full mixer").clicked()
             {
@@ -428,8 +456,8 @@ fn sound_bar(app: &mut App, ui: &mut egui::Ui) {
             return;
         }
         let gap = 10.0;
-        let w = ((ui.available_width() - gap * (buses.len() as f32 - 1.0)) / buses.len() as f32).clamp(120.0, 240.0);
-        egui::ScrollArea::horizontal().id_salt("sound").show(ui, |ui| {
+        let w = ((ui.available_width() - gap * (buses.len() as f32 - 1.0)) / buses.len() as f32).clamp(120.0, 360.0);
+        egui::ScrollArea::horizontal().id_salt("sound").max_height(chip_h).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = gap;
                 for b in &buses {

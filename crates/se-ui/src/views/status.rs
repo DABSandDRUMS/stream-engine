@@ -294,7 +294,9 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         let checks = warns.iter().filter(|w| !w.fail && !w.setup).count();
         let setup = warns.iter().filter(|w| w.setup).count();
         let plural = |n: usize, one: &str, many: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {many}") };
-        let (text, c) = if fails > 0 {
+        let (text, c) = if fails > 0 && checks > 0 {
+            (format!("{} · {}", plural(fails, "problem", "problems"), plural(checks, "thing to check", "things to check")), t.bright_red)
+        } else if fails > 0 {
             (plural(fails, "problem", "problems"), t.bright_red)
         } else if checks > 0 {
             (plural(checks, "thing to check", "things to check"), t.yellow)

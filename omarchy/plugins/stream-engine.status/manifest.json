@@ -18,7 +18,7 @@
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
-      "streamCommand": "stream",
+      "streamCommand": "streamctl",
       "socket": "",
       "openCommand": "stream-engine-launch-or-focus",
       "preflightIntervalSec": 30,
@@ -26,7 +26,7 @@
       "hideWhenOffline": false
     },
     "schema": [
-      { "key": "streamCommand", "type": "string", "label": "stream CLI", "defaultValue": "stream", "description": "Command (or absolute path) of the stream CLI." },
+      { "key": "streamCommand", "type": "string", "label": "streamctl CLI", "defaultValue": "streamctl", "description": "Command (or absolute path) of the streamctl CLI." },
       { "key": "socket", "type": "path", "label": "Engine socket", "defaultValue": "", "description": "Empty = the engine's default ($XDG_RUNTIME_DIR/stream-engine/engine.sock)." },
       { "key": "openCommand", "type": "string", "label": "Open UI command", "defaultValue": "stream-engine-launch-or-focus", "description": "Runs on left click; `--program` is appended for the program window." },
       { "key": "preflightIntervalSec", "type": "integer", "label": "Preflight refresh (seconds)", "min": 5, "max": 600, "step": 5, "defaultValue": 30 },

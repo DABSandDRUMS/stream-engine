@@ -518,7 +518,7 @@ impl Songs {
         let day = self.ledger.day(now);
         let reset = quota::next_reset(now).to_zoned(jiff::tz::TimeZone::system()).strftime("%H:%M").to_string();
         let (st, detail) = match (&self.key, &self.last_api_error) {
-            (None, _) => ("warn", "no YouTube API key — `stream do youtube.key.set <key>`; requests use the library only".to_string()),
+            (None, _) => ("warn", "no YouTube API key — `streamctl do youtube.key.set <key>`; requests use the library only".to_string()),
             (_, Some(e @ (ApiError::KeyInvalid(_) | ApiError::NotEnabled(_)))) => ("fail", e.to_string()),
             _ => match self.ledger.mode(now) {
                 Mode::Full => ("pass", format!("API key set; {}/{} units used today", day.used, self.ledger.limit)),

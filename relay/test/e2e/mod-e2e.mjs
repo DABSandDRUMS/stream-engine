@@ -2,10 +2,10 @@
 // End-to-end check of remote mod access: a fake Twitch OAuth provider + `wrangler dev` + a
 // running dev engine linked to it. Drives the browser flow (login → Twitch authorize →
 // callback fragment → session), then console calls, and verifies the effect in the engine
-// through the `stream` CLI.
+// through the `streamctl` CLI.
 //
 //   node test/e2e/mod-e2e.mjs --relay http://127.0.0.1:8787 --client-id fake-client \
-//        --broadcaster-id 1000 --stream "stream --socket /tmp/se-extras.sock"
+//        --broadcaster-id 1000 --stream "streamctl --socket /tmp/se-extras.sock"
 //
 // wrangler dev must run with TWITCH_ID_BASE/TWITCH_API_BASE pointing at the fake provider
 // (default http://127.0.0.1:8799), e.g.
@@ -20,7 +20,7 @@ const { values: a } = parseArgs({
     "fake-port": { type: "string", default: "8799" },
     "client-id": { type: "string" },
     "broadcaster-id": { type: "string" },
-    stream: { type: "string", default: "stream" },
+    stream: { type: "string", default: "streamctl" },
   },
 });
 if (!a["client-id"] || !a["broadcaster-id"]) {

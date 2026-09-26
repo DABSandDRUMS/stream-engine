@@ -25,8 +25,8 @@ Optional but recommended: an Euler Stream API key (free "Community" account) rai
 Store it in the system keyring — it never goes into project files:
 
 ```
-stream do "tiktok.key.set <your-key>"   # stored as keyring secret `tiktok.sign_api_key`
-stream do "tiktok.key.set ''"           # remove it again
+streamctl do "tiktok.key.set <your-key>"   # stored as keyring secret `tiktok.sign_api_key`
+streamctl do "tiktok.key.set ''"           # remove it again
 ```
 
 Limits as of 2026-09-25: without a key the sign endpoint allows **5 connection requests per
@@ -64,15 +64,15 @@ cooldown = { global = "10s" }
 ```
 
 Flood protection: chat is capped at 20 events/s (burst 40), joins at 5/s, gifts at 20/s,
-follows/shares/subs at 10/s; the excess is dropped and counted (`stream query tiktok`).
+follows/shares/subs at 10/s; the excess is dropped and counted (`streamctl query tiktok`).
 History that TikTok replays on (re)connect never fires events.
 
 ## Controls
 
-- `stream do "tiktok.connect [unique_id]"` — connect for this session even if `enabled = false`
+- `streamctl do "tiktok.connect [unique_id]"` — connect for this session even if `enabled = false`
   (optionally to another account).
-- `stream do tiktok.disconnect` — stay disconnected for this session even if `enabled = true`.
-- `stream query tiktok` — `{enabled, connected, state, room_id, unique_id, last_error, viewers,
+- `streamctl do tiktok.disconnect` — stay disconnected for this session even if `enabled = true`.
+- `streamctl query tiktok` — `{enabled, connected, state, room_id, unique_id, last_error, viewers,
   sign_auth, counts}`.
 
 The overrides last until the engine restarts.
@@ -89,7 +89,7 @@ The overrides last until the engine restarts.
 ## Troubleshooting
 
 - `health.tiktok` fail "sign provider refused": the key is wrong or the plan lacks the route —
-  `stream do "tiktok.key.set <key>"`.
+  `streamctl do "tiktok.key.set <key>"`.
 - warn "sign provider rate limit": too many reconnects on the anonymous tier — add a key.
 - warn "blocked by TikTok": TikTok served a captcha or rejected the socket; it retries with backoff.
   If it persists after a TikTok update, check the upstream projects for protocol changes.

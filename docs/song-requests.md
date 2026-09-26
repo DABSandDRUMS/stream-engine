@@ -8,7 +8,7 @@ request queue with a UI-editable policy, and control of the player page. The UI 
 
 1. Google Cloud project → enable **YouTube Data API v3** → create an **API key** (no billing,
    no OAuth). Restrict it to the YouTube Data API if you like.
-2. `stream do youtube.key.set <key>` (or the UI's *YouTube & relay* tab). The engine checks it
+2. `streamctl do youtube.key.set <key>` (or the UI's *YouTube & relay* tab). The engine checks it
    with one `videos.list` call (1 unit) and stores it in the keyring (`youtube.api_key`); the
    command is redacted from session logs and the audit table. `youtube.key.clear` removes it.
 3. The `youtube` web source (scene `duo`) loads `/web/player.html`. Sign the CEF profile into

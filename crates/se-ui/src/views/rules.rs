@@ -174,9 +174,16 @@ pub fn friendly_text(text: &str) -> String {
     while let Some(open) = rest.find('{') {
         let Some(close) = rest[open..].find('}').map(|c| open + c) else { break };
         out.push_str(&rest[..open]);
-        out.push('(');
-        out.push_str(&placeholder_words(&rest[open + 1..close]));
-        out.push(')');
+        // already in brackets ("(… {x} …)"): don't add another pair
+        let inside = out.matches('(').count() > out.matches(')').count();
+        let words = placeholder_words(&rest[open + 1..close]);
+        if inside {
+            out.push_str(&words);
+        } else {
+            out.push('(');
+            out.push_str(&words);
+            out.push(')');
+        }
         rest = &rest[close + 1..];
     }
     out.push_str(rest);
@@ -210,7 +217,7 @@ fn placeholder_words(p: &str) -> String {
         "goals.subs.current" => "subs so far",
         "goals.subs.target" => "sub goal",
         "queue.now.user" => "who asked for it",
-        "queue.length" => "songs waiting",
+        "queue.length" => "how many",
         "queue.url" => "song list link",
         _ => "",
     };
@@ -225,6 +232,15 @@ fn placeholder_words(p: &str) -> String {
     tail.join(" ").to_lowercase()
 }
 
+/// "while you're live", "during BRB" (show modes inside sentences).
+fn mode_while(m: &str) -> String {
+    match m {
+        "live" => "while you're live".into(),
+        "offline" => "while you're off air".into(),
+        m => format!("during {}", pretty(m)),
+    }
+}
+
 /// Completes "When …" for an event pattern.
 fn when_sentence(when: &str) -> String {
     let when = when.trim();
@@ -232,10 +248,19 @@ fn when_sentence(when: &str) -> String {
         return "…".into();
     }
     if let Some(m) = when.strip_prefix("mode.enter.") {
-        return if m == "*" || m.is_empty() { "any show mode starts".into() } else { format!("you switch to {}", pretty(m)) };
+        return match m {
+            "*" | "" => "any show mode starts".into(),
+            "live" => "you go live".into(),
+            "offline" => "you go off air".into(),
+            m => format!("you switch to {}", pretty(m)),
+        };
     }
     if let Some(m) = when.strip_prefix("mode.exit.") {
-        return if m == "*" || m.is_empty() { "any show mode ends".into() } else { format!("you leave {}", pretty(m)) };
+        return match m {
+            "*" | "" => "any show mode ends".into(),
+            "live" => "you stop being live".into(),
+            m => format!("you leave {}", pretty(m)),
+        };
     }
     match TRIGGERS.iter().find(|x| x.pattern == when) {
         Some(x) => x.sentence.into(),
@@ -378,8 +403,8 @@ impl Cond {
                     _ => format!("at {:.0}% strength", x * 100.0),
                 }
             }
-            FieldKind::Mode if self.op == CondOp::Ne => format!("except during {}", pretty(v)),
-            FieldKind::Mode => format!("while {}", pretty(v)),
+            FieldKind::Mode if self.op == CondOp::Ne => format!("except {}", mode_while(v)),
+            FieldKind::Mode => mode_while(v),
             FieldKind::Bool => {
                 let (yes, no) = match self.field.as_str() {
                     "is_gift" => ("a gift".to_string(), "not a gift".to_string()),
@@ -596,7 +621,7 @@ impl Step {
     fn icon(self) -> &'static str {
         match self {
             Step::Preset | Step::Release => icon::BOLT,
-            Step::Scene | Step::Preview => icon::SCENE,
+            Step::Scene | Step::Preview => icon::LAYERS,
             Step::Lights => icon::LIGHT,
             Step::Say => icon::CHAT,
             Step::Sound => icon::VOLUME,
@@ -2174,6 +2199,8 @@ mod tests {
         assert_eq!(friendly_text("{random:a|b|c}!"), "(a, b or c)!");
         assert_eq!(friendly_text("Goal {goals.subs.current}/{goals.subs.target}"), "Goal (subs so far)/(sub goal)");
         assert_eq!(friendly_text("no braces {"), "no braces {");
+        assert_eq!(friendly_text("Song queue ({queue.length} waiting)"), "Song queue (how many waiting)");
+        assert_eq!(friendly_text("{song} (asked by {queue.now.user})"), "(current song) (asked by who asked for it)");
         assert_eq!(nice_name("SUB BIG"), "Sub big");
         assert_eq!(nice_name("brb"), "BRB");
         assert_eq!(nice_name("Kit (HDMI 1)"), "Kit (HDMI 1)");

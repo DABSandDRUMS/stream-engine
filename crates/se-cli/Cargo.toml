@@ -1,12 +1,12 @@
 [package]
 name = "se-cli"
-description = "`stream`: command-line client for the engine API"
+description = "`streamctl`: command-line client for the engine API"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "stream"
+name = "streamctl"
 path = "src/main.rs"
 
 [dependencies]

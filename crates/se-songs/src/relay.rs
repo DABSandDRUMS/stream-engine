@@ -145,7 +145,7 @@ async fn run(hub: Arc<Hub>, store: Store, mut cfg_rx: watch::Receiver<LinkConfig
                 let detail = if u.is_none() {
                     "not configured — set [relay] url in project.toml".to_string()
                 } else {
-                    "no shared secret — run `stream do relay.secret.set <secret>`".to_string()
+                    "no shared secret — run `streamctl do relay.secret.set <secret>`".to_string()
                 };
                 *status.lock() = Status { configured: false, connected: false, url: u.unwrap_or_default(), detail: detail.clone(), since: None };
                 health(&hub, "warn", &detail);

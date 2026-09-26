@@ -157,7 +157,7 @@ package() {
   release="$(_se_target_dir)/release"
 
   install -Dm755 "$release/stream-engine" "$pkgdir/usr/bin/stream-engine"
-  install -Dm755 "$release/stream" "$pkgdir/usr/bin/stream"
+  install -Dm755 "$release/streamctl" "$pkgdir/usr/bin/streamctl"
   install -Dm755 omarchy/bin/stream-engine-launch-or-focus "$pkgdir/usr/bin/stream-engine-launch-or-focus"
 
   # Engine data: share_dir() resolves <exe>/../share/stream-engine.

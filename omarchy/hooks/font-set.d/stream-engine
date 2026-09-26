@@ -3,8 +3,8 @@
 # switches fonts right away. `omarchy-hook font-set` runs it with the new font family as $1 and
 # the engine emits the event `omarchy.font_set {font}`.
 #
-# Never fails the hook: without the stream CLI or a running engine it does nothing.
-command -v stream >/dev/null 2>&1 || exit 0
+# Never fails the hook: without the streamctl CLI or a running engine it does nothing.
+command -v streamctl >/dev/null 2>&1 || exit 0
 [[ -n ${1:-} ]] || exit 0
-timeout 3 stream fire omarchy.font_set "font=$1" >/dev/null 2>&1
+timeout 3 streamctl fire omarchy.font_set "font=$1" >/dev/null 2>&1
 exit 0

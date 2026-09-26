@@ -1,9 +1,9 @@
 .pragma library
 
-// Pure state reduction for the stream-engine bar widget: turns `stream --json` output into the
+// Pure state reduction for the stream-engine bar widget: turns `streamctl --json` output into the
 // widget model. No QML types here, so the logic is testable with plain JS.
 
-// State addresses the widget subscribes to (`stream --json watch --state …`).
+// State addresses the widget subscribes to (`streamctl --json watch --state …`).
 var WATCH_STATE = [
   "show.mode",
   "show.scene.program",
@@ -62,7 +62,7 @@ function healthEntry(value) {
   return { status: "warn", detail: toText(value) }
 }
 
-// Apply one `stream --json watch` line. Returns the next state, or null when the line carries
+// Apply one `streamctl --json watch` line. Returns the next state, or null when the line carries
 // no state change (events, signals, logs, or unparsable output).
 function applyWatchLine(state, line) {
   var msg
@@ -97,7 +97,7 @@ function applyWatchLine(state, line) {
   return next
 }
 
-// `stream --json preflight` → the full checklist (health.* plus the engine's disk/GPU/idle checks).
+// `streamctl --json preflight` → the full checklist (health.* plus the engine's disk/GPU/idle checks).
 // Returns the next state, or null when the output is not a checklist.
 function applyPreflight(state, text) {
   var list
@@ -117,7 +117,7 @@ function applyPreflight(state, text) {
   return next
 }
 
-// `stream --json query engine.info` → {version, session, project, pid, started} or null.
+// `streamctl --json query engine.info` → {version, session, project, pid, started} or null.
 function parseInfo(text) {
   try {
     var info = JSON.parse(text)

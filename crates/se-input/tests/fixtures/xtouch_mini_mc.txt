@@ -2,7 +2,7 @@
 # Built from the documented MC-mode control map (encoders CC 16-23 relative sign/magnitude,
 # pushes = notes 32-39, top row = notes 89 90 40-45, bottom row = 87 88 91 92 86 93 94 95,
 # layer A/B = notes 84/85, fader = pitch-bend on channel 9). Re-record from the hardware with
-# `stream do "midi.record xtouch 20 file=crates/se-input/tests/fixtures/xtouch_mini_mc.txt"`.
+# `streamctl do "midi.record xtouch 20 file=crates/se-input/tests/fixtures/xtouch_mini_mc.txt"`.
 # <ms since start> <hex bytes>
 0 B0 10 01
 12 B0 10 01

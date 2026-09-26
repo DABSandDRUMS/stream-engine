@@ -82,7 +82,7 @@ A multi-cell fixture's own addresses (`lights.bar1.color`) work the same way ove
 ### Playbacks
 A playback runs one cue list. Its values are core overrides keyed `cuelist:<cl>` at the playback's
 **priority**, so the normal resolver merges them (HTP intensity, LTP by priority) and
-`stream explain lights.<head>.<attr>` shows which list holds a value. Fades are core animations.
+`streamctl explain lights.<head>.<attr>` shows which list holds a value. Fades are core animations.
 
 - **Priority:** the caller's `priority` argument (presets pass their priority, timelines theirs),
   otherwise the list's own `priority` (default 200). A `priority` in the list file is a floor.
@@ -411,8 +411,8 @@ highlight, active}` show its state.
 | `lights.programmer.store` | `palette?`, `kind?`, `cuelist?`, `cue?`, `preset?` |
 | `lights.rdm.discover` | run RDM discovery now |
 
-Positional forms work: `stream do "lights.go main"`, `stream do "lights.goto main 3"`,
-`stream do "lights.cue warm_duo"`. Cue ids match by text (`3` = `"3"`).
+Positional forms work: `streamctl do "lights.go main"`, `streamctl do "lights.goto main 3"`,
+`streamctl do "lights.cue warm_duo"`. Cue ids match by text (`3` = `"3"`).
 In command *text*, a bare `<something>.release` is the core's release op — write
 `lights.release all` / `lights.release cuelist=main` and `lights.programmer.release all`
 (the UI and the deck send these actions directly, so this only matters when typing them).
@@ -428,7 +428,7 @@ Chat may fire cue lists and flashes (chat priority, capped) but never the progra
 `lights.programmer.{selection, highlight, active}`,
 `lights.output.{fps, jitter_ms, frames, limited}`, `health.dmx`.
 
-### Queries (`stream query <name>`)
+### Queries (`streamctl query <name>`)
 - `lights.rig` — fixtures, heads, groups, profiles, outputs (status `ok|warn|fail|off` + detail), patch errors.
 - `lights.cuelists` — every list with playing state, current/next cue, progress, cue timing.
 - `lights.palettes` — palettes with their values and `used_by`.
@@ -555,7 +555,7 @@ hangs (for `position`) and which ones belong together (groups: front, back, floo
    the manual.
 
 ### Verifying with the DMX monitor
-1. Open the Lights view → DMX monitor (or `stream query lights.output` → `universes`).
+1. Open the Lights view → DMX monitor (or `streamctl query lights.output` → `universes`).
 2. Select a fixture and **highlight** it: exactly its channels, starting at its start address,
    should change — and the physical fixture should light up open white.
 3. Step through attributes in the programmer (colour, pan, tilt, gobo…) and confirm the fixture

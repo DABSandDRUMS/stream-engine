@@ -10,7 +10,7 @@
 //!
 //! `sign_url` is a base URL (`/webcast/rooms/{room_id}/connect` is appended) or a full URL
 //! template containing `{room_id}`. The API key is the keyring secret `tiktok.sign_api_key`
-//! (set with `stream tiktok.key.set <key>`); without one the provider's anonymous limits apply.
+//! (set with `streamctl do tiktok.key.set <key>`); without one the provider's anonymous limits apply.
 
 use std::time::Duration;
 
