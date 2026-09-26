@@ -1,0 +1,18 @@
+[package]
+name = "se-cli"
+description = "`stream`: command-line client for the engine API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "stream"
+path = "src/main.rs"
+
+[dependencies]
+se-proto.workspace = true
+se-client.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }

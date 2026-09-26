@@ -1,0 +1,3 @@
+label = "CONFETTI"
+color = "#e6c384"
+fx = [{ name = "patch.confetti" }]

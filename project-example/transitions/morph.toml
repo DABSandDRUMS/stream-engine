@@ -1,0 +1,6 @@
+# Animate matching nodes between scenes; entering/leaving nodes fade.
+kind = "morph"
+ms = 700
+ease = "in_out_cubic"
+enter = "fade"
+exit = "fade"

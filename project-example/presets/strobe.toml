@@ -1,0 +1,6 @@
+# Strobe look. Needs confirmation and never runs from chat (photosensitivity).
+label = "STROBE"
+color = "#dcd7ba"
+hold = "3s"
+confirm = true
+lights = { cue = "strobe" }

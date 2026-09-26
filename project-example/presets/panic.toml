@@ -1,0 +1,3 @@
+# Safe look fired by Panic.
+label = "SAFE"
+lights = { cue = "safe" }

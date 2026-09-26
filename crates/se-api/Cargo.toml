@@ -1,0 +1,27 @@
+[package]
+name = "se-api"
+description = "Unix socket + WebSocket JSON + OSC API, auth, HTTP server for web patches and the player page"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+se-proto.workspace = true
+se-hub.workspace = true
+se-core.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rosc.workspace = true
+futures-util.workspace = true
+parking_lot.workspace = true
+axum = { version = "0.8", features = ["ws"] }
+tower-http = { version = "0.7", features = ["fs", "cors"] }
+se-clock.workspace = true
+
+[dev-dependencies]
+toml.workspace = true
+tokio-tungstenite.workspace = true
+tempfile.workspace = true

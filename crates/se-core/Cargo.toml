@@ -1,0 +1,18 @@
+[package]
+name = "se-core"
+description = "State tree, provenance, commands, rules, bindings, presets, modes, timelines, policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+se-proto.workspace = true
+se-expr.workspace = true
+se-clock.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]

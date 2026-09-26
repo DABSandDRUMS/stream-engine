@@ -1,0 +1,19 @@
+# High corner wide of the whole kit, kick cam picture-in-picture.
+key = 2
+
+[canvas.wide]
+nodes = [
+  { src = "cam_wide", rect = [0.0, 0.0, 1.0, 1.0] },
+  { src = "cam_kick", rect = [0.74, 0.70, 0.24, 0.26], radius = 16 },
+]
+
+[canvas.tall]
+nodes = [
+  { src = "cam_wide", rect = [0.0, 0.0, 1.0, 0.6] },
+  { src = "cam_kick", rect = [0.0, 0.6, 1.0, 0.4] },
+]
+
+[transitions]
+pool = [{ name = "morph", w = 2 }, { name = "zoomblur", w = 1 }]
+avoid_repeat = 1
+ms = [500, 800]

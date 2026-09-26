@@ -1,0 +1,14 @@
+[package]
+name = "se-ui-kit"
+description = "Design system: Omarchy theme tokens, typography, custom widgets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+egui.workspace = true
+serde.workspace = true
+toml.workspace = true
+notify.workspace = true
+crossbeam-channel.workspace = true
+tracing.workspace = true

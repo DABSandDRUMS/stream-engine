@@ -1,0 +1,12 @@
+# Front view toward the throne, full frame.
+key = 3
+
+[canvas.wide]
+nodes = [{ src = "cam_kit", rect = [0.0, 0.0, 1.0, 1.0] }]
+
+[canvas.tall]
+nodes = [{ src = "cam_kit", rect = [0.0, 0.0, 1.0, 1.0], crop = [0.2, 0.0, 0.2, 0.0] }]
+
+[transitions]
+pool = [{ name = "morph" }, { name = "fade" }]
+avoid_repeat = 1

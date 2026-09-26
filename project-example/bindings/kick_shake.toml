@@ -1,0 +1,7 @@
+# Kick drum shakes the kit camera while HYPE is active.
+target = "scene.*.node.cam_kit.offset_y"
+signal = "band.kick"
+range = [0, 12]
+attack = "5ms"
+release = "120ms"
+scope = "preset.hype"

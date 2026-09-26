@@ -1,0 +1,8 @@
+label = "HYPE"
+color = "#e82424"
+hold = "8s"
+conflict = "replace"
+fx = [{ name = "rgb_split", hold = "8s" }, { name = "patch.confetti" }]
+lights = { cue = "chase_fast", hold = "8s" }
+sound = "airhorn"
+set = { "fx.rgb_split.amount" = 0.6 }

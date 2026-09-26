@@ -1,0 +1,12 @@
+[[rule]]
+name = "tier 2+ sub"
+when = "twitch.sub"
+if = "event.tier >= 2 && mode == 'live' && !event.is_gift"
+do = ["preset.fire sub_big"]
+cooldown = { global = "10s" }
+
+[[rule]]
+name = "raid"
+when = "twitch.raid"
+if = "event.viewers >= 10"
+do = ["preset.fire hype", "bot.say 'Welcome raiders from {from}!'"]

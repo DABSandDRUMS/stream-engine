@@ -1,0 +1,21 @@
+[package]
+name = "se-hub"
+description = "Engine bus: core thread runner, command/ack routing, action dispatch, state snapshots"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+se-proto.workspace = true
+se-core.workspace = true
+se-clock.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+crossbeam-channel.workspace = true
+arc-swap.workspace = true
+parking_lot.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+toml.workspace = true

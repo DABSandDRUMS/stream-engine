@@ -1218,6 +1218,8 @@ stream-engine/
     se-bot/         # chatbot: commands, templating, timers, counters, quotes
     se-alerts/      # alert routing, queue, combining, TTS integration
     se-songs/       # YouTube lookup, cache/library, queue, policy, player control
+    se-hub/         # engine bus: core-thread runner, command/ack routing, action dispatch, lock-free state snapshots
+    se-client/      # blocking Unix-socket client with reconnect (UI, CLI)
     se-api/         # Unix socket + WebSocket JSON + OSC API, auth, HTTP server for web patches/player page
     se-obs/         # engine side of the OBS plugin link (health, timestamps, start/stop)
     se-ui-kit/      # design system: Omarchy theme tokens, typography, custom widgets

@@ -1,0 +1,21 @@
+# Kit front + high corner wide, side by side.
+label = "duo"
+key = 1
+
+[canvas.wide]
+nodes = [
+  { src = "cam_kit",  rect = [0.02, 0.05, 0.47, 0.90], radius = 24 },
+  { src = "cam_wide", rect = [0.51, 0.05, 0.47, 0.90], radius = 24, fx = [{ name = "vhs", when = "mode == 'chill'" }] },
+  { src = "youtube",  rect = [0.70, 0.70, 0.28, 0.25], when = "queue.playing" },
+]
+
+[canvas.tall]
+nodes = [
+  { src = "cam_kit",  rect = [0.0, 0.0, 1.0, 0.55] },
+  { src = "cam_wide", rect = [0.0, 0.55, 1.0, 0.45] },
+]
+
+[transitions]
+pool = [{ name = "morph", w = 3 }, { name = "fade", w = 1 }, { name = "zoomblur", w = 1 }]
+avoid_repeat = 1
+ms = [500, 900]

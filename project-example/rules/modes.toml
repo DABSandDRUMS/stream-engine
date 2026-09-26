@@ -1,0 +1,9 @@
+[[rule]]
+name = "brb scene"
+when = "mode.enter.brb"
+do = ["scene.cut brb"]
+
+[[rule]]
+name = "back from brb"
+when = "mode.exit.brb"
+do = ["scene.cut duo"]

@@ -1,0 +1,4 @@
+label = "CHILL"
+color = "#7e9cd8"
+toggle = true
+set = { "fx.vhs.amount" = 0.5, "fx.grade.warmth" = 0.3 }

@@ -1,0 +1,20 @@
+[Unit]
+Description=stream-engine live production engine
+Documentation=https://github.com/DABSandDRUMS/stream-engine
+After=pipewire.service graphical-session.target
+Wants=pipewire.service
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=/usr/bin/stream-engine daemon
+Restart=always
+RestartSec=1
+# The core and render threads heartbeat; a stall of either restarts the engine.
+WatchdogSec=10
+TimeoutStopSec=10
+Environment=RUST_BACKTRACE=1
+# Real-time scheduling comes from the `realtime` group limits of the user session (PLAN §28.4).
+
+[Install]
+WantedBy=graphical-session.target

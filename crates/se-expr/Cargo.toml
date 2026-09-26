@@ -1,0 +1,10 @@
+[package]
+name = "se-expr"
+description = "Small safe expression language for rule conditions and when-clauses"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+se-proto.workspace = true
+thiserror.workspace = true

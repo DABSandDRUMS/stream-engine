@@ -1,0 +1,21 @@
+# Four-up of every drum camera.
+key = 4
+
+[canvas.wide]
+nodes = [
+  { src = "cam_kit",  rect = [0.0, 0.0, 0.5, 0.5] },
+  { src = "cam_wide", rect = [0.5, 0.0, 0.5, 0.5] },
+  { src = "cam_3",    rect = [0.0, 0.5, 0.5, 0.5] },
+  { src = "cam_kick", rect = [0.5, 0.5, 0.5, 0.5] },
+]
+
+[canvas.tall]
+nodes = [
+  { src = "cam_kit",  rect = [0.0, 0.0, 1.0, 0.25] },
+  { src = "cam_wide", rect = [0.0, 0.25, 1.0, 0.25] },
+  { src = "cam_3",    rect = [0.0, 0.5, 1.0, 0.25] },
+  { src = "cam_kick", rect = [0.0, 0.75, 1.0, 0.25] },
+]
+
+[transitions]
+pool = [{ name = "morph" }]

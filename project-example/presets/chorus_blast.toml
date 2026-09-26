@@ -1,0 +1,5 @@
+label = "CHORUS"
+color = "#98bb6c"
+hold = "4s"
+fx = [{ name = "zoom_pulse" }]
+lights = { cue = "chase_fast", hold = "4s" }

@@ -1,0 +1,12 @@
+[[rule]]
+name = "big cheer"
+when = "twitch.cheer"
+if = "event.bits >= 1000"
+do = ["preset.fire hype", "bot.say 'HYPE! Thanks {user} for {bits} bits'"]
+cooldown = { global = "10s" }
+
+[[rule]]
+name = "any cheer"
+when = "twitch.cheer"
+if = "event.bits < 1000"
+do = ["preset.fire confetti"]

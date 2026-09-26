@@ -1,0 +1,13 @@
+# Be right back: background patch + music.
+key = 6
+on_enter = ["audio.duck music 0"]
+
+[canvas.wide]
+nodes = [{ src = "patch.aurora", rect = [0.0, 0.0, 1.0, 1.0] }]
+
+[canvas.tall]
+nodes = [{ src = "patch.aurora", rect = [0.0, 0.0, 1.0, 1.0] }]
+
+[transitions]
+name = "fade"
+ms = 1200

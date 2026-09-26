@@ -1,0 +1,19 @@
+[package]
+name = "se-ui"
+description = "The stream-engine UI: Show/Build modes, panels, layouts (egui on wgpu)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+se-proto.workspace = true
+se-client.workspace = true
+se-ui-kit.workspace = true
+eframe.workspace = true
+egui.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+tracing.workspace = true
+crossbeam-channel.workspace = true

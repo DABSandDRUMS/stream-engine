@@ -1,0 +1,31 @@
+# stream-engine starter project.
+# Everything here is plain TOML: edit by hand or in the UI (comments are preserved).
+schema = 1
+name = "drum stream"
+start_mode = "offline"
+
+[canvas.wide]
+width = 1920
+height = 1080
+fps = 60
+
+[canvas.tall]
+width = 1080
+height = 1920
+fps = 60
+
+# Extra LFOs (built-ins: lfo.slow, lfo.mid, lfo.fast, lfo.beat, lfo.bar, lfo.random)
+[lfo.breathe]
+shape = "sine"
+rate = "0.05hz"
+
+[safety]
+# Chat-originated overrides expire after this long.
+chat_ttl = "30s"
+# Hard caps applied after every other layer.
+caps = { "lights.*.intensity" = [0.0, 1.0] }
+# Caps for chat-originated values only.
+chat_caps = { "fx.*.amount" = [0.0, 0.6] }
+
+# Base values for any address (the UI writes here too).
+[params]
