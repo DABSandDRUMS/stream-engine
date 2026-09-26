@@ -81,5 +81,11 @@ mlua = { version = "0.12", features = ["luajit"] }
 debug = 1
 lto = "thin"
 
+# Debug builds: line numbers for our code (backtraces), no debug info for dependencies.
+# Full debug info made target/debug grow past 100 GB.
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.dev.package."*"]
 opt-level = 2
+debug = false
