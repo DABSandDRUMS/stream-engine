@@ -12,6 +12,8 @@
 //! | `/panic`, `/clean` | – | |
 //! | `/event` | type, [key, value]… | emit an event |
 //! | `/subscribe` | pattern | state changes fed back as `/<a>/<b> value` |
+//! | `/subscribe/events` | pattern | events fed back as `/event/<a>/<b> [key, value]…` (the shape `/event` takes) |
+//! | `/unsubscribe` | [pattern] | drop one state/event pattern, or all of them |
 //! | anything else | one number | signal `osc.<path>`, plus event `osc.<path>` on a rising edge |
 
 use crate::auth::{Auth, Scope};
@@ -29,6 +31,27 @@ struct Peer {
     scope: Scope,
     seen: Instant,
     subs: Vec<String>,
+    event_subs: Vec<String>,
+}
+
+/// An event as OSC: `/event/<type with dots as slashes>`, then the payload's fields as
+/// key/value pairs (a non-map payload is one argument). Mirrors what `/event` accepts.
+fn event_msg(e: &Event) -> OscMessage {
+    let mut args = Vec::new();
+    match &e.payload {
+        Value::Map(m) => {
+            for (k, v) in m {
+                args.push(OscType::String(k.clone()));
+                match to_osc(v).as_slice() {
+                    [one] => args.push(one.clone()),
+                    _ => args.push(OscType::String(v.to_string())),
+                }
+            }
+        }
+        Value::Null => {}
+        other => args.extend(to_osc(other)),
+    }
+    OscMessage { addr: format!("/event/{}", e.ty.replace('.', "/")), args }
 }
 
 fn arg_value(a: &OscType) -> Value {
@@ -73,6 +96,18 @@ pub async fn serve_osc(hub: Arc<Hub>, auth: Arc<Auth>, bind: SocketAddr) -> Resu
         tokio::spawn(async move {
             let mut bus = hub.subscribe();
             while let Ok(b) = bus.recv().await {
+                if let Bus::Event(e) = &*b {
+                    let targets: Vec<SocketAddr> = peers.lock().iter().filter(|(_, p)| any_match(&p.event_subs, &e.ty)).map(|(a, _)| *a).collect();
+                    if targets.is_empty() {
+                        continue;
+                    }
+                    if let Ok(buf) = rosc::encoder::encode(&OscPacket::Message(event_msg(e))) {
+                        for addr in targets {
+                            let _ = sock.send_to(&buf, addr).await;
+                        }
+                    }
+                    continue;
+                }
                 let Bus::Changes(changes) = &*b else { continue };
                 let targets: Vec<(SocketAddr, Vec<String>)> =
                     peers.lock().iter().filter(|(_, p)| !p.subs.is_empty()).map(|(a, p)| (*a, p.subs.clone())).collect();
@@ -102,7 +137,7 @@ pub async fn serve_osc(hub: Arc<Hub>, auth: Arc<Auth>, bind: SocketAddr) -> Resu
                 };
                 let ok = match auth.check(&tok) {
                     Some(scope) => {
-                        peers.lock().insert(from, Peer { scope, seen: Instant::now(), subs: Vec::new() });
+                        peers.lock().insert(from, Peer { scope, seen: Instant::now(), subs: Vec::new(), event_subs: Vec::new() });
                         true
                     }
                     None => false,
@@ -151,9 +186,31 @@ pub async fn serve_osc(hub: Arc<Hub>, auth: Arc<Auth>, bind: SocketAddr) -> Resu
                     }
                     Some(Op::Emit { ty: s(0), payload })
                 }
-                "/subscribe" => {
+                "/subscribe" | "/subscribe/events" => {
+                    let pat = s(0);
+                    if se_proto::address::is_valid(&pat, true)
+                        && let Some(p) = peers.lock().get_mut(&from)
+                    {
+                        let list = if m.addr == "/subscribe" { &mut p.subs } else { &mut p.event_subs };
+                        if !list.contains(&pat) {
+                            list.push(pat);
+                        }
+                    }
+                    None
+                }
+                "/unsubscribe" => {
                     if let Some(p) = peers.lock().get_mut(&from) {
-                        p.subs.push(s(0));
+                        match args.first() {
+                            Some(v) => {
+                                let pat = v.to_string();
+                                p.subs.retain(|x| *x != pat);
+                                p.event_subs.retain(|x| *x != pat);
+                            }
+                            None => {
+                                p.subs.clear();
+                                p.event_subs.clear();
+                            }
+                        }
                     }
                     None
                 }
@@ -183,5 +240,25 @@ pub async fn serve_osc(hub: Arc<Hub>, auth: Arc<Auth>, bind: SocketAddr) -> Resu
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn events_go_out_in_the_shape_event_takes_in() {
+        let e = Event::new("twitch.cheer", Origin::Sim, Value::map().with("bits", 1000).with("user", "drumfan42"));
+        let m = event_msg(&e);
+        assert_eq!(m.addr, "/event/twitch/cheer");
+        assert_eq!(m.args.len(), 4);
+        let pairs: Vec<(String, Value)> = m.args.chunks(2).map(|kv| (arg_value(&kv[0]).to_string(), arg_value(&kv[1]))).collect();
+        assert!(pairs.contains(&("bits".into(), Value::Int(1000))));
+        assert!(pairs.contains(&("user".into(), Value::Str("drumfan42".into()))));
+        // nested values travel as one text argument so pairs stay aligned
+        let nested = event_msg(&Event::new("x.y", Origin::Sim, Value::map().with("list", Value::List(vec![Value::Int(1), Value::Int(2)]))));
+        assert_eq!(nested.args.len(), 2);
+        assert!(event_msg(&Event::new("beat", Origin::Audio, Value::Null)).args.is_empty());
     }
 }
