@@ -13,7 +13,7 @@
 //!   or the page sends `on = false`, so a UI that closed or crashed can't keep a camera open. A
 //!   source that starts using the camera takes it over: the preview thread is stopped first.
 
-use crate::frame::MjpegDecoder;
+use crate::frame::{MjpegDecoder, SignalDetector, rgba_stats, yuyv_stats};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError};
 use parking_lot::Mutex;
 use se_devices::DeviceInfo;
@@ -222,6 +222,9 @@ pub struct Tap {
     thumb: Mutex<Thumb>,
     /// (seq, JPEG of that thumbnail): encoded once per new thumbnail.
     jpeg: Mutex<(u64, Vec<u8>)>,
+    /// The input carries no picture (HDMI without a signal delivers blank frames): the
+    /// thumbnail would be a flat colour, so none is shown.
+    pub no_signal: AtomicBool,
 }
 
 /// One thumbnail as the query hands it out.
@@ -277,6 +280,7 @@ impl Tap {
     /// Forget the picture (the camera closed).
     fn clear(&self) {
         self.want.store(false, Ordering::Relaxed);
+        self.no_signal.store(false, Ordering::Relaxed);
         let mut t = self.thumb.lock();
         t.seq = 0;
         self.last_ns.store(0, Ordering::Relaxed);
@@ -348,21 +352,36 @@ fn stream(path: &str, tap: &Tap, stop: &Receiver<()>) -> Result<(), String> {
     let yuv = Yuv::new(fmt.matrix(), fmt.range());
     let mut dec = if fourcc == v4l2::PIX_MJPEG { Some(MjpegDecoder::new()?) } else { None };
     let mut rgba = if dec.is_some() { vec![0u8; (stride * h) as usize] } else { Vec::new() };
+    // same no-signal rules as a camera source (blank or frozen-flat frames, input status)
+    let cfg = crate::config::SignalCfg::default();
+    let mut det = SignalDetector::new(cfg.timeout_ms, cfg.black_level, cfg.hold_ms);
+    let mut last_input = 0u64;
+    let opened = se_clock::now();
     loop {
         let ready = s.wait(100).map_err(|e| e.to_string())?;
         if ready.frame {
             while let Some(f) = s.dequeue().map_err(|e| e.to_string())? {
                 let now = se_clock::now();
-                if !f.is_error() && tap.due(now) {
+                if !f.is_error() {
                     let data = s.data(&f);
+                    let due = tap.due(now);
                     match &mut dec {
-                        None if data.len() >= (stride * (h - 1) + w * 2) as usize => tap.offer(now, |out| yuyv_thumb(data, w, h, stride, yuv, out)),
+                        None if data.len() >= (stride * (h - 1) + w * 2) as usize => {
+                            det.frame(now, yuyv_stats(data, w, h, stride));
+                            if due {
+                                tap.offer(now, |out| yuyv_thumb(data, w, h, stride, yuv, out));
+                            }
+                        }
                         None => {}
-                        Some(d) => {
+                        // MJPEG is only decoded when a thumbnail is due
+                        Some(d) if due => {
                             if d.header(data) == Some((w, h)) && d.decode_rgba(data, &mut rgba, w, h, stride).is_ok() {
+                                det.frame(now, rgba_stats(&rgba, w, h, stride));
                                 tap.offer(now, |out| rgba_thumb(&rgba, w, h, stride, out));
                             }
                         }
+                        // between decoded thumbnails: the frame still arrived, judge it like the last
+                        Some(_) => det.frame(now, det.last_stats),
                     }
                 }
                 s.requeue(f.index).map_err(|e| e.to_string())?;
@@ -370,6 +389,16 @@ fn stream(path: &str, tap: &Tap, stop: &Receiver<()>) -> Result<(), String> {
         } else if ready.error {
             return Err(format!("{path} went away"));
         }
+        let now = se_clock::now();
+        if now.saturating_sub(last_input) >= 1_000_000_000 {
+            last_input = now;
+            if let Ok(inp) = dev.input_status() {
+                det.input(!v4l2::input_has_no_signal(inp));
+            }
+        }
+        // give a fresh stream the detector's hold time before calling it blank
+        let settled = now.saturating_sub(opened) >= (cfg.hold_ms + cfg.timeout_ms) * 1_000_000;
+        tap.no_signal.store(settled && !det.tick(now), Ordering::Relaxed);
         match stop.try_recv() {
             Ok(()) | Err(TryRecvError::Disconnected) => return Ok(()),
             Err(TryRecvError::Empty) => {}
@@ -482,10 +511,12 @@ impl Previews {
                     Plan::Wait(s) => (None, Some(s.clone()).filter(|s| !s.is_empty())),
                     Plan::Open => (Some(e.tap.clone()), None),
                 };
-                let pic = tap.and_then(|t| t.picture());
+                let blank = tap.as_ref().is_some_and(|t| t.no_signal.load(Ordering::Relaxed));
+                let pic = if blank { None } else { tap.and_then(|t| t.picture()) };
                 let error = if matches!(e.plan, Plan::Open) { e.error.lock().clone() } else { String::new() };
                 let state = match (&e.plan, &pic) {
                     (Plan::Wait(_), _) => "waiting",
+                    _ if blank => "no_signal",
                     (_, Some(p)) if now_ns.saturating_sub(p.at_ns) <= FRESH_NS => "live",
                     _ if !error.is_empty() => "error",
                     (_, Some(_)) => "no_picture",
@@ -508,7 +539,8 @@ impl Previews {
 #[derive(Debug)]
 pub struct Report {
     pub identity: String,
-    /// `live` | `starting` | `no_picture` | `waiting` (a source is opening it) | `error`.
+    /// `live` | `starting` | `no_picture` | `no_signal` (frames arrive but carry no picture) |
+    /// `waiting` (a source is opening it) | `error`.
     pub state: &'static str,
     /// The source whose frames are shown (or that is opening the camera).
     pub source: Option<String>,
@@ -634,6 +666,29 @@ mod tests {
         // BT.709 red: Y 63, Cb 102, Cr 240
         let red709 = px(63, 102, 240, Yuv::new("bt709", "limited"));
         assert!(red709[0] >= 250 && red709[1] <= 5 && red709[2] <= 5, "{red709:?}");
+    }
+
+    #[test]
+    fn a_blank_input_reports_no_signal_instead_of_a_flat_picture() {
+        // an HDMI input without a signal: all-zero YUYV (would draw as solid green)
+        let (w, h) = (64u32, 36u32);
+        let src = vec![0u8; (w * 2 * h) as usize];
+        let tap = Arc::new(Tap::default());
+        tap.want.store(true, Ordering::Relaxed);
+        tap.offer(1_000_000_000, |out| yuyv_thumb(&src, w, h, w * 2, Yuv::new("bt601", "limited"), out));
+        tap.no_signal.store(true, Ordering::Relaxed);
+        let mut prev = Previews::default();
+        let holders = HashMap::from([("cam".to_string(), Holder { source: "cam_3".into(), capturing: true, tap: tap.clone() })]);
+        prev.leases.renew("cam", DEFAULT_LEASE, Instant::now());
+        prev.reconcile(&holders, &[]);
+        let r = prev.report(&holders, &HashMap::new(), 1_100_000_000);
+        assert_eq!(r[0].state, "no_signal");
+        assert!(r[0].picture.is_none(), "no flat-colour thumbnail");
+        // the picture comes back with the signal
+        tap.no_signal.store(false, Ordering::Relaxed);
+        let r = prev.report(&holders, &HashMap::new(), 1_100_000_000);
+        assert_eq!(r[0].state, "live");
+        assert!(r[0].picture.is_some());
     }
 
     #[test]

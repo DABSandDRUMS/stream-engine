@@ -313,6 +313,7 @@ fn capture(
         if s != signal {
             signal = s;
             st.signal.store(s, Ordering::Relaxed);
+            st.preview.no_signal.store(!s, Ordering::Relaxed);
             pubs.set("signal", Value::Bool(s));
             if !s {
                 let ls = det.last_stats;

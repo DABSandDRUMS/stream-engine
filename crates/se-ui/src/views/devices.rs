@@ -927,6 +927,7 @@ fn camera_thumb(cx: &RowCtx, st: &mut DevicesState, ui: &mut Ui, d: &Value) {
         Some(("waiting", _)) => ("Opening…", Some("A camera source is opening this input.".to_string())),
         Some(("error", e)) => ("Can't show", Some(format!("Can't show a picture: {e}."))),
         Some(("no_picture", _)) => ("No picture", Some("Nothing is coming in. Is the camera on?".to_string())),
+        Some(("no_signal", _)) => ("No signal", Some("This input is connected but gets no picture. Is the camera on, and is its HDMI cable in?".to_string())),
         _ => ("Starting…", None),
     };
     if tex.is_some() {
