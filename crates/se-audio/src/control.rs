@@ -126,6 +126,9 @@ pub struct Control {
     xruns_minute: std::collections::VecDeque<(Instant, u64)>,
     config_errors: Vec<String>,
     stem_hint: bool,
+    /// Last time the mic input carried sound (preflight "mic signal present", §17.1).
+    mic_heard: Option<std::time::Instant>,
+    mic_since: std::time::Instant,
 }
 
 fn now_ns() -> u64 {
@@ -207,6 +210,8 @@ impl Control {
             xruns_minute: Default::default(),
             config_errors: errs,
             stem_hint: false,
+            mic_heard: None,
+            mic_since: std::time::Instant::now(),
             ctx,
         };
         c.declare_static();
@@ -911,6 +916,15 @@ impl Control {
             h("pass", format!("se-program → {}", prog.join(", ")))
         };
         self.publish_if("health.audio.obs", obs, 0.0);
+        if let Some(mic) = self.cfg.analysis.mic.clone() {
+            let level = self.ana.latest.lock().get("mic").and_then(|v| v.get_path("peak")).and_then(Value::as_f64).unwrap_or(0.0);
+            let now = std::time::Instant::now();
+            if level > MIC_PRESENT {
+                self.mic_heard = Some(now);
+            }
+            let v = mic_health(&mic, self.mic_heard.map(|t| now.duration_since(t)), now.duration_since(self.mic_since));
+            self.publish_if("health.audio.mic", v, 0.0);
+        }
         let recent = match (self.xruns_minute.front(), self.xruns_minute.back()) {
             (Some((_, a)), Some((_, b))) => b - a,
             _ => 0,
@@ -1067,4 +1081,37 @@ fn fx_prefix(a: &str) -> Option<String> {
 pub fn read_config(ctx: &EngineCtx) -> Result<AudioConfig, String> {
     let section = ctx.project_section("audio").and_then(|v| v.as_table().cloned()).unwrap_or_default();
     config::parse(&section, &ctx.kind("audio"))
+}
+
+/// Peak above which the mic counts as picking something up (≈ −60 dBFS: room tone, not silence).
+const MIC_PRESENT: f64 = 0.001;
+
+/// Mic preflight: sound within the last minute passes; a silent mic warns (muted, unplugged, or
+/// the wrong input) once it's been watched for 10 s.
+fn mic_health(input: &str, since_heard: Option<std::time::Duration>, watched: std::time::Duration) -> Value {
+    let h = |s: &str, d: String| Value::map().with("status", s).with("detail", d);
+    match since_heard {
+        Some(d) if d.as_secs() < 60 => h("pass", format!("mic `{input}` is picking up sound")),
+        _ if watched.as_secs() < 10 => h("pass", format!("listening to mic `{input}`…")),
+        Some(_) => h("warn", format!("no sound from mic `{input}` in the last minute: is it muted or unplugged?")),
+        None => h("warn", format!("no sound from mic `{input}` yet: is it muted or unplugged?")),
+    }
+}
+
+#[cfg(test)]
+mod mic_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn silent_mic_warns_after_a_grace_period_and_recent_sound_passes() {
+        let st = |heard: Option<u64>, watched: u64| {
+            mic_health("vox", heard.map(Duration::from_secs), Duration::from_secs(watched)).get_path("status").and_then(Value::as_str).unwrap().to_string()
+        };
+        assert_eq!(st(None, 3), "pass", "just started listening");
+        assert_eq!(st(None, 30), "warn", "never heard");
+        assert_eq!(st(Some(5), 300), "pass");
+        assert_eq!(st(Some(59), 300), "pass");
+        assert_eq!(st(Some(61), 300), "warn", "went quiet");
+    }
 }

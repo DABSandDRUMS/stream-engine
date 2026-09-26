@@ -177,7 +177,7 @@ State (declared with metadata — the UI builds controls from it):
 | `audio.monitor.gain`, `.roundtrip_ms`, `audio.drums.<pad>.threshold`, `audio.source.<id>.gain` | M12 |
 | `patch.<id>.<param>`, `patch.<id>` (trigger), `patch.<id>.error` | `dsp` patches |
 | `perf.audio.xruns`, `.load`, `.dsp_ms`, `.quantum`, `.rate`, `.latency_ms`, `.driver_delay_ms`, `.allocs` | perf |
-| `health.audio.pipewire`, `.rt`, `.obs`, `.xruns`, `.config`, `.input.<n>` | preflight |
+| `health.audio.pipewire`, `.rt`, `.obs`, `.xruns`, `.config`, `.input.<n>`, `.mic` (with `analysis.mic`: sound within the last minute) | preflight |
 
 Signals: `band.*` and `music.*` (`level`, `peak` linear; `lufs` short-term, `lufs_m`; `bass`,
 `mid`, `high` linear band RMS; `b.0`…`b.30` 1/3-octave bands; `centroid` 0–1; `kick`, `snare`,
