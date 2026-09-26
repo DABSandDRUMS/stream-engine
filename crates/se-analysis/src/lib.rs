@@ -19,6 +19,7 @@ mod filters;
 mod live;
 pub mod offline;
 mod stats;
+pub mod vad;
 
 pub use beat::{BeatEvent, BeatTracker, MAX_BPM_LIMIT, MIN_BPM_LIMIT};
 pub use drums::{DrumHit, DrumPadConfig, DrumTriggers};

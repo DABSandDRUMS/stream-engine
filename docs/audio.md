@@ -100,7 +100,7 @@ beat_source = "auto"       # beat.* from band when confident, else music; or a b
 min_bpm = 70
 max_bpm = 180
 mic = "vox"                # input analysed as the mic: mic.level, mic.hype, mic.talking
-talk_threshold = -42.0     # dBFS for mic.talking
+talk_threshold = -42.0     # dBFS: mic.talking = a voice (built-in voice detector) above this level
 talk_hold = "600ms"
 
 [sources."patch.drone"]    # `dsp` patch with layer = "audio-source" → bus
@@ -182,7 +182,7 @@ State (declared with metadata — the UI builds controls from it):
 Signals: `band.*` and `music.*` (`level`, `peak` linear; `lufs` short-term, `lufs_m`; `bass`,
 `mid`, `high` linear band RMS; `b.0`…`b.30` 1/3-octave bands; `centroid` 0–1; `kick`, `snare`,
 `hat` onset envelopes; `flux`, `novelty`), `beat.bpm`, `beat.phase`, `beat.confidence`,
-`mic.level`, `mic.hype`, `mic.talking` (with `analysis.mic`), `audio.<bus>.level|peak` and
+`mic.level`, `mic.hype`, `mic.voice` (voice-detector score 0–1), `mic.talking` (with `analysis.mic`), `audio.<bus>.level|peak` and
 `audio.input.<n>.level|peak` (meters, linear), `audio.duck.amount` (0–1), `drums.<pad>`.
 All level-like signals are linear (proportional to the audio), so binding `auto_normalize`
 gives the same feel on quiet and loud songs.

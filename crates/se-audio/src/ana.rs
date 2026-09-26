@@ -92,6 +92,8 @@ struct Run {
     talking: bool,
     talk_until: u64,
     last_level: f32,
+    /// Voice detector on the mic (`mic.talking` = voice and above the talk level).
+    vad: Option<Box<se_analysis::vad::Vad>>,
 }
 
 struct Names {
@@ -209,6 +211,7 @@ fn thread(hub: Arc<Hub>, rx: std::sync::mpsc::Receiver<Msg>, beat: Arc<BeatShare
                                 talking: false,
                                 talk_until: 0,
                                 last_level: 0.0,
+                                vad: src.is_mic.then(|| Box::new(se_analysis::vad::Vad::new(s.rate as f32))),
                             }
                         })
                         .collect();
@@ -297,6 +300,10 @@ fn thread(hub: Arc<Hub>, rx: std::sync::mpsc::Receiver<Msg>, beat: Arc<BeatShare
                 };
                 run.read += n as u64;
                 did = true;
+                let voice = run.vad.as_mut().map(|v| {
+                    v.push(&l[..n], &r[..n]);
+                    v.score()
+                });
                 let names = &run.names;
                 let hub2 = &hub;
                 let hop = &mut run.hop;
@@ -317,8 +324,13 @@ fn thread(hub: Arc<Hub>, rx: std::sync::mpsc::Receiver<Msg>, beat: Arc<BeatShare
                         }
                     }
                     if is_mic {
-                        if f.level > talk_thr {
+                        // speech (not drums, bleed or room noise) at talking level
+                        let speech = voice.is_none_or(|v| v >= se_analysis::vad::VAD_THRESHOLD);
+                        if speech && f.level > talk_thr {
                             *talk_until = f.ts + talk_hold_ns;
+                        }
+                        if let Some(v) = voice {
+                            sig.push(("mic.voice".into(), v));
                         }
                         let now_talking = f.ts < *talk_until;
                         if now_talking != *talking {

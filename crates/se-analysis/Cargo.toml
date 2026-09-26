@@ -11,6 +11,7 @@ serde.workspace = true
 rustfft = "6.4"
 realfft = "3"
 blake3 = "1"
+earshot = "1.2"
 symphonia = { version = "0.6", default-features = false, features = ["opt-simd", "wav", "pcm", "adpcm", "flac", "mp3", "ogg", "vorbis", "aac", "isomp4", "mkv", "aiff", "caf", "alac", "id3v1", "id3v2", "ape"] }
 
 [dev-dependencies]
