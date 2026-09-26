@@ -1,0 +1,16 @@
+[package]
+name = "se-patch"
+description = "Patches: manifests, loader, WGSL header generation, Lua runtime, templates"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+se-proto.workspace = true
+se-core.workspace = true
+serde.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

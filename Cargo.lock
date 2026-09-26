@@ -3409,6 +3409,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "se-patch"
+version = "0.1.0"
+dependencies = [
+ "se-core",
+ "se-proto",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.21",
+ "toml",
+]
+
+[[package]]
 name = "se-proto"
 version = "0.1.0"
 dependencies = [

@@ -18,6 +18,7 @@ se-store = { path = "crates/se-store" }
 se-api = { path = "crates/se-api" }
 se-hub = { path = "crates/se-hub" }
 se-client = { path = "crates/se-client" }
+se-patch = { path = "crates/se-patch" }
 se-app = { path = "crates/se-app" }
 se-ui-kit = { path = "crates/se-ui-kit" }
 se-ui = { path = "crates/se-ui" }
