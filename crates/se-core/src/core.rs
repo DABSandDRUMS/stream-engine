@@ -1033,6 +1033,31 @@ impl Core {
         {
             return Err(format!("chat effects are paused in mode `{}`", self.mode_str()));
         }
+        // `set scene.*.node.cam_face.offset_y 5`: one command per matching address (§2.1)
+        if let Some(pattern) = wildcard_target(op) {
+            if !address::is_valid(pattern, true) {
+                return Err(format!("bad address `{pattern}`"));
+            }
+            let mut addrs: Vec<String> = self.state.matching(pattern).map(|i| self.state.param(i).addr.clone()).collect();
+            if matches!(op, Op::Release { .. }) {
+                addrs.extend(self.triggers.keys().filter(|k| address::matches(pattern, k)).cloned());
+                addrs.sort();
+                addrs.dedup();
+            }
+            if addrs.is_empty() {
+                return Err(format!("`{pattern}` matches nothing"));
+            }
+            let (mut done, mut first_err) = (0usize, None);
+            for a in &addrs {
+                match self.exec(&with_address(op, a), origin, ctx) {
+                    Ok(()) => done += 1,
+                    Err(e) => {
+                        first_err.get_or_insert(e);
+                    }
+                }
+            }
+            return if done > 0 { Ok(()) } else { Err(first_err.unwrap_or_default()) };
+        }
         match op {
             Op::Set { address, value } => {
                 self.check_writable(address, origin)?;
@@ -2284,4 +2309,22 @@ pub fn declare_scene(st: &mut StateTree, s: &SceneDef) {
 /// preset must not switch the look off again.
 fn held_lights(def: &PresetDef) -> Option<crate::config::LightsRef> {
     def.lights.clone().filter(|l| l.hold.is_some() || def.hold.is_some() || def.toggle || !def.set.is_empty())
+}
+
+/// The address pattern of a Set/Animate/Release that uses `*`.
+fn wildcard_target(op: &Op) -> Option<&str> {
+    match op {
+        Op::Set { address, .. } | Op::Animate { address, .. } | Op::Release { address } if address.contains('*') => Some(address),
+        _ => None,
+    }
+}
+
+/// The same op aimed at one concrete address.
+fn with_address(op: &Op, a: &str) -> Op {
+    match op {
+        Op::Set { value, .. } => Op::Set { address: a.into(), value: value.clone() },
+        Op::Animate { to, ms, ease, .. } => Op::Animate { address: a.into(), to: to.clone(), ms: *ms, ease: *ease },
+        Op::Release { .. } => Op::Release { address: a.into() },
+        other => other.clone(),
+    }
 }

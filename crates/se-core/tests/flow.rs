@@ -42,6 +42,7 @@ fn project() -> Vec<SourceFile> {
             "chain",
             "[[rule]]\nwhen = \"test.a\"\ndo = [\"emit test.b\", \"wait 1s\", \"set fx.delayed 1\"]\n[[rule]]\nwhen = \"test.loop\"\ndo = [\"emit test.loop\"]",
         ),
+        file("rules", "wild", "[[rule]]\nwhen = \"test.wild\"\ndo = [\"set scene.*.node.cam_face.offset_y 5\"]"),
         file("bindings", "shake", "target = \"scene.*.node.cam_face.offset_y\"\nsignal = \"music.kick\"\nrange = [0, 12]\nscope = \"preset.hype\""),
     ]
 }
@@ -379,4 +380,37 @@ fn one_shot_preset_leaves_its_light_cue_running_but_held_preset_releases_it() {
     assert!(!lights.iter().any(|a| a.starts_with("lights.release")), "{lights:?}");
     let lights = light_actions(&run(&mut c, 2000));
     assert!(lights.iter().any(|a| a.starts_with("lights.release")), "{lights:?}");
+}
+
+#[test]
+fn wildcard_addresses_in_commands_hit_every_match() {
+    let mut c = core();
+    run(&mut c, 5);
+    let targets: Vec<String> = ["duo", "wide"].iter().map(|s| format!("scene.{s}.node.cam_face.offset_y")).filter(|a| c.get(a).is_some()).collect();
+    assert!(!targets.is_empty(), "scene node params are declared");
+    // a rule's `do` with a wildcard address
+    c.submit(Input::Event { event: Event::new("test.wild", Origin::Sim, Value::Null) });
+    run(&mut c, 5);
+    for a in &targets {
+        assert_eq!(f(&c, a), 5.0, "{a}");
+    }
+    // a manual release with the same pattern clears every match
+    c.submit(Input::Command { cmd: Command::new(Origin::Ui, Op::Release { address: "scene.*.node.cam_face.offset_y".into() }) });
+    run(&mut c, 5);
+    for a in &targets {
+        assert_eq!(f(&c, a), 0.0, "{a} released");
+    }
+    // a pattern that matches nothing is an error, not a silent no-op
+    c.submit(Input::Command { cmd: Command::new(Origin::Ui, Op::Set { address: "nothing.*.here".into(), value: Value::Float(1.0) }) });
+    let out = run(&mut c, 5);
+    assert!(out.iter().any(|o| matches!(o, Output::Ack { ok: false, error: Some(e), .. } if e.contains("matches nothing"))));
+    // chat still can't reach the mixer through a wildcard
+    c.submit(Input::Command { cmd: Command::new(Origin::Ui, Op::ModeSet { mode: "live".into() }) });
+    c.submit(Input::Declare { address: "mixer.16r.ch.1.fader".into(), meta: Meta::float(0.5, [0.0, 1.0]) });
+    run(&mut c, 5);
+    let mut cmd = Command::new(Origin::Chat, Op::Set { address: "mixer.*.ch.1.fader".into(), value: Value::Float(1.0) });
+    cmd.actor = Some(Actor { platform: "twitch".into(), id: "v".into(), name: "viewer".into(), roles: vec![] });
+    c.submit(Input::Command { cmd });
+    run(&mut c, 5);
+    assert_eq!(f(&c, "mixer.16r.ch.1.fader"), 0.5);
 }
