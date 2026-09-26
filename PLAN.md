@@ -9,7 +9,7 @@ Handoff document for building a custom, all-in-one live-stream production engine
 ## 0. Ground rules (non-negotiable)
 
 1. **One machine.** All hardware is attached to this machine; the verified inventory is in §28.1:
-   - RTX 3070, two ultrawide monitors
+   - RTX 3070; two ultrawide monitors + a TV
    - AVMatrix 4× HDMI capture, MSI USB HDMI capture, a USB camera (6 cameras total)
    - PreSonus Studio 24c, which carries the StudioLive 16R's main stereo mix into the machine
    - PreSonus StudioLive 16R on the LAN (network control added in M8, §8.7)
@@ -962,8 +962,8 @@ One small service on the owner's domain; the only code we run off this machine.
 
 ### 15.3 Windows, docking, layouts
 - One main window with dockable panels. **Any panel can pop out** into its own window (separate Wayland toplevel with app-id `stream-engine.<panel>`), so Hyprland can tile it on another monitor or workspace.
-- **Named layouts** (`layouts/*.toml`), e.g. `show-1mon`, `show-2mon`, `build`. Switch with the palette or a keybind.
-- **Confidence monitor:** a borderless fullscreen `stream-engine.program` window (wide, tall, or both side by side) for a TV or second screen, so the streamer sees exactly what goes out.
+- **Named layouts** (`layouts/*.toml`): default `show-3disp` (DP-1 Show mode, DP-2 multiview + Build/dock panels, TV confidence), plus `show-2disp` (used automatically when the TV is off), and `build`. Switch with the palette or a keybind.
+- **Confidence monitor:** a borderless fullscreen `stream-engine.program` window on the **TV** (wide, tall, or both side by side), so the streamer sees exactly what goes out. It follows display hotplug: if the TV is off or unplugged, it moves to DP-2 and returns when the TV reappears.
 - **Scaling:** follows Hyprland monitor scale, plus an in-app zoom.
 
 ### 15.4 Show mode layout (DP-1: MSI MAG341CQ, 3440×1440 @ 100 Hz, scale 1.25 → 2752×1152 logical)
@@ -1117,7 +1117,7 @@ It then creates a starter project from `project-example` with working templates 
 - **Keybinds:** add to `~/.config/hypr/bindings.lua` with `o.bind(...)` calling the `stream` CLI (Take, Panic, Clean, BRB, open UI). Check existing binds first (`omarchy menu keybindings --print`) and `hl.unbind` any conflicts.
 - **Window rules:** app-ids `stream-engine` (main) and `stream-engine.<panel>` / `stream-engine.program` get rules via Omarchy's `o.window(match, rules)` helper, which wraps Hyprland 0.56.2's Lua `hl.window_rule`.
   - Omarchy's own rules already use the fields we need: `workspace`, `fullscreen`, `float`, `idle_inhibit`.
-  - Default placement: main window on **DP-1**; confidence/program window fullscreen on **DP-2** (WEH 3440×1440 @ 60 Hz).
+  - Default placement: main window on **DP-1**; panels/multiview on **DP-2** (WEH 3440×1440 @ 60 Hz); confidence/program window fullscreen on the **TV** (NVIDIA HDMI), falling back to DP-2 when the TV isn't connected.
 - **Menu:** entries in `~/.config/omarchy/extensions/omarchy-menu.jsonc` (open UI, go live, switch layout, run preflight).
 - **Bar widget:** an Omarchy shell (Quickshell) plugin in `~/.config/omarchy/plugins/<id>/` showing live state, uptime, health, and pending approvals; click opens the UI.
 - **Notifications:** freedesktop notifications (the Omarchy shell is the daemon) for background problems when the UI isn't focused: feed stale, device unplugged, token expiring, disk low. Never for routine events.
@@ -1351,7 +1351,7 @@ Each milestone ends with a **live smoke run**: the actual app, real devices, out
 | TTS | Kokoro-82M via ONNX Runtime; espeak-ng as a separate process | Apache-2.0 model; avoids linking GPL code |
 | MJPEG decode | CPU (`turbojpeg`) | One MJPEG source; a 12-core CPU; no nvJPEG dependency |
 | GPU | Everything on the RTX 3070; the AMD iGPU is unused | Avoids cross-GPU dmabuf paths |
-| Monitors | DP-1 (100 Hz) = UI; DP-2 = confidence/program + multiview | Matches the two ultrawides on the machine |
+| Displays | DP-1 (100 Hz) = UI Show mode; DP-2 = multiview + Build/dock panels; TV = confidence/program (fallback DP-2) | Matches the two ultrawides + TV on the machine |
 | Vertical output | Our `tall` canvas feeds Aitum Stream Suite's existing Vertical canvas in OBS | Already configured on this machine |
 
 ---
@@ -1387,7 +1387,7 @@ Each milestone ends with a **live smoke run**: the actual app, real devices, out
 |---|---|
 | CPU / RAM / disk | AMD Ryzen 9 7900X (12C/24T), 30 GiB RAM, 400 GB free on `/home` |
 | GPU | NVIDIA GeForce RTX 3070, 8 GB, driver 610.57 (nvidia-open), Vulkan 1.4; NVENC H.264/HEVC. AMD Raphael iGPU present, unused |
-| Monitors | DP-1 MSI MAG341CQ 3440×1440 @ 100 Hz; DP-2 WEH WC34DX9019 3440×1440 @ 60 Hz; both scale 1.25 |
+| Displays | DP-1 MSI MAG341CQ 3440×1440 @ 100 Hz; DP-2 WEH WC34DX9019 3440×1440 @ 60 Hz; both scale 1.25. **TV:** owner-confirmed third display; not detected at probe time (all other NVIDIA connectors, including `HDMI-A-1` and `DP-3`, reported disconnected; likely off). Its mode is read at runtime from Hyprland |
 | HDMI capture | AVMatrix VC42 4-port PCIe (in-tree `hws` driver), YUYV 1080p60, cameras on all 4 inputs: `/dev/video0` HDMI 1 = kit, front view toward the throne; `/dev/video1` HDMI 2 = high corner wide of the whole kit; `/dev/video2` HDMI 3 = camera (no picture at probe time); `/dev/video3` HDMI 4 = low kick-pedal cam. No audio from the VC42 |
 | USB capture | MSI "Streaming Boost" UVC capture (`/dev/video4`) with a camera attached, 1280×720@60 MJPEG/YUYV + stereo 48 kHz audio (no picture at probe time) |
 | USB camera | Sonix USB Camera (`/dev/video6`), 1080p30 MJPEG, mono mic; room view |
