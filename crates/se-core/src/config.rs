@@ -414,6 +414,8 @@ pub struct PresetDef {
     pub priority: Option<u16>,
     /// Pressing again while active releases it.
     pub toggle: bool,
+    /// Stays on until released (`preset.release`, a button let go), even with nothing in `set`.
+    pub until_released: bool,
     /// Requires confirmation (hold-to-confirm in Show mode) and is chat-disabled.
     pub confirm: bool,
     pub chat: Option<bool>,

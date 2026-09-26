@@ -125,11 +125,9 @@ fn main() {
                 h.state_mut().build.canvas.selected = first;
                 pump(&mut h, 800);
                 shots += save(&mut h, &out, &format!("{name}-layer"));
-                h.state_mut().build.comp.side = 1;
+                h.state_mut().build.canvas.selected = None;
                 pump(&mut h, 1200);
                 shots += save(&mut h, &out, &format!("{name}-scene"));
-                h.state_mut().build.comp.side = 0;
-                h.state_mut().build.canvas.selected = None;
             }
         }
     }

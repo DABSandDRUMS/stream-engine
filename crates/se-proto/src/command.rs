@@ -257,7 +257,8 @@ impl Op {
     /// scene.go <name>               scene.cut <name> [transition]
     /// scene.take [transition] [dur] preset.fire <name> [k=v …]  preset.release <name>
     /// mode.set <mode>               emit <type> [k=v …]        wait <dur>
-    /// panic | clean | undo | redo   <any.action> [positional …] [k=v …]
+    /// toggle <addr>                 panic | clean | undo | redo
+    /// <any.action> [positional …] [k=v …]
     /// ```
     pub fn parse(text: &str) -> Result<Op, ParseError> {
         Op::from_tokens(&tokenize(text)?)
@@ -282,6 +283,11 @@ impl Op {
             },
             "trigger" => Op::Trigger { address: arg(0, "an address")?.clone(), payload: kv_payload(&rest[1..]) },
             "release" => Op::Release { address: arg(0, "an address")?.clone() },
+            // flip a switch (bool) or a number between 0 and its max; routed by the core
+            "toggle" => {
+                let a = rest.iter().find_map(|t| t.strip_prefix("address=")).or_else(|| rest.first().filter(|t| !t.contains('=')).map(String::as_str));
+                Op::Action { name: "toggle".into(), args: Value::map().with("address", a.ok_or_else(|| ParseError("`toggle` needs an address".into()))?) }
+            }
             "scene.go" => Op::SceneGo { scene: arg(0, "a scene")?.clone() },
             "scene.cut" => Op::SceneCut { scene: arg(0, "a scene")?.clone(), transition: rest.get(1).cloned() },
             "scene.take" => Op::SceneTake { transition: rest.iter().find(|t| parse_ms(t).is_none()).cloned(), ms: rest.iter().find_map(|t| parse_ms(t)) },
@@ -458,6 +464,14 @@ mod tests {
         assert_eq!(Op::parse("set a.b [1, 2]").unwrap(), Op::Set { address: "a.b".into(), value: Value::parse_text("[1, 2]") });
         assert!(Op::parse("").is_err());
         assert!(Op::parse("$(boom) x").is_err());
+    }
+
+    #[test]
+    fn parse_toggle() {
+        let want = Op::Action { name: "toggle".into(), args: Value::map().with("address", "scene.main.node.cam.fx.blur.enabled") };
+        assert_eq!(Op::parse("toggle scene.main.node.cam.fx.blur.enabled").unwrap(), want);
+        assert_eq!(Op::parse("toggle address=scene.main.node.cam.fx.blur.enabled").unwrap(), want);
+        assert!(Op::parse("toggle").is_err());
     }
 
     #[test]

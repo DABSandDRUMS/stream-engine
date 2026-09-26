@@ -1,17 +1,19 @@
-//! Signal links (§15.5, Settings → Troubleshooting): every binding in a list, and an editor to
-//! create or change one — pick a signal, shape it (strength/shift/gate/rise/fall/curve/range/auto
-//! level/combine/only-when) with a live transfer curve and the shaped output over the signal's
-//! recent history (computed with the core's own shaping code), then save to
-//! `bindings/<name>.toml` through `project.write`.
+//! Automation → Modulation (docs/ui-model.md): every link from a signal to a setting, grouped by
+//! what it moves, and a roomy editor — the same controls as the ∿ popover beside any setting
+//! (links.rs) plus every shaping option, a live transfer curve and the shaped output over the
+//! signal's recent history (computed with the core's own shaping code). Links are saved to
+//! `bindings/<name>.toml` (or edited in place in the file they live in, e.g. a learned fader in
+//! `controllers/*.toml`) through `project.write`, only on Create / Save / Remove.
 
 use crate::app::App;
+use crate::views::links;
 use crate::views::live::nice;
-use egui::{Align, Layout, RichText, Ui, Vec2};
+use egui::{RichText, Ui, Vec2};
 use se_core::bindings::{BindingRt, apply_curve};
 use se_core::config::{BindMode, BindingDef, Curve, Dur};
 use se_proto::{Meta, Value};
 use se_ui_kit::Theme;
-use se_ui_kit::theme::{font_mono, font_semibold, spacing, type_scale};
+use se_ui_kit::theme::{font_mono, spacing, type_scale};
 use se_ui_kit::widgets::{self, Kind, Size, icon};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -59,6 +61,33 @@ impl Draft {
         }
     }
 
+    /// A draft of an existing binding (its full definition) that lives in `file`.
+    pub fn from_def(def: &BindingDef, file: Option<String>) -> Draft {
+        Draft {
+            name: def.name.clone(),
+            target: def.target.clone(),
+            signal: def.signal.clone(),
+            gain: def.gain,
+            offset: def.offset,
+            gate: def.gate,
+            attack_ms: def.attack.map(|a| a.ms() as f64).unwrap_or(0.0),
+            release_ms: def.release.map(|a| a.ms() as f64).unwrap_or(0.0),
+            curve: def.curve,
+            invert: def.invert,
+            range: def.range,
+            auto_normalize: match &def.auto_normalize {
+                Some(Value::Bool(true)) => Some(10.0),
+                Some(Value::Str(s)) => se_proto::parse_duration_ms(s).map(|ms| ms as f64 / 1000.0),
+                Some(v) => v.as_f64(),
+                None => None,
+            },
+            mode: def.mode,
+            scope: def.scope.clone().unwrap_or_default(),
+            enabled: def.enabled,
+            existing: Some((def.name.clone(), file)),
+        }
+    }
+
     /// The core binding definition this draft describes.
     pub fn def(&self) -> BindingDef {
         BindingDef {
@@ -102,10 +131,10 @@ impl Draft {
         history.iter().map(|x| rt.shape(*x as f64, dt) as f32).collect()
     }
 
-    /// `project.write` arguments: path + keys (removals as null so edits drop old options).
-    pub fn write_args(&self, file_text: Option<&str>) -> Value {
+    /// Keys written for this binding (null removes options that were cleared).
+    fn set_value(&self) -> Value {
         let d = self.def();
-        let mut set = Value::map()
+        Value::map()
             .with("target", d.target.clone())
             .with("signal", d.signal.clone())
             .with("gain", d.gain)
@@ -119,26 +148,37 @@ impl Draft {
             .with("release", ms_value(self.release_ms))
             .with("range", d.range.map(|[a, b]| Value::List(vec![Value::Float(a), Value::Float(b)])).unwrap_or_default())
             .with("auto_normalize", d.auto_normalize.clone().unwrap_or_default())
-            .with("scope", d.scope.clone().map(Value::Str).unwrap_or_default());
-        match &self.existing {
-            Some((name, Some(path))) => {
-                let multi = file_text.and_then(|t| t.parse::<toml::Table>().ok()).is_some_and(|t| t.get("binding").is_some_and(|b| b.is_array()));
-                if multi {
-                    let stem_index = name.rsplit_once('#').and_then(|(_, n)| n.parse::<i64>().ok()).map(|n| n - 1);
-                    let args = Value::map().with("path", path.clone()).with("table", "binding");
-                    match stem_index {
-                        Some(i) => args.with("index", i).with("set", set),
-                        None => args.with("match", Value::map().with("name", name.clone())).with("set", set),
-                    }
-                } else {
-                    Value::map().with("path", path.clone()).with("set", set)
-                }
-            }
-            _ => {
-                set = set.with("name", Value::Null);
-                Value::map().with("path", format!("bindings/{}.toml", sanitize(&self.name))).with("set", set)
-            }
+            .with("scope", d.scope.clone().map(Value::Str).unwrap_or_default())
+    }
+
+    /// `project.write` args naming this existing binding: its file, plus the `[[binding]]`
+    /// entry when the file holds several (by explicit name, else by position `<file>#<n>`).
+    fn entry_args(&self, file_text: Option<&str>) -> Option<Value> {
+        let Some((name, Some(path))) = &self.existing else { return None };
+        let args = Value::map().with("path", path.clone());
+        let parsed = file_text.and_then(|t| t.parse::<toml::Table>().ok());
+        let Some(entries) = parsed.as_ref().and_then(|t| t.get("binding")).and_then(|b| b.as_array()) else { return Some(args) };
+        let args = args.with("table", "binding");
+        let explicit = entries.iter().any(|e| e.get("name").and_then(|n| n.as_str()) == Some(name.as_str()));
+        Some(match (explicit, name.rsplit_once('#').and_then(|(_, n)| n.parse::<i64>().ok())) {
+            (false, Some(n)) => args.with("index", n - 1),
+            _ => args.with("match", Value::map().with("name", name.clone())),
+        })
+    }
+
+    /// `project.write` arguments: a new binding gets its own file; an existing one is edited in
+    /// place. `file_text` is the current text of the existing binding's file.
+    pub fn write_args(&self, file_text: Option<&str>) -> Value {
+        match self.entry_args(file_text) {
+            Some(args) => args.with("set", self.set_value()),
+            None => Value::map().with("path", format!("bindings/{}.toml", sanitize(&self.name))).with("set", self.set_value().with("name", Value::Null)),
         }
+    }
+
+    /// `project.write` arguments that remove this existing binding (its entry, or its file when
+    /// it is the only thing in it).
+    pub fn delete_args(&self, file_text: Option<&str>) -> Option<Value> {
+        Some(self.entry_args(file_text)?.with("delete", true))
     }
 }
 
@@ -172,61 +212,27 @@ pub fn sanitize(s: &str) -> String {
     if out.is_empty() { "binding".into() } else { out }
 }
 
-#[derive(Default)]
-pub struct ModulateState {
-    pub draft: Option<Draft>,
-    pub signal_filter: String,
-    pending_file: Option<String>,
+/// A file-stem-safe name for a new link that no file in `taken` (`bindings/<x>.toml`) uses.
+pub fn unique_name(base: &str, taken: &[String]) -> String {
+    let base = sanitize(base);
+    let used = |n: &str| taken.iter().any(|f| f == &format!("bindings/{n}.toml"));
+    let mut name = base.clone();
+    let mut i = 2;
+    while used(&name) {
+        name = format!("{base}_{i}");
+        i += 1;
+    }
+    name
 }
 
-impl ModulateState {
-    pub fn start(&mut self, target: &str, meta: &Meta, _current: &Value) {
-        self.draft = Some(Draft::new(target, meta));
-        self.signal_filter.clear();
-    }
-
-    /// Edit an existing binding (row of the `bindings` query + its definition from `config.bindings`).
-    pub fn edit_existing(&mut self, b: &Value) {
-        let s = |k: &str| b.get_path(k).and_then(Value::as_str).unwrap_or("").to_string();
-        let mut d = Draft::new(&s("target"), &Meta::default());
-        d.name = s("name");
-        d.signal = s("signal");
-        d.enabled = b.get_path("enabled").is_none_or(Value::truthy);
-        let file = b.get_path("file").and_then(Value::as_str).filter(|f| !f.is_empty()).map(String::from);
-        d.existing = Some((d.name.clone(), file.clone()));
-        self.pending_file = file;
-        self.draft = Some(d);
-    }
-
-    fn fill_from_config(&mut self, cfg: &Value) {
-        let Some(d) = self.draft.as_mut() else { return };
-        let Some((name, _)) = d.existing.clone() else { return };
-        let Some(def) = cfg.as_list().and_then(|l| l.iter().find(|x| x.get_path("name").and_then(Value::as_str) == Some(name.as_str()))) else { return };
-        let Ok(def): Result<BindingDef, _> = serde_json::from_value(serde_json::Value::from(def)) else { return };
-        let keep = d.existing.clone();
-        *d = Draft {
-            name: def.name.clone(),
-            target: def.target.clone(),
-            signal: def.signal.clone(),
-            gain: def.gain,
-            offset: def.offset,
-            gate: def.gate,
-            attack_ms: def.attack.map(|a| a.ms() as f64).unwrap_or(0.0),
-            release_ms: def.release.map(|a| a.ms() as f64).unwrap_or(0.0),
-            curve: def.curve,
-            invert: def.invert,
-            range: def.range,
-            auto_normalize: match &def.auto_normalize {
-                Some(Value::Bool(true)) => Some(10.0),
-                Some(Value::Str(s)) => se_proto::parse_duration_ms(s).map(|ms| ms as f64 / 1000.0),
-                Some(v) => v.as_f64(),
-                None => None,
-            },
-            mode: def.mode,
-            scope: def.scope.clone().unwrap_or_default(),
-            enabled: def.enabled,
-            existing: keep,
-        };
+/// Plain words for a curve (the file keeps [`curve_name`]).
+pub(crate) fn curve_words(c: Curve) -> &'static str {
+    match c {
+        Curve::Linear => "Straight",
+        Curve::Exp => "Slow start",
+        Curve::Log => "Fast start",
+        Curve::Smoothstep => "Soft S-curve",
+        Curve::FaderTaper => "Like a fader",
     }
 }
 
@@ -239,262 +245,377 @@ fn link_name(name: &str) -> String {
     }
 }
 
-/// Plain words for a curve (the file keeps [`curve_name`]).
-fn curve_words(c: Curve) -> &'static str {
-    match c {
-        Curve::Linear => "Straight",
-        Curve::Exp => "Slow start",
-        Curve::Log => "Fast start",
-        Curve::Smoothstep => "Soft S-curve",
-        Curve::FaderTaper => "Like a fader",
+#[derive(Default)]
+pub struct ModulateState {
+    /// The link open in the Modulation editor.
+    pub draft: Option<Draft>,
+    pub signal_filter: String,
+    /// Editing an existing link whose full definition (`config.bindings`) hasn't arrived yet;
+    /// editing waits for it so a save never writes placeholder values over the file's.
+    loading: bool,
+    /// The open link's file text was asked for.
+    file_asked: bool,
+    /// The ∿/⚡ popovers and the index of who changes what.
+    pub(crate) links: links::LinksState,
+}
+
+impl ModulateState {
+    /// A new link on `target` (from the Inspector's ∿ or the page's "+").
+    pub fn start(&mut self, target: &str, meta: &Meta, _current: &Value) {
+        self.draft = Some(Draft::new(target, meta));
+        self.signal_filter.clear();
+        self.loading = false;
+        self.file_asked = false;
+    }
+
+    /// Edit an existing link (a row of the `bindings` query); its full definition is filled in
+    /// from `config.bindings` when it arrives.
+    pub fn edit_existing(&mut self, b: &Value) {
+        let s = |k: &str| b.get_path(k).and_then(Value::as_str).unwrap_or("").to_string();
+        let mut d = Draft::new(&s("target"), &Meta::default());
+        d.name = s("name");
+        d.signal = s("signal");
+        d.enabled = b.get_path("enabled").is_none_or(Value::truthy);
+        let file = Some(s("file")).filter(|f| !f.is_empty());
+        d.existing = Some((d.name.clone(), file));
+        self.draft = Some(d);
+        self.signal_filter.clear();
+        self.loading = true;
+        self.file_asked = false;
     }
 }
 
-/// Form row: dim label on the left (with the file key as tooltip), control on the right.
-fn row(ui: &mut Ui, t: &Theme, label: &str, key: &str, add: impl FnOnce(&mut Ui)) {
-    ui.label(RichText::new(label).color(t.text_dim)).on_hover_text(key);
-    ui.horizontal(add);
-    ui.end_row();
+/// Fill a just-opened link from `config.bindings` and fetch its file (to edit it in place).
+fn load_existing(app: &mut App) {
+    let Some((name, file)) = app.build.modulate.draft.as_ref().and_then(|d| d.existing.clone()) else { return };
+    if let Some(f) = &file
+        && !app.build.modulate.file_asked
+    {
+        app.build.modulate.file_asked = true;
+        links::read_file(app, f);
+    }
+    if !app.build.modulate.loading {
+        return;
+    }
+    let target = app.build.modulate.draft.as_ref().map(|d| d.target.clone()).unwrap_or_default();
+    let row = Value::map().with("name", name).with("target", target);
+    if let Some(def) = links::config_def(app, &row) {
+        app.build.modulate.draft = Some(Draft::from_def(&def, file));
+        app.build.modulate.loading = false;
+    }
 }
 
+fn s<'a>(v: &'a Value, k: &str) -> &'a str {
+    v.get_path(k).and_then(Value::as_str).unwrap_or("")
+}
+
+fn clip(s: &str, n: usize) -> String {
+    if s.chars().count() <= n { s.to_string() } else { format!("{}…", s.chars().take(n.saturating_sub(1)).collect::<String>()) }
+}
+
+/// A link in the list, worded once per frame.
+struct Row {
+    value: Value,
+    name: String,
+    area: usize,
+    title: String,
+    sub: String,
+    full: String,
+    trailing: &'static str,
+}
+
+fn rows(app: &App) -> Vec<Row> {
+    let mut out: Vec<Row> = app
+        .m
+        .q_list("bindings")
+        .iter()
+        .map(|b| {
+            let (target, signal) = (s(b, "target"), links::signal_words(s(b, "signal")));
+            let trailing = if !b.get_path("enabled").is_none_or(Value::truthy) {
+                "Off"
+            } else if !b.get_path("active").is_some_and(Value::truthy) {
+                "Waiting"
+            } else {
+                ""
+            };
+            Row {
+                value: b.clone(),
+                name: s(b, "name").to_string(),
+                area: links::area(target),
+                title: clip(&links::address_short(app, target), 30),
+                sub: clip(&format!("follows {signal}"), 38),
+                full: format!("{} follows {signal}", links::address_label(app, target)),
+                trailing,
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| (a.area, &a.title).cmp(&(b.area, &b.title)));
+    out
+}
+
+/// The Modulation page: links (grouped by what they move) · the open link.
 pub fn ui(app: &mut App, ui: &mut Ui) {
     let t = app.t.clone();
-    if app.build.modulate.draft.is_none() {
-        list(app, ui, &t);
-        return;
+    links::keep_fresh(app);
+    load_existing(app);
+    let rows = rows(app);
+    let sel = app.build.modulate.draft.as_ref().and_then(|d| d.existing.as_ref()).map(|(n, _)| n.clone());
+    let any = !rows.is_empty();
+    let ((pick, create), start) = widgets::split(ui, 290.0, |ui| list_pane(ui, &t, &rows, sel.as_deref()), |ui| detail(app, ui, &t, any));
+    if create || start {
+        app.build.modulate.start("", &Meta::default(), &Value::Null);
     }
-    // definitions of existing bindings (shaping details) and the file they live in
-    if app.build.modulate.draft.as_ref().is_some_and(|d| d.existing.is_some()) {
-        if app.m.q("config.bindings").is_none() {
-            app.m.query("config.bindings", Value::Null);
-        } else if let Some(cfg) = app.m.q("config.bindings").cloned()
-            && app.build.modulate.draft.as_ref().is_some_and(|d| d.signal.is_empty() || d.target.is_empty() || d.attack_ms == 10.0 && d.release_ms == 150.0)
-        {
-            app.build.modulate.fill_from_config(&cfg);
-        }
-        if let Some(f) = app.build.modulate.pending_file.take() {
-            app.m.query_as(&format!("project.read:{f}"), "project.read", Value::map().with("path", f));
-        }
-    }
-    let mut signals: Vec<String> = app.m.signals.keys().cloned().collect();
-    signals.sort();
-    let mut save = false;
-    let mut cancel = false;
-    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        let form_w = (ui.available_width() * 0.5).clamp(420.0, 640.0);
-        ui.horizontal_top(|ui| {
-            ui.allocate_ui_with_layout(Vec2::new(form_w, 10.0), Layout::top_down(Align::Min), |ui| {
-                ui.set_width(form_w);
-                let st = &mut app.build.modulate;
-                let Some(d) = st.draft.as_mut() else { return };
-                let title = if d.existing.is_some() { link_name(&d.name) } else { "New link".to_string() };
-                ui.label(RichText::new(title).font(font_semibold(type_scale::LARGE)).color(t.fg));
-                widgets::hint(ui, &t, "Make a setting follow a live signal, e.g. zoom that pulses with the kick drum.");
-                ui.add_space(spacing::M);
-                egui::Grid::new("modulate").num_columns(2).spacing([16.0, 10.0]).min_col_width(130.0).show(ui, |ui| {
-                    row(ui, &t, "Setting", "target", |ui| {
-                        if d.existing.is_none() {
-                            // a new link's name follows the setting until you type your own
-                            let auto = Draft::new(&d.target, &Meta::default()).name;
-                            let r = ui.add(
-                                se_ui_kit::widgets::field(&mut d.target)
-                                    .font(font_mono(type_scale::SMALL + 0.5))
-                                    .hint_text("scene.duo.node.cam.zoom")
-                                    .desired_width(300.0),
-                            );
-                            if r.changed() && d.name == auto {
-                                d.name = Draft::new(&d.target, &Meta::default()).name;
-                            }
-                        } else {
-                            ui.label(RichText::new(&d.target).font(font_mono(type_scale::SMALL + 0.5)).color(t.modulated()));
-                        }
-                    });
-                    row(ui, &t, "Name", "name", |ui| {
-                        ui.add_enabled(d.existing.is_none(), se_ui_kit::widgets::field(&mut d.name).desired_width(240.0));
-                    });
-                    row(ui, &t, "Follows", "signal", |ui| {
-                        egui::ComboBox::from_id_salt("mod-signal")
-                            .width(260.0)
-                            .selected_text(if d.signal.is_empty() { "Pick a signal…" } else { d.signal.as_str() })
-                            .show_ui(ui, |ui| {
-                                ui.add(se_ui_kit::widgets::field(&mut st.signal_filter).hint_text("Search (band, music, midi…)"));
-                                let f = st.signal_filter.to_lowercase();
-                                for s in signals.iter().filter(|s| f.is_empty() || s.to_lowercase().contains(&f)).take(200) {
-                                    if ui.selectable_label(d.signal == *s, s).clicked() {
-                                        d.signal = s.clone();
-                                    }
-                                }
-                            });
-                    });
-                    row(ui, &t, "Strength", "gain", |ui| {
-                        ui.add(egui::DragValue::new(&mut d.gain).speed(0.01).range(-20.0..=20.0).prefix("× "));
-                    });
-                    row(ui, &t, "Shift", "offset", |ui| {
-                        ui.add(egui::DragValue::new(&mut d.offset).speed(0.01).range(-10.0..=10.0));
-                    });
-                    row(ui, &t, "Upside down", "invert", |ui| {
-                        widgets::toggle(ui, &t, &mut d.invert);
-                    });
-                    row(ui, &t, "Ignore below", "gate", |ui| {
-                        let mut on = d.gate.is_some();
-                        if widgets::toggle(ui, &t, &mut on).changed() {
-                            d.gate = on.then_some(0.1);
-                        }
-                        if let Some(g) = d.gate.as_mut() {
-                            ui.add(egui::Slider::new(g, 0.0..=1.0).max_decimals(3));
-                        }
-                    });
-                    row(ui, &t, "Rise / fall time", "attack / release", |ui| {
-                        ui.add(egui::DragValue::new(&mut d.attack_ms).range(0.0..=5000.0).speed(1.0).suffix(" ms"));
-                        ui.label(RichText::new("/").color(t.text_faint));
-                        ui.add(egui::DragValue::new(&mut d.release_ms).range(0.0..=10000.0).speed(2.0).suffix(" ms"));
-                    });
-                    row(ui, &t, "Curve", "curve", |ui| {
-                        egui::ComboBox::from_id_salt("mod-curve").selected_text(curve_words(d.curve)).show_ui(ui, |ui| {
-                            for c in [Curve::Linear, Curve::Exp, Curve::Log, Curve::Smoothstep, Curve::FaderTaper] {
-                                ui.selectable_value(&mut d.curve, c, curve_words(c));
-                            }
-                        });
-                    });
-                    row(ui, &t, "Output range", "range", |ui| {
-                        let mut on = d.range.is_some();
-                        if widgets::toggle(ui, &t, &mut on).changed() {
-                            d.range = on.then_some([0.0, 1.0]);
-                        }
-                        if let Some(r) = d.range.as_mut() {
-                            ui.add(egui::DragValue::new(&mut r[0]).speed(0.01));
-                            ui.label(RichText::new("to").color(t.text_faint));
-                            ui.add(egui::DragValue::new(&mut r[1]).speed(0.01));
-                        }
-                    });
-                    row(ui, &t, "Auto level", "auto_normalize", |ui| {
-                        let mut on = d.auto_normalize.is_some();
-                        if widgets::toggle(ui, &t, &mut on).on_hover_text("Same feel on quiet and loud songs").changed() {
-                            d.auto_normalize = on.then_some(10.0);
-                        }
-                        if let Some(w) = d.auto_normalize.as_mut() {
-                            ui.add(egui::DragValue::new(w).range(1.0..=120.0).suffix(" s window"));
-                        }
-                    });
-                    row(ui, &t, "Combine", "mode", |ui| {
-                        let modes = [BindMode::Add, BindMode::Multiply, BindMode::Replace];
-                        let mut i = modes.iter().position(|m| *m == d.mode).unwrap_or(0);
-                        if widgets::segmented(ui, &t, &mut i, &["Add", "Multiply", "Replace"]) {
-                            d.mode = modes[i];
-                        }
-                    });
-                    row(ui, &t, "Only when", "scope", |ui| {
-                        ui.add(se_ui_kit::widgets::field(&mut d.scope).hint_text("always · scene.duo · preset.hype · mode.live").desired_width(300.0));
-                    });
-                });
-                ui.add_space(spacing::M);
-                let err = BindingRt::new(d.def()).err();
-                if let Some(e) = &err {
-                    ui.label(RichText::new(format!("{} {e}", icon::WARN)).size(type_scale::SMALL + 0.5).color(t.bright_red));
-                    ui.add_space(spacing::XS);
-                }
-                ui.horizontal(|ui| {
-                    let ok = !d.signal.is_empty() && !d.target.is_empty() && !d.name.trim().is_empty() && err.is_none();
-                    if widgets::button_ex(ui, &t, Some(icon::CHECK), "Save link", Kind::Primary, Size::Medium, 0.0, ok).clicked() {
-                        save = true;
-                    }
-                    if widgets::button(ui, &t, "Close", Kind::Ghost).clicked() {
-                        cancel = true;
-                    }
-                });
-                let dest = match &d.existing {
-                    Some((_, Some(f))) => f.clone(),
-                    _ => format!("bindings/{}.toml", sanitize(&d.name)),
-                };
-                widgets::hint(ui, &t, &format!("Saved in {dest}"));
-            });
-            ui.add_space(spacing::XL);
-            // live preview
-            ui.vertical(|ui| {
-                let d = app.build.modulate.draft.clone().unwrap_or_else(|| Draft::new("", &Meta::default()));
-                let hist: Vec<f32> = app.m.signals.get(&d.signal).map(|h| h.iter().copied().collect()).unwrap_or_default();
-                let shaped = d.simulate(&hist, 1.0 / 30.0);
-                let out_range = d.range.map(|[a, b]| [a.min(b) as f32, a.max(b) as f32]).unwrap_or([0.0, 1.0]);
-                widgets::section(ui, &t, "", "What it does");
-                widgets::hint(ui, &t, "Left: signal in → setting out. Right: the signal (faint) and what the setting does with it.");
-                ui.add_space(spacing::S);
-                ui.horizontal_top(|ui| {
-                    let f = |x: f64| d.transfer(x);
-                    se_ui_kit::curve::transfer_curve(ui, &t, Vec2::new(170.0, 150.0), &f, d.range.unwrap_or([0.0, 1.0]), hist.last().map(|v| *v as f64));
-                    ui.vertical(|ui| {
-                        se_ui_kit::curve::dual_scope(ui, &t, Vec2::new((ui.available_width() - 8.0).max(160.0), 150.0), &hist, &shaped, out_range);
-                        let now = match (hist.last(), shaped.last()) {
-                            _ if d.signal.is_empty() => "Pick a signal to see it move.".to_string(),
-                            (Some(v), Some(o)) => format!("{} is {v:.3} → the setting gets {o:.3}", d.signal),
-                            _ => format!("Waiting for {}…", d.signal),
-                        };
-                        ui.label(RichText::new(now).font(font_mono(type_scale::SMALL)).color(t.text_dim));
-                    });
-                });
-            });
-        });
-    });
-    if save && let Some(d) = app.build.modulate.draft.clone() {
-        let file_text = match d.existing.as_ref().and_then(|(_, f)| f.clone()) {
-            Some(f) => app.m.q(&format!("project.read:{f}")).and_then(|v| v.get_path("text")).and_then(Value::as_str).map(String::from),
-            None => None,
-        };
-        let args = d.write_args(file_text.as_deref());
-        app.m.action("project.write", args);
-        app.m.toast(format!("Saved the link {}", link_name(&d.name)), false);
-        app.m.refresh_soon();
-    }
-    if cancel {
-        app.build.modulate.draft = None;
+    if let Some(i) = pick {
+        app.build.modulate.edit_existing(&rows[i].value);
     }
 }
 
-/// Every link, with "New link"; picking one opens it in the editor.
-fn list(app: &mut App, ui: &mut Ui, t: &Theme) {
-    let links = app.m.q_list("bindings").to_vec();
-    if links.is_empty() {
-        if widgets::empty_state(
-            ui,
-            t,
-            icon::LINK,
-            "No signal links yet",
-            "A link makes a setting move with a signal, like zoom that pulses with the bass.",
-            Some("Make a link"),
-        ) {
-            app.build.modulate.draft = Some(Draft::new("", &Meta::default()));
+/// Returns (picked row, "+" clicked).
+fn list_pane(ui: &mut Ui, t: &Theme, rows: &[Row], sel: Option<&str>) -> (Option<usize>, bool) {
+    let create = widgets::pane_header(ui, t, "Links", Some(rows.len()), Some("New link"));
+    let mut pick = None;
+    egui::ScrollArea::vertical().id_salt("modulation-list").auto_shrink([false, false]).show(ui, |ui| {
+        let mut area = usize::MAX;
+        for (i, r) in rows.iter().enumerate() {
+            if r.area != area {
+                area = r.area;
+                widgets::group_label(ui, t, links::AREAS[area]);
+            }
+            if widgets::list_row(ui, t, links::SINE, &r.title, &r.sub, r.trailing, sel == Some(r.name.as_str())).on_hover_text(&r.full).clicked() {
+                pick = Some(i);
+            }
         }
+    });
+    (pick, create)
+}
+
+/// The open link, or what a link is. Returns true when the empty state's "New link" is clicked.
+fn detail(app: &mut App, ui: &mut Ui, t: &Theme, any: bool) -> bool {
+    if app.build.modulate.draft.is_none() {
+        let (title, body) = if any {
+            ("Pick a link", "A link makes a setting follow a signal. Pick one on the left to change it, or make a new one.")
+        } else {
+            ("Nothing follows a signal yet", "A link makes a setting follow a signal: a layer that bounces with the kick, blur that swells with the bass.")
+        };
+        return widgets::empty_state(ui, t, links::SINE, title, body, Some("New link"));
+    }
+    egui::ScrollArea::vertical().id_salt("modulation-detail").auto_shrink([false, false]).show(ui, |ui| editor(app, ui, t));
+    false
+}
+
+fn editor(app: &mut App, ui: &mut Ui, t: &Theme) {
+    let Some(mut d) = app.build.modulate.draft.clone() else { return };
+    let loading = app.build.modulate.loading;
+    let is_new = d.existing.is_none();
+    let file = d.existing.as_ref().and_then(|(_, f)| f.clone());
+    let text = file.as_deref().and_then(|f| links::file_text(app, f));
+    let loaded = file.is_none() || text.is_some();
+    let err = BindingRt::new(d.def()).err();
+    let target = d.target.trim().to_string();
+    let ready = !loading && loaded && !d.signal.is_empty() && !target.is_empty() && !d.name.trim().is_empty() && err.is_none();
+    let title = if target.is_empty() { "New link".to_string() } else { links::address_label(app, &target) };
+    let sub = if d.signal.is_empty() { "Pick a signal for it to follow".to_string() } else { format!("Follows {}", links::signal_words(&d.signal)) };
+    let (mut save, mut close) = (false, false);
+    widgets::detail_header(ui, t, links::SINE, &title, &sub, |ui| {
+        save = widgets::button_ex(ui, t, Some(icon::CHECK), if is_new { "Create" } else { "Save" }, Kind::Primary, Size::Medium, 0.0, ready).clicked();
+        close = widgets::button_ex(ui, t, None, "Close", Kind::Ghost, Size::Medium, 0.0, true).clicked();
+    });
+    if let Some(e) = &err {
+        ui.label(RichText::new(format!("{} {e}", icon::WARN)).size(type_scale::SMALL + 0.5).color(t.bright_red));
+        ui.add_space(spacing::S);
+    }
+    if loading {
+        widgets::hint(ui, t, "Loading this link…");
+    }
+    ui.add_enabled_ui(!loading, |ui| sections(app, ui, t, &mut d, is_new));
+    let mut remove = false;
+    if !is_new {
+        ui.add_space(spacing::M);
+        ui.add_enabled_ui(loaded, |ui| remove = widgets::hold_button(ui, t, "Remove link", t.bright_red, 0.6));
+    }
+    if save {
+        if is_new {
+            let taken: Vec<String> = app.m.q_list("bindings").iter().map(|b| s(b, "file").to_string()).collect();
+            let stem = unique_name(&d.name, &taken);
+            d.name = stem.clone();
+            app.m.action("project.write", d.write_args(None));
+            // from now on it is the link in bindings/<stem>.toml (named after its file)
+            d.name = format!("{stem}#1");
+            d.existing = Some((d.name.clone(), Some(format!("bindings/{stem}.toml"))));
+            app.build.modulate.file_asked = false;
+        } else {
+            app.m.action("project.write", d.write_args(text.as_deref()));
+            if let Some(f) = &file {
+                links::read_file(app, f);
+            }
+        }
+        app.m.toast(format!("Saved the link {}.", link_name(&d.name)), false);
+        links::refetch(app);
+    }
+    if remove && let Some(args) = d.delete_args(text.as_deref()) {
+        app.m.action("project.write", args);
+        app.m.toast(format!("Removed the link {}.", link_name(&d.name)), false);
+        links::refetch(app);
+        app.build.modulate.draft = None;
         return;
     }
-    ui.horizontal(|ui| {
-        widgets::hint(ui, t, "Pick a link to change it.");
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if widgets::button_ex(ui, t, Some(icon::PLUS), "New link", Kind::Primary, Size::Medium, 0.0, true).clicked() {
-                app.build.modulate.draft = Some(Draft::new("", &Meta::default()));
-            }
-        });
-    });
-    ui.add_space(spacing::S);
-    let mut open = None;
-    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        for b in &links {
-            let s = |k: &str| b.get_path(k).and_then(Value::as_str).unwrap_or("");
-            let active = b.get_path("active").is_some_and(Value::truthy);
-            let on = b.get_path("enabled").is_none_or(Value::truthy);
-            let trailing = if !on {
-                "Off"
-            } else if active {
-                "Moving now"
+    app.build.modulate.draft = if close { None } else { Some(d) };
+}
+
+fn sections(app: &mut App, ui: &mut Ui, t: &Theme, d: &mut Draft, is_new: bool) {
+    widgets::inspector_section(ui, t, "mod-preview", "What it does", true, |_| {}, |ui| preview(app, ui, t, d));
+    widgets::inspector_section(
+        ui,
+        t,
+        "mod-setting",
+        "Setting",
+        true,
+        |_| {},
+        |ui| {
+            if is_new {
+                widgets::prop_row(ui, t, "Setting", |ui| {
+                    // a new link's name follows the setting until you type your own
+                    let auto = Draft::new(&d.target, &Meta::default()).name;
+                    let r = ui.add(
+                        widgets::field(&mut d.target)
+                            .font(font_mono(type_scale::SMALL + 0.5))
+                            .hint_text("scene.main.node.cam.scale")
+                            .desired_width(ui.available_width()),
+                    );
+                    if r.changed() && d.name == auto {
+                        d.name = Draft::new(&d.target, &Meta::default()).name;
+                    }
+                });
+                widgets::prop_row(ui, t, "Name", |ui| ui.add(widgets::field(&mut d.name).desired_width(240.0)));
             } else {
-                "Waiting"
+                widgets::prop_row(ui, t, "Setting", |ui| {
+                    ui.label(RichText::new(links::address_label(app, &d.target)).color(t.modulated())).on_hover_text(d.target.as_str());
+                });
+            }
+        },
+    );
+    widgets::inspector_section(
+        ui,
+        t,
+        "mod-signal",
+        "Signal",
+        true,
+        |_| {},
+        |ui| {
+            let target = d.target.trim().to_string();
+            let learn = (is_new && se_proto::address::is_valid(&target, false)).then_some(target.as_str());
+            links::signal_picker(app, ui, t, &mut d.signal, learn, false);
+            ui.add_space(spacing::XS);
+            widgets::details(ui, t, "mod-all-signals", "All signals", |ui| all_signals(app, ui, t, &mut d.signal));
+        },
+    );
+    let bounds = app.m.meta.get(d.target.trim()).and_then(|m| m.range).map(|[a, b]| (a, b)).unwrap_or((0.0, 0.0));
+    widgets::inspector_section(
+        ui,
+        t,
+        "mod-response",
+        "Response",
+        true,
+        |_| {},
+        |ui| {
+            widgets::prop_row(ui, t, "From / to", |ui| {
+                let mut on = d.range.is_some();
+                if widgets::toggle(ui, t, &mut on).on_hover_text("Map the signal onto these values").changed() {
+                    d.range = on.then_some(if bounds.1 > bounds.0 { [bounds.0, bounds.1] } else { [0.0, 1.0] });
+                }
+                if let Some(r) = d.range.as_mut() {
+                    links::range_values(ui, t, r, bounds);
+                }
+            });
+            widgets::prop_row(ui, t, "Strength", |ui| ui.add(egui::DragValue::new(&mut d.gain).speed(0.01).range(-20.0..=20.0).prefix("× ")));
+            widgets::prop_row(ui, t, "Shift", |ui| ui.add(egui::DragValue::new(&mut d.offset).speed(0.01).range(-10.0..=10.0)));
+            widgets::prop_row(ui, t, "Upside down", |ui| widgets::toggle(ui, t, &mut d.invert));
+            widgets::prop_row(ui, t, "Ignore below", |ui| {
+                let mut on = d.gate.is_some();
+                if widgets::toggle(ui, t, &mut on).changed() {
+                    d.gate = on.then_some(0.1);
+                }
+                if let Some(g) = d.gate.as_mut() {
+                    ui.add(egui::Slider::new(g, 0.0..=1.0).max_decimals(3));
+                }
+            });
+            widgets::prop_row(ui, t, "Curve", |ui| links::curve_chips(ui, t, &mut d.curve));
+            widgets::prop_row(ui, t, "Smoothing", |ui| links::smoothing(ui, t, d));
+            widgets::prop_row(ui, t, "Auto level", |ui| {
+                let mut on = d.auto_normalize.is_some();
+                if widgets::toggle(ui, t, &mut on).on_hover_text("Same feel on quiet and loud songs").changed() {
+                    d.auto_normalize = on.then_some(10.0);
+                }
+                if let Some(w) = d.auto_normalize.as_mut() {
+                    ui.add(egui::DragValue::new(w).range(1.0..=120.0).suffix(" s window"));
+                }
+            });
+        },
+    );
+    widgets::inspector_section(
+        ui,
+        t,
+        "mod-more",
+        "More",
+        false,
+        |_| {},
+        |ui| {
+            widgets::prop_row(ui, t, "On", |ui| widgets::toggle(ui, t, &mut d.enabled));
+            widgets::prop_row(ui, t, "Combine", |ui| {
+                let modes = [BindMode::Add, BindMode::Multiply, BindMode::Replace];
+                let mut i = modes.iter().position(|m| *m == d.mode).unwrap_or(0);
+                if widgets::segmented(ui, t, &mut i, &["Add", "Multiply", "Replace"]) {
+                    d.mode = modes[i];
+                }
+            });
+            widgets::prop_row(ui, t, "Only when", |ui| {
+                ui.add(widgets::field(&mut d.scope).hint_text("always · scene.duo · mode.live").desired_width(ui.available_width()));
+            });
+            let dest = match &d.existing {
+                Some((_, Some(f))) => f.clone(),
+                _ => format!("bindings/{}.toml", sanitize(&d.name)),
             };
-            if widgets::list_row(ui, t, icon::LINK, &link_name(s("name")), &format!("{} follows {}", s("target"), s("signal")), trailing, false).clicked() {
-                open = Some(b.clone());
+            widgets::prop_row(ui, t, "Saved in", |ui| ui.label(RichText::new(dest).font(font_mono(type_scale::SMALL + 0.5)).color(t.text_dim)));
+        },
+    );
+}
+
+/// Any signal the engine reports, searchable (custom signals, OSC, meters…).
+fn all_signals(app: &mut App, ui: &mut Ui, t: &Theme, signal: &mut String) {
+    let st = &mut app.build.modulate;
+    ui.add(widgets::field(&mut st.signal_filter).hint_text("Search signals").desired_width(ui.available_width()));
+    let f = st.signal_filter.to_lowercase();
+    let mut names: Vec<&String> = app.m.signals.keys().filter(|n| f.is_empty() || n.to_lowercase().contains(&f)).collect();
+    names.sort();
+    egui::ScrollArea::vertical().id_salt("mod-all-signals").max_height(240.0).auto_shrink([false, true]).show(ui, |ui| {
+        for n in names.into_iter().take(60) {
+            if widgets::list_row(ui, t, "", &links::signal_label(n), "", n, *signal == *n).clicked() {
+                *signal = n.clone();
             }
         }
     });
-    if let Some(b) = open {
-        app.build.modulate.edit_existing(&b);
-    }
+}
+
+/// Transfer curve (signal in → setting out) and the live signal with what the setting does.
+fn preview(app: &App, ui: &mut Ui, t: &Theme, d: &Draft) {
+    let hist: Vec<f32> = app.m.signals.get(&d.signal).map(|h| h.iter().copied().collect()).unwrap_or_default();
+    let shaped = d.simulate(&hist, 1.0 / 30.0);
+    let out_range = d.range.map(|[a, b]| [a.min(b) as f32, a.max(b) as f32]).unwrap_or([0.0, 1.0]);
+    widgets::hint(ui, t, "Left: signal in → setting out. Right: the signal (faint) and what the setting does with it.");
+    ui.add_space(spacing::S);
+    ui.horizontal_top(|ui| {
+        let f = |x: f64| d.transfer(x);
+        se_ui_kit::curve::transfer_curve(ui, t, Vec2::new(170.0, 140.0), &f, d.range.unwrap_or([0.0, 1.0]), hist.last().map(|v| *v as f64));
+        ui.vertical(|ui| {
+            se_ui_kit::curve::dual_scope(ui, t, Vec2::new((ui.available_width() - 8.0).max(160.0), 140.0), &hist, &shaped, out_range);
+            let now = match (hist.last(), shaped.last()) {
+                _ if d.signal.is_empty() => "Pick a signal to see it move.".to_string(),
+                (Some(v), Some(o)) => format!("{} is {v:.3} → the setting gets {o:.3}", links::signal_label(&d.signal)),
+                _ => format!("Waiting for {}…", links::signal_words(&d.signal)),
+            };
+            ui.label(RichText::new(now).font(font_mono(type_scale::SMALL)).color(t.text_dim));
+        });
+    });
 }
 
 #[cfg(test)]
@@ -538,14 +659,55 @@ mod tests {
         assert_eq!(a.get_path("set.signal").and_then(Value::as_str), Some("band.kick"));
         assert_eq!(a.get_path("set.attack").and_then(Value::as_str), Some("10ms"));
         assert!(a.get_path("table").is_none());
+        assert!(d.delete_args(None).is_none(), "nothing to remove before it is saved");
+        let two = "[[binding]]\ntarget='a'\nsignal='b'\n[[binding]]\ntarget='c'\nsignal='d'\n";
         d.existing = Some(("controllers#2".into(), Some("controllers/faders.toml".into())));
-        let a = d.write_args(Some("[[binding]]\ntarget='a'\nsignal='b'\n[[binding]]\ntarget='c'\nsignal='d'\n"));
+        let a = d.write_args(Some(two));
         assert_eq!(a.get_path("table").and_then(Value::as_str), Some("binding"));
         assert_eq!(a.get_path("index").and_then(Value::as_i64), Some(1));
+        let del = d.delete_args(Some(two)).unwrap();
+        assert_eq!((del.get_path("index").and_then(Value::as_i64), del.get_path("delete")), (Some(1), Some(&Value::Bool(true))));
+        // an entry with an explicit name is found by it, not by position
+        d.existing = Some(("faders#2".into(), Some("controllers/faders.toml".into())));
+        let a = d.write_args(Some("[[binding]]\nname='faders#2'\ntarget='a'\nsignal='b'\n"));
+        assert_eq!(a.get_path("match.name").and_then(Value::as_str), Some("faders#2"));
         d.existing = Some(("kick_shake".into(), Some("bindings/kick_shake.toml".into())));
         let a = d.write_args(Some("target = 'x'\nsignal = 'y'\n"));
         assert_eq!(a.get_path("path").and_then(Value::as_str), Some("bindings/kick_shake.toml"));
         assert!(a.get_path("table").is_none());
+        let del = d.delete_args(Some("target = 'x'\nsignal = 'y'\n")).unwrap();
+        assert!(del.get_path("table").is_none() && del.get_path("delete").is_some_and(Value::truthy), "a single-link file goes away");
         assert_eq!(sanitize("  "), "binding");
+        let taken = ["bindings/cam_kick.toml".to_string(), "bindings/cam_kick_2.toml".to_string()];
+        assert_eq!(unique_name("Cam kick", &taken), "cam_kick_3");
+        assert_eq!(unique_name("cam_bass", &taken), "cam_bass");
+    }
+
+    #[test]
+    fn a_saved_link_reads_back_the_same() {
+        let mut d = Draft::new("scene.duo.node.cam.scale", &Meta::float(1.0, [0.01, 10.0]));
+        d.signal = "band.kick".into();
+        d.gain = 1.5;
+        d.offset = 0.1;
+        d.gate = Some(0.2);
+        d.attack_ms = 20.0;
+        d.release_ms = 0.0;
+        d.curve = Curve::Smoothstep;
+        d.invert = true;
+        d.range = Some([1.0, 1.25]);
+        d.auto_normalize = Some(8.0);
+        d.mode = BindMode::Replace;
+        d.scope = "scene.duo".into();
+        d.enabled = false;
+        // what project.write puts in the new file (null = key left out)
+        let Some(Value::Map(set)) = d.write_args(None).get_path("set").cloned() else { panic!("no set") };
+        let kept: std::collections::BTreeMap<String, Value> = set.into_iter().filter(|(_, v)| !v.is_null()).collect();
+        let text = toml::to_string(&toml::Value::try_from(Value::Map(kept)).unwrap()).unwrap();
+        let def: BindingDef = toml::from_str(&text).unwrap();
+        let mut back = Draft::from_def(&def, Some("bindings/cam_scale_mod.toml".into()));
+        assert_eq!(back.existing.as_ref().and_then(|(_, f)| f.as_deref()), Some("bindings/cam_scale_mod.toml"));
+        back.name = d.name.clone();
+        back.existing = None;
+        assert_eq!(back, d, "{text}");
     }
 }

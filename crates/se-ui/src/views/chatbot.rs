@@ -1,20 +1,28 @@
-//! Chat commands (§14.3): what viewers can type in chat (!discord → a reply), timed messages,
-//! counters, quotes, and a place to try a command as a viewer would. Everything is plain words;
-//! file names, extra commands and actions sit under "Details".
-//! Data: queries `bot.commands`, `bot.timers`, `bot.counters`, `bot.quotes`, `bot.files`;
-//! commands: `bot.command.save|delete`, `bot.timer.save|delete`, `bot.counter.set|delete`,
-//! `bot.quote.add|edit|delete`, `sim.chat`. Files are written comment-preserving.
+//! Chat bot views (§14.3), both in the list/detail grammar of `docs/ui-model.md`.
+//! [`ui`] (Automation → Chat commands): what viewers can type in chat (!discord → a reply and/or
+//! steps to run), a list of commands and one command's inspector, with a place to try it.
+//! [`extras_ui`] (Community → Chat bot): timed messages, counters, quotes and the bot settings.
+//! Data: queries `bot.commands`, `bot.timers`, `bot.counters`, `bot.quotes`, `bot.files`, and
+//! `project.read project.toml` for `[bot]`; commands: `bot.command.save|delete`,
+//! `bot.timer.save|delete`, `bot.counter.set|delete`, `bot.quote.add|edit|delete`, `sim.chat`,
+//! `project.write` (settings). Files are written comment-preserving.
 
 use crate::app::App;
 use crate::views::live::nice;
-use crate::views::rules::{Words, capitalize, friendly_text};
-use egui::{Align, Layout, RichText, Vec2};
+use crate::views::rules::{Words, capitalize, friendly_text, steps_editor};
+use egui::RichText;
 use se_proto::{Op, Value};
 use se_ui_kit::Theme;
 use se_ui_kit::theme::{font_mono, font_semibold, spacing, type_scale};
 use se_ui_kit::widgets::{self, Kind, LedState, Size, icon};
 
-const TABS: [&str; 5] = ["Commands", "Timed messages", "Counters", "Quotes", "Try it"];
+const EXTRA_TABS: [&str; 4] = ["Timed messages", "Counters", "Quotes", "Settings"];
+
+/// Query key of the `project.toml` read behind the Settings tab.
+const PROJECT_KEY: &str = "chatbot.project";
+
+/// Width of the list pane.
+const LIST_W: f32 = 300.0;
 
 /// (role, who can use it).
 const ROLES: [(&str, &str); 6] = [
@@ -54,29 +62,60 @@ struct Draft {
     usage: String,
     min_args: String,
     description: String,
-    cmds: String,
+    /// Command lines run after the reply (`do`).
+    cmds: Vec<String>,
+    /// Engine action of a built-in command and its settings (TOML text); shown, never edited,
+    /// but sent back on save so they survive.
     action: String,
     args: String,
     /// `bot.commands` behavior (`reply`, `builtin <name>`, `action <name>`, `do`).
     behavior: String,
+    /// What the command does, in words.
+    does: String,
     // timers
     every: String,
     min_lines: String,
 }
 
+/// State of the Chat commands page.
 #[derive(Clone, Default)]
 struct Form {
-    tab: usize,
     filter: String,
     cmd: Option<Draft>,
-    timer: Option<Draft>,
-    counter_name: String,
-    counter_value: String,
-    quote_text: String,
-    quote_edit: Option<(i64, String)>,
+    /// A command just created: select it once it shows up in the list.
+    select_name: Option<String>,
     test_msg: String,
     test_role: String,
     last_query: f64,
+}
+
+/// State of the Chat bot page (timed messages, counters, quotes, settings).
+#[derive(Clone, Default)]
+struct Extras {
+    tab: usize,
+    timer: Option<Draft>,
+    /// Selected counter (by name).
+    counter: Option<String>,
+    /// New counter being set up: (name, starting value).
+    counter_new: Option<(String, String)>,
+    /// Quote being edited: (id, text); id `None` = new.
+    quote: Option<(Option<i64>, String)>,
+    quote_filter: String,
+    /// `[bot]` as last read, and the edited copy.
+    set_base: Option<BotSettings>,
+    set_draft: Option<BotSettings>,
+    set_seq: u64,
+    /// Ignore reads until this time (a save is on its way).
+    set_hold: f64,
+    set_error: bool,
+    last_query: f64,
+    last_read: f64,
+}
+
+/// What a list pane reports: the "+" or a row.
+enum Pick {
+    New,
+    At(usize),
 }
 
 fn act(app: &mut App, name: &str, args: Value) {
@@ -124,8 +163,9 @@ fn opt(s: &str) -> Value {
     if s.trim().is_empty() { Value::Null } else { Value::Str(s.trim().into()) }
 }
 
-fn lines(s: &str) -> Value {
-    let v: Vec<Value> = s.lines().map(str::trim).filter(|x| !x.is_empty()).map(|x| Value::Str(x.into())).collect();
+/// Command lines as a `do` list (`Null` when there are none).
+fn steps(cmds: &[String]) -> Value {
+    let v: Vec<Value> = cmds.iter().map(|x| x.trim()).filter(|x| !x.is_empty()).map(|x| Value::Str(x.into())).collect();
     if v.is_empty() { Value::Null } else { Value::List(v) }
 }
 
@@ -143,8 +183,21 @@ fn pretty(m: &str) -> String {
     if !m.is_empty() && m.len() <= 3 && m.chars().all(|c| c.is_ascii_alphabetic()) { m.to_ascii_uppercase() } else { nice(m) }
 }
 
+fn mode_list(app: &App) -> Vec<String> {
+    app.m.q_list("modes").iter().filter_map(|v| v.as_str().map(String::from)).collect()
+}
+
 impl Draft {
-    fn from_command(c: &Value) -> Draft {
+    fn new_command(custom: &str) -> Draft {
+        Draft { enabled: true, role: "everyone".into(), file: custom.to_string(), name: "!".into(), behavior: "reply".into(), ..Default::default() }
+    }
+
+    /// Timers post only while live unless modes say otherwise, so modes start empty.
+    fn new_timer(custom: &str) -> Draft {
+        Draft { enabled: true, every: "20m".into(), min_lines: "10".into(), file: custom.to_string(), ..Default::default() }
+    }
+
+    fn from_command(c: &Value, words: &Words) -> Draft {
         let args = c.get_path("args").and_then(Value::as_map).filter(|m| !m.is_empty()).map(|m| {
             let body: Vec<String> = m.iter().map(|(k, v)| format!("{k} = {}", toml_literal(v))).collect();
             format!("{{ {} }}", body.join(", "))
@@ -166,10 +219,11 @@ impl Draft {
                 n => n.to_string(),
             },
             description: s(c, "description").into(),
-            cmds: list(c, "do").join("\n"),
+            cmds: list(c, "do"),
             action: s(c, "action").into(),
             args: args.unwrap_or_default(),
             behavior: s(c, "behavior").into(),
+            does: does(c, words),
             ..Default::default()
         }
     }
@@ -182,11 +236,16 @@ impl Draft {
             reply: s(t, "reply").into(),
             modes: list(t, "modes").join(", "),
             enabled: t.get_path("enabled").is_none_or(Value::truthy),
-            cmds: list(t, "do").join("\n"),
+            cmds: list(t, "do"),
             every: dur(i(t, "every_ms")),
             min_lines: i(t, "min_chat_lines").to_string(),
             ..Default::default()
         }
+    }
+
+    /// Built-in and action commands: the bot already knows what to do.
+    fn builtin(&self) -> bool {
+        self.behavior.starts_with("builtin") || self.behavior.starts_with("action")
     }
 
     fn command_fields(&self) -> Result<Value, String> {
@@ -202,12 +261,12 @@ impl Draft {
         } else {
             match Value::parse_text(self.args.trim()) {
                 v @ Value::Map(_) => v,
-                _ => return Err("The action's settings (Details) need to look like { text = \"{args}\" }.".into()),
+                _ => return Err("This command's built-in settings can't be read, so it wasn't saved.".into()),
             }
         };
         let min_args = match self.min_args.trim() {
             "" | "0" => Value::Null,
-            n => Value::Int(n.parse::<i64>().map_err(|_| "“Words needed after it” must be a number.")?),
+            n => Value::Int(n.parse::<i64>().map_err(|_| "“Words needed” must be a number.")?),
         };
         Ok(Value::map()
             .with("name", self.name.trim())
@@ -220,7 +279,7 @@ impl Draft {
             .with("usage", opt(&self.usage))
             .with("min_args", min_args)
             .with("description", opt(&self.description))
-            .with("do", lines(&self.cmds))
+            .with("do", steps(&self.cmds))
             .with("action", opt(&self.action))
             .with("args", args))
     }
@@ -234,8 +293,19 @@ impl Draft {
             .with("min_chat_lines", n)
             .with("modes", csv(&self.modes))
             .with("reply", opt(&self.reply))
-            .with("do", lines(&self.cmds))
+            .with("do", steps(&self.cmds))
             .with("enabled", if self.enabled { Value::Null } else { Value::Bool(false) }))
+    }
+
+    /// Where it is saved: a file picker while new, the file name after.
+    fn saved_in(&mut self, ui: &mut egui::Ui, t: &Theme, salt: &str, files: &BotFiles) {
+        widgets::prop_row(ui, t, "Saved in", |ui| {
+            if self.at.is_some() {
+                ui.label(RichText::new(&self.file).font(font_mono(type_scale::SMALL + 0.5)).color(t.fg));
+            } else {
+                file_picker(ui, salt, &mut self.file, &files.files, &files.custom);
+            }
+        });
     }
 }
 
@@ -279,24 +349,6 @@ fn does(c: &Value, words: &Words) -> String {
     }
 }
 
-fn chip(ui: &mut egui::Ui, t: &Theme, label: &str, on: bool) -> egui::Response {
-    widgets::chip(ui, t, "", label, on)
-}
-
-/// Center `body` in a column at most `max_w` wide (wide screens).
-fn centered(ui: &mut egui::Ui, max_w: f32, body: impl FnOnce(&mut egui::Ui)) {
-    let avail = ui.available_width();
-    let h = ui.available_height();
-    let w = avail.min(max_w);
-    ui.horizontal_top(|ui| {
-        ui.add_space(((avail - w) / 2.0 - ui.spacing().item_spacing.x).max(0.0));
-        ui.allocate_ui_with_layout(Vec2::new(w, h), Layout::top_down(Align::Min), |ui| {
-            ui.set_width(w);
-            body(ui);
-        });
-    });
-}
-
 fn toggle_csv(csv: &mut String, item: &str) {
     let mut items: Vec<String> = csv.split(',').map(str::trim).filter(|x| !x.is_empty()).map(String::from).collect();
     match items.iter().position(|x| x == item) {
@@ -308,13 +360,13 @@ fn toggle_csv(csv: &mut String, item: &str) {
     *csv = items.join(", ");
 }
 
-/// Mode chips over a comma-separated list (none picked = any mode).
+/// Mode chips over a comma-separated list.
 fn mode_chips(ui: &mut egui::Ui, t: &Theme, csv: &mut String, modes: &[String]) {
     let chosen: Vec<String> = csv.split(',').map(str::trim).filter(|x| !x.is_empty()).map(String::from).collect();
     let mut flip = None;
     ui.horizontal_wrapped(|ui| {
         for m in modes.iter().chain(chosen.iter().filter(|c| !modes.contains(c))) {
-            if chip(ui, t, &pretty(m), chosen.contains(m)).clicked() {
+            if widgets::chip(ui, t, "", &pretty(m), chosen.contains(m)).clicked() {
                 flip = Some(m.clone());
             }
         }
@@ -322,106 +374,6 @@ fn mode_chips(ui: &mut egui::Ui, t: &Theme, csv: &mut String, modes: &[String]) 
     if let Some(m) = flip {
         toggle_csv(csv, &m);
     }
-}
-
-fn label(ui: &mut egui::Ui, t: &Theme, text: &str) {
-    ui.label(RichText::new(text).color(t.text_dim));
-}
-
-pub fn ui(app: &mut App, ui: &mut egui::Ui) {
-    let t = app.t.clone();
-    let id = egui::Id::new("chatbot-form");
-    let mut form: Form = ui.data_mut(|d| d.get_temp::<Form>(id)).unwrap_or_default();
-    if form.test_role.is_empty() {
-        form.test_role = "everyone".into();
-    }
-    let now = ui.input(|i| i.time);
-    if now - form.last_query > 1.0 {
-        form.last_query = now;
-        for q in ["bot.commands", "bot.timers", "bot.counters", "bot.quotes", "bot.files"] {
-            app.m.query(q, Value::Null);
-        }
-    }
-    let files_v = app.m.q("bot.files").cloned().unwrap_or_default();
-    let files = list(&files_v, "files");
-    let custom = s(&files_v, "custom_file").to_string();
-    let errors: Vec<Value> = files_v.get_path("errors").and_then(Value::as_list).map(<[Value]>::to_vec).unwrap_or_default();
-
-    centered(ui, 2400.0, |ui| tab_body(app, ui, &t, &mut form, &files, &custom, &errors));
-    ui.data_mut(|d| d.insert_temp(id, form));
-}
-
-#[allow(clippy::too_many_arguments)]
-fn tab_body(app: &mut App, ui: &mut egui::Ui, t: &Theme, form: &mut Form, files: &[String], custom: &str, errors: &[Value]) {
-    let t = t.clone();
-    ui.horizontal(|ui| {
-        widgets::segmented(ui, &t, &mut form.tab, &TABS);
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let health = app.m.get("health.bot").cloned().unwrap_or_default();
-            let twitch = crate::views::twitch::twitch_state(app);
-            let (led, text) = match s(&health, "status") {
-                // the bot only answers once it can reach Twitch chat
-                "pass" if !twitch.connected() => (LedState::Armed, "Chat bot: Not connected"),
-                "pass" => (LedState::Healthy, "Chat bot: Working"),
-                "fail" => (LedState::Error, "Chat bot: Not connected"),
-                "" => (LedState::Idle, "Chat bot: Off"),
-                _ => (LedState::Armed, "Chat bot: Needs a look"),
-            };
-            let tip =
-                if twitch.connected() { s(&health, "detail").to_string() } else { format!("Connect Twitch so the bot can answer in chat. {}", twitch.body) };
-            widgets::pill(ui, &t, if led == LedState::Healthy { icon::CHECK } else { icon::WARN }, text, led).on_hover_text(tip);
-        });
-    });
-    for e in errors {
-        ui.add_space(spacing::S);
-        widgets::callout(
-            ui,
-            &t,
-            widgets::Tone::Warn,
-            icon::WARN,
-            "Some commands didn't load",
-            &format!("A command file has a mistake, so the bot skips it until it's fixed: {}", s(e, "msg")),
-            None,
-        );
-    }
-    ui.add_space(spacing::L);
-    match form.tab {
-        0 => commands(app, ui, &t, form, files, custom),
-        1 => timers(app, ui, &t, form, files, custom),
-        2 => counters(app, ui, &t, form),
-        3 => quotes(app, ui, &t, form),
-        _ => test(app, ui, &t, form),
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Side {
-    List,
-    Editor,
-}
-
-/// List on the left, editor on the right (stacked when narrow). `body` draws one side per call.
-fn columns(ui: &mut egui::Ui, mut body: impl FnMut(&mut egui::Ui, Side)) {
-    let avail = ui.available_size();
-    if avail.x < 820.0 {
-        egui::ScrollArea::vertical().id_salt("bot-narrow").auto_shrink([false, false]).show(ui, |ui| {
-            body(ui, Side::List);
-            ui.add_space(spacing::L);
-            body(ui, Side::Editor);
-        });
-        return;
-    }
-    let total = avail.x.min(2400.0);
-    let list_w = (total * 0.36).clamp(380.0, 760.0);
-    let ed_w = total - list_w - spacing::L;
-    ui.horizontal_top(|ui| {
-        ui.add_space(((avail.x - total) / 2.0 - ui.spacing().item_spacing.x).max(0.0));
-        ui.allocate_ui_with_layout(Vec2::new(list_w, avail.y), Layout::top_down(Align::Min), |ui| body(ui, Side::List));
-        ui.add_space(spacing::L - ui.spacing().item_spacing.x);
-        ui.allocate_ui_with_layout(Vec2::new(ed_w, avail.y), Layout::top_down(Align::Min), |ui| {
-            egui::ScrollArea::vertical().id_salt("bot-editor").auto_shrink([false, false]).show(ui, |ui| body(ui, Side::Editor));
-        });
-    });
 }
 
 fn file_picker(ui: &mut egui::Ui, salt: &str, file: &mut String, files: &[String], custom: &str) {
@@ -435,229 +387,370 @@ fn file_picker(ui: &mut egui::Ui, salt: &str, file: &mut String, files: &[String
     });
 }
 
-// ---- commands ------------------------------------------------------------------------------------
+/// A hint lined up with the controls of the rows above it.
+fn row_hint(ui: &mut egui::Ui, t: &Theme, text: &str) {
+    widgets::prop_row(ui, t, "", |ui| {
+        widgets::hint(ui, t, text);
+    });
+}
 
-fn commands(app: &mut App, ui: &mut egui::Ui, t: &Theme, form: &mut Form, files: &[String], custom: &str) {
-    let cmds: Vec<Value> = app.m.q_list("bot.commands").to_vec();
-    let modes: Vec<String> = app.m.q_list("modes").iter().filter_map(|v| v.as_str().map(String::from)).collect();
-    let words = Words::new(app);
-    let height = ui.available_height();
-    let mut new = false;
-    let (mut save, mut delete, mut close, mut close_x) = (false, false, false, false);
-    columns(ui, |ui, side| match side {
-        Side::List => {
-            widgets::titled(
-                ui,
-                t,
-                "Your commands",
-                &format!("{} commands viewers can type", cmds.len()),
-                |ui| new = widgets::button_ex(ui, t, Some(icon::PLUS), "New command", Kind::Primary, Size::Medium, 0.0, true).clicked(),
-                |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.add(
-                        se_ui_kit::widgets::field(&mut form.filter)
-                            .hint_text(format!("{}  Find a command", icon::SEARCH))
-                            .margin(egui::Margin::symmetric(10, 7))
-                            .desired_width(f32::INFINITY),
-                    );
-                    ui.add_space(spacing::S);
-                    if cmds.is_empty() {
-                        widgets::empty_state(
-                            ui,
-                            t,
-                            icon::CHAT,
-                            "No commands yet",
-                            "A command is something viewers type, like !discord, and the bot answers.",
-                            None,
-                        );
-                        return;
-                    }
-                    let q = form.filter.to_lowercase();
-                    egui::ScrollArea::vertical().id_salt("bot-cmds").auto_shrink([false, true]).max_height((height - 140.0).max(120.0)).show(ui, |ui| {
-                        // your own replies first, then the built-in ones
-                        let mut last = None;
-                        for c in cmds.iter().filter(|c| s(c, "behavior") == "reply").chain(cmds.iter().filter(|c| s(c, "behavior") != "reply")) {
-                            let reply = s(c, "behavior") == "reply";
-                            if last != Some(reply) {
-                                if last.is_some() {
-                                    ui.add_space(spacing::S);
-                                }
-                                let n = cmds.iter().filter(|c| (s(c, "behavior") == "reply") == reply).count();
-                                widgets::section(ui, t, "", &if reply { format!("Answers ({n})") } else { format!("Built in ({n})") });
-                                last = Some(reply);
-                            }
-                            let name = s(c, "name");
-                            if !q.is_empty() && !name.to_lowercase().contains(&q) && !s(c, "reply").to_lowercase().contains(&q) {
-                                continue;
-                            }
-                            let selected = form.cmd.as_ref().and_then(|d| d.at.clone()) == Some((s(c, "file").into(), i(c, "index")));
-                            let enabled = c.get_path("enabled").is_none_or(Value::truthy);
-                            let trailing = match (enabled, s(c, "role")) {
-                                (false, _) => "Off".to_string(),
-                                (true, "" | "everyone") => String::new(),
-                                (true, r) => role_words(r).to_string(),
-                            };
-                            let glyph = if reply { icon::CHAT } else { icon::BOLT };
-                            let sub = does(c, &words);
-                            let sub = if trailing.is_empty() { sub } else { clip(&sub, 52) };
-                            if widgets::list_row(ui, t, glyph, name, &sub, &trailing, selected).clicked() {
-                                form.cmd = Some(Draft::from_command(c));
-                            }
-                        }
-                    });
-                },
-            );
+/// The hold-to-delete button that ends a detail pane.
+fn delete_button(ui: &mut egui::Ui, t: &Theme, label: &str) -> bool {
+    ui.add_space(spacing::L);
+    ui.horizontal(|ui| {
+        let done = widgets::hold_button(ui, t, label, t.bright_red, 0.6);
+        widgets::hint(ui, t, "Press and hold to delete.");
+        done
+    })
+    .inner
+}
+
+/// Save (or Create while new) and Close, for a detail header (right to left).
+fn save_close(ui: &mut egui::Ui, t: &Theme, new: bool, can_save: bool, save: &mut bool, close: &mut bool) {
+    *save = widgets::button_ex(ui, t, Some(icon::CHECK), if new { "Create" } else { "Save" }, Kind::Primary, Size::Medium, 0.0, can_save).clicked();
+    *close = widgets::icon_button(ui, t, icon::CROSS, "Close").clicked();
+}
+
+fn poll(app: &mut App, now: f64, last: &mut f64) {
+    if now - *last > 1.0 {
+        *last = now;
+        for q in ["bot.commands", "bot.timers", "bot.counters", "bot.quotes", "bot.files"] {
+            app.m.query(q, Value::Null);
         }
-        Side::Editor => {
-            let Some(d) = form.cmd.as_mut() else {
-                widgets::panel(ui, t, |ui| {
-                    ui.set_width(ui.available_width());
-                    new |= widgets::empty_state(
-                        ui,
-                        t,
-                        icon::CHAT,
-                        "Pick a command to change it",
-                        "Or make a new one, like !discord that answers with your invite link.",
-                        None,
-                    );
-                });
-                return;
-            };
-            let title = if d.at.is_some() { d.name.clone() } else { "New command".to_string() };
-            let can_save = !d.name.trim().is_empty();
-            let mut save_top = false;
-            widgets::titled(
+    }
+}
+
+/// Command files (`bot.files`): where new entries can go, and files that failed to load.
+struct BotFiles {
+    files: Vec<String>,
+    custom: String,
+    errors: Vec<String>,
+}
+
+impl BotFiles {
+    fn read(app: &App) -> BotFiles {
+        let v = app.m.q("bot.files").cloned().unwrap_or_default();
+        let errors: Vec<String> =
+            v.get_path("errors").and_then(Value::as_list).map(|l| l.iter().map(|e| s(e, "msg").to_string()).collect()).unwrap_or_default();
+        BotFiles { files: list(&v, "files"), custom: s(&v, "custom_file").to_string(), errors }
+    }
+
+    fn callouts(&self, ui: &mut egui::Ui, t: &Theme) {
+        for e in &self.errors {
+            widgets::callout(
                 ui,
                 t,
-                &title,
-                "What viewers type, and what the bot does.",
-                |ui| {
-                    close_x = widgets::icon_button(ui, t, icon::CROSS, "Close").clicked();
-                    save_top = widgets::button_ex(ui, t, Some(icon::CHECK), "Save", Kind::Primary, Size::Medium, 0.0, can_save).clicked();
-                },
-                |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        label(ui, t, "Command");
-                        ui.add(se_ui_kit::widgets::field(&mut d.name).font(font_semibold(type_scale::LARGE)).hint_text("!discord").desired_width(220.0));
-                        ui.add_space(spacing::M);
-                        widgets::toggle(ui, t, &mut d.enabled).on_hover_text("Off: the bot ignores it");
-                        label(ui, t, if d.enabled { "On" } else { "Off" });
-                    });
-                    ui.horizontal(|ui| {
-                        label(ui, t, "Also works as");
-                        ui.add(se_ui_kit::widgets::field(&mut d.aliases).hint_text("!dc, !disc").desired_width(ui.available_width() - 8.0));
-                    });
-                    ui.add_space(spacing::M);
-                    let builtin = d.behavior.starts_with("builtin") || d.behavior.starts_with("action");
-                    if builtin && d.reply.is_empty() {
-                        widgets::hint(ui, t, "This command is built in. You can still change who can use it and how often.");
-                    } else {
-                        widgets::section(ui, t, "", "The bot answers");
-                        ui.add(
-                            egui::TextEdit::multiline(&mut d.reply)
-                                .hint_text("Join the Discord: https://discord.gg/…")
-                                .desired_rows(3)
-                                .desired_width(f32::INFINITY),
-                        );
-                        ui.horizontal_wrapped(|ui| {
-                            label(ui, t, "Insert");
-                            for (ph, what) in PLACEHOLDERS {
-                                if widgets::chip(ui, t, "", &capitalize(what), false)
-                                    .on_hover_text(format!("Becomes {what} when it's used. Types {ph}."))
-                                    .clicked()
-                                {
-                                    d.reply.push_str(ph);
-                                }
-                            }
-                        });
-                    }
-                    ui.add_space(spacing::M);
-                    widgets::section(ui, t, "", "Who and how often");
-                    ui.horizontal(|ui| {
-                        label(ui, t, "Who can use it");
-                        egui::ComboBox::from_id_salt("bot-cmd-role").width(200.0).selected_text(role_words(&d.role)).show_ui(ui, |ui| {
-                            for (r, w) in ROLES {
-                                ui.selectable_value(&mut d.role, r.to_string(), w);
-                            }
-                        });
-                    });
-                    ui.horizontal(|ui| {
-                        label(ui, t, "Wait between uses");
-                        ui.add(se_ui_kit::widgets::field(&mut d.cd_global).hint_text("30s").desired_width(70.0));
-                        ui.add_space(spacing::M);
-                        label(ui, t, "Same viewer waits");
-                        ui.add(se_ui_kit::widgets::field(&mut d.cd_user).hint_text("2m").desired_width(70.0));
-                    });
-                    widgets::hint(ui, t, "Times like 30s or 2m. Leave empty for no wait.");
-                    ui.add_space(spacing::S);
-                    label(ui, t, "Only during these show modes (none picked: always)");
-                    mode_chips(ui, t, &mut d.modes, &modes);
-                    ui.add_space(spacing::M);
-                    widgets::section(ui, t, "", "If they leave something out");
-                    ui.horizontal(|ui| {
-                        label(ui, t, "Words needed after it");
-                        ui.add(se_ui_kit::widgets::field(&mut d.min_args).hint_text("0").desired_width(40.0));
-                        label(ui, t, "then answer");
-                        ui.add(se_ui_kit::widgets::field(&mut d.usage).hint_text("Try: !so @name").desired_width(ui.available_width() - 8.0));
-                    });
-                    ui.add_space(spacing::M);
-                    ui.horizontal(|ui| {
-                        label(ui, t, "Notes (just for you)");
-                        ui.add(se_ui_kit::widgets::field(&mut d.description).desired_width(ui.available_width() - 8.0));
-                    });
-                    ui.add_space(spacing::S);
-                    widgets::details(ui, t, "bot-cmd-details", "Details", |ui| {
-                        ui.horizontal(|ui| {
-                            label(ui, t, "Saved in");
-                            if d.at.is_some() {
-                                ui.label(RichText::new(&d.file).font(font_mono(type_scale::SMALL + 0.5)).color(t.fg));
-                            } else {
-                                file_picker(ui, "bot-cmd-file", &mut d.file, files, custom);
-                            }
-                        });
-                        label(ui, t, "Also runs (one command per line)");
-                        ui.add(
-                            egui::TextEdit::multiline(&mut d.cmds)
-                                .hint_text("preset.fire hype")
-                                .font(font_mono(type_scale::BODY - 1.0))
-                                .desired_rows(2)
-                                .desired_width(f32::INFINITY),
-                        );
-                        ui.horizontal(|ui| {
-                            label(ui, t, "Action");
-                            ui.add(
-                                se_ui_kit::widgets::field(&mut d.action)
-                                    .hint_text("queue.request")
-                                    .font(font_mono(type_scale::BODY - 1.0))
-                                    .desired_width(160.0),
-                            );
-                            ui.add(
-                                se_ui_kit::widgets::field(&mut d.args)
-                                    .hint_text("{ text = \"{args}\" }")
-                                    .font(font_mono(type_scale::BODY - 1.0))
-                                    .desired_width(ui.available_width() - 8.0),
-                            );
-                        });
-                    });
-                    ui.add_space(spacing::M);
-                    if d.at.is_some() {
-                        ui.horizontal(|ui| {
-                            delete = widgets::hold_button(ui, t, "Delete command", t.bright_red, 0.6);
-                            widgets::hint(ui, t, "Press and hold to delete.");
-                        });
-                    }
-                },
+                widgets::Tone::Warn,
+                icon::WARN,
+                "Some commands didn't load",
+                &format!("A command file has a mistake, so the bot skips it until it's fixed: {e}"),
+                None,
             );
-            save |= save_top;
+            ui.add_space(spacing::M);
+        }
+    }
+}
+
+/// Whether the bot can answer in chat (bot health plus the Twitch connection).
+struct BotStatus {
+    led: LedState,
+    text: &'static str,
+    tip: String,
+}
+
+impl BotStatus {
+    fn read(app: &App) -> BotStatus {
+        let health = app.m.get("health.bot").cloned().unwrap_or_default();
+        let twitch = crate::views::twitch::twitch_state(app);
+        let (led, text) = match s(&health, "status") {
+            // the bot only answers once it can reach Twitch chat
+            "pass" if !twitch.connected() => (LedState::Armed, "Chat bot: Not connected"),
+            "pass" => (LedState::Healthy, "Chat bot: Working"),
+            "fail" => (LedState::Error, "Chat bot: Not connected"),
+            "" => (LedState::Idle, "Chat bot: Off"),
+            _ => (LedState::Armed, "Chat bot: Needs a look"),
+        };
+        let tip = if twitch.connected() { s(&health, "detail").to_string() } else { format!("Connect Twitch so the bot can answer in chat. {}", twitch.body) };
+        BotStatus { led, text, tip }
+    }
+
+    fn show(&self, ui: &mut egui::Ui, t: &Theme) {
+        widgets::pill(ui, t, if self.led == LedState::Healthy { icon::CHECK } else { icon::WARN }, self.text, self.led).on_hover_text(self.tip.as_str());
+    }
+}
+
+// ---- chat commands -------------------------------------------------------------------------------
+
+/// Automation → Chat commands.
+pub fn ui(app: &mut App, ui: &mut egui::Ui) {
+    let t = app.t.clone();
+    let id = egui::Id::new("chatbot-form");
+    let mut form: Form = ui.data_mut(|d| d.get_temp::<Form>(id)).unwrap_or_default();
+    if form.test_role.is_empty() {
+        form.test_role = "everyone".into();
+    }
+    poll(app, ui.input(|i| i.time), &mut form.last_query);
+    let files = BotFiles::read(app);
+    files.callouts(ui, &t);
+    let cmds: Vec<Value> = app.m.q_list("bot.commands").to_vec();
+    let words = Words::new(app);
+    if form.cmd.is_none()
+        && let Some(name) = form.select_name.clone()
+        && let Some(c) = cmds.iter().find(|c| s(c, "name").trim_start_matches('!') == name.trim_start_matches('!'))
+    {
+        form.cmd = Some(Draft::from_command(c, &words));
+        form.select_name = None;
+    }
+    let status = BotStatus::read(app);
+    let modes = mode_list(app);
+    let selected = form.cmd.as_ref().and_then(|d| d.at.clone());
+    let mut filter = std::mem::take(&mut form.filter);
+    let (pick, ()) = widgets::split(
+        ui,
+        LIST_W,
+        |ui| command_list(ui, &t, &cmds, &words, &status, &mut filter, selected.as_ref()),
+        |ui| {
+            egui::ScrollArea::vertical().id_salt("bot-cmd-detail").auto_shrink([false, false]).show(ui, |ui| {
+                command_detail(app, ui, &t, &mut form, &files, &modes);
+            });
+        },
+    );
+    form.filter = filter;
+    match pick {
+        Some(Pick::New) => {
+            form.cmd = Some(Draft::new_command(&files.custom));
+            form.select_name = None;
+        }
+        Some(Pick::At(n)) => {
+            if let Some(c) = cmds.get(n) {
+                form.cmd = Some(Draft::from_command(c, &words));
+                form.select_name = None;
+            }
+        }
+        None => {}
+    }
+    ui.data_mut(|d| d.insert_temp(id, form));
+}
+
+/// Commands the owner wrote (a reply or steps), as opposed to built-in ones.
+fn is_own(c: &Value) -> bool {
+    matches!(s(c, "behavior"), "reply" | "do")
+}
+
+fn command_list(
+    ui: &mut egui::Ui,
+    t: &Theme,
+    cmds: &[Value],
+    words: &Words,
+    status: &BotStatus,
+    filter: &mut String,
+    selected: Option<&(String, i64)>,
+) -> Option<Pick> {
+    let mut pick = None;
+    if widgets::pane_header(ui, t, "Chat commands", Some(cmds.len()), Some("New command")) {
+        pick = Some(Pick::New);
+    }
+    status.show(ui, t);
+    ui.add_space(spacing::S);
+    ui.add(widgets::field(&mut *filter).hint_text(format!("{}  Find a command", icon::SEARCH)).desired_width(f32::INFINITY));
+    ui.add_space(spacing::XS);
+    let q = filter.trim().to_lowercase();
+    egui::ScrollArea::vertical().id_salt("bot-cmd-list").auto_shrink([false, false]).show(ui, |ui| {
+        if cmds.is_empty() {
+            widgets::hint(ui, t, "No commands yet.");
+            return;
+        }
+        let mut shown = 0;
+        for (group, own) in [("Your commands", true), ("Built in", false)] {
+            let rows: Vec<(usize, &Value)> = cmds
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| is_own(c) == own)
+                .filter(|(_, c)| q.is_empty() || s(c, "name").to_lowercase().contains(&q) || s(c, "reply").to_lowercase().contains(&q))
+                .collect();
+            if rows.is_empty() {
+                continue;
+            }
+            widgets::group_label(ui, t, group);
+            for (n, c) in rows {
+                shown += 1;
+                let at = (s(c, "file").to_string(), i(c, "index"));
+                let enabled = c.get_path("enabled").is_none_or(Value::truthy);
+                let trailing = match (enabled, s(c, "role")) {
+                    (false, _) => "Off".to_string(),
+                    (true, "" | "everyone") => String::new(),
+                    (true, r) => role_words(r).to_string(),
+                };
+                let sub = clip(&does(c, words), if trailing.is_empty() { 34 } else { 20 });
+                let glyph = if s(c, "behavior") == "reply" { icon::CHAT } else { icon::BOLT };
+                if widgets::list_row(ui, t, glyph, s(c, "name"), &sub, &trailing, selected == Some(&at)).clicked() {
+                    pick = Some(Pick::At(n));
+                }
+            }
+        }
+        if shown == 0 {
+            widgets::hint(ui, t, "No command matches that.");
         }
     });
-    close |= close_x;
-    if new {
-        form.cmd =
-            Some(Draft { enabled: true, role: "everyone".into(), file: custom.to_string(), name: "!".into(), behavior: "reply".into(), ..Default::default() });
+    pick
+}
+
+fn command_detail(app: &mut App, ui: &mut egui::Ui, t: &Theme, form: &mut Form, files: &BotFiles, modes: &[String]) {
+    let Some(mut d) = form.cmd.take() else {
+        if widgets::empty_state(
+            ui,
+            t,
+            icon::CHAT,
+            "Chat commands",
+            "Something viewers type in chat, like !discord, and what the bot does.",
+            Some("New command"),
+        ) {
+            form.cmd = Some(Draft::new_command(&files.custom));
+            form.select_name = None;
+        }
+        return;
+    };
+    if command_editor(app, ui, t, form, &mut d, files, modes) {
+        form.cmd = Some(d);
     }
-    let Some(d) = form.cmd.clone() else { return };
+}
+
+/// One command's inspector. Returns false when the command should be deselected.
+fn command_editor(app: &mut App, ui: &mut egui::Ui, t: &Theme, form: &mut Form, d: &mut Draft, files: &BotFiles, modes: &[String]) -> bool {
+    let new = d.at.is_none();
+    let title = if new {
+        "New command".to_string()
+    } else if d.name.trim().is_empty() {
+        "Command".to_string()
+    } else {
+        d.name.trim().to_string()
+    };
+    let can_save = !d.name.trim().trim_start_matches('!').is_empty();
+    let (mut save, mut close) = (false, false);
+    widgets::detail_header(ui, t, icon::CHAT, &title, "What viewers type and what happens", |ui| {
+        save = widgets::button_ex(ui, t, Some(icon::CHECK), if new { "Create" } else { "Save" }, Kind::Primary, Size::Medium, 0.0, can_save).clicked();
+        ui.add_space(spacing::S);
+        ui.label(RichText::new(if d.enabled { "On" } else { "Off" }).color(t.text_dim));
+        widgets::toggle(ui, t, &mut d.enabled).on_hover_text("Off: the bot ignores it");
+        close = widgets::icon_button(ui, t, icon::CROSS, "Close").clicked();
+    });
+
+    widgets::inspector_section(
+        ui,
+        t,
+        ("bot-cmd", "command"),
+        "Command",
+        true,
+        |_| {},
+        |ui| {
+            widgets::prop_row(ui, t, "Name", |ui| {
+                ui.add(widgets::field(&mut d.name).hint_text("!discord").desired_width(f32::INFINITY));
+            });
+            widgets::prop_row(ui, t, "Also works as", |ui| {
+                ui.add(widgets::field(&mut d.aliases).hint_text("!dc, !disc").desired_width(f32::INFINITY));
+            });
+            widgets::prop_row(ui, t, "Note", |ui| {
+                ui.add(widgets::field(&mut d.description).hint_text("Just for you").desired_width(f32::INFINITY));
+            });
+        },
+    );
+
+    widgets::inspector_section(
+        ui,
+        t,
+        ("bot-cmd", "who"),
+        "Who & how often",
+        true,
+        |_| {},
+        |ui| {
+            widgets::prop_row(ui, t, "Who can use it", |ui| {
+                egui::ComboBox::from_id_salt("bot-cmd-role").width(200.0).selected_text(role_words(&d.role)).show_ui(ui, |ui| {
+                    for (r, w) in ROLES {
+                        ui.selectable_value(&mut d.role, r.to_string(), w);
+                    }
+                });
+            });
+            widgets::prop_row(ui, t, "Wait between uses", |ui| {
+                ui.add(widgets::field(&mut d.cd_global).hint_text("30s").desired_width(90.0));
+            });
+            widgets::prop_row(ui, t, "Same viewer waits", |ui| {
+                ui.add(widgets::field(&mut d.cd_user).hint_text("2m").desired_width(90.0));
+            });
+            row_hint(ui, t, "Times like 30s or 2m. Empty: no wait.");
+            widgets::prop_row(ui, t, "Only during", |ui| mode_chips(ui, t, &mut d.modes, modes));
+            row_hint(ui, t, "Show modes. None picked: always.");
+            widgets::prop_row(ui, t, "Words needed", |ui| {
+                ui.add(widgets::field(&mut d.min_args).hint_text("0").desired_width(60.0));
+                widgets::hint(ui, t, "after the command");
+            });
+            widgets::prop_row(ui, t, "Otherwise answer", |ui| {
+                ui.add(widgets::field(&mut d.usage).hint_text("Try: !so @name").desired_width(f32::INFINITY));
+            });
+        },
+    );
+
+    let builtin = d.builtin();
+    widgets::inspector_section(
+        ui,
+        t,
+        ("bot-cmd", "reply"),
+        "Reply",
+        true,
+        |_| {},
+        |ui| {
+            if builtin && d.reply.is_empty() {
+                widgets::hint(ui, t, "This command is built in, so the bot already knows what to answer.");
+                return;
+            }
+            ui.add(egui::TextEdit::multiline(&mut d.reply).hint_text("Join the Discord: https://discord.gg/…").desired_rows(3).desired_width(f32::INFINITY));
+            ui.add_space(spacing::XS);
+            ui.horizontal_wrapped(|ui| {
+                widgets::hint(ui, t, "Insert");
+                for (ph, what) in PLACEHOLDERS {
+                    if widgets::chip(ui, t, "", &capitalize(what), false).on_hover_text(format!("Becomes {what} when it's used. Types {ph}.")).clicked() {
+                        d.reply.push_str(ph);
+                    }
+                }
+            });
+        },
+    );
+
+    widgets::inspector_section(
+        ui,
+        t,
+        ("bot-cmd", "do"),
+        "Do",
+        true,
+        |_| {},
+        |ui| {
+            if builtin {
+                if !d.does.is_empty() {
+                    widgets::hint(ui, t, &d.does);
+                    ui.add_space(spacing::XS);
+                }
+                if let Some(name) = d.behavior.strip_prefix("builtin ") {
+                    widgets::fact(ui, t, "Built in", name);
+                }
+                if !d.action.is_empty() {
+                    widgets::fact(ui, t, "Action", &d.action);
+                }
+                if !d.args.is_empty() {
+                    widgets::fact(ui, t, "Settings", &d.args);
+                }
+            } else {
+                widgets::hint(ui, t, "Runs at once; timed steps need a saved action.");
+                ui.add_space(spacing::XS);
+                steps_editor(app, ui, "bot-cmd-do", &mut d.cmds, "twitch.chat");
+            }
+        },
+    );
+
+    widgets::inspector_section(ui, t, ("bot-cmd", "try"), "Try it", false, |_| {}, |ui| try_it(app, ui, t, form, d.name.trim()));
+
+    ui.add_space(spacing::S);
+    widgets::details(ui, t, "bot-cmd-details", "Details", |ui| d.saved_in(ui, t, "bot-cmd-file", files));
+    let delete = !new && delete_button(ui, t, "Delete command");
+
     if save {
         match d.command_fields() {
             Ok(fields) => {
@@ -667,139 +760,250 @@ fn commands(app: &mut App, ui: &mut egui::Ui, t: &Theme, form: &mut Form, files:
                 }
                 act(app, "bot.command.save", args);
                 app.m.toast(format!("Saved {}.", d.name.trim()), false);
-                if d.at.is_none() {
-                    form.cmd = None;
+                if new {
+                    form.select_name = Some(d.name.trim().to_string());
+                    return false;
                 }
             }
             Err(e) => app.m.toast(e, true),
         }
-    } else if delete {
+    }
+    if delete {
         if let Some((file, idx)) = d.at.clone() {
             act(app, "bot.command.delete", Value::map().with("file", file).with("index", idx));
         }
-        form.cmd = None;
-    } else if close {
-        form.cmd = None;
+        return false;
     }
+    !close
+}
+
+/// Send a chat line as a pretend viewer and watch the bot answer.
+fn try_it(app: &mut App, ui: &mut egui::Ui, t: &Theme, form: &mut Form, name: &str) {
+    widgets::prop_row(ui, t, "Pretend to be", |ui| {
+        egui::ComboBox::from_id_salt("bot-test-role").width(200.0).selected_text(role_words(&form.test_role)).show_ui(ui, |ui| {
+            for (r, w) in ROLES {
+                ui.selectable_value(&mut form.test_role, r.to_string(), w);
+            }
+        });
+    });
+    let fallback = if name.trim_start_matches('!').is_empty() { "" } else { name };
+    let can_send = !form.test_msg.trim().is_empty() || !fallback.is_empty();
+    let mut send = false;
+    widgets::prop_row(ui, t, "Message", |ui| {
+        let r = ui.add(
+            widgets::field(&mut form.test_msg)
+                .hint_text(if fallback.is_empty() { "!discord" } else { fallback })
+                .desired_width((ui.available_width() - 110.0).max(80.0)),
+        );
+        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        send = widgets::button_ex(ui, t, Some(icon::PLAY), "Send", Kind::Secondary, Size::Medium, 0.0, can_send).clicked() || enter;
+    });
+    let msg = if form.test_msg.trim().is_empty() { fallback.to_string() } else { form.test_msg.trim().to_string() };
+    if send && !msg.is_empty() {
+        act(app, "sim.chat", Value::map().with("message", msg).with("role", form.test_role.clone()).with("user", "tester"));
+        form.test_msg.clear();
+    }
+    row_hint(ui, t, "The bot answers in your Twitch chat when it's connected.");
+    ui.add_space(spacing::S);
+    egui::Frame::new()
+        .fill(t.bg)
+        .stroke(egui::Stroke::new(1.0, t.border))
+        .corner_radius(egui::CornerRadius::same(se_ui_kit::theme::radius::CONTROL))
+        .inner_margin(egui::Margin::same(12))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            egui::ScrollArea::vertical().id_salt("bot-test-log").stick_to_bottom(true).auto_shrink([false, false]).max_height(240.0).show(ui, |ui| {
+                let mut any = false;
+                for e in app.m.events.iter().filter(|e| e.ty == "twitch.chat" || e.ty == "bot.said") {
+                    any = true;
+                    ui.horizontal_wrapped(|ui| {
+                        if e.ty == "bot.said" {
+                            ui.label(RichText::new(format!("{}  Bot", icon::BOT)).font(font_semibold(type_scale::BODY)).color(t.green));
+                            ui.label(RichText::new(s(&e.payload, "text")).color(t.fg));
+                        } else {
+                            let who = e.actor.as_ref().map(|a| a.name.as_str()).unwrap_or("someone");
+                            ui.label(RichText::new(who).font(font_semibold(type_scale::BODY)).color(t.accent));
+                            ui.label(RichText::new(s(&e.payload, "message")).color(t.fg));
+                        }
+                    });
+                }
+                if !any {
+                    widgets::hint(ui, t, "Nothing yet. Send a message and the answer shows up here.");
+                }
+            });
+        });
+}
+
+// ---- chat bot extras -----------------------------------------------------------------------------
+
+/// Community → Chat bot: timed messages, counters, quotes and settings.
+pub fn extras_ui(app: &mut App, ui: &mut egui::Ui) {
+    let t = app.t.clone();
+    let id = egui::Id::new("chatbot-extras");
+    let mut ex: Extras = ui.data_mut(|d| d.get_temp::<Extras>(id)).unwrap_or_default();
+    let now = ui.input(|i| i.time);
+    poll(app, now, &mut ex.last_query);
+    let files = BotFiles::read(app);
+    widgets::segmented(ui, &t, &mut ex.tab, &EXTRA_TABS);
+    ui.add_space(spacing::M);
+    files.callouts(ui, &t);
+    match ex.tab {
+        0 => timers(app, ui, &t, &mut ex, &files),
+        1 => counters(app, ui, &t, &mut ex),
+        2 => quotes(app, ui, &t, &mut ex),
+        _ => settings(app, ui, &t, &mut ex, &files, now),
+    }
+    ui.data_mut(|d| d.insert_temp(id, ex));
 }
 
 // ---- timed messages ------------------------------------------------------------------------------
 
-fn timers(app: &mut App, ui: &mut egui::Ui, t: &Theme, form: &mut Form, files: &[String], custom: &str) {
+fn timers(app: &mut App, ui: &mut egui::Ui, t: &Theme, ex: &mut Extras, files: &BotFiles) {
     let timers: Vec<Value> = app.m.q_list("bot.timers").to_vec();
-    let modes: Vec<String> = app.m.q_list("modes").iter().filter_map(|v| v.as_str().map(String::from)).collect();
+    let modes = mode_list(app);
     let mode = app.m.str("show.mode").to_string();
-    let mut new = false;
-    let (mut save, mut delete, mut close, mut close_x) = (false, false, false, false);
-    columns(ui, |ui, side| match side {
-        Side::List => {
-            widgets::titled(
-                ui,
-                t,
-                "Timed messages",
-                "The bot posts these every so often while chat is active.",
-                |ui| new = widgets::button_ex(ui, t, Some(icon::PLUS), "New timed message", Kind::Primary, Size::Medium, 0.0, true).clicked(),
-                |ui| {
-                    ui.set_width(ui.available_width());
-                    if timers.is_empty() {
-                        widgets::empty_state(ui, t, icon::CLOCK, "No timed messages yet", "Like a reminder to follow, posted every 20 minutes.", None);
-                        return;
+    let selected = ex.timer.as_ref().and_then(|d| d.at.clone());
+    let (pick, ()) = widgets::split(
+        ui,
+        LIST_W,
+        |ui| timer_list(ui, t, &timers, &mode, selected.as_ref()),
+        |ui| {
+            egui::ScrollArea::vertical().id_salt("bot-timer-detail").auto_shrink([false, false]).show(ui, |ui| {
+                let Some(mut d) = ex.timer.take() else {
+                    if widgets::empty_state(
+                        ui,
+                        t,
+                        icon::CLOCK,
+                        "Timed messages",
+                        "The bot posts these every so often while chat is active.",
+                        Some("New timed message"),
+                    ) {
+                        ex.timer = Some(Draft::new_timer(&files.custom));
                     }
-                    for tm in &timers {
-                        let selected = form.timer.as_ref().and_then(|d| d.at.clone()) == Some((s(tm, "file").into(), i(tm, "index")));
-                        let enabled = tm.get_path("enabled").is_none_or(Value::truthy);
-                        let tm_modes = list(tm, "modes");
-                        let in_mode = tm_modes.is_empty() || tm_modes.contains(&mode);
-                        let title = if s(tm, "name").is_empty() { clip(s(tm, "reply"), 40) } else { nice(s(tm, "name")) };
-                        let sub = format!("Every {} · after {} chat messages", dur_words(i(tm, "every_ms")), i(tm, "min_chat_lines"));
-                        let trailing = match (enabled, in_mode, tm.get_path("next_in_ms").and_then(Value::as_i64)) {
-                            (false, ..) => "Off".to_string(),
-                            (true, false, _) | (true, _, None) => format!("waits for {}", tm_modes.iter().map(|m| pretty(m)).collect::<Vec<_>>().join(" / ")),
-                            (true, true, Some(ms)) => format!("next in {}:{:02}", ms / 60_000, ms / 1000 % 60),
-                        };
-                        if widgets::list_row(ui, t, icon::CLOCK, &title, &sub, &trailing, selected).clicked() {
-                            form.timer = Some(Draft::from_timer(tm));
-                        }
-                    }
-                },
-            );
+                    return;
+                };
+                if timer_editor(app, ui, t, &mut d, files, &modes) {
+                    ex.timer = Some(d);
+                }
+            });
+        },
+    );
+    match pick {
+        Some(Pick::New) => ex.timer = Some(Draft::new_timer(&files.custom)),
+        Some(Pick::At(n)) => {
+            if let Some(tm) = timers.get(n) {
+                ex.timer = Some(Draft::from_timer(tm));
+            }
         }
-        Side::Editor => {
-            let Some(d) = form.timer.as_mut() else {
-                widgets::panel(ui, t, |ui| {
-                    ui.set_width(ui.available_width());
-                    widgets::empty_state(ui, t, icon::CLOCK, "Pick a timed message to change it", "Or make a new one with New timed message.", None);
-                });
-                return;
+        None => {}
+    }
+}
+
+fn timer_list(ui: &mut egui::Ui, t: &Theme, timers: &[Value], mode: &str, selected: Option<&(String, i64)>) -> Option<Pick> {
+    let mut pick = None;
+    if widgets::pane_header(ui, t, "Timed messages", Some(timers.len()), Some("New timed message")) {
+        pick = Some(Pick::New);
+    }
+    egui::ScrollArea::vertical().id_salt("bot-timer-list").auto_shrink([false, false]).show(ui, |ui| {
+        if timers.is_empty() {
+            widgets::hint(ui, t, "No timed messages yet.");
+        }
+        for (n, tm) in timers.iter().enumerate() {
+            let at = (s(tm, "file").to_string(), i(tm, "index"));
+            let enabled = tm.get_path("enabled").is_none_or(Value::truthy);
+            let tm_modes = list(tm, "modes");
+            let in_mode = tm_modes.is_empty() || tm_modes.iter().any(|m| m == mode);
+            let title = if s(tm, "name").is_empty() { clip(s(tm, "reply"), 24) } else { nice(s(tm, "name")) };
+            let sub = format!("Every {} · {} messages", dur_words(i(tm, "every_ms")), i(tm, "min_chat_lines"));
+            let trailing = match (enabled, in_mode, tm.get_path("next_in_ms").and_then(Value::as_i64)) {
+                (false, ..) => "Off".to_string(),
+                (true, false, _) | (true, _, None) => format!("waits for {}", tm_modes.iter().map(|m| pretty(m)).collect::<Vec<_>>().join(" / ")),
+                (true, true, Some(ms)) => format!("next in {}:{:02}", ms / 60_000, ms / 1000 % 60),
             };
-            let title = if d.at.is_some() { "Timed message" } else { "New timed message" };
-            let can_save = !d.every.trim().is_empty();
-            let mut save_top = false;
-            widgets::titled(
-                ui,
-                t,
-                title,
-                "Posted in chat every so often.",
-                |ui| {
-                    close_x = widgets::icon_button(ui, t, icon::CROSS, "Close").clicked();
-                    save_top = widgets::button_ex(ui, t, Some(icon::CHECK), "Save", Kind::Primary, Size::Medium, 0.0, can_save).clicked();
-                },
-                |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        label(ui, t, "Name");
-                        ui.add(se_ui_kit::widgets::field(&mut d.name).hint_text("follow reminder").desired_width(240.0));
-                        ui.add_space(spacing::M);
-                        widgets::toggle(ui, t, &mut d.enabled);
-                        label(ui, t, if d.enabled { "On" } else { "Off" });
-                    });
-                    ui.add_space(spacing::S);
-                    widgets::section(ui, t, "", "Message");
-                    ui.add(egui::TextEdit::multiline(&mut d.reply).hint_text("Enjoying the stream? Hit follow!").desired_rows(3).desired_width(f32::INFINITY));
-                    ui.add_space(spacing::M);
-                    widgets::section(ui, t, "", "When");
-                    ui.horizontal(|ui| {
-                        label(ui, t, "Every");
-                        ui.add(se_ui_kit::widgets::field(&mut d.every).hint_text("20m").desired_width(70.0));
-                        label(ui, t, "once at least");
-                        ui.add(se_ui_kit::widgets::field(&mut d.min_lines).hint_text("10").desired_width(50.0));
-                        label(ui, t, "chat messages have passed");
-                    });
-                    widgets::hint(ui, t, "At least 1 minute apart. Chat messages keep it from posting into an empty chat.");
-                    ui.add_space(spacing::S);
-                    label(ui, t, "Only during these show modes (none picked: always)");
-                    mode_chips(ui, t, &mut d.modes, &modes);
-                    ui.add_space(spacing::S);
-                    widgets::details(ui, t, "bot-timer-details", "Details", |ui| {
-                        ui.horizontal(|ui| {
-                            label(ui, t, "Saved in");
-                            if d.at.is_some() {
-                                ui.label(RichText::new(&d.file).font(font_mono(type_scale::SMALL + 0.5)).color(t.fg));
-                            } else {
-                                file_picker(ui, "bot-timer-file", &mut d.file, files, custom);
-                            }
-                        });
-                        label(ui, t, "Also runs (one command per line)");
-                        ui.add(egui::TextEdit::multiline(&mut d.cmds).font(font_mono(type_scale::BODY - 1.0)).desired_rows(2).desired_width(f32::INFINITY));
-                    });
-                    ui.add_space(spacing::M);
-                    if d.at.is_some() {
-                        ui.horizontal(|ui| {
-                            delete = widgets::hold_button(ui, t, "Delete timed message", t.bright_red, 0.6);
-                            widgets::hint(ui, t, "Press and hold to delete.");
-                        });
-                    }
-                },
-            );
-            save |= save_top;
+            if widgets::list_row(ui, t, icon::CLOCK, &title, &sub, &trailing, selected == Some(&at)).clicked() {
+                pick = Some(Pick::At(n));
+            }
         }
     });
-    close |= close_x;
-    if new {
-        form.timer =
-            Some(Draft { enabled: true, every: "20m".into(), min_lines: "10".into(), modes: "live".into(), file: custom.to_string(), ..Default::default() });
-    }
-    let Some(d) = form.timer.clone() else { return };
+    pick
+}
+
+/// One timed message's inspector. Returns false when it should be deselected.
+fn timer_editor(app: &mut App, ui: &mut egui::Ui, t: &Theme, d: &mut Draft, files: &BotFiles, modes: &[String]) -> bool {
+    let new = d.at.is_none();
+    let title = if new {
+        "New timed message".to_string()
+    } else if d.name.trim().is_empty() {
+        "Timed message".to_string()
+    } else {
+        nice(d.name.trim())
+    };
+    let can_save = !d.every.trim().is_empty();
+    let (mut save, mut close) = (false, false);
+    widgets::detail_header(ui, t, icon::CLOCK, &title, "Posted in chat every so often", |ui| {
+        save_close(ui, t, new, can_save, &mut save, &mut close);
+    });
+
+    widgets::inspector_section(
+        ui,
+        t,
+        ("bot-timer", "message"),
+        "Message",
+        true,
+        |_| {},
+        |ui| {
+            widgets::prop_row(ui, t, "Name", |ui| {
+                ui.add(widgets::field(&mut d.name).hint_text("Follow reminder").desired_width(f32::INFINITY));
+            });
+            widgets::prop_row(ui, t, "Message", |ui| {
+                ui.add(egui::TextEdit::multiline(&mut d.reply).hint_text("Enjoying the stream? Hit follow!").desired_rows(3).desired_width(f32::INFINITY));
+            });
+            widgets::prop_row(ui, t, "On", |ui| {
+                widgets::toggle(ui, t, &mut d.enabled);
+                widgets::hint(ui, t, if d.enabled { "The bot posts it." } else { "Off: the bot skips it." });
+            });
+        },
+    );
+
+    widgets::inspector_section(
+        ui,
+        t,
+        ("bot-timer", "when"),
+        "When",
+        true,
+        |_| {},
+        |ui| {
+            widgets::prop_row(ui, t, "Every", |ui| {
+                ui.add(widgets::field(&mut d.every).hint_text("20m").desired_width(90.0));
+                widgets::hint(ui, t, "at least 1 minute");
+            });
+            widgets::prop_row(ui, t, "After", |ui| {
+                ui.add(widgets::field(&mut d.min_lines).hint_text("10").desired_width(60.0));
+                widgets::hint(ui, t, "chat messages, so it never posts into a quiet chat");
+            });
+            widgets::prop_row(ui, t, "Only during", |ui| mode_chips(ui, t, &mut d.modes, modes));
+            row_hint(ui, t, "Show modes. None picked: only while live.");
+        },
+    );
+
+    widgets::inspector_section(
+        ui,
+        t,
+        ("bot-timer", "do"),
+        "Do",
+        true,
+        |_| {},
+        |ui| {
+            widgets::hint(ui, t, "Also runs these each time it posts.");
+            ui.add_space(spacing::XS);
+            steps_editor(app, ui, "bot-timer-do", &mut d.cmds, "");
+        },
+    );
+
+    ui.add_space(spacing::S);
+    widgets::details(ui, t, "bot-timer-details", "Details", |ui| d.saved_in(ui, t, "bot-timer-file", files));
+    let delete = !new && delete_button(ui, t, "Delete timed message");
+
     if save {
         match d.timer_fields() {
             Ok(fields) => {
@@ -809,167 +1013,288 @@ fn timers(app: &mut App, ui: &mut egui::Ui, t: &Theme, form: &mut Form, files: &
                 }
                 act(app, "bot.timer.save", args);
                 app.m.toast("Timed message saved.", false);
-                if d.at.is_none() {
-                    form.timer = None;
+                if new {
+                    return false;
                 }
             }
             Err(e) => app.m.toast(e, true),
         }
-    } else if delete {
+    }
+    if delete {
         if let Some((file, idx)) = d.at.clone() {
             act(app, "bot.timer.delete", Value::map().with("file", file).with("index", idx));
         }
-        form.timer = None;
-    } else if close {
-        form.timer = None;
+        return false;
     }
+    !close
 }
 
 // ---- counters ------------------------------------------------------------------------------------
 
-fn counters(app: &mut App, ui: &mut egui::Ui, t: &Theme, form: &mut Form) {
+fn counters(app: &mut App, ui: &mut egui::Ui, t: &Theme, ex: &mut Extras) {
     let counters: Vec<Value> = app.m.q_list("bot.counters").to_vec();
-    egui::ScrollArea::vertical().id_salt("bot-counters").auto_shrink([false, false]).show(ui, |ui| centered(ui, 1100.0, |ui| {
-        widgets::titled(ui, t, "Counters", "Numbers your commands can show, like drumsticks thrown.", |_| {}, |ui| {
-            ui.set_width(ui.available_width());
-            if counters.is_empty() {
-                widgets::empty_state(ui, t, icon::PLUS, "No counters yet", "Add one below, then show it in a command's answer with Insert → A counter.", None);
+    let selected = if ex.counter_new.is_some() { None } else { ex.counter.clone() };
+    let (pick, ()) = widgets::split(
+        ui,
+        LIST_W,
+        |ui| {
+            let mut pick = None;
+            if widgets::pane_header(ui, t, "Counters", Some(counters.len()), Some("New counter")) {
+                pick = Some(Pick::New);
             }
-            for (n, c) in counters.iter().enumerate() {
-                let name = s(c, "name").to_string();
-                let v = i(c, "value");
-                egui::Frame::new()
-                    .fill(t.surface_hi)
-                    .corner_radius(egui::CornerRadius::same(se_ui_kit::theme::radius::CONTROL))
-                    .inner_margin(egui::Margin::symmetric(14, 8))
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.horizontal(|ui| {
-                            ui.add_sized([220.0, 28.0], egui::Label::new(RichText::new(nice(&name)).font(font_semibold(type_scale::BODY + 1.0)).color(t.fg)).truncate());
-                            ui.add_sized([90.0, 28.0], egui::Label::new(RichText::new(v.to_string()).font(font_mono(type_scale::HEADING)).color(t.fg)));
-                            if widgets::button(ui, t, "−1", Kind::Secondary).clicked() {
-                                act(app, "bot.counter.set", Value::map().with("name", name.clone()).with("value", v - 1));
-                            }
-                            if widgets::button(ui, t, "+1", Kind::Secondary).clicked() {
-                                act(app, "bot.counter.set", Value::map().with("name", name.clone()).with("value", v + 1));
-                            }
-                            if widgets::button(ui, t, "Reset", Kind::Ghost).clicked() {
-                                act(app, "bot.counter.set", Value::map().with("name", name.clone()).with("value", 0));
-                            }
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                ui.push_id(("counter", n), |ui| {
-                                    if widgets::hold_button(ui, t, "Delete", t.bright_red, 0.5) {
-                                        act(app, "bot.counter.delete", Value::map().with("name", name.clone()));
-                                    }
-                                });
-                            });
-                        });
-                    });
-                ui.add_space(spacing::XS);
-            }
-            ui.add_space(spacing::M);
-            widgets::section(ui, t, "", "Add a counter");
-            ui.horizontal(|ui| {
-                ui.add(se_ui_kit::widgets::field(&mut form.counter_name).hint_text("Name, like drumsticks").margin(egui::Margin::symmetric(10, 7)).desired_width(220.0));
-                ui.add(se_ui_kit::widgets::field(&mut form.counter_value).hint_text("Starts at 0").margin(egui::Margin::symmetric(10, 7)).desired_width(100.0));
-                let v = if form.counter_value.trim().is_empty() { Ok(0) } else { form.counter_value.trim().parse::<i64>() };
-                if widgets::button_ex(ui, t, Some(icon::PLUS), "Add counter", Kind::Primary, Size::Medium, 0.0, !form.counter_name.trim().is_empty() && v.is_ok()).clicked() {
-                    act(app, "bot.counter.set", Value::map().with("name", form.counter_name.trim()).with("value", v.unwrap_or(0)));
-                    form.counter_name.clear();
-                    form.counter_value.clear();
+            egui::ScrollArea::vertical().id_salt("bot-counter-list").auto_shrink([false, false]).show(ui, |ui| {
+                if counters.is_empty() {
+                    widgets::hint(ui, t, "No counters yet.");
+                }
+                for (n, c) in counters.iter().enumerate() {
+                    let name = s(c, "name");
+                    if widgets::list_row(ui, t, icon::LIST, &nice(name), "", &i(c, "value").to_string(), selected.as_deref() == Some(name)).clicked() {
+                        pick = Some(Pick::At(n));
+                    }
                 }
             });
-            ui.add_space(spacing::S);
-            widgets::details(ui, t, "bot-counter-details", "Details", |ui| {
-                widgets::hint(ui, t, "Mods can set a counter from chat with !setcounter. Each counter is also the setting bot.counter.<name>, so reactions and overlays can use it.");
+            pick
+        },
+        |ui| {
+            egui::ScrollArea::vertical().id_salt("bot-counter-detail").auto_shrink([false, false]).show(ui, |ui| {
+                counter_detail(app, ui, t, ex, &counters);
             });
+        },
+    );
+    match pick {
+        Some(Pick::New) => {
+            ex.counter = None;
+            ex.counter_new = Some(Default::default());
+        }
+        Some(Pick::At(n)) => {
+            if let Some(c) = counters.get(n) {
+                ex.counter = Some(s(c, "name").to_string());
+                ex.counter_new = None;
+            }
+        }
+        None => {}
+    }
+}
+
+fn counter_detail(app: &mut App, ui: &mut egui::Ui, t: &Theme, ex: &mut Extras, counters: &[Value]) {
+    if let Some((name, value)) = ex.counter_new.as_mut() {
+        let start = if value.trim().is_empty() { Ok(0) } else { value.trim().parse::<i64>() };
+        let can_create = !name.trim().is_empty() && start.is_ok();
+        let (mut create, mut close) = (false, false);
+        widgets::detail_header(ui, t, icon::LIST, "New counter", "A number your commands can show", |ui| {
+            save_close(ui, t, true, can_create, &mut create, &mut close);
         });
-    }));
+        widgets::inspector_section(
+            ui,
+            t,
+            ("bot-counter", "new"),
+            "Counter",
+            true,
+            |_| {},
+            |ui| {
+                widgets::prop_row(ui, t, "Name", |ui| {
+                    ui.add(widgets::field(&mut *name).hint_text("drumsticks").desired_width(f32::INFINITY));
+                });
+                widgets::prop_row(ui, t, "Starts at", |ui| {
+                    ui.add(widgets::field(&mut *value).hint_text("0").desired_width(90.0));
+                });
+            },
+        );
+        if create {
+            let name = name.trim().to_string();
+            act(app, "bot.counter.set", Value::map().with("name", name.clone()).with("value", start.unwrap_or(0)));
+            ex.counter = Some(name);
+            ex.counter_new = None;
+        } else if close {
+            ex.counter_new = None;
+        }
+        return;
+    }
+    let Some(c) = ex.counter.as_ref().and_then(|n| counters.iter().find(|c| s(c, "name") == n)) else {
+        if widgets::empty_state(ui, t, icon::LIST, "Counters", "Numbers your commands can show, like drumsticks thrown.", Some("New counter")) {
+            ex.counter = None;
+            ex.counter_new = Some(Default::default());
+        }
+        return;
+    };
+    let name = s(c, "name").to_string();
+    let v = i(c, "value");
+    let mut close = false;
+    widgets::detail_header(ui, t, icon::LIST, &nice(&name), "A number your commands can show", |ui| {
+        close = widgets::icon_button(ui, t, icon::CROSS, "Close").clicked();
+    });
+    let mut set = None;
+    widgets::inspector_section(
+        ui,
+        t,
+        ("bot-counter", "count"),
+        "Count",
+        true,
+        |_| {},
+        |ui| {
+            widgets::prop_row(ui, t, "Now", |ui| {
+                ui.label(RichText::new(v.to_string()).font(font_mono(type_scale::HEADING)).color(t.fg));
+                ui.add_space(spacing::M);
+                if widgets::button(ui, t, "−1", Kind::Secondary).clicked() {
+                    set = Some(v - 1);
+                }
+                if widgets::button(ui, t, "+1", Kind::Secondary).clicked() {
+                    set = Some(v + 1);
+                }
+                if widgets::button(ui, t, "Reset", Kind::Ghost).clicked() {
+                    set = Some(0);
+                }
+            });
+        },
+    );
+    if let Some(to) = set {
+        act(app, "bot.counter.set", Value::map().with("name", name.clone()).with("value", to));
+    }
+    widgets::inspector_section(
+        ui,
+        t,
+        ("bot-counter", "use"),
+        "Use it",
+        true,
+        |_| {},
+        |ui| {
+            widgets::hint(ui, t, "Show it in a command's reply with Insert → A counter. Mods can set it from chat with !setcounter.");
+        },
+    );
+    ui.add_space(spacing::S);
+    widgets::details(ui, t, "bot-counter-details", "Details", |ui| {
+        widgets::fact(ui, t, "Setting", &format!("bot.counter.{name}"));
+        widgets::hint(ui, t, "Triggers and sources can use this setting.");
+    });
+    if delete_button(ui, t, "Delete counter") {
+        act(app, "bot.counter.delete", Value::map().with("name", name));
+        ex.counter = None;
+    } else if close {
+        ex.counter = None;
+    }
 }
 
 // ---- quotes --------------------------------------------------------------------------------------
 
-fn quotes(app: &mut App, ui: &mut egui::Ui, t: &Theme, form: &mut Form) {
+fn quote_by(q: &Value) -> String {
+    match s(q, "added_by") {
+        "" | "ui" => "you".to_string(),
+        who => who.to_string(),
+    }
+}
+
+fn quotes(app: &mut App, ui: &mut egui::Ui, t: &Theme, ex: &mut Extras) {
     let quotes: Vec<Value> = app.m.q_list("bot.quotes").to_vec();
-    egui::ScrollArea::vertical().id_salt("bot-quotes").auto_shrink([false, false]).show(ui, |ui| {
-        centered(ui, 1200.0, |ui| {
-            widgets::titled(
-                ui,
-                t,
-                "Quotes",
-                "Funny moments to bring back. Viewers show one with !quote.",
-                |_| {},
-                |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            se_ui_kit::widgets::field(&mut form.quote_text)
-                                .hint_text("Something worth remembering…")
-                                .margin(egui::Margin::symmetric(10, 7))
-                                .desired_width(ui.available_width() - 150.0),
-                        );
-                        if widgets::button_ex(ui, t, Some(icon::PLUS), "Add quote", Kind::Primary, Size::Medium, 0.0, !form.quote_text.trim().is_empty())
-                            .clicked()
-                        {
-                            act(app, "bot.quote.add", Value::map().with("text", form.quote_text.trim()).with("by", "ui"));
-                            form.quote_text.clear();
-                        }
-                    });
-                    ui.add_space(spacing::M);
-                    if quotes.is_empty() {
-                        widgets::empty_state(ui, t, icon::CHAT, "No quotes yet", "Add one above, or let viewers save them with !addquote.", None);
-                        return;
-                    }
-                    for q in quotes.iter().rev() {
-                        let qid = i(q, "id");
-                        egui::Frame::new()
-                            .fill(t.surface_hi)
-                            .corner_radius(egui::CornerRadius::same(se_ui_kit::theme::radius::CONTROL))
-                            .inner_margin(egui::Margin::symmetric(14, 10))
-                            .show(ui, |ui| {
-                                ui.set_width(ui.available_width());
-                                ui.horizontal(|ui| {
-                                    ui.label(RichText::new(format!("#{qid}")).font(font_mono(type_scale::SMALL + 0.5)).color(t.text_faint));
-                                    let editing = form.quote_edit.as_ref().is_some_and(|(e, _)| *e == qid);
-                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                        ui.push_id(("quote", qid), |ui| {
-                                            if widgets::hold_button(ui, t, "Delete", t.bright_red, 0.5) {
-                                                act(app, "bot.quote.delete", Value::map().with("id", qid));
-                                            }
-                                        });
-                                        if editing {
-                                            if widgets::button_ex(ui, t, Some(icon::CHECK), "Save", Kind::Primary, Size::Small, 0.0, true).clicked()
-                                                && let Some((_, text)) = form.quote_edit.take()
-                                            {
-                                                act(app, "bot.quote.edit", Value::map().with("id", qid).with("text", text));
-                                            }
-                                        } else if widgets::button_ex(ui, t, Some(icon::EDIT), "Edit", Kind::Ghost, Size::Small, 0.0, true).clicked() {
-                                            form.quote_edit = Some((qid, s(q, "text").to_string()));
-                                        }
-                                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| match &mut form.quote_edit {
-                                            Some((eid, text)) if *eid == qid => {
-                                                ui.add(se_ui_kit::widgets::field(text).desired_width(ui.available_width()));
-                                            }
-                                            _ => {
-                                                ui.add(egui::Label::new(RichText::new(format!("“{}”", s(q, "text"))).color(t.fg)).wrap());
-                                            }
-                                        });
-                                    });
-                                });
-                                let by = match s(q, "added_by") {
-                                    "" | "ui" => "you".to_string(),
-                                    who => who.to_string(),
-                                };
-                                ui.label(
-                                    RichText::new(format!("Added by {by} on {}", crate_date(i(q, "created_at")))).size(type_scale::SMALL).color(t.text_dim),
-                                );
-                            });
-                        ui.add_space(spacing::XS);
-                    }
-                },
-            );
-        })
+    let selected = ex.quote.as_ref().and_then(|(id, _)| *id);
+    let mut filter = std::mem::take(&mut ex.quote_filter);
+    let (pick, ()) = widgets::split(
+        ui,
+        LIST_W,
+        |ui| quote_list(ui, t, &quotes, &mut filter, selected),
+        |ui| {
+            egui::ScrollArea::vertical().id_salt("bot-quote-detail").auto_shrink([false, false]).show(ui, |ui| {
+                quote_detail(app, ui, t, ex, &quotes);
+            });
+        },
+    );
+    ex.quote_filter = filter;
+    match pick {
+        Some(Pick::New) => ex.quote = Some((None, String::new())),
+        Some(Pick::At(n)) => {
+            if let Some(q) = quotes.get(n) {
+                ex.quote = Some((Some(i(q, "id")), s(q, "text").to_string()));
+            }
+        }
+        None => {}
+    }
+}
+
+fn quote_list(ui: &mut egui::Ui, t: &Theme, quotes: &[Value], filter: &mut String, selected: Option<i64>) -> Option<Pick> {
+    let mut pick = None;
+    if widgets::pane_header(ui, t, "Quotes", Some(quotes.len()), Some("New quote")) {
+        pick = Some(Pick::New);
+    }
+    ui.add(widgets::field(&mut *filter).hint_text(format!("{}  Find a quote", icon::SEARCH)).desired_width(f32::INFINITY));
+    ui.add_space(spacing::XS);
+    let q = filter.trim().to_lowercase();
+    egui::ScrollArea::vertical().id_salt("bot-quote-list").auto_shrink([false, false]).show(ui, |ui| {
+        if quotes.is_empty() {
+            widgets::hint(ui, t, "No quotes yet.");
+            return;
+        }
+        let mut shown = 0;
+        // newest first
+        for (n, quote) in quotes.iter().enumerate().rev() {
+            if !q.is_empty() && !s(quote, "text").to_lowercase().contains(&q) {
+                continue;
+            }
+            shown += 1;
+            let qid = i(quote, "id");
+            let sub = format!("{} · {}", quote_by(quote), crate_date(i(quote, "created_at")));
+            if widgets::list_row(ui, t, icon::CHAT, &clip(s(quote, "text"), 26), &sub, &format!("#{qid}"), selected == Some(qid)).clicked() {
+                pick = Some(Pick::At(n));
+            }
+        }
+        if shown == 0 {
+            widgets::hint(ui, t, "No quote matches that.");
+        }
     });
+    pick
+}
+
+fn quote_detail(app: &mut App, ui: &mut egui::Ui, t: &Theme, ex: &mut Extras, quotes: &[Value]) {
+    let Some((qid, mut text)) = ex.quote.take() else {
+        if widgets::empty_state(ui, t, icon::CHAT, "Quotes", "Funny moments to bring back. Viewers show one with !quote.", Some("New quote")) {
+            ex.quote = Some((None, String::new()));
+        }
+        return;
+    };
+    let q = qid.and_then(|id| quotes.iter().find(|q| i(q, "id") == id));
+    if qid.is_some() && q.is_none() {
+        // it was deleted meanwhile
+        return;
+    }
+    let id = qid;
+    let (title, sub) = match q {
+        Some(q) => (format!("Quote #{}", i(q, "id")), format!("Added by {} on {}", quote_by(q), crate_date(i(q, "created_at")))),
+        None => ("New quote".to_string(), "Viewers show one with !quote".to_string()),
+    };
+    let changed = q.is_none_or(|q| s(q, "text") != text.trim());
+    let can_save = changed && !text.trim().is_empty();
+    let (mut save, mut close) = (false, false);
+    widgets::detail_header(ui, t, icon::CHAT, &title, &sub, |ui| {
+        save_close(ui, t, id.is_none(), can_save, &mut save, &mut close);
+    });
+    widgets::inspector_section(
+        ui,
+        t,
+        ("bot-quote", "text"),
+        "Quote",
+        true,
+        |_| {},
+        |ui| {
+            ui.add(egui::TextEdit::multiline(&mut text).hint_text("Something worth remembering…").desired_rows(3).desired_width(f32::INFINITY));
+        },
+    );
+    let delete = id.is_some() && delete_button(ui, t, "Delete quote");
+    if save {
+        match id {
+            Some(id) => act(app, "bot.quote.edit", Value::map().with("id", id).with("text", text.trim())),
+            None => {
+                act(app, "bot.quote.add", Value::map().with("text", text.trim()).with("by", "ui"));
+                return;
+            }
+        }
+    }
+    if delete {
+        if let Some(id) = id {
+            act(app, "bot.quote.delete", Value::map().with("id", id));
+        }
+        return;
+    }
+    if !close {
+        ex.quote = Some((qid, text));
+    }
 }
 
 fn crate_date(unix: i64) -> String {
@@ -985,72 +1310,151 @@ fn crate_date(unix: i64) -> String {
     format!("{:04}-{m:02}-{d:02}", yoe + era * 400 + i64::from(m <= 2))
 }
 
-// ---- try it --------------------------------------------------------------------------------------
+// ---- settings ------------------------------------------------------------------------------------
 
-fn test(app: &mut App, ui: &mut egui::Ui, t: &Theme, form: &mut Form) {
-    let height = ui.available_height();
-    widgets::titled(
-        ui,
-        t,
-        "Try a command",
-        "Type like a viewer would. The bot answers in your Twitch chat when it's connected.",
-        |_| {},
-        |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                label(ui, t, "Pretend to be");
-                egui::ComboBox::from_id_salt("bot-test-role").width(180.0).selected_text(role_words(&form.test_role)).show_ui(ui, |ui| {
-                    for (r, w) in ROLES {
-                        ui.selectable_value(&mut form.test_role, r.to_string(), w);
-                    }
-                });
-                let r = ui.add(
-                    se_ui_kit::widgets::field(&mut form.test_msg)
-                        .hint_text("!discord")
-                        .margin(egui::Margin::symmetric(10, 7))
-                        .desired_width(ui.available_width() - 110.0),
-                );
-                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                let send = widgets::button_ex(ui, t, Some(icon::PLAY), "Send", Kind::Primary, Size::Medium, 0.0, !form.test_msg.trim().is_empty()).clicked();
-                if (send || enter) && !form.test_msg.trim().is_empty() {
-                    act(app, "sim.chat", Value::map().with("message", form.test_msg.trim()).with("role", form.test_role.clone()).with("user", "tester"));
-                    form.test_msg.clear();
+/// The editable part of `[bot]` in `project.toml` (defaults as in `se-bot` `Settings`).
+#[derive(Clone, PartialEq)]
+struct BotSettings {
+    custom_file: String,
+    mods_skip: bool,
+    max_reply: i64,
+    max_custom: i64,
+}
+
+impl BotSettings {
+    /// `None` when the file can't be parsed.
+    fn parse(text: &str) -> Option<BotSettings> {
+        let table = toml::from_str::<toml::Table>(text).ok()?;
+        let bot = table.get("bot").and_then(toml::Value::as_table);
+        let get = |k: &str| bot.and_then(|b| b.get(k));
+        Some(BotSettings {
+            custom_file: get("custom_file").and_then(toml::Value::as_str).unwrap_or("commands/custom.toml").to_string(),
+            mods_skip: get("mods_bypass_cooldowns").and_then(toml::Value::as_bool).unwrap_or(true),
+            max_reply: get("max_reply").and_then(toml::Value::as_integer).unwrap_or(500),
+            max_custom: get("max_custom_reply").and_then(toml::Value::as_integer).unwrap_or(400),
+        })
+    }
+
+    /// `project.write` `set` keys for what differs from `base`.
+    fn changes(&self, base: &BotSettings) -> Value {
+        let mut set = Value::map();
+        if self.mods_skip != base.mods_skip {
+            set = set.with("bot.mods_bypass_cooldowns", self.mods_skip);
+        }
+        if self.max_reply != base.max_reply {
+            set = set.with("bot.max_reply", self.max_reply);
+        }
+        if self.max_custom != base.max_custom {
+            set = set.with("bot.max_custom_reply", self.max_custom);
+        }
+        if self.custom_file != base.custom_file {
+            set = set.with("bot.custom_file", self.custom_file.clone());
+        }
+        set
+    }
+}
+
+fn settings(app: &mut App, ui: &mut egui::Ui, t: &Theme, ex: &mut Extras, files: &BotFiles, now: f64) {
+    if now >= ex.set_hold && now - ex.last_read > 2.0 {
+        ex.last_read = now;
+        app.m.query_as(PROJECT_KEY, "project.read", Value::map().with("path", "project.toml"));
+    }
+    let seq = app.m.q_seq(PROJECT_KEY);
+    if seq != ex.set_seq {
+        ex.set_seq = seq;
+        // while a save is on its way, a read may still show the old file
+        if now >= ex.set_hold
+            && let Some(reply) = app.m.q(PROJECT_KEY)
+        {
+            let loaded = BotSettings::parse(s(reply, "text"));
+            ex.set_error = loaded.is_none();
+            if let Some(loaded) = loaded {
+                let dirty = ex.set_draft.is_some() && ex.set_draft != ex.set_base;
+                if !dirty {
+                    ex.set_draft = Some(loaded.clone());
                 }
-            });
+                ex.set_base = Some(loaded);
+            }
+        }
+    }
+    let status = BotStatus::read(app);
+    egui::ScrollArea::vertical().id_salt("bot-settings").auto_shrink([false, false]).show(ui, |ui| {
+        ui.set_max_width(760.0);
+        let dirty = ex.set_draft.is_some() && ex.set_draft != ex.set_base;
+        let (mut save, mut discard) = (false, false);
+        widgets::detail_header(ui, t, icon::BOT, "Chat bot", "How the bot answers in chat", |ui| {
+            save = widgets::button_ex(ui, t, Some(icon::CHECK), "Save", Kind::Primary, Size::Medium, 0.0, dirty).clicked();
+            discard = widgets::button_ex(ui, t, None, "Discard", Kind::Ghost, Size::Medium, 0.0, dirty).clicked();
+        });
+        status.show(ui, t);
+        ui.add_space(spacing::M);
+        if ex.set_error {
+            widgets::callout(
+                ui,
+                t,
+                widgets::Tone::Warn,
+                icon::WARN,
+                "Can't read the bot settings",
+                "project.toml has a mistake. Fix it and they show up here.",
+                None,
+            );
             ui.add_space(spacing::M);
-            widgets::section(ui, t, "", "Chat and bot answers");
-            egui::Frame::new()
-                .fill(t.bg)
-                .stroke(egui::Stroke::new(1.0, t.border))
-                .corner_radius(egui::CornerRadius::same(se_ui_kit::theme::radius::CONTROL))
-                .inner_margin(egui::Margin::same(12))
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    egui::ScrollArea::vertical()
-                        .id_salt("bot-test-log")
-                        .stick_to_bottom(true)
-                        .auto_shrink([false, false])
-                        .max_height((height - 220.0).max(160.0))
-                        .show(ui, |ui| {
-                            let mut any = false;
-                            for e in app.m.events.iter().filter(|e| e.ty == "twitch.chat" || e.ty == "bot.said") {
-                                any = true;
-                                ui.horizontal_wrapped(|ui| {
-                                    if e.ty == "bot.said" {
-                                        ui.label(RichText::new(format!("{}  Bot", icon::BOT)).font(font_semibold(type_scale::BODY)).color(t.green));
-                                        ui.label(RichText::new(s(&e.payload, "text")).color(t.fg));
-                                    } else {
-                                        let who = e.actor.as_ref().map(|a| a.name.as_str()).unwrap_or("someone");
-                                        ui.label(RichText::new(who).font(font_semibold(type_scale::BODY)).color(t.accent));
-                                        ui.label(RichText::new(s(&e.payload, "message")).color(t.fg));
-                                    }
-                                });
-                            }
-                            if !any {
-                                widgets::hint(ui, t, "Nothing yet. Send a command above and the answer shows up here.");
-                            }
-                        });
+        }
+        let Some(d) = ex.set_draft.as_mut() else {
+            if !ex.set_error {
+                widgets::hint(ui, t, "Loading…");
+            }
+            return;
+        };
+        widgets::inspector_section(
+            ui,
+            t,
+            ("bot-settings", "replies"),
+            "Replies",
+            true,
+            |_| {},
+            |ui| {
+                widgets::prop_row(ui, t, "Longest reply", |ui| {
+                    ui.add(egui::DragValue::new(&mut d.max_reply).range(1..=500).suffix(" characters"));
                 });
-        },
-    );
+                widgets::prop_row(ui, t, "Added in chat", |ui| {
+                    ui.add(egui::DragValue::new(&mut d.max_custom).range(1..=500).suffix(" characters"));
+                    widgets::hint(ui, t, "longest reply of a command added with !addcom");
+                });
+            },
+        );
+        widgets::inspector_section(
+            ui,
+            t,
+            ("bot-settings", "commands"),
+            "Commands",
+            true,
+            |_| {},
+            |ui| {
+                widgets::prop_row(ui, t, "Mods skip waits", |ui| {
+                    widgets::toggle(ui, t, &mut d.mods_skip);
+                    widgets::hint(ui, t, "Mods and you skip the wait between uses.");
+                });
+                widgets::prop_row(ui, t, "New ones go to", |ui| {
+                    egui::ComboBox::from_id_salt("bot-settings-file").width(240.0).selected_text(d.custom_file.clone()).show_ui(ui, |ui| {
+                        let current = d.custom_file.clone();
+                        for f in files.files.iter().chain((!files.files.contains(&current)).then_some(&current)) {
+                            ui.selectable_value(&mut d.custom_file, f.clone(), f);
+                        }
+                    });
+                });
+                row_hint(ui, t, "Where new commands are saved, from here or from chat with !addcom.");
+            },
+        );
+        let draft = d.clone();
+        if save && let Some(base) = ex.set_base.clone() {
+            app.m.action("project.write", Value::map().with("path", "project.toml").with("set", draft.changes(&base)));
+            app.m.toast("Bot settings saved.", false);
+            ex.set_base = Some(draft);
+            ex.set_hold = now + 0.6;
+            ex.last_read = 0.0;
+        } else if discard {
+            ex.set_draft = ex.set_base.clone();
+        }
+    });
 }

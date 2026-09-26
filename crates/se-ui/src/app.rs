@@ -15,23 +15,43 @@ use se_ui_kit::{Theme, ThemeChange, ThemeWatcher};
 use std::collections::HashSet;
 use std::time::Instant;
 
-/// Sidebar pages, in sidebar order.
+/// Edit pages, in sidebar order (docs/ui-model.md): what you build, how it reacts, production,
+/// the channel, then Settings. Overview and Clipping are the other two master tabs.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Page {
     Live,
     Scenes,
-    Inputs,
-    Lights,
-    Sound,
+    Sources,
+    Notifications,
     Automation,
+    Sound,
+    Lights,
     Community,
     Recordings,
     Settings,
 }
 
+/// Sidebar groups of Edit pages (Settings is pinned at the bottom).
+pub const SIDEBAR: &[(&str, &[Page])] = &[
+    ("Show", &[Page::Scenes, Page::Sources, Page::Notifications, Page::Automation]),
+    ("Production", &[Page::Sound, Page::Lights]),
+    ("Channel", &[Page::Community]),
+];
+
 impl Page {
-    pub const ALL: [Page; 9] =
-        [Page::Live, Page::Scenes, Page::Inputs, Page::Lights, Page::Sound, Page::Automation, Page::Community, Page::Recordings, Page::Settings];
+    pub const COUNT: usize = 10;
+    pub const ALL: [Page; Page::COUNT] = [
+        Page::Live,
+        Page::Scenes,
+        Page::Sources,
+        Page::Notifications,
+        Page::Automation,
+        Page::Sound,
+        Page::Lights,
+        Page::Community,
+        Page::Recordings,
+        Page::Settings,
+    ];
 
     /// Which master tab the page lives under.
     pub fn master(self) -> Master {
@@ -46,10 +66,11 @@ impl Page {
         match self {
             Page::Live => "live",
             Page::Scenes => "scenes",
-            Page::Inputs => "inputs",
-            Page::Lights => "lights",
-            Page::Sound => "sound",
+            Page::Sources => "sources",
+            Page::Notifications => "notifications",
             Page::Automation => "automation",
+            Page::Sound => "sound",
+            Page::Lights => "lights",
             Page::Community => "community",
             Page::Recordings => "recordings",
             Page::Settings => "settings",
@@ -64,10 +85,11 @@ impl Page {
         match self {
             Page::Live => "Overview",
             Page::Scenes => "Scenes",
-            Page::Inputs => "Inputs",
-            Page::Lights => "Lights",
-            Page::Sound => "Sound",
+            Page::Sources => "Sources",
+            Page::Notifications => "Notifications",
             Page::Automation => "Automation",
+            Page::Sound => "Sound",
+            Page::Lights => "Lights",
             Page::Community => "Community",
             Page::Recordings => "Clipping",
             Page::Settings => "Settings",
@@ -78,28 +100,30 @@ impl Page {
         match self {
             Page::Live => icon::LIVE,
             Page::Scenes => icon::LAYERS,
-            Page::Inputs => icon::CAMERA,
-            Page::Lights => icon::LIGHT,
-            Page::Sound => icon::VOLUME,
+            Page::Sources => icon::CAMERA,
+            Page::Notifications => icon::ALERT,
             Page::Automation => icon::BOLT,
+            Page::Sound => icon::VOLUME,
+            Page::Lights => icon::LIGHT,
             Page::Community => icon::USERS,
             Page::Recordings => icon::FILM,
             Page::Settings => icon::SETTINGS,
         }
     }
 
-    /// One sentence under the page title: what you do here.
+    /// One sentence under the page title: what this page is for.
     pub fn blurb(self) -> &'static str {
         match self {
             Page::Live => "",
-            Page::Scenes => "Build your stream: scenes, quick effects, overlays, transitions, and your media.",
-            Page::Inputs => "Cameras, controllers, and everything else plugged in.",
-            Page::Lights => "Turn looks on and off, run cue lists, and set the overall brightness.",
+            Page::Scenes => "Arrange sources into layers, give layers effects, and choose how scenes change.",
+            Page::Sources => "Everything that makes picture or sound: cameras, videos, images, web pages and generated visuals.",
+            Page::Notifications => "What viewers see and hear when they follow, subscribe, cheer or raid.",
+            Page::Automation => "Triggers run actions. Modulation makes settings follow music, beats and controls.",
             Page::Sound => "Levels for everything your viewers hear.",
-            Page::Automation => "Make things happen on their own: when something happens, do something.",
-            Page::Community => "Alerts, goals, song requests, the chat bot, and giveaways.",
+            Page::Lights => "Turn looks on and off, run cue lists, and set the overall brightness.",
+            Page::Community => "Chat bot, song requests, Twitch, goals and giveaways.",
             Page::Recordings => "Past streams, markers, and clips ready to review.",
-            Page::Settings => "Accounts, backups, history, and help when something's off.",
+            Page::Settings => "Devices, accounts, backups, history, and help when something's off.",
         }
     }
 
@@ -107,23 +131,30 @@ impl Page {
     pub fn tabs(self) -> &'static [(ViewId, &'static str)] {
         match self {
             Page::Live => &[],
-            Page::Scenes => &[
-                (ViewId::Composition, "Scenes"),
-                (ViewId::QuickEffects, "Quick effects"),
-                (ViewId::Patches, "Overlays"),
-                (ViewId::Transitions, "Transitions"),
-                (ViewId::Media, "Media"),
+            Page::Scenes => &[(ViewId::Composition, "Scenes"), (ViewId::Effects, "Effects"), (ViewId::Transitions, "Transitions")],
+            Page::Sources => &[(ViewId::Sources, "Sources"), (ViewId::Media, "Files")],
+            Page::Notifications => &[(ViewId::Alerts, "Alerts"), (ViewId::AlertDelivery, "Look & timing"), (ViewId::Tts, "Read-out voice")],
+            Page::Automation => &[
+                (ViewId::Reactions, "Events"),
+                (ViewId::Controllers, "Buttons & pedals"),
+                (ViewId::Chatbot, "Chat commands"),
+                (ViewId::Actions, "Actions"),
+                (ViewId::Modulation, "Modulation"),
+                (ViewId::Timeline, "Timelines"),
             ],
-            Page::Inputs => &[(ViewId::Devices, "Cameras & devices"), (ViewId::Controllers, "Buttons & pedals")],
+            Page::Sound => &[(ViewId::Audio, "Mix"), (ViewId::Mixer, "Mixing desk")],
             Page::Lights => &[(ViewId::Lights, "Lights")],
-            Page::Sound => &[(ViewId::Audio, "Mix"), (ViewId::Mixer, "Mixing desk"), (ViewId::Tts, "Text to speech")],
-            Page::Automation => &[(ViewId::Reactions, "Reactions"), (ViewId::Chatbot, "Chat commands"), (ViewId::Timeline, "Timelines")],
-            Page::Community => {
-                &[(ViewId::Alerts, "Alerts & goals"), (ViewId::Songs, "Song requests"), (ViewId::Twitch, "Twitch"), (ViewId::Giveaway, "Giveaways")]
-            }
+            Page::Community => &[
+                (ViewId::ChatBot, "Chat bot"),
+                (ViewId::Songs, "Song requests"),
+                (ViewId::Twitch, "Twitch"),
+                (ViewId::Goals, "Goals"),
+                (ViewId::Giveaway, "Giveaways"),
+            ],
             Page::Recordings => &[(ViewId::Sessions, "Recordings & clips")],
             Page::Settings => &[
                 (ViewId::Setup, "Get started"),
+                (ViewId::Devices, "Devices"),
                 (ViewId::Settings, "Accounts & app"),
                 (ViewId::Maintenance, "Backups"),
                 (ViewId::History, "History"),
@@ -179,59 +210,69 @@ impl Master {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ViewId {
     Composition,
-    Reactions,
-    Troubleshoot,
-    Sessions,
-    Audio,
-    Setup,
-    Songs,
-    Giveaway,
-    Maintenance,
-    Tts,
-    Lights,
-    Patches,
-    Devices,
-    Performance,
-    Settings,
-    Timeline,
-    Chatbot,
-    Alerts,
-    Mixer,
-    Twitch,
-    Controllers,
-    Media,
-    History,
+    Effects,
     Transitions,
-    QuickEffects,
+    Sources,
+    Media,
+    Alerts,
+    AlertDelivery,
+    Tts,
+    Reactions,
+    Controllers,
+    Chatbot,
+    Actions,
+    Modulation,
+    Timeline,
+    Audio,
+    Mixer,
+    Lights,
+    ChatBot,
+    Songs,
+    Twitch,
+    Goals,
+    Giveaway,
+    Sessions,
+    Setup,
+    Devices,
+    Settings,
+    Maintenance,
+    History,
+    Performance,
+    Troubleshoot,
 }
 
 impl ViewId {
     pub const ALL: &'static [(ViewId, &'static str, &'static str)] = &[
-        (ViewId::Composition, icon::LAYERS, "Scene layout"),
-        (ViewId::Reactions, icon::BOLT, "Reactions"),
-        (ViewId::Troubleshoot, icon::CONSOLE, "Troubleshooting"),
-        (ViewId::Sessions, icon::FILM, "Recordings & clips"),
-        (ViewId::Audio, icon::MIX, "Sound mix"),
-        (ViewId::Setup, icon::ROCKET, "Get started"),
-        (ViewId::Songs, icon::MUSIC, "Song requests"),
-        (ViewId::Giveaway, icon::GIFT, "Giveaways"),
-        (ViewId::Maintenance, icon::SAVE, "Backups"),
-        (ViewId::Tts, icon::MIC, "Text to speech"),
-        (ViewId::Lights, icon::LIGHT, "Lights"),
-        (ViewId::Patches, icon::SPARKLE, "Overlays"),
-        (ViewId::Devices, icon::DEVICE, "Devices"),
-        (ViewId::Performance, icon::PERF, "Performance"),
-        (ViewId::Settings, icon::SETTINGS, "Accounts & app"),
-        (ViewId::Timeline, icon::TIMELINE, "Timelines"),
-        (ViewId::Chatbot, icon::BOT, "Chat commands"),
-        (ViewId::Alerts, icon::ALERT, "Alerts & goals"),
-        (ViewId::Mixer, icon::SLIDERS, "Mixing desk"),
-        (ViewId::Twitch, icon::TWITCH, "Twitch"),
-        (ViewId::Controllers, icon::CONTROLLER, "Buttons & pedals"),
-        (ViewId::Media, icon::IMAGE, "Media"),
-        (ViewId::History, icon::CLOCK, "History"),
+        (ViewId::Composition, icon::LAYERS, "Scenes"),
+        (ViewId::Effects, icon::WAND, "Effects"),
         (ViewId::Transitions, icon::SHUFFLE, "Transitions"),
-        (ViewId::QuickEffects, icon::BOLT, "Quick effects"),
+        (ViewId::Sources, icon::CAMERA, "Sources"),
+        (ViewId::Media, icon::IMAGE, "Files"),
+        (ViewId::Alerts, icon::ALERT, "Alerts"),
+        (ViewId::AlertDelivery, icon::SLIDERS, "Notification look & timing"),
+        (ViewId::Tts, icon::MIC, "Read-out voice"),
+        (ViewId::Reactions, icon::BOLT, "Events"),
+        (ViewId::Controllers, icon::CONTROLLER, "Buttons & pedals"),
+        (ViewId::Chatbot, icon::BOT, "Chat commands"),
+        (ViewId::Actions, icon::PLAY, "Actions"),
+        (ViewId::Modulation, icon::WAVE, "Modulation"),
+        (ViewId::Timeline, icon::TIMELINE, "Timelines"),
+        (ViewId::Audio, icon::MIX, "Sound mix"),
+        (ViewId::Mixer, icon::SLIDERS, "Mixing desk"),
+        (ViewId::Lights, icon::LIGHT, "Lights"),
+        (ViewId::ChatBot, icon::BOT, "Chat bot"),
+        (ViewId::Songs, icon::MUSIC, "Song requests"),
+        (ViewId::Twitch, icon::TWITCH, "Twitch"),
+        (ViewId::Goals, icon::TROPHY, "Goals"),
+        (ViewId::Giveaway, icon::GIFT, "Giveaways"),
+        (ViewId::Sessions, icon::FILM, "Recordings & clips"),
+        (ViewId::Setup, icon::ROCKET, "Get started"),
+        (ViewId::Devices, icon::DEVICE, "Devices"),
+        (ViewId::Settings, icon::SETTINGS, "Accounts & app"),
+        (ViewId::Maintenance, icon::SAVE, "Backups"),
+        (ViewId::History, icon::CLOCK, "History"),
+        (ViewId::Performance, icon::PERF, "Performance"),
+        (ViewId::Troubleshoot, icon::CONSOLE, "Troubleshooting"),
     ];
 }
 
@@ -244,7 +285,7 @@ pub struct App {
     pub preferences: crate::preferences::Preferences,
     pub page: Page,
     /// Selected tab per page (index into [`Page::tabs`]).
-    pub tab: [usize; 9],
+    pub tab: [usize; Page::COUNT],
     /// The Edit page to come back to from Overview/Clipping.
     pub last_edit: Page,
     /// Selected address prefix (inspector).
@@ -291,7 +332,7 @@ impl App {
             zoom: 1.0,
             preferences,
             page: Page::Live,
-            tab: [0; 9],
+            tab: [0; Page::COUNT],
             last_edit: Page::Scenes,
             selected: None,
             show: Default::default(),
@@ -318,30 +359,35 @@ impl App {
     pub fn view_ui(&mut self, v: ViewId, ui: &mut egui::Ui) {
         match v {
             ViewId::Composition => views::composition::ui(self, ui),
-            ViewId::Reactions => views::rules::ui(self, ui),
-            ViewId::Troubleshoot => views::troubleshoot::ui(self, ui),
-            ViewId::Sessions => views::sessions::ui(self, ui),
-            ViewId::Audio => views::audio::ui(self, ui),
-            ViewId::Setup => views::setup::ui(self, ui),
-            ViewId::Songs => views::songs::ui(self, ui),
-            ViewId::Giveaway => views::giveaway::ui(self, ui),
-            ViewId::Maintenance => views::maintenance::ui(self, ui),
-            ViewId::Tts => views::tts::ui(self, ui),
-            ViewId::Lights => views::lights::ui(self, ui),
-            ViewId::Patches => views::patches::ui(self, ui),
-            ViewId::Devices => views::devices::ui(self, ui),
-            ViewId::Performance => views::perf::ui(self, ui),
-            ViewId::Settings => views::settings::ui(self, ui),
-            ViewId::Timeline => views::timeline::ui(self, ui),
-            ViewId::Chatbot => views::chatbot::ui(self, ui),
-            ViewId::Alerts => views::alerts::ui(self, ui),
-            ViewId::Mixer => views::mixer::ui(self, ui),
-            ViewId::Twitch => views::twitch::ui(self, ui),
-            ViewId::Controllers => views::controllers::ui(self, ui),
-            ViewId::Media => views::media::ui(self, ui),
-            ViewId::History => views::history::ui(self, ui),
+            ViewId::Effects => views::effects::ui(self, ui),
             ViewId::Transitions => views::transitions::ui(self, ui),
-            ViewId::QuickEffects => views::quick_effects::ui(self, ui),
+            ViewId::Sources => views::sources::ui(self, ui),
+            ViewId::Media => views::media::ui(self, ui),
+            ViewId::Alerts => views::alerts::ui(self, ui),
+            ViewId::AlertDelivery => views::alerts::delivery_ui(self, ui),
+            ViewId::Tts => views::tts::ui(self, ui),
+            ViewId::Reactions => views::rules::ui(self, ui),
+            ViewId::Controllers => views::controllers::ui(self, ui),
+            ViewId::Chatbot => views::chatbot::ui(self, ui),
+            ViewId::Actions => views::actions::ui(self, ui),
+            ViewId::Modulation => views::modulate::ui(self, ui),
+            ViewId::Timeline => views::timeline::ui(self, ui),
+            ViewId::Audio => views::audio::ui(self, ui),
+            ViewId::Mixer => views::mixer::ui(self, ui),
+            ViewId::Lights => views::lights::ui(self, ui),
+            ViewId::ChatBot => views::chatbot::extras_ui(self, ui),
+            ViewId::Songs => views::songs::ui(self, ui),
+            ViewId::Twitch => views::twitch::ui(self, ui),
+            ViewId::Goals => views::alerts::goals_ui(self, ui),
+            ViewId::Giveaway => views::giveaway::ui(self, ui),
+            ViewId::Sessions => views::sessions::ui(self, ui),
+            ViewId::Setup => views::setup::ui(self, ui),
+            ViewId::Devices => views::devices::ui(self, ui),
+            ViewId::Settings => views::settings::ui(self, ui),
+            ViewId::Maintenance => views::maintenance::ui(self, ui),
+            ViewId::History => views::history::ui(self, ui),
+            ViewId::Performance => views::perf::ui(self, ui),
+            ViewId::Troubleshoot => views::troubleshoot::ui(self, ui),
         }
     }
 
@@ -459,7 +505,8 @@ impl App {
             Panel::View(v) => self.open_view(v),
             Panel::Library | Panel::Canvas | Panel::Inspector => self.open_view(ViewId::Composition),
             Panel::Rules => self.open_view(ViewId::Reactions),
-            Panel::Modulate | Panel::Scopes | Panel::Trace | Panel::Simulator | Panel::Console => {
+            Panel::Modulate => self.open_view(ViewId::Modulation),
+            Panel::Scopes | Panel::Trace | Panel::Simulator | Panel::Console => {
                 self.troubleshoot.tool = views::troubleshoot::Tool::for_panel(p);
                 self.open_view(ViewId::Troubleshoot);
             }
@@ -684,21 +731,22 @@ impl App {
             .show(ui, |ui| {
                 let rail = ui.max_rect();
                 ui.painter().vline(rail.right() + 11.5, rail.y_range(), egui::Stroke::new(1.0, t.border));
-                ui.horizontal(|ui| {
-                    ui.add_space(12.0);
-                    ui.label(egui::RichText::new("Workspace").size(se_ui_kit::theme::type_scale::SMALL).color(t.text_dim));
-                });
-                ui.add_space(12.0);
                 let setup_left = views::setup::steps_left(self);
-                for p in Page::ALL {
-                    if p == Page::Settings || p.master() != Master::Edit {
-                        continue;
+                for (i, (group, pages)) in SIDEBAR.iter().enumerate() {
+                    if i > 0 {
+                        ui.add_space(14.0);
                     }
-                    let badge = views::live::nav_badge(self, p);
-                    if se_ui_kit::widgets::nav_item(ui, &t, p.icon(), p.label(), self.page == p, badge).clicked() {
-                        self.page = p;
+                    ui.horizontal(|ui| {
+                        ui.add_space(12.0);
+                        se_ui_kit::widgets::group_label(ui, &t, group);
+                    });
+                    for &p in *pages {
+                        let badge = views::live::nav_badge(self, p);
+                        if se_ui_kit::widgets::nav_item(ui, &t, p.icon(), p.label(), self.page == p, badge).clicked() {
+                            self.page = p;
+                        }
+                        ui.add_space(2.0);
                     }
-                    ui.add_space(4.0);
                 }
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
                     let (dot, text) = if self.m.connected { (t.green, "Engine running") } else { (t.bright_red, "Engine not running") };
@@ -725,11 +773,13 @@ impl App {
         let page = self.page;
         let tabs = page.tabs();
         egui::CentralPanel::default().frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin::same(24))).show(ui, |ui| {
-            se_ui_kit::widgets::page_header(ui, &t, page.label(), page.blurb(), |ui| {
-                if matches!(page, Page::Scenes | Page::Lights) {
-                    views::history::undo_button(self, ui);
-                }
-            });
+            if page != Page::Recordings {
+                se_ui_kit::widgets::page_header(ui, &t, page.label(), page.blurb(), |ui| {
+                    if matches!(page, Page::Scenes | Page::Lights) {
+                        views::history::undo_button(self, ui);
+                    }
+                });
+            }
             let idx = &mut self.tab[page as usize];
             *idx = (*idx).min(tabs.len().saturating_sub(1));
             if tabs.len() > 1 {
@@ -816,6 +866,9 @@ impl eframe::App for App {
             crate::windows::program_root(self, ui);
         } else {
             self.main_ui(ui, ctx);
+        }
+        if self.page != Page::Recordings && !self.is_popped_out(&Panel::View(ViewId::Sessions).id()) {
+            views::sessions::leave(ctx);
         }
         self.toasts(ctx);
         let repaint = [33, 50, 80][self.gpu_pressure() as usize];

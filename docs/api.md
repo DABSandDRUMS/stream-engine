@@ -233,6 +233,7 @@ trigger <addr> [k=v …]          <addr>.trigger [k=v …]        release <addr>
 scene.go <name>                 scene.cut <name> [transition]
 scene.take [transition] [dur]   preset.fire <name> [k=v …]    preset.release <name>
 mode.set <mode>                 emit <type> [k=v …]  (alias: fire)                wait <dur>
+toggle <addr>  (= action toggle address=<addr>: switch flips; number 0 ⇄ its max, or 1; like `set` from the same origin; wildcards flip each match)
 panic | clean | undo | redo     <any.action> [positional …] [k=v …]
 ```
 
@@ -520,7 +521,7 @@ Tokens are compared in constant time.
 `emit`, the action name for `action`, and the command word for `scene.go`, `scene.cut`,
 `scene.take`, `preset.fire`, `preset.release`, `mode.set`. A grant (an address pattern) covers
 every target it matches and everything beneath it. Never allowed for patches, whatever the
-grants: `api.*`, `secrets.*`, `project.*`, `patch.new`, `patch.open`, secret-carrying actions
+grants: `api.*`, `secrets.*`, `project.*`, `patch.new`, `patch.open`, `patch.remove`, secret-carrying actions
 (`*.key.set`, `*.secret.set`, `*.token.set`, `secrets.set`, `api.device.add`), `set_base`,
 `panic`, `clean`, `undo`, `redo`. Grant changes apply to the page's existing token immediately
 ([patches.md](patches.md)).

@@ -686,18 +686,19 @@ fn assign_entries(args: &Value) -> Result<Vec<(String, toml_edit::Value)>, Strin
             table.insert(k.into(), toml::Value::Boolean(*b));
         }
     }
-    let cmds: Option<Vec<String>> = match args.get_path("do") {
-        Some(Value::Str(s)) => Some(vec![s.clone()]),
-        Some(Value::List(l)) => Some(l.iter().filter_map(|v| v.as_str().map(String::from)).collect()),
-        _ => None,
-    };
-    if let Some(cmds) = cmds {
+    // command lists run on press (`do`) and on key-up (`release`)
+    for k in ["do", "release"] {
+        let cmds: Vec<String> = match args.get_path(k) {
+            Some(Value::Str(s)) => vec![s.clone()],
+            Some(Value::List(l)) => l.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
+            _ => continue,
+        };
         let mut a = toml_edit::Array::new();
         for c in &cmds {
             a.push(c.as_str());
         }
-        out.push(("do".into(), toml_edit::Value::Array(a)));
-        table.insert("do".into(), toml::Value::Array(cmds.into_iter().map(toml::Value::String).collect()));
+        out.push((k.into(), toml_edit::Value::Array(a)));
+        table.insert(k.into(), toml::Value::Array(cmds.into_iter().map(toml::Value::String).collect()));
     }
     config::Action::from_table(&table)?;
     if out.is_empty() {
@@ -754,6 +755,7 @@ fn page_value(sh: &Shared, cfg: &DeckCfg, page: &str) -> Result<Value, String> {
                 config::Action::Scene { name, .. } => v = v.with("scene", name.clone()),
                 config::Action::Toggle(a) | config::Action::Momentary(a) => v = v.with("address", a.clone()),
                 config::Action::Page(pg) => v = v.with("page", pg.clone()),
+                config::Action::Commands { press, release } => v = v.with("do", press.clone()).with("release", release.clone()),
                 _ => {}
             }
             v
@@ -960,4 +962,27 @@ fn health_values(sh: &Shared) -> Vec<(String, Value)> {
         out.push(("health.voice".to_string(), h));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn assign_writes_press_and_release_lists() {
+        let list = |c: &str| Value::List(vec![Value::from(c)]);
+        let args = Value::map().with("do", list("preset.fire hype")).with("release", list("preset.release hype")).with("label", "Hype");
+        let entries = assign_entries(&args).unwrap();
+        let keys: Vec<&str> = entries.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, ["label", "do", "release"]);
+        let text = entries.iter().map(|(k, v)| format!("{k} = {v}")).collect::<Vec<_>>().join("\n");
+        let table: toml::Table = text.parse().unwrap();
+        assert_eq!(
+            config::Action::from_table(&table).unwrap(),
+            config::Action::Commands { press: vec!["preset.fire hype".into()], release: vec!["preset.release hype".into()] }
+        );
+        // a release list alone is a valid key too (nothing on press)
+        assert!(assign_entries(&Value::map().with("release", list("scene.take"))).is_ok());
+        assert!(assign_entries(&Value::map().with("release", list("set"))).is_err(), "release lines are checked like press lines");
+    }
 }

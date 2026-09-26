@@ -1,32 +1,272 @@
-//! Edits to `scenes/<name>.toml` made by the Scenes page: add/remove/reorder layers, layer and
-//! scene effects, when a layer shows, what the scene does coming on and going off, its
-//! background color, the transition speed, new and duplicated scenes. Pure text → text
-//! with `toml_edit`, so comments and formatting the owner wrote survive; the page sends the
-//! result with `project.write {path, text}` and the engine hot-reloads it.
+//! Text edits for the Scenes editor, made to `scenes/<name>.toml`: add, remove, reorder and
+//! duplicate layers; swap what a layer shows; a layer's effects (and their settings), blend,
+//! mask, enter/exit animation and when it shows; the scene's effects, number key, lights,
+//! what it does coming on and going off, its background color and transition speed; new and
+//! duplicated scenes. Pure text → text with `toml_edit`, so comments and formatting the owner
+//! wrote survive; the page sends the result with `project.write {path, text}` and the engine
+//! hot-reloads it. Also the engine's effect library in plain words ([`EFFECTS`]).
 
-use anyhow::{Context as _, Result, anyhow};
-use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, Value, value};
+use anyhow::{Context as _, Result, anyhow, bail};
+use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, TableLike, Value, value};
 
-/// Built-in effects that can be attached to a layer or a whole scene: (id, friendly name).
-pub const EFFECTS: &[(&str, &str)] = &[
-    ("grade", "Color grade"),
-    ("blur", "Blur"),
-    ("pixelate", "Pixelate"),
-    ("glitch", "Glitch"),
-    ("rgb_split", "Color split"),
-    ("vhs", "VHS tape"),
-    ("vignette", "Vignette"),
-    ("zoom_pulse", "Zoom pulse"),
-    ("chroma_key", "Green screen"),
-    ("lut", "Color look"),
+// ---- the effect library ---------------------------------------------------------------------
+
+/// One setting of a built-in effect (default and range as in the engine's library,
+/// `se-render/src/effects.rs`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FxParam {
+    pub name: &'static str,
+    pub label: &'static str,
+    pub default: f64,
+    pub min: f64,
+    pub max: f64,
+    /// Shown after the value ("px", "°", "Hz", "EV"); empty for plain amounts.
+    pub unit: &'static str,
+}
+
+/// A built-in effect in plain words.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FxDef {
+    pub id: &'static str,
+    pub label: &'static str,
+    /// One plain line: what it does.
+    pub about: &'static str,
+    /// Its settings after the strength every effect has ([`STRENGTH`]).
+    pub params: &'static [FxParam],
+    /// Can go on a layer or a scene (`fade_to_black` works on the whole output only).
+    pub on_layers: bool,
+}
+
+const fn fp(name: &'static str, label: &'static str, default: f64, min: f64, max: f64, unit: &'static str) -> FxParam {
+    FxParam { name, label, default, min, max, unit }
+}
+
+/// How strongly an attached effect shows (`amount`; 1 when the entry doesn't say).
+pub const STRENGTH: FxParam = fp("amount", "Strength", 1.0, 0.0, 1.0, "");
+
+/// Every built-in effect of the engine, in menu order.
+pub const EFFECTS: &[FxDef] = &[
+    FxDef {
+        id: "grade",
+        label: "Color grade",
+        about: "Warmer or cooler, more contrast, richer or paler colors.",
+        params: &[
+            fp("warmth", "Warmth", 0.0, -1.0, 1.0, ""),
+            fp("tint", "Tint", 0.0, -1.0, 1.0, ""),
+            fp("contrast", "Contrast", 1.0, 0.0, 2.0, ""),
+            fp("saturation", "Saturation", 1.0, 0.0, 2.0, ""),
+            fp("lift", "Shadows", 0.0, -0.5, 0.5, ""),
+            fp("exposure", "Exposure", 0.0, -3.0, 3.0, "EV"),
+        ],
+        on_layers: true,
+    },
+    FxDef { id: "blur", label: "Blur", about: "Softens the picture.", params: &[fp("radius", "Amount", 16.0, 0.0, 96.0, "px")], on_layers: true },
+    FxDef {
+        id: "pixelate",
+        label: "Pixelate",
+        about: "Turns the picture into big square blocks.",
+        params: &[fp("size", "Block size", 32.0, 1.0, 256.0, "px")],
+        on_layers: true,
+    },
+    FxDef {
+        id: "glitch",
+        label: "Glitch",
+        about: "Digital breakup: slices jump sideways and colors tear.",
+        params: &[
+            fp("blocks", "Blocks", 0.5, 0.0, 1.0, ""),
+            fp("shift", "Shift", 0.5, 0.0, 1.0, ""),
+            fp("color", "Color tear", 0.5, 0.0, 1.0, ""),
+            fp("speed", "Speed", 1.0, 0.0, 4.0, ""),
+        ],
+        on_layers: true,
+    },
+    FxDef {
+        id: "rgb_split",
+        label: "Color split",
+        about: "Pulls the red and blue apart for a trippy edge.",
+        params: &[fp("angle", "Direction", 0.0, -180.0, 180.0, "°"), fp("spread", "Spread", 0.012, 0.0, 0.1, "")],
+        on_layers: true,
+    },
+    FxDef {
+        id: "vhs",
+        label: "VHS tape",
+        about: "Old tape look: wobble, color bleed, lines and noise.",
+        params: &[
+            fp("noise", "Noise", 0.5, 0.0, 1.0, ""),
+            fp("jitter", "Wobble", 0.5, 0.0, 1.0, ""),
+            fp("scanlines", "Lines", 0.5, 0.0, 1.0, ""),
+            fp("bleed", "Color bleed", 0.5, 0.0, 1.0, ""),
+        ],
+        on_layers: true,
+    },
+    FxDef {
+        id: "vignette",
+        label: "Vignette",
+        about: "Darkens the edges to pull the eye to the middle.",
+        params: &[fp("radius", "Size", 0.75, 0.1, 1.5, ""), fp("softness", "Softness", 0.45, 0.01, 1.0, "")],
+        on_layers: true,
+    },
+    FxDef {
+        id: "zoom_pulse",
+        label: "Zoom pulse",
+        about: "Punches in, and can pulse with the beat.",
+        params: &[
+            fp("zoom", "Zoom", 0.08, 0.0, 0.5, ""),
+            fp("beat", "On the beat", 1.0, 0.0, 1.0, ""),
+            fp("center_x", "Center X", 0.5, 0.0, 1.0, ""),
+            fp("center_y", "Center Y", 0.5, 0.0, 1.0, ""),
+        ],
+        on_layers: true,
+    },
+    FxDef {
+        id: "shake",
+        label: "Shake",
+        about: "Jolts the picture around, like an impact.",
+        params: &[fp("strength", "Movement", 0.03, 0.0, 0.15, ""), fp("speed", "Speed", 12.0, 1.0, 40.0, "Hz")],
+        on_layers: true,
+    },
+    FxDef {
+        id: "chroma_key",
+        label: "Green screen",
+        about: "Removes a green (or any one color) background. Layers only.",
+        params: &[
+            fp("key_r", "Key red", 0.0, 0.0, 1.0, ""),
+            fp("key_g", "Key green", 1.0, 0.0, 1.0, ""),
+            fp("key_b", "Key blue", 0.0, 0.0, 1.0, ""),
+            fp("similarity", "Range", 0.4, 0.0, 1.0, ""),
+            fp("smoothness", "Soft edge", 0.08, 0.0, 1.0, ""),
+            fp("spill", "Spill fix", 0.1, 0.0, 1.0, ""),
+        ],
+        on_layers: true,
+    },
+    FxDef { id: "lut", label: "Color look", about: "Applies a color look file (.cube) from your project.", params: &[], on_layers: true },
+    FxDef {
+        id: "fade_to_black",
+        label: "Fade to black",
+        about: "Fades everything, including what's on every scene, to black.",
+        params: &[fp("color_r", "Red", 0.0, 0.0, 1.0, ""), fp("color_g", "Green", 0.0, 0.0, 1.0, ""), fp("color_b", "Blue", 0.0, 0.0, 1.0, "")],
+        on_layers: false,
+    },
 ];
+
+/// The built-in effect `id`.
+pub fn effect_def(id: &str) -> Option<&'static FxDef> {
+    EFFECTS.iter().find(|e| e.id == id)
+}
 
 /// Friendly name of an effect id (`patch.aurora` → `Aurora`).
 pub fn effect_name(id: &str) -> String {
-    if let Some((_, n)) = EFFECTS.iter().find(|(e, _)| *e == id) {
-        return n.to_string();
+    match effect_def(id) {
+        Some(e) => e.label.to_string(),
+        None => crate::views::live::nice(id.strip_prefix("patch.").unwrap_or(id)),
     }
-    crate::views::live::nice(id.strip_prefix("patch.").unwrap_or(id))
+}
+
+/// One plain line about a built-in effect; empty for custom ones.
+pub fn effect_about(id: &str) -> &'static str {
+    effect_def(id).map_or("", |e| e.about)
+}
+
+/// A setting written in an effect entry.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FxValue {
+    Num(f64),
+    Text(String),
+}
+
+impl FxValue {
+    fn toml(&self) -> Value {
+        match self {
+            FxValue::Num(x) => ((x * 10000.0).round() / 10000.0).into(),
+            FxValue::Text(s) => s.as_str().into(),
+        }
+    }
+}
+
+/// What a new entry of the built-in `id` writes: its strength and every setting at the default,
+/// so each is this layer's own setting from the start (switchable, followable), not the shared
+/// one. Custom effects: nothing (the page adds their numeric settings).
+pub fn fx_defaults(id: &str) -> Vec<(String, FxValue)> {
+    let Some(e) = effect_def(id) else { return Vec::new() };
+    std::iter::once(&STRENGTH).chain(e.params).map(|p| (p.name.to_string(), FxValue::Num(p.default))).collect()
+}
+
+/// One effect entry as written in a file.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FxEntry {
+    pub name: String,
+    /// `enabled = false` in the file: a layer's effect is off; a scene's shows only while
+    /// something fires it.
+    pub enabled: bool,
+    /// Numeric settings written in the entry.
+    pub nums: Vec<(String, f64)>,
+    /// Text settings written in the entry (the `file` of a color look).
+    pub texts: Vec<(String, String)>,
+    pub when: Option<String>,
+    /// Written as just its name (`fx = ["blur"]`): the engine can't save a switch into it.
+    pub bare: bool,
+}
+
+impl FxEntry {
+    pub fn num(&self, key: &str) -> Option<f64> {
+        self.nums.iter().find(|(k, _)| k == key).map(|(_, v)| *v)
+    }
+    pub fn text(&self, key: &str) -> Option<&str> {
+        self.texts.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+}
+
+/// Keys of an effect entry that aren't the effect's settings.
+const FX_KEYS: [&str; 5] = ["name", "when", "group", "hold", "enabled"];
+
+fn fx_entry(v: &Value) -> Option<FxEntry> {
+    match v {
+        Value::String(s) => Some(FxEntry { name: s.value().clone(), enabled: true, bare: true, ..FxEntry::default() }),
+        Value::InlineTable(t) => {
+            let mut e = FxEntry {
+                name: t.get("name")?.as_str()?.to_string(),
+                enabled: t.get("enabled").and_then(Value::as_bool).unwrap_or(true),
+                when: t.get("when").and_then(Value::as_str).map(String::from),
+                ..FxEntry::default()
+            };
+            for (k, v) in t.iter().filter(|(k, _)| !FX_KEYS.contains(k)) {
+                match v {
+                    Value::Float(f) => e.nums.push((k.to_string(), *f.value())),
+                    Value::Integer(i) => e.nums.push((k.to_string(), *i.value() as f64)),
+                    Value::String(s) => e.texts.push((k.to_string(), s.value().clone())),
+                    _ => {}
+                }
+            }
+            Some(e)
+        }
+        _ => None,
+    }
+}
+
+fn fx_entries(a: &Array) -> Vec<FxEntry> {
+    a.iter().filter_map(fx_entry).collect()
+}
+
+fn fx_index(a: &Array, fx: &str) -> Option<usize> {
+    a.iter().position(|v| fx_entry(v).is_some_and(|e| e.name == fx))
+}
+
+/// The entry for `fx` as an inline table (a bare `"name"` entry becomes `{ name = "…" }`).
+fn fx_table<'a>(a: &'a mut Array, fx: &str) -> Option<&'a mut InlineTable> {
+    let i = fx_index(a, fx)?;
+    if a.get(i)?.is_str() {
+        let mut t = InlineTable::new();
+        t.insert("name", fx.into());
+        a.replace(i, t);
+    }
+    a.get_mut(i)?.as_inline_table_mut()
+}
+
+/// Where effects are attached: one layer of the scene (every canvas) or the whole scene.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FxHost<'a> {
+    Layer(&'a str),
+    Scene,
 }
 
 fn parse(text: &str) -> Result<DocumentMut> {
@@ -36,6 +276,10 @@ fn parse(text: &str) -> Result<DocumentMut> {
 /// The identity of a node entry: its `id`, else its `src`.
 fn node_id(t: &InlineTable) -> Option<&str> {
     t.get("id").and_then(Value::as_str).or_else(|| t.get("src").and_then(Value::as_str))
+}
+
+fn table_id(t: &dyn TableLike) -> Option<&str> {
+    t.get("id").and_then(Item::as_str).or_else(|| t.get("src").and_then(Item::as_str))
 }
 
 /// Every `canvas.<name>.nodes` array in the document.
@@ -49,6 +293,44 @@ fn node_arrays(doc: &mut DocumentMut) -> Vec<&mut Array> {
             _ => None,
         })
         .collect()
+}
+
+/// Run `f` on the entry of the layer `node` on every canvas (inline `nodes = [...]` or
+/// `[[canvas.x.nodes]]` tables). Returns how many entries it ran on.
+fn each_node(doc: &mut DocumentMut, node: &str, mut f: impl FnMut(&mut dyn TableLike) -> Result<()>) -> Result<usize> {
+    let Some(canvases) = doc.get_mut("canvas").and_then(Item::as_table_like_mut) else { return Ok(0) };
+    let mut n = 0;
+    for (_, c) in canvases.iter_mut() {
+        let Some(nodes) = c.as_table_like_mut().and_then(|c| c.get_mut("nodes")) else { continue };
+        match nodes {
+            Item::Value(Value::Array(arr)) => {
+                for t in arr.iter_mut().filter_map(Value::as_inline_table_mut).filter(|t| node_id(t) == Some(node)) {
+                    f(t)?;
+                    n += 1;
+                }
+            }
+            Item::ArrayOfTables(aot) => {
+                for t in aot.iter_mut().filter(|t| table_id(&**t) == Some(node)) {
+                    f(t)?;
+                    n += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(n)
+}
+
+/// The first entry of the layer `node` (the main canvas first).
+fn first_node<'a>(doc: &'a DocumentMut, node: &str) -> Option<&'a dyn TableLike> {
+    let canvases = doc.get("canvas")?.as_table_like()?;
+    let mut order: Vec<(&str, &Item)> = canvases.iter().collect();
+    order.sort_by_key(|(k, _)| *k != "wide");
+    order.into_iter().find_map(|(_, c)| match c.as_table_like()?.get("nodes")? {
+        Item::Value(Value::Array(arr)) => arr.iter().filter_map(Value::as_inline_table).find(|t| node_id(t) == Some(node)).map(|t| t as &dyn TableLike),
+        Item::ArrayOfTables(aot) => aot.iter().find(|t| table_id(*t) == Some(node)).map(|t| t as &dyn TableLike),
+        _ => None,
+    })
 }
 
 fn canvas_table<'a>(doc: &'a mut DocumentMut, canvas: &str) -> &'a mut Table {
@@ -90,32 +372,73 @@ fn rect(r: [f64; 4]) -> Value {
     Value::Array(a)
 }
 
-/// Add a layer showing `src`, centered, on the main and vertical canvases.
-pub fn add_layer(text: &str, src: &str) -> Result<String> {
+/// A layer name that is safe inside an address (`scene.<s>.node.<id>.…`): `patch.aurora` →
+/// `aurora`, `color:#ff0000` → `color`; names of letters, digits, `_` and `-` stay as they are.
+fn plain_id(src: &str) -> String {
+    let base = src.strip_prefix("patch.").unwrap_or(src);
+    let base = if base.starts_with("color:") || base.starts_with('#') { "color" } else { base };
+    let s: String = base.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).collect();
+    if s.is_empty() { "layer".into() } else { s }
+}
+
+/// `base`, else `base_2`, `base_3`, … whichever isn't in `used`.
+fn unique(base: &str, used: &[String]) -> String {
+    if !used.iter().any(|u| u == base) {
+        return base.to_string();
+    }
+    (2..).map(|i| format!("{base}_{i}")).find(|c| !used.contains(c)).expect("a free name")
+}
+
+/// Every layer name in the scene (all canvases).
+fn layer_names(doc: &mut DocumentMut) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for arr in node_arrays(doc) {
+        for id in arr.iter().filter_map(|v| v.as_inline_table().and_then(node_id)) {
+            if !out.iter().any(|o| o == id) {
+                out.push(id.to_string());
+            }
+        }
+    }
+    out
+}
+
+fn is_color(src: &str) -> bool {
+    src.starts_with("color:") || src.starts_with('#')
+}
+
+// ---- layers ---------------------------------------------------------------------------------
+
+/// Add a layer showing `src` on the main and vertical canvases: centered in front, or a solid
+/// color filling the canvas at the back. Returns the new text and the new layer's name.
+pub fn add_layer(text: &str, src: &str) -> Result<(String, String)> {
     let mut doc = parse(text)?;
+    let used = layer_names(&mut doc);
+    let base = plain_id(src);
+    // a layer without an `id` is named after its source; that only works for a plain,
+    // unused name
+    let id = if base == src && !used.iter().any(|u| u == src) { None } else { Some(unique(&base, &used)) };
+    let color = is_color(src);
     for (canvas, r) in [("wide", [0.25, 0.25, 0.5, 0.5]), ("tall", [0.1, 0.3, 0.8, 0.4])] {
         let t = canvas_table(&mut doc, canvas);
         if !t.contains_key("nodes") {
             t.insert("nodes", value(Array::new()));
         }
         let arr = t["nodes"].as_array_mut().ok_or_else(|| anyhow!("canvas.{canvas}.nodes isn't a list"))?;
-        let mut used: Vec<String> = arr.iter().filter_map(|v| v.as_inline_table().and_then(node_id).map(String::from)).collect();
         let mut n = InlineTable::new();
         n.insert("src", src.into());
-        if used.iter().any(|u| u == src) {
-            // a second layer of the same source needs its own id
-            let mut i = 2;
-            while used.contains(&format!("{src}_{i}")) {
-                i += 1;
-            }
-            n.insert("id", format!("{src}_{i}").into());
-            used.push(format!("{src}_{i}"));
+        if let Some(id) = &id {
+            n.insert("id", id.as_str().into());
         }
-        n.insert("rect", rect(r));
-        arr.push(Value::InlineTable(n));
+        n.insert("rect", rect(if color { [0.0, 0.0, 1.0, 1.0] } else { r }));
+        if color {
+            arr.insert(0, Value::InlineTable(n));
+        } else {
+            arr.push(Value::InlineTable(n));
+        }
         multiline(arr);
     }
-    Ok(doc.to_string())
+    let name = id.unwrap_or_else(|| src.to_string());
+    Ok((doc.to_string(), name))
 }
 
 /// Remove the layer `node` from every canvas.
@@ -144,139 +467,291 @@ pub fn move_layer(text: &str, node: &str, forward: bool) -> Result<String> {
     Ok(doc.to_string())
 }
 
+/// Move the layer `node` right next to `target`: just in front of it (`in_front`) or just
+/// behind it, on every canvas that has both.
+pub fn place_layer(text: &str, node: &str, target: &str, in_front: bool) -> Result<String> {
+    let mut doc = parse(text)?;
+    if node == target {
+        return Ok(doc.to_string());
+    }
+    let pos = |a: &Array, id: &str| a.iter().position(|v| v.as_inline_table().and_then(node_id) == Some(id));
+    for arr in node_arrays(&mut doc) {
+        let Some(i) = pos(arr, node) else { continue };
+        if pos(arr, target).is_none() {
+            continue;
+        }
+        let v = arr.remove(i);
+        let j = pos(arr, target).expect("target is still there") + usize::from(in_front);
+        arr.insert(j, v);
+        multiline(arr);
+    }
+    Ok(doc.to_string())
+}
+
+/// A copy of the layer `node` just in front of it, on every canvas that has it. Returns the
+/// new text and the copy's name.
+pub fn duplicate_layer(text: &str, node: &str) -> Result<(String, String)> {
+    let mut doc = parse(text)?;
+    let used = layer_names(&mut doc);
+    if !used.iter().any(|u| u == node) {
+        bail!("this scene has no layer `{node}`");
+    }
+    let id = unique(&plain_id(node), &used);
+    for arr in node_arrays(&mut doc) {
+        let Some(i) = arr.iter().position(|v| v.as_inline_table().and_then(node_id) == Some(node)) else { continue };
+        let mut copy = arr.get(i).expect("found").clone();
+        if let Some(t) = copy.as_inline_table_mut() {
+            t.insert("id", id.as_str().into());
+        }
+        copy.decor_mut().clear();
+        arr.insert(i + 1, copy);
+        multiline(arr);
+    }
+    Ok((doc.to_string(), id))
+}
+
 /// Show `src` in the layer `node` instead (every canvas; place, size and effects stay). A layer
-/// without its own `id` is named after what it shows, so it gets a new name unless another
-/// layer already shows `src`. Returns the new text and the layer's name afterwards.
+/// without its own `id` is named after what it shows, so it follows the new source when that
+/// is a plain, unused name; otherwise it gets an `id`. Returns the new text and the layer's
+/// name afterwards.
 pub fn set_layer_source(text: &str, node: &str, src: &str) -> Result<(String, String)> {
     let mut doc = parse(text)?;
-    let mut arrays = node_arrays(&mut doc);
-    let entries = |a: &Array| a.iter().filter_map(Value::as_inline_table).map(|t| (node_id(t).map(String::from), t.get("id").is_some())).collect::<Vec<_>>();
-    let all: Vec<(Option<String>, bool)> = arrays.iter().flat_map(|a| entries(a)).collect();
-    let Some(explicit) = all.iter().find(|(id, _)| id.as_deref() == Some(node)).map(|(_, e)| *e) else {
-        return Err(anyhow!("this scene has no layer `{node}`"));
+    let used = layer_names(&mut doc);
+    let mut explicit = None;
+    each_node(&mut doc, node, |t| {
+        explicit = Some(explicit.unwrap_or(false) || t.contains_key("id"));
+        Ok(())
+    })?;
+    let Some(explicit) = explicit else { return Err(anyhow!("this scene has no layer `{node}`")) };
+    let taken = src != node && used.iter().any(|u| u == src);
+    let new_id = if explicit {
+        node.to_string()
+    } else if plain_id(src) == src && !taken {
+        src.to_string()
+    } else if plain_id(node) == node {
+        node.to_string()
+    } else {
+        unique(&plain_id(src), &used)
     };
-    // a layer named after its source follows the new source, unless that name is taken
-    let taken = src != node && all.iter().any(|(id, _)| id.as_deref() == Some(src));
-    let new_id = if explicit || taken { node.to_string() } else { src.to_string() };
-    for arr in arrays.iter_mut() {
-        let Some(t) = arr.iter_mut().filter_map(Value::as_inline_table_mut).find(|t| node_id(t) == Some(node)) else { continue };
-        t.insert("src", src.into());
+    each_node(&mut doc, node, |t| {
+        t.insert("src", value(src));
         if !explicit && new_id != src {
-            t.insert("id", new_id.as_str().into());
+            t.insert("id", value(new_id.as_str()));
         }
-    }
+        Ok(())
+    })?;
     Ok((doc.to_string(), new_id))
 }
 
-fn fx_names(a: Option<&Array>) -> Vec<String> {
-    a.map(|a| {
-        a.iter()
-            .filter_map(|v| match v {
-                Value::String(s) => Some(s.value().clone()),
-                Value::InlineTable(t) => t.get("name").and_then(Value::as_str).map(String::from),
-                _ => None,
-            })
-            .collect()
-    })
-    .unwrap_or_default()
+/// One layer as the Layers list shows it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayerInfo {
+    pub id: String,
+    pub src: String,
+    /// Effects on it.
+    pub fx: usize,
 }
 
-/// Effects attached to the layer `node` (first canvas that has the node).
-pub fn layer_effects(text: &str, node: &str) -> Vec<String> {
-    let Ok(mut doc) = parse(text) else { return Vec::new() };
-    for arr in node_arrays(&mut doc) {
-        if let Some(t) = arr.iter().filter_map(Value::as_inline_table).find(|t| node_id(t) == Some(node)) {
-            return fx_names(t.get("fx").and_then(Value::as_array));
+/// The scene's layers in drawing order on `canvas` (back first), then those only on other
+/// canvases; each with what it shows and how many effects it has (from its first entry).
+pub fn layers(text: &str, canvas: &str) -> Vec<LayerInfo> {
+    let Ok(doc) = parse(text) else { return Vec::new() };
+    let Some(canvases) = doc.get("canvas").and_then(Item::as_table_like) else { return Vec::new() };
+    let mut order: Vec<(&str, &Item)> = canvases.iter().collect();
+    order.sort_by_key(|(k, _)| *k != canvas);
+    let mut out: Vec<LayerInfo> = Vec::new();
+    let mut add = |t: &dyn TableLike| {
+        let Some(id) = table_id(t) else { return };
+        if out.iter().any(|l| l.id == id) {
+            return;
+        }
+        let src = t.get("src").and_then(Item::as_str).unwrap_or(id).to_string();
+        let fx = t.get("fx").and_then(Item::as_array).map_or(0, Array::len);
+        out.push(LayerInfo { id: id.to_string(), src, fx });
+    };
+    for (_, c) in order {
+        match c.as_table_like().and_then(|c| c.get("nodes")) {
+            Some(Item::Value(Value::Array(arr))) => arr.iter().filter_map(Value::as_inline_table).for_each(|t| add(t)),
+            Some(Item::ArrayOfTables(aot)) => aot.iter().for_each(|t| add(t)),
+            _ => {}
         }
     }
-    Vec::new()
+    out
 }
 
-/// Add (`on`) or remove the effect `fx` on the layer `node` (every canvas).
-pub fn set_layer_effect(text: &str, node: &str, fx: &str, on: bool) -> Result<String> {
+/// Layer names in drawing order on `canvas` (back first), then those only on other canvases.
+pub fn layer_order(text: &str, canvas: &str) -> Vec<String> {
+    layers(text, canvas).into_iter().map(|l| l.id).collect()
+}
+
+/// A text property of the layer `node` (`blend`, `mask`, `enter`, `exit`, `src`; the main
+/// canvas's entry first).
+pub fn layer_prop(text: &str, node: &str, key: &str) -> Option<String> {
+    let doc = parse(text).ok()?;
+    first_node(&doc, node)?.get(key)?.as_str().filter(|s| !s.is_empty()).map(String::from)
+}
+
+/// Set (or with `None` remove) a text property of the layer `node` on every canvas.
+pub fn set_layer_prop(text: &str, node: &str, key: &str, v: Option<&str>) -> Result<String> {
     let mut doc = parse(text)?;
-    for arr in node_arrays(&mut doc) {
-        for v in arr.iter_mut() {
-            let Some(t) = v.as_inline_table_mut() else { continue };
-            if node_id(t) != Some(node) {
-                continue;
-            }
-            toggle_fx(t.get_or_insert("fx", Array::new()).as_array_mut().ok_or_else(|| anyhow!("fx isn't a list"))?, fx, on);
-            if t.get("fx").and_then(Value::as_array).is_some_and(Array::is_empty) {
-                t.remove("fx");
+    let n = each_node(&mut doc, node, |t| {
+        match v.filter(|s| !s.is_empty()) {
+            Some(s) => match t.get_mut(key) {
+                // keep the value's own comment
+                Some(Item::Value(old)) => {
+                    let decor = old.decor().clone();
+                    *old = s.into();
+                    *old.decor_mut() = decor;
+                }
+                _ => {
+                    t.insert(key, value(s));
+                }
+            },
+            None => {
+                t.remove(key);
             }
         }
+        Ok(())
+    })?;
+    if n == 0 {
+        bail!("this scene has no layer `{node}`");
     }
     Ok(doc.to_string())
 }
 
-fn toggle_fx(a: &mut Array, fx: &str, on: bool) {
-    let has = fx_names(Some(a)).iter().any(|n| n == fx);
-    if on && !has {
+// ---- effects on a layer or the scene --------------------------------------------------------
+
+/// Run `f` on each effect list of `host` (a layer's on every canvas, or the scene's top-level
+/// `fx`); `create` adds a missing list first. Lists left empty are removed.
+fn each_fx_list(doc: &mut DocumentMut, host: FxHost, create: bool, mut f: impl FnMut(&mut Array)) -> Result<usize> {
+    match host {
+        FxHost::Layer(node) => {
+            let mut bad = false;
+            let n = each_node(doc, node, |t| {
+                if create && !t.contains_key("fx") {
+                    t.insert("fx", value(Array::new()));
+                }
+                let empty = match t.get_mut("fx") {
+                    Some(Item::Value(Value::Array(a))) => {
+                        f(a);
+                        a.is_empty()
+                    }
+                    Some(_) => {
+                        bad = true;
+                        false
+                    }
+                    None => false,
+                };
+                if empty {
+                    t.remove("fx");
+                }
+                Ok(())
+            })?;
+            if bad {
+                bail!("the layer's effects aren't a list");
+            }
+            if n == 0 {
+                bail!("this scene has no layer `{node}`");
+            }
+            Ok(n)
+        }
+        FxHost::Scene => {
+            if create && !doc.contains_key("fx") {
+                doc.insert("fx", value(Array::new()));
+            }
+            let Some(item) = doc.get_mut("fx") else { return Ok(0) };
+            let a = item.as_array_mut().ok_or_else(|| anyhow!("the scene's effects are written as tables; change them in the file"))?;
+            f(a);
+            let empty = a.is_empty();
+            if empty {
+                doc.remove("fx");
+            }
+            Ok(1)
+        }
+    }
+}
+
+/// The effects of `host` (a layer: the main canvas's entry first).
+pub fn fx_list(text: &str, host: FxHost) -> Vec<FxEntry> {
+    let Ok(doc) = parse(text) else { return Vec::new() };
+    let a = match host {
+        FxHost::Layer(node) => first_node(&doc, node).and_then(|t| t.get("fx")).and_then(Item::as_array),
+        FxHost::Scene => doc.get("fx").and_then(Item::as_array),
+    };
+    a.map(fx_entries).unwrap_or_default()
+}
+
+/// Attach the effect `fx` to `host` with `params` written in its entry (no change when it's
+/// already there).
+pub fn add_fx(text: &str, host: FxHost, fx: &str, params: &[(String, FxValue)]) -> Result<String> {
+    let mut doc = parse(text)?;
+    each_fx_list(&mut doc, host, true, |a| {
+        if fx_index(a, fx).is_some() {
+            return;
+        }
         let mut e = InlineTable::new();
         e.insert("name", fx.into());
+        for (k, v) in params {
+            e.insert(k, v.toml());
+        }
         a.push(Value::InlineTable(e));
-    } else if !on {
-        a.retain(|v| match v {
-            Value::String(s) => s.value() != fx,
-            Value::InlineTable(t) => t.get("name").and_then(Value::as_str) != Some(fx),
-            _ => true,
-        });
-    }
-}
-
-/// Effects on the whole scene (`fx = [...]` at the top of the file).
-pub fn scene_effects(text: &str) -> Vec<String> {
-    parse(text).ok().map(|d| fx_names(d.get("fx").and_then(Item::as_array))).unwrap_or_default()
-}
-
-pub fn set_scene_effect(text: &str, fx: &str, on: bool) -> Result<String> {
-    let mut doc = parse(text)?;
-    if !doc.contains_key("fx") {
-        doc.insert("fx", value(Array::new()));
-    }
-    let a = doc["fx"].as_array_mut().ok_or_else(|| anyhow!("fx isn't a list"))?;
-    toggle_fx(a, fx, on);
-    if a.is_empty() {
-        doc.remove("fx");
-    }
+    })?;
     Ok(doc.to_string())
 }
 
-/// The show condition of the layer `node` (`when = "…"`; first canvas that has the node).
+/// Take the effect `fx` off `host`.
+pub fn remove_fx(text: &str, host: FxHost, fx: &str) -> Result<String> {
+    let mut doc = parse(text)?;
+    each_fx_list(&mut doc, host, false, |a| {
+        a.retain(|v| fx_entry(v).is_none_or(|e| e.name != fx));
+    })?;
+    Ok(doc.to_string())
+}
+
+/// Switch the effect `fx` of `host` on (no `enabled` key) or off (`enabled = false`).
+pub fn set_fx_enabled(text: &str, host: FxHost, fx: &str, on: bool) -> Result<String> {
+    let mut doc = parse(text)?;
+    each_fx_list(&mut doc, host, false, |a| {
+        if let Some(t) = fx_table(a, fx) {
+            if on {
+                t.remove("enabled");
+            } else {
+                t.insert("enabled", false.into());
+            }
+        }
+    })?;
+    Ok(doc.to_string())
+}
+
+/// Write (or with `None` remove) the setting `key` in the entry of the effect `fx` of `host`.
+pub fn set_fx_param(text: &str, host: FxHost, fx: &str, key: &str, v: Option<&FxValue>) -> Result<String> {
+    if FX_KEYS.contains(&key) {
+        bail!("`{key}` isn't a setting");
+    }
+    let mut doc = parse(text)?;
+    each_fx_list(&mut doc, host, false, |a| {
+        if let Some(t) = fx_table(a, fx) {
+            match v {
+                Some(v) => {
+                    t.insert(key, v.toml());
+                }
+                None => {
+                    t.remove(key);
+                }
+            }
+        }
+    })?;
+    Ok(doc.to_string())
+}
+
+/// The show condition of the layer `node` (`when = "…"`; the main canvas's entry first).
 pub fn layer_when(text: &str, node: &str) -> Option<String> {
-    let mut doc = parse(text).ok()?;
-    node_arrays(&mut doc)
-        .into_iter()
-        .find_map(|arr| {
-            arr.iter().filter_map(Value::as_inline_table).find(|t| node_id(t) == Some(node)).map(|t| t.get("when").and_then(Value::as_str).map(String::from))
-        })
-        .flatten()
-        .filter(|w| !w.trim().is_empty())
+    layer_prop(text, node, "when").filter(|w| !w.trim().is_empty())
 }
 
 /// Show the layer `node` only while `when` is true (`None` or empty = always), on every canvas.
 pub fn set_layer_when(text: &str, node: &str, when: Option<&str>) -> Result<String> {
-    let mut doc = parse(text)?;
-    let when = when.map(str::trim).filter(|w| !w.is_empty());
-    let mut found = false;
-    for arr in node_arrays(&mut doc) {
-        for t in arr.iter_mut().filter_map(Value::as_inline_table_mut).filter(|t| node_id(t) == Some(node)) {
-            found = true;
-            match when {
-                Some(w) => {
-                    t.insert("when", w.into());
-                }
-                None => {
-                    t.remove("when");
-                }
-            }
-        }
-    }
-    if !found {
-        return Err(anyhow!("this scene has no layer `{node}`"));
-    }
-    Ok(doc.to_string())
+    set_layer_prop(text, node, "when", when.map(str::trim))
 }
 
 /// One plain check of a layer's show condition. Anything else is edited as text.
@@ -286,8 +761,8 @@ pub enum LayerCheck {
     Mode { mode: String, not: bool },
     /// `queue.now.id` (a song request is playing) or `!queue.now.id`.
     Song { playing: bool },
-    /// `patch.<id>.active` (the overlay is playing) or `!patch.<id>.active`.
-    Overlay { id: String, playing: bool },
+    /// `patch.<id>.active` (a source that plays on cue is playing) or `!patch.<id>.active`.
+    Source { id: String, playing: bool },
 }
 
 impl LayerCheck {
@@ -298,8 +773,8 @@ impl LayerCheck {
             LayerCheck::Mode { mode, .. } if mode.is_empty() || mode.contains(['\'', '"']) => None,
             LayerCheck::Mode { mode, not } => Some(format!("mode {} '{mode}'", if *not { "!=" } else { "==" })),
             LayerCheck::Song { playing } => Some(format!("{}queue.now.id", bang(*playing))),
-            LayerCheck::Overlay { id, .. } if id.is_empty() => None,
-            LayerCheck::Overlay { id, playing } => Some(format!("{}patch.{id}.active", bang(*playing))),
+            LayerCheck::Source { id, .. } if id.is_empty() => None,
+            LayerCheck::Source { id, playing } => Some(format!("{}patch.{id}.active", bang(*playing))),
         }
     }
 }
@@ -325,7 +800,7 @@ fn parse_check(p: &str) -> Option<LayerCheck> {
         return Some(LayerCheck::Song { playing: yes });
     }
     let id = path.strip_prefix("patch.")?.strip_suffix(".active")?;
-    simple_name(id).then(|| LayerCheck::Overlay { id: id.to_string(), playing: yes })
+    simple_name(id).then(|| LayerCheck::Source { id: id.to_string(), playing: yes })
 }
 
 /// The plain checks of a show condition (all must be true); `None` when it needs the text editor.
@@ -445,6 +920,72 @@ pub fn set_background(text: &str, color: Option<&str>) -> Result<String> {
                 t.remove("background");
             }
         }
+    }
+    Ok(doc.to_string())
+}
+
+/// The scene's number key (1–9).
+pub fn key(text: &str) -> Option<i64> {
+    parse(text).ok()?.get("key")?.as_integer()
+}
+
+/// Set (or with `None` remove) the scene's number key.
+pub fn set_key(text: &str, key: Option<i64>) -> Result<String> {
+    let mut doc = parse(text)?;
+    match key {
+        Some(k) => match doc.get_mut("key") {
+            // keep the line's own comment
+            Some(Item::Value(v)) => {
+                let decor = v.decor().clone();
+                *v = k.into();
+                *v.decor_mut() = decor;
+            }
+            _ => {
+                doc.insert("key", value(k));
+            }
+        },
+        None => {
+            doc.remove("key");
+        }
+    }
+    Ok(doc.to_string())
+}
+
+/// What the scene does with the lights when it comes on: (`look`, `cue`); `cue` is a cue list
+/// to run (a `cuelist` + `cue` pair names one cue of a list and reads as that list).
+pub fn lights(text: &str) -> (Option<String>, Option<String>) {
+    let Ok(doc) = parse(text) else { return (None, None) };
+    let Some(l) = doc.get("lights").and_then(Item::as_table_like) else { return (None, None) };
+    let s = |k: &str| l.get(k).and_then(Item::as_str).filter(|s| !s.is_empty()).map(String::from);
+    (s("look"), s("cuelist").or_else(|| s("cue")))
+}
+
+/// Set (or with `None` remove) the scene's light look (`key` = `look`) or cue list (`cue`).
+/// Other keys (`hold`) stay; an empty `[lights]` goes away.
+pub fn set_lights(text: &str, key: &str, v: Option<&str>) -> Result<String> {
+    if !["look", "cue"].contains(&key) {
+        bail!("scenes set a light `look` or `cue`, not `{key}`");
+    }
+    let mut doc = parse(text)?;
+    if v.is_some() && !doc.contains_key("lights") {
+        doc.insert("lights", Item::Table(Table::new()));
+    }
+    let Some(l) = doc.get_mut("lights").and_then(Item::as_table_like_mut) else { return Ok(doc.to_string()) };
+    if key == "cue" {
+        // a whole cue list now, not one cue of it
+        l.remove("cuelist");
+    }
+    match v.filter(|s| !s.is_empty()) {
+        Some(s) => {
+            l.insert(key, value(s));
+        }
+        None => {
+            l.remove(key);
+        }
+    }
+    let empty = l.is_empty();
+    if empty {
+        doc.remove("lights");
     }
     Ok(doc.to_string())
 }
@@ -640,15 +1181,18 @@ ms = [500, 900]
 
     #[test]
     fn add_layer_on_both_canvases_keeps_comments_and_gives_duplicates_ids() {
-        let out = add_layer(DUO, "youtube").unwrap();
+        let (out, id) = add_layer(DUO, "youtube").unwrap();
+        assert_eq!(id, "youtube");
         assert!(out.starts_with("# Kit front + high corner wide"), "{out}");
         assert!(out.contains("# top"), "{out}");
         assert_eq!(nodes(&out, "wide"), ["cam_kit", "cam_wide", "youtube"]);
         assert_eq!(nodes(&out, "tall"), ["cam_kit", "youtube"]);
-        let twice = add_layer(&out, "youtube").unwrap();
+        let (twice, id) = add_layer(&out, "youtube").unwrap();
+        assert_eq!(id, "youtube_2");
         assert_eq!(nodes(&twice, "wide"), ["cam_kit", "cam_wide", "youtube", "youtube_2"]);
+        assert_eq!(nodes(&twice, "tall"), ["cam_kit", "youtube", "youtube_2"], "the same name on both canvases");
         // a scene without canvases gets them
-        let fresh = add_layer("label = \"x\"\n", "cam_kit").unwrap();
+        let (fresh, _) = add_layer("label = \"x\"\n", "cam_kit").unwrap();
         assert_eq!(nodes(&fresh, "wide"), ["cam_kit"]);
         assert_eq!(nodes(&fresh, "tall"), ["cam_kit"]);
         assert!(fresh.parse::<DocumentMut>().is_ok());
@@ -667,18 +1211,151 @@ ms = [500, 900]
     }
 
     #[test]
-    fn layer_and_scene_effects_toggle() {
-        assert_eq!(layer_effects(DUO, "cam_wide"), ["vhs"]);
-        let on = set_layer_effect(DUO, "cam_kit", "blur", true).unwrap();
-        assert_eq!(layer_effects(&on, "cam_kit"), ["blur"]);
-        let again = set_layer_effect(&on, "cam_kit", "blur", true).unwrap();
-        assert_eq!(layer_effects(&again, "cam_kit"), ["blur"], "no duplicates");
-        let off = set_layer_effect(&on, "cam_wide", "vhs", false).unwrap();
-        assert!(layer_effects(&off, "cam_wide").is_empty());
-        assert!(!off.contains("when = \"mode"), "{off}");
-        let s = set_scene_effect(DUO, "grade", true).unwrap();
-        assert_eq!(scene_effects(&s), ["grade"]);
-        assert!(scene_effects(&set_scene_effect(&s, "grade", false).unwrap()).is_empty());
+    fn layer_names_stay_usable_in_addresses() {
+        // sources whose names aren't plain get a plain layer name, so
+        // `scene.<s>.node.<id>.<prop>` stays one segment per part
+        let (out, id) = add_layer(DUO, "patch.aurora").unwrap();
+        assert_eq!(id, "aurora");
+        assert_eq!(nodes(&out, "wide"), ["cam_kit", "cam_wide", "aurora"]);
+        let (out, id) = add_layer(&out, "patch.aurora").unwrap();
+        assert_eq!(id, "aurora_2");
+        // a solid color fills the canvas at the back
+        let (out, id) = add_layer(&out, "color:#102030").unwrap();
+        assert_eq!(id, "color");
+        assert_eq!(nodes(&out, "wide")[0], "color");
+        assert_eq!(node_entries(&out, "tall")[0].2, [0.0, 0.0, 1.0, 1.0]);
+        let def = engine_reads(&out);
+        assert_eq!(def.nodes("wide")[0].src, "color:#102030");
+        assert_eq!(def.nodes("wide").len(), 5);
+    }
+
+    #[test]
+    fn duplicate_and_drop_layers_in_place() {
+        let (out, id) = duplicate_layer(DUO, "cam_kit").unwrap();
+        assert_eq!(id, "cam_kit_2");
+        assert_eq!(nodes(&out, "wide"), ["cam_kit", "cam_kit_2", "cam_wide"]);
+        assert_eq!(nodes(&out, "tall"), ["cam_kit", "cam_kit_2"]);
+        let def = engine_reads(&out);
+        assert_eq!(def.nodes("wide")[1].src, "cam_kit");
+        assert_eq!(def.nodes("wide")[1].radius, 24.0, "the copy keeps the look");
+        assert!(duplicate_layer(DUO, "nope").is_err());
+        // drop cam_kit in front of cam_wide, then behind it again
+        let front = place_layer(DUO, "cam_kit", "cam_wide", true).unwrap();
+        assert_eq!(nodes(&front, "wide"), ["cam_wide", "cam_kit"]);
+        assert_eq!(nodes(&front, "tall"), ["cam_kit"], "a canvas without the target is left alone");
+        let back = place_layer(&front, "cam_kit", "cam_wide", false).unwrap();
+        assert_eq!(nodes(&back, "wide"), ["cam_kit", "cam_wide"]);
+        assert_eq!(layer_order(&front, "wide"), ["cam_wide", "cam_kit"]);
+        assert_eq!(layer_order(&front, "tall"), ["cam_kit", "cam_wide"], "layers only on the other canvas come last");
+    }
+
+    #[test]
+    fn layer_effects_with_settings_round_trip_through_the_engine() {
+        assert_eq!(fx_list(DUO, FxHost::Layer("cam_wide")).iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["vhs"]);
+        let out = add_fx(DUO, FxHost::Layer("cam_kit"), "blur", &fx_defaults("blur")).unwrap();
+        let again = add_fx(&out, FxHost::Layer("cam_kit"), "blur", &fx_defaults("blur")).unwrap();
+        assert_eq!(fx_list(&again, FxHost::Layer("cam_kit")).len(), 1, "no duplicates");
+        let blur = &fx_list(&out, FxHost::Layer("cam_kit"))[0];
+        assert!(blur.enabled);
+        assert_eq!((blur.num("amount"), blur.num("radius")), (Some(1.0), Some(16.0)));
+        // the engine reads every written setting as this layer's own (both canvases)
+        let def = engine_reads(&out);
+        for c in ["wide", "tall"] {
+            let fx = &def.nodes(c)[0].fx[0];
+            assert_eq!(fx.name, "blur", "{c}");
+            assert_eq!(fx.params.get("radius").and_then(|v| v.as_f64()), Some(16.0), "{c}");
+            assert_eq!(fx.enabled, None, "{c}");
+        }
+        // off, a changed setting, on again
+        let off = set_fx_enabled(&out, FxHost::Layer("cam_kit"), "blur", false).unwrap();
+        assert!(!fx_list(&off, FxHost::Layer("cam_kit"))[0].enabled);
+        assert_eq!(engine_reads(&off).nodes("tall")[0].fx[0].enabled, Some(false));
+        let tuned = set_fx_param(&off, FxHost::Layer("cam_kit"), "blur", "radius", Some(&FxValue::Num(40.123456))).unwrap();
+        assert_eq!(fx_list(&tuned, FxHost::Layer("cam_kit"))[0].num("radius"), Some(40.1235));
+        let on = set_fx_enabled(&tuned, FxHost::Layer("cam_kit"), "blur", true).unwrap();
+        assert!(fx_list(&on, FxHost::Layer("cam_kit"))[0].enabled);
+        assert!(!on.contains("enabled"), "{on}");
+        // a bare name entry becomes a table when it gets a setting
+        let bare = DUO.replace("fx = [{ name = \"vhs\", when = \"mode == 'chill'\" }]", "fx = [\"vhs\"]");
+        let lut = set_fx_param(&bare, FxHost::Layer("cam_wide"), "vhs", "noise", Some(&FxValue::Num(0.2))).unwrap();
+        assert_eq!(fx_list(&lut, FxHost::Layer("cam_wide"))[0].num("noise"), Some(0.2));
+        engine_reads(&lut);
+        assert!(set_fx_param(&out, FxHost::Layer("cam_kit"), "blur", "enabled", Some(&FxValue::Num(1.0))).is_err());
+        // removing keeps the other layer's effect and its show condition
+        let gone = remove_fx(&on, FxHost::Layer("cam_kit"), "blur").unwrap();
+        assert!(fx_list(&gone, FxHost::Layer("cam_kit")).is_empty());
+        assert_eq!(fx_list(&gone, FxHost::Layer("cam_wide"))[0].when.as_deref(), Some("mode == 'chill'"));
+        assert!(add_fx(DUO, FxHost::Layer("nope"), "blur", &[]).is_err());
+    }
+
+    #[test]
+    fn scene_effects_round_trip() {
+        let s = add_fx(DUO, FxHost::Scene, "lut", &[("file".into(), FxValue::Text("assets/luts/warm.cube".into()))]).unwrap();
+        let fx = fx_list(&s, FxHost::Scene);
+        assert_eq!((fx[0].name.as_str(), fx[0].text("file")), ("lut", Some("assets/luts/warm.cube")));
+        let def = engine_reads(&s);
+        assert_eq!(def.fx[0].params.get("file").and_then(|v| v.as_str()), Some("assets/luts/warm.cube"));
+        let fired = set_fx_enabled(&s, FxHost::Scene, "lut", false).unwrap();
+        assert_eq!(engine_reads(&fired).fx[0].enabled, Some(false));
+        assert!(fx_list(&remove_fx(&s, FxHost::Scene, "lut").unwrap(), FxHost::Scene).is_empty());
+        let gone: DocumentMut = remove_fx(&s, FxHost::Scene, "lut").unwrap().parse().unwrap();
+        assert!(gone.get("fx").is_none(), "an empty list goes away");
+    }
+
+    #[test]
+    fn the_effect_table_matches_the_engine_library_shape() {
+        for e in EFFECTS {
+            assert!(!e.about.is_empty() && !e.label.is_empty(), "{}", e.id);
+            for p in e.params {
+                assert!(p.min < p.max && (p.min..=p.max).contains(&p.default), "{}.{}", e.id, p.name);
+            }
+        }
+        assert!(effect_def("chroma_key").is_some_and(|e| e.on_layers));
+        assert!(effect_def("fade_to_black").is_some_and(|e| !e.on_layers));
+        assert_eq!(effect_name("patch.aurora"), "Aurora");
+        assert_eq!(effect_about("patch.aurora"), "");
+    }
+
+    #[test]
+    fn blend_mask_enter_and_exit_are_written_on_every_canvas() {
+        let out = set_layer_prop(DUO, "cam_kit", "blend", Some("screen")).unwrap();
+        let out = set_layer_prop(&out, "cam_kit", "enter", Some("slide_left")).unwrap();
+        let out = set_layer_prop(&out, "cam_kit", "exit", Some("scale")).unwrap();
+        let out = set_layer_prop(&out, "cam_kit", "mask", Some("assets/images/round.png")).unwrap();
+        assert_eq!(layer_prop(&out, "cam_kit", "blend").as_deref(), Some("screen"));
+        let def = engine_reads(&out);
+        for c in ["wide", "tall"] {
+            let n = &def.nodes(c)[0];
+            assert_eq!((n.blend.as_str(), n.enter.as_deref(), n.exit.as_deref()), ("screen", Some("slide_left"), Some("scale")), "{c}");
+            assert_eq!(n.mask.as_deref(), Some("assets/images/round.png"), "{c}");
+        }
+        assert!(out.contains("# top"), "{out}");
+        let plain = set_layer_prop(&out, "cam_kit", "blend", None).unwrap();
+        assert_eq!(layer_prop(&plain, "cam_kit", "blend"), None);
+        assert_eq!(engine_reads(&plain).nodes("tall")[0].blend, "normal");
+        assert!(set_layer_prop(DUO, "nope", "blend", Some("add")).is_err());
+        // `[[canvas.x.nodes]]` tables are edited too
+        let aot = "[[canvas.wide.nodes]]\nsrc = \"cam_kit\" # me\nrect = [0.0, 0.0, 1.0, 1.0]\n";
+        let out = set_layer_prop(aot, "cam_kit", "exit", Some("fade")).unwrap();
+        assert_eq!(engine_reads(&out).nodes("wide")[0].exit.as_deref(), Some("fade"));
+        assert!(out.contains("# me"), "{out}");
+    }
+
+    #[test]
+    fn number_key_and_lights() {
+        assert_eq!(key(DUO), Some(1));
+        assert_eq!(key(&set_key(DUO, Some(4)).unwrap()), Some(4));
+        assert_eq!(key(&set_key(DUO, None).unwrap()), None);
+        let l = set_lights(DUO, "look", Some("warm")).unwrap();
+        let l = set_lights(&l, "cue", Some("intro")).unwrap();
+        assert_eq!(lights(&l), (Some("warm".into()), Some("intro".into())));
+        let def = engine_reads(&l);
+        let lr = def.lights.unwrap();
+        assert_eq!((lr.look.as_deref(), lr.cue.as_deref()), (Some("warm"), Some("intro")));
+        let none = set_lights(&set_lights(&l, "look", None).unwrap(), "cue", None).unwrap();
+        assert_eq!(lights(&none), (None, None));
+        assert!(!none.contains("[lights]"), "{none}");
+        assert!(set_lights(DUO, "hold", Some("1s")).is_err());
     }
 
     #[test]
@@ -830,7 +1507,7 @@ name = "cut"
     fn plain_show_checks_read_and_write_the_same_condition() {
         use LayerCheck::*;
         let cases: &[(&str, Vec<LayerCheck>)] = &[
-            ("!patch.terminal_boot.active", vec![Overlay { id: "terminal_boot".into(), playing: false }]),
+            ("!patch.terminal_boot.active", vec![Source { id: "terminal_boot".into(), playing: false }]),
             ("queue.now.id", vec![Song { playing: true }]),
             ("mode == 'chill' && !queue.now.id", vec![Mode { mode: "chill".into(), not: false }, Song { playing: false }]),
             ("mode != \"brb\"", vec![Mode { mode: "brb".into(), not: true }]),

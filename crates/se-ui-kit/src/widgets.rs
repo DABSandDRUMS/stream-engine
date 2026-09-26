@@ -48,6 +48,9 @@ pub mod icon {
     pub const HOME: &str = "\u{f015}";
     pub const LAYERS: &str = "\u{f009}";
     pub const WAND: &str = "\u{f0d0}";
+    /// Modulation: a setting following a signal.
+    pub const WAVE: &str = "\u{f201}";
+    pub const TROPHY: &str = "\u{f091}";
     pub const MUSIC: &str = "\u{f001}";
     pub const USERS: &str = "\u{f0c0}";
     pub const FILM: &str = "\u{f008}";
@@ -319,6 +322,7 @@ pub fn chip(ui: &mut Ui, t: &Theme, icon: &str, label: &str, selected: bool) -> 
     let enabled = ui.is_enabled();
     let parts = icon_text(ui, Some(icon), label, font_medium(type_scale::SMALL + 0.5), t.fg);
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(parts.2 + 24.0, 28.0), sense(enabled));
+    resp.widget_info(|| WidgetInfo::selected(WidgetType::Button, enabled, selected, label));
     if ui.is_rect_visible(rect) {
         let (h, p) = hover_press(ui, &resp, enabled);
         let s = motion::t(ui.ctx(), resp.id.with("selected"), selected, motion::BASE);
@@ -707,6 +711,152 @@ pub fn details<R>(ui: &mut Ui, t: &Theme, id_salt: impl std::hash::Hash + std::f
     )
 }
 
+// ---- list/detail and inspector grammar ----------------------------------------------------------
+//
+// Every editing surface follows one shape: a list pane (what exists, one "+" to create) and a
+// detail pane (the selected thing, as collapsible inspector sections of label/control rows).
+
+/// Width of the label column in [`prop_row`], so controls line up down an inspector.
+pub const PROP_LABEL_W: f32 = 112.0;
+
+/// Two full-height columns: a fixed-width list pane and a detail pane that takes the rest.
+pub fn split<L, R>(ui: &mut Ui, list_w: f32, left: impl FnOnce(&mut Ui) -> L, right: impl FnOnce(&mut Ui) -> R) -> (L, R) {
+    let h = ui.available_height();
+    let gap = spacing::L;
+    let w = ui.available_width();
+    let list_w = list_w.min((w - gap) * 0.5).max(0.0);
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = gap;
+        let l = ui.allocate_ui_with_layout(Vec2::new(list_w, h), Layout::top_down(Align::Min), |ui| {
+            ui.set_width(list_w);
+            left(ui)
+        });
+        let r = ui.allocate_ui_with_layout(Vec2::new(ui.available_width(), h), Layout::top_down(Align::Min), |ui| {
+            ui.set_width(ui.available_width());
+            right(ui)
+        });
+        (l.inner, r.inner)
+    })
+    .inner
+}
+
+/// List pane heading: title, optional count, and one "+" create button. Returns true on click.
+pub fn pane_header(ui: &mut Ui, t: &Theme, title: &str, count: Option<usize>, create: Option<&str>) -> bool {
+    let mut clicked = false;
+    ui.horizontal(|ui| {
+        ui.set_min_height(28.0);
+        ui.label(RichText::new(title).font(font_semibold(type_scale::BODY)).color(t.fg));
+        if let Some(n) = count {
+            ui.label(RichText::new(n.to_string()).size(type_scale::SMALL).color(t.text_faint));
+        }
+        if let Some(tip) = create {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                clicked = icon_button_ex(ui, t, icon::PLUS, tip, Kind::Secondary, ui.is_enabled()).clicked();
+            });
+        }
+    });
+    ui.add_space(spacing::S);
+    clicked
+}
+
+/// Small uppercase group label inside a list pane ("CAMERAS", "ON EVERY SCENE").
+pub fn group_label(ui: &mut Ui, t: &Theme, text: &str) {
+    ui.add_space(spacing::S);
+    ui.label(RichText::new(text.to_uppercase()).font(font_medium(type_scale::SMALL - 1.0)).color(t.text_faint).extra_letter_spacing(0.6));
+    ui.add_space(spacing::XS);
+}
+
+/// Detail pane title block: kind icon, title, one-line kind/description, actions on the right.
+pub fn detail_header(ui: &mut Ui, t: &Theme, icon: &str, title: &str, subtitle: &str, actions: impl FnOnce(&mut Ui)) {
+    ui.horizontal(|ui| {
+        let (tile, _) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::hover());
+        ui.painter().rect(tile, CornerRadius::same(radius::CONTROL), t.surface_hi, Stroke::new(1.0, t.border), StrokeKind::Inside);
+        ui.painter().text(tile.center(), Align2::CENTER_CENTER, icon, font(16.0), t.fg);
+        ui.add_space(spacing::S);
+        ui.vertical(|ui| {
+            ui.label(RichText::new(title).font(font_semibold(type_scale::HEADING)).color(t.fg));
+            if !subtitle.is_empty() {
+                ui.label(RichText::new(subtitle).size(type_scale::SMALL + 0.5).color(t.text_dim));
+            }
+        });
+        ui.with_layout(Layout::right_to_left(Align::Center), actions);
+    });
+    ui.add_space(spacing::M);
+}
+
+/// Collapsible inspector section: chevron + label, optional trailing controls (e.g. "+ Add"),
+/// body indented under a hairline. Open state persists per `id_salt`. Returns the body result
+/// while open.
+pub fn inspector_section<R>(
+    ui: &mut Ui,
+    t: &Theme,
+    id_salt: impl std::hash::Hash + std::fmt::Debug,
+    title: &str,
+    default_open: bool,
+    trailing: impl FnOnce(&mut Ui),
+    body: impl FnOnce(&mut Ui) -> R,
+) -> Option<R> {
+    let id = ui.make_persistent_id(("inspector_section", id_salt));
+    let mut open: bool = ui.data(|d| d.get_temp(id)).unwrap_or(default_open);
+    let top = ui.cursor().top();
+    ui.painter().hline(ui.max_rect().x_range(), top, Stroke::new(1.0, t.border));
+    ui.add_space(spacing::S);
+    ui.horizontal(|ui| {
+        ui.set_min_height(28.0);
+        let text = format!("{}  {}", if open { icon::DOWN } else { icon::RIGHT }, title);
+        let g = ui.painter().layout_no_wrap(text, font_semibold(type_scale::SMALL + 0.5), t.fg);
+        let (rect, resp) = ui.allocate_exact_size(Vec2::new(g.size().x + 8.0, 28.0), Sense::click());
+        let c = if resp.hovered() { t.fg } else { mix(t.fg, t.text_dim, 0.35) };
+        ui.painter().galley_with_override_text_color(Pos2::new(rect.left(), rect.center().y - g.size().y / 2.0), g, c);
+        focus_ring(ui, t, &resp, rect, radius::CONTROL);
+        if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+            open = !open;
+            ui.data_mut(|d| d.insert_temp(id, open));
+        }
+        ui.with_layout(Layout::right_to_left(Align::Center), trailing);
+    });
+    if !open {
+        ui.add_space(spacing::XS);
+        return None;
+    }
+    ui.add_space(spacing::XS);
+    let r = body(ui);
+    ui.add_space(spacing::M);
+    Some(r)
+}
+
+/// One inspector property: a fixed-width dim label, then the control(s) filling the row.
+pub fn prop_row<R>(ui: &mut Ui, t: &Theme, label: &str, body: impl FnOnce(&mut Ui) -> R) -> R {
+    ui.horizontal(|ui| {
+        ui.set_min_height(30.0);
+        ui.allocate_ui_with_layout(Vec2::new(PROP_LABEL_W, 30.0), Layout::left_to_right(Align::Center), |ui| {
+            ui.set_min_width(PROP_LABEL_W);
+            ui.add(egui::Label::new(RichText::new(label).size(type_scale::SMALL + 0.5).color(t.text_dim)).truncate());
+        });
+        body(ui)
+    })
+    .inner
+}
+
+/// Selectable tile for "what kind of thing?" choosers (new source, new trigger). Fixed size so a
+/// row of them reads as one set.
+pub fn kind_tile(ui: &mut Ui, t: &Theme, icon: &str, title: &str, body: &str, selected: bool) -> Response {
+    let size = Vec2::new(220.0, 92.0);
+    let enabled = ui.is_enabled();
+    let (rect, resp) = ui.allocate_exact_size(size, sense(enabled));
+    let (hover, _) = hover_press(ui, &resp, enabled);
+    let fill = if selected { mix(t.surface, t.accent, 0.12) } else { mix(t.surface, t.surface_hi, hover) };
+    let stroke = if selected { t.accent } else { mix(t.border, t.text_faint, hover) };
+    let p = ui.painter();
+    p.rect(rect, CornerRadius::same(radius::CARD), fill, Stroke::new(1.0, stroke), StrokeKind::Inside);
+    p.text(rect.left_top() + Vec2::new(14.0, 14.0), Align2::LEFT_TOP, icon, font(16.0), if selected { t.accent } else { t.fg });
+    p.text(rect.left_top() + Vec2::new(40.0, 14.0), Align2::LEFT_TOP, title, font_semibold(type_scale::BODY), t.fg);
+    let g = p.layout(body.to_string(), font(type_scale::SMALL), t.text_dim, size.x - 28.0);
+    p.galley(rect.left_top() + Vec2::new(14.0, 42.0), g, t.text_dim);
+    focus_ring(ui, t, &resp, rect, radius::CARD);
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 /// Dim helper text.
 pub fn hint(ui: &mut Ui, t: &Theme, text: &str) -> Response {
     ui.label(RichText::new(text).size(type_scale::SMALL + 0.5).color(t.text_dim))
@@ -860,6 +1010,7 @@ pub fn list_row(ui: &mut Ui, t: &Theme, icon: &str, title: &str, subtitle: &str,
     let w = ui.available_width();
     let h = if subtitle.is_empty() { 40.0 } else { 54.0 };
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), sense(ui.is_enabled()));
+    resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), title));
     let (hover, press) = hover_press(ui, &resp, ui.is_enabled());
     let sel = motion::t(ui.ctx(), resp.id.with("selected"), selected, motion::SLOW);
     let p = ui.painter();

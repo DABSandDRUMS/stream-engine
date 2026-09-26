@@ -1,12 +1,5 @@
-//! Settings → Devices (§15.6): everything plugged in, grouped the way a streamer thinks about
-//! it — cameras (live picture, signal, which input, picture settings), sound (with the mixing
-//! desk found on the network), controllers and the lights interfaces (USB or network) — with
-//! Connected / Missing badges and inline renaming. Every camera input shows a live thumbnail:
-//! the multiview picture when a source shows it, else a temporary preview leased from video-in
-//! (`video_in.preview`, renewed while the row is on screen). The technical identity (udev
-//! identity, node, formats, modes, decoder, network address) sits behind "Details". Pure client
-//! of the `devices` / `sources` / `video_in.preview` queries, `source.*` state, and the
-//! `devices.*` / `source.*` / `video_in.preview` actions.
+//! Settings → Devices: discovered hardware, identity, health, and temporary previews.
+//! Define and edit scene sources on Sources → Sources.
 
 use crate::app::App;
 use crate::frames::Canvas;
@@ -16,7 +9,7 @@ use crate::views::monitor;
 use egui::{Align, Layout, Pos2, Rect, RichText, Ui, Vec2};
 use se_proto::{Op, Value};
 use se_ui_kit::Theme;
-use se_ui_kit::theme::{font_medium, font_mono, font_semibold, radius, spacing, type_scale};
+use se_ui_kit::theme::{font_medium, font_mono, radius, spacing, type_scale};
 use se_ui_kit::widgets::{self, Kind, Size, icon};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -27,8 +20,6 @@ const AFTER_ACTION: Duration = Duration::from_millis(250);
 const EDIT_HOLD: Duration = Duration::from_millis(1200);
 /// A sent rename shows until the engine confirms it, or this long.
 const RENAME_WAIT: Duration = Duration::from_secs(3);
-/// Camera tiles are at least this wide.
-const TILE_MIN: f32 = 300.0;
 /// Camera input thumbnails in the device list.
 const THUMB: Vec2 = Vec2::new(128.0, 72.0);
 /// Preview leases last this long (seconds) and are renewed every `LEASE_RENEW` while shown, so
@@ -39,7 +30,7 @@ const LEASE_RENEW: Duration = Duration::from_secs(2);
 const PREVIEW_EVERY: Duration = Duration::from_millis(250);
 /// Hardware groups: (title, one line, registry kinds).
 const GROUPS: [(&str, &str, &[&str]); 4] = [
-    ("Camera inputs", "Capture cards and webcams your cameras plug into.", &["camera"]),
+    ("Discovered cameras", "Available capture cards and webcams. Discovery does not add a scene source.", &["camera"]),
     ("Sound", "Audio interfaces, sound cards and the mixing desk.", &["audio_node", "audio_card", "ucnet"]),
     ("Controllers", "Pads, pedals, faders and button boxes.", &["midi", "hid"]),
     ("Lights", "The boxes that talk to your lights, by cable or over the network.", &["serial", "artnet"]),
@@ -165,7 +156,7 @@ pub fn ui(app: &mut App, ui: &mut Ui) {
     let pics = Pics { atlas: monitor::texture(app, Canvas::Atlas, hz).map(|f| f.id), tiles: monitor::atlas_tiles(app) };
     let t = app.t.clone();
     let mut out = Vec::new();
-    view(&app.m, &t, &mut st, ui, &pics, &mut out, now);
+    view(&app.m, &t, &mut st, ui, &pics, &mut out);
     if !out.is_empty() {
         st.soon(now);
     }
@@ -195,42 +186,7 @@ fn source_title(src: &Value) -> String {
     if s(src, "label").is_empty() { nice(s(src, "name")) } else { s(src, "label").to_string() }
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum Signal {
-    Picture,
-    NoPicture,
-    Missing,
-    Problem,
-    Unused,
-}
-
-/// Display names of the scenes that show `source`.
-fn scenes_using(m: &Model, source: &str) -> Vec<String> {
-    m.q_list("scenes")
-        .iter()
-        .filter(|sc| sc.get_path("sources").and_then(Value::as_list).is_some_and(|l| l.iter().any(|v| v.as_str() == Some(source))))
-        .map(|sc| nice(if s(sc, "label").is_empty() { s(sc, "name") } else { s(sc, "label") }))
-        .collect()
-}
-
-fn source_signal(m: &Model, src: &Value) -> Signal {
-    let a = |k: &str| format!("source.{}.{k}", s(src, "name"));
-    let signal = m.get(&a("signal")).map(Value::truthy).unwrap_or(b(src, "signal"));
-    let capturing = m.get(&a("capturing")).map(Value::truthy).unwrap_or(b(src, "capturing"));
-    if !b(src, "used") {
-        Signal::Unused
-    } else if b(src, "missing") {
-        Signal::Missing
-    } else if !s(src, "error").is_empty() && !capturing {
-        Signal::Problem
-    } else if signal {
-        Signal::Picture
-    } else {
-        Signal::NoPicture
-    }
-}
-
-fn view(m: &Model, t: &Theme, st: &mut DevicesState, ui: &mut Ui, pics: &Pics, out: &mut Vec<Op>, now: Instant) {
+fn view(m: &Model, t: &Theme, st: &mut DevicesState, ui: &mut Ui, pics: &Pics, out: &mut Vec<Op>) {
     let Some(reg) = m.q("devices") else {
         widgets::panel(ui, t, |ui| {
             ui.set_width(ui.available_width());
@@ -248,15 +204,14 @@ fn view(m: &Model, t: &Theme, st: &mut DevicesState, ui: &mut Ui, pics: &Pics, o
     let network = reg.get_path("network").cloned().unwrap_or_default();
     let sources: Vec<Value> = m.q_list("sources").to_vec();
 
-    summary(m, t, st, ui, &expected, &sources, out);
+    ui.heading("Discovered devices");
+    summary(t, st, ui, &expected, out);
     ui.add_space(spacing::L);
 
     let flt = st.filter.to_lowercase();
     let matches = |v: &Value| flt.is_empty() || ["id", "name", "label", "identity", "path"].iter().any(|k| s(v, k).to_lowercase().contains(&flt));
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = spacing::S;
-        cameras(m, t, st, ui, pics, &sources, &devices, &matches, out, now);
-        ui.add_space(spacing::S);
         let w = ui.available_width();
         let cols = if w >= 2200.0 {
             4
@@ -283,14 +238,12 @@ fn view(m: &Model, t: &Theme, st: &mut DevicesState, ui: &mut Ui, pics: &Pics, o
 }
 
 /// One line on how things are, plus search and "look again".
-fn summary(m: &Model, t: &Theme, st: &mut DevicesState, ui: &mut Ui, expected: &[Value], sources: &[Value], out: &mut Vec<Op>) {
+fn summary(t: &Theme, st: &mut DevicesState, ui: &mut Ui, expected: &[Value], out: &mut Vec<Op>) {
     let missing: Vec<String> = expected
         .iter()
         .filter(|e| !b(e, "present") && !b(e, "optional"))
         .map(|e| if s(e, "label").is_empty() { nice(s(e, "id")) } else { s(e, "label").to_string() })
         .collect();
-    let dark: Vec<String> =
-        sources.iter().filter(|v| matches!(source_signal(m, v), Signal::NoPicture | Signal::Missing | Signal::Problem)).map(source_title).collect();
     // search and "look again" on their own row, then how things are
     ui.horizontal(|ui| {
         ui.add(se_ui_kit::widgets::field(&mut st.filter).hint_text("Find a device").desired_width(260.0));
@@ -309,279 +262,10 @@ fn summary(m: &Model, t: &Theme, st: &mut DevicesState, ui: &mut Ui, expected: &
             if missing.len() == 1 { "1 device is not connected".to_string() } else { format!("{} devices are not connected", missing.len()) },
             format!("{}. Check they're plugged in and switched on.", missing.join(", ")),
         )
-    } else if !dark.is_empty() {
-        (
-            widgets::Tone::Warn,
-            icon::WARN,
-            if dark.len() == 1 { "1 camera has no picture".to_string() } else { format!("{} cameras have no picture", dark.len()) },
-            format!("{}. Check the camera is on and its cable is in.", dark.join(", ")),
-        )
     } else {
-        (widgets::Tone::Ok, icon::CHECK, "Everything's plugged in".to_string(), "All your cameras, sound and controllers are working.".to_string())
+        (widgets::Tone::Ok, icon::CHECK, "No missing devices reported".to_string(), "Manage cameras and media on Sources → Sources.".to_string())
     };
     widgets::callout(ui, t, tone, ic, &title, &line, None);
-}
-
-// ---- cameras (sources) ---------------------------------------------------------------------------
-
-#[allow(clippy::too_many_arguments)]
-fn cameras(
-    m: &Model,
-    t: &Theme,
-    st: &mut DevicesState,
-    ui: &mut Ui,
-    pics: &Pics,
-    sources: &[Value],
-    devices: &[Value],
-    matches: &dyn Fn(&Value) -> bool,
-    out: &mut Vec<Op>,
-    now: Instant,
-) {
-    let list: Vec<&Value> = sources.iter().filter(|v| matches(v)).collect();
-    widgets::titled(
-        ui,
-        t,
-        "Cameras",
-        "What each camera is showing right now.",
-        |_| {},
-        |ui| {
-            ui.set_width(ui.available_width());
-            if sources.is_empty() {
-                widgets::empty_state(ui, t, icon::CAMERA, "No cameras yet", "Plug a camera in, then name it in Get started.", None);
-                return;
-            }
-            if list.is_empty() {
-                widgets::hint(ui, t, "No camera matches your search.");
-                return;
-            }
-            let gap = spacing::L;
-            let w = ui.available_width();
-            let n = (((w + gap) / (TILE_MIN + gap)).floor() as usize).clamp(1, 6);
-            let tile_w = ((w - gap * (n as f32 - 1.0)) / n as f32).floor();
-            for row in list.chunks(n) {
-                ui.horizontal_top(|ui| {
-                    ui.spacing_mut().item_spacing.x = gap;
-                    for src in row {
-                        ui.allocate_ui_with_layout(Vec2::new(tile_w, 10.0), Layout::top_down(Align::Min), |ui| {
-                            ui.set_width(tile_w);
-                            camera_tile(m, t, st, ui, pics, src, devices, out, now);
-                        });
-                    }
-                });
-                ui.add_space(gap);
-            }
-        },
-    );
-}
-
-#[allow(clippy::too_many_arguments)]
-fn camera_tile(m: &Model, t: &Theme, st: &mut DevicesState, ui: &mut Ui, pics: &Pics, src: &Value, devices: &[Value], out: &mut Vec<Op>, now: Instant) {
-    let name = s(src, "name").to_string();
-    let a = |k: &str| format!("source.{name}.{k}");
-    let sig = source_signal(m, src);
-    let w = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(w, w * 9.0 / 16.0), egui::Sense::hover());
-    let tally = match sig {
-        Signal::Missing | Signal::Problem => Some(widgets::LedState::Error),
-        _ => None,
-    };
-    widgets::video_frame(ui, t, rect, pics.of(&name), "", tally, None);
-    ui.add_space(spacing::S);
-    let fps = m.get(&a("fps")).and_then(Value::as_f64).unwrap_or(f(src, "measured_fps"));
-    let dropped = m.get(&a("dropped")).and_then(Value::as_i64).unwrap_or(f(src, "dropped") as i64);
-    let (badge, color, line) = match sig {
-        Signal::Picture => {
-            let skipped = if dropped > 0 { format!(" · {dropped} frames skipped") } else { String::new() };
-            ("Working", t.green, format!("Showing a picture, {fps:.0} frames a second{skipped}"))
-        }
-        Signal::NoPicture => ("Needs a look", t.yellow, "Nothing is coming in. Is the camera on?".to_string()),
-        Signal::Missing => ("Not connected", t.bright_red, "Its input isn't plugged in.".to_string()),
-        Signal::Problem => ("Needs a look", t.bright_red, "It couldn't start. Try Restart.".to_string()),
-        Signal::Unused => {
-            // video only runs for sources on screen; a source some scene uses is just waiting
-            let scenes = scenes_using(m, &name);
-            if scenes.is_empty() {
-                ("Off", t.text_dim, "Not in any scene yet.".to_string())
-            } else {
-                ("Off", t.text_dim, format!("Turns on when {} is showing.", scenes.join(" or ")))
-            }
-        }
-    };
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(source_title(src)).font(font_semibold(type_scale::LARGE)).color(t.fg));
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            widgets::badge(ui, t, badge, color);
-        });
-    });
-    widgets::hint(ui, t, &line);
-    ui.add_space(spacing::XS);
-    if s(src, "kind") == "camera" {
-        ui.horizontal(|ui| {
-            let cams: Vec<&Value> = devices.iter().filter(|d| s(d, "kind") == "camera").collect();
-            let current =
-                cams.iter().find(|c| s(c, "identity") == s(src, "identity")).map(|c| s(c, "label").to_string()).unwrap_or_else(|| "Pick an input".into());
-            // Restart takes its place on the right first; the input menu gets what's left
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if widgets::button_ex(ui, t, Some(icon::UNDO), "Restart", Kind::Ghost, Size::Small, 0.0, true)
-                    .on_hover_text("Close and reopen the camera")
-                    .clicked()
-                {
-                    out.push(action("source.reopen", Value::map().with("source", name.as_str())));
-                }
-                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    ui.label(RichText::new("Input").color(t.text_dim));
-                    egui::ComboBox::from_id_salt(("assign", &name))
-                        .selected_text(current.clone())
-                        .width((ui.available_width() - spacing::S).max(80.0))
-                        .wrap_mode(egui::TextWrapMode::Truncate)
-                        .show_ui(ui, |ui| {
-                            for c in cams {
-                                if ui.selectable_label(s(c, "identity") == s(src, "identity"), s(c, "label")).clicked() {
-                                    out.push(action("source.assign", Value::map().with("source", name.as_str()).with("identity", s(c, "identity"))));
-                                }
-                            }
-                        })
-                        .response
-                        .on_hover_text(&current);
-                });
-            });
-        });
-        let controls: Vec<Value> = src.get_path("controls").and_then(Value::as_list).map(<[Value]>::to_vec).unwrap_or_default();
-        if !controls.is_empty() {
-            widgets::details(ui, t, ("pic", &name), "Picture settings", |ui| picture_settings(m, t, st, ui, &name, &controls, out, now));
-        }
-    } else {
-        ui.horizontal(|ui| {
-            let pos = m.get(&a("position")).and_then(Value::as_f64).unwrap_or(0.0);
-            let dur = m.get(&a("duration")).and_then(Value::as_f64).unwrap_or(0.0);
-            ui.label(RichText::new(format!("{} / {}", clock(pos), clock(dur))).font(font_mono(type_scale::SMALL + 0.5)).color(t.text_dim));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let paused = m.b(&a("paused"));
-                if widgets::button_ex(
-                    ui,
-                    t,
-                    Some(if paused { icon::PLAY } else { icon::PAUSE }),
-                    if paused { "Play" } else { "Pause" },
-                    Kind::Secondary,
-                    Size::Small,
-                    0.0,
-                    true,
-                )
-                .clicked()
-                {
-                    out.push(Op::Set { address: a("paused"), value: Value::Bool(!paused) });
-                }
-                if widgets::button_ex(ui, t, Some(icon::UNDO), "From the start", Kind::Ghost, Size::Small, 0.0, true).clicked() {
-                    out.push(action("source.restart", Value::map().with("source", name.as_str())));
-                }
-            });
-        });
-    }
-    widgets::details(ui, t, ("src-details", &name), "Details", |ui| source_details(m, t, ui, src));
-}
-
-fn clock(secs: f64) -> String {
-    let s = secs.max(0.0) as i64;
-    format!("{}:{:02}", s / 60, s % 60)
-}
-
-fn source_details(m: &Model, t: &Theme, ui: &mut Ui, src: &Value) {
-    let name = s(src, "name");
-    let size = src
-        .get_path("size")
-        .and_then(Value::as_list)
-        .map(|l| format!("{}×{}", l.first().and_then(Value::as_i64).unwrap_or(0), l.get(1).and_then(Value::as_i64).unwrap_or(0)))
-        .unwrap_or_else(|| format!("{}×{}", f(src, "width"), f(src, "height")));
-    let fps = m.get(&format!("source.{name}.fps")).and_then(Value::as_f64).unwrap_or(f(src, "measured_fps"));
-    let cpu = m.get(&format!("source.{name}.cpu")).and_then(Value::as_f64).unwrap_or(f(src, "cpu"));
-    widgets::fact(ui, t, "Source", name);
-    widgets::fact(ui, t, "Format", &format!("{} {size}", s(src, "format")));
-    widgets::fact(ui, t, "Frame rate", &format!("{fps:.2} of {:.0}", f(src, "fps")));
-    widgets::fact(ui, t, "Converted to", &format!("{} {}", s(src, "slot_format"), s(src, "decoder")));
-    if !s(src, "matrix").is_empty() {
-        widgets::fact(ui, t, "Color", &format!("{} {}", s(src, "matrix"), s(src, "range")));
-    }
-    widgets::fact(ui, t, "CPU", &format!("{cpu:.1}%"));
-    widgets::fact(ui, t, "Device", s(src, "device"));
-    widgets::fact(ui, t, "Node", s(src, "path"));
-    for k in ["error", "config_error"] {
-        if !s(src, k).is_empty() {
-            ui.label(RichText::new(s(src, k)).size(type_scale::SMALL).color(t.bright_red));
-        }
-    }
-}
-
-/// Camera controls (brightness, focus, white balance…) as sliders, switches and menus.
-#[allow(clippy::too_many_arguments)]
-fn picture_settings(m: &Model, t: &Theme, st: &mut DevicesState, ui: &mut Ui, name: &str, list: &[Value], out: &mut Vec<Op>, now: Instant) {
-    for c in list {
-        let cname = s(c, "name");
-        let addr = format!("source.{name}.ctrl.{cname}");
-        let auto = b(c, "inactive");
-        let ro = b(c, "read_only");
-        let live = st.edits.get(&addr).map(|(v, _)| v.clone()).or_else(|| m.get(&addr).cloned()).or_else(|| c.get_path("value").cloned()).unwrap_or_default();
-        let label = if s(c, "label").is_empty() { nice(cname) } else { s(c, "label").to_string() };
-        let mut new: Option<Value> = None;
-        ui.add_enabled_ui(!ro, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(&label).font(font_medium(type_scale::SMALL + 0.5)).color(if auto { t.text_faint } else { t.text_dim }))
-                    .on_hover_text(format!("{cname} · camera value {}", c.get_path("value").map(|v| v.to_string()).unwrap_or_default()));
-                if auto {
-                    ui.label(RichText::new("automatic").size(type_scale::SMALL).color(t.text_faint));
-                }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if widgets::icon_button(ui, t, icon::UNDO, "Back to the saved value").clicked() {
-                        st.edits.remove(&addr);
-                        out.push(Op::Release { address: addr.clone() });
-                    }
-                    match s(c, "type") {
-                        "bool" => {
-                            let mut v = live.truthy();
-                            if widgets::toggle(ui, t, &mut v).changed() {
-                                new = Some(Value::Bool(v));
-                            }
-                        }
-                        "enum" => {
-                            let menu: Vec<Value> = c.get_path("menu").and_then(Value::as_list).map(<[Value]>::to_vec).unwrap_or_default();
-                            let cur = live.as_str().unwrap_or("").to_string();
-                            let shown = menu.iter().find(|x| s(x, "name") == cur).map(|x| s(x, "label").to_string()).unwrap_or(cur.clone());
-                            egui::ComboBox::from_id_salt(("menu", &addr)).selected_text(shown).width(170.0).show_ui(ui, |ui| {
-                                for it in &menu {
-                                    if ui.selectable_label(s(it, "name") == cur, s(it, "label")).clicked() {
-                                        new = Some(Value::Str(s(it, "name").to_string()));
-                                    }
-                                }
-                            });
-                        }
-                        _ => {
-                            ui.label(RichText::new(live.as_i64().unwrap_or(0).to_string()).font(font_mono(type_scale::SMALL)).color(t.fg));
-                        }
-                    }
-                });
-            });
-            if !matches!(s(c, "type"), "bool" | "enum") {
-                let (lo, hi) = (f(c, "min") as i64, f(c, "max") as i64);
-                let mut v = live.as_i64().unwrap_or(lo);
-                let step = f(c, "step").max(1.0);
-                ui.spacing_mut().slider_width = ui.available_width();
-                if ui.add(egui::Slider::new(&mut v, lo..=hi).step_by(step).show_value(false).clamping(egui::SliderClamping::Always)).changed() {
-                    new = Some(Value::Int(v));
-                }
-            }
-        });
-        if let Some(v) = new {
-            st.edits.insert(addr.clone(), (v.clone(), now));
-            out.push(Op::Set { address: addr, value: v });
-        }
-        ui.add_space(spacing::XS);
-    }
-    ui.add_space(spacing::XS);
-    if widgets::button_ex(ui, t, Some(icon::SAVE), "Keep these settings", Kind::Secondary, Size::Small, 0.0, true)
-        .on_hover_text("Use these every time the camera starts")
-        .clicked()
-    {
-        out.push(action("source.save_controls", Value::map().with("source", name)));
-    }
 }
 
 // ---- hardware ------------------------------------------------------------------------------------

@@ -1569,7 +1569,7 @@ impl Core {
         self.run_list(&cmds, origin, pctx);
         let release_at = match def.hold {
             Some(h) => Some(now + h.ns()),
-            None if def.set.is_empty() && !def.toggle => Some(now + longest * MS),
+            None if def.set.is_empty() && !def.toggle && !def.until_released => Some(now + longest * MS),
             None if chat => Some(now + self.chat_ttl),
             None => None,
         };
@@ -2095,6 +2095,20 @@ impl Core {
         res
     }
 
+    /// The value `toggle` sets: a switch flips; a number goes to 0, or from 0 to its declared
+    /// max (1 when it has no range). Integers stay integers.
+    fn toggled(&self, address: &str) -> Result<Value, String> {
+        let i = self.state.id(address).ok_or_else(|| format!("unknown setting `{address}`"))?;
+        let max = self.state.param(i).meta.range.map_or(1.0, |r| r[1]);
+        Ok(match self.state.value(i) {
+            Value::Bool(b) => Value::Bool(!b),
+            Value::Int(n) => Value::Int(if *n != 0 { 0 } else { max.round() as i64 }),
+            Value::Float(f) => Value::Float(if *f != 0.0 { 0.0 } else { max }),
+            Value::Null => Value::Bool(true),
+            _ => return Err(format!("`{address}` is not an on/off or number setting")),
+        })
+    }
+
     fn action(&mut self, name: &str, args: &Value, origin: Origin, ctx: &Ctx) -> Result<(), String> {
         let pos = |i: usize| args.get_path("args").and_then(|a| a.as_list()).and_then(|l| l.get(i)).cloned();
         let arg = |k: &str, i: usize| args.get_path(k).cloned().or_else(|| pos(i));
@@ -2161,6 +2175,22 @@ impl Core {
                 } else {
                     self.fire_preset(&n, &Value::Null, origin, ctx)
                 }
+            }
+            "toggle" => {
+                let a = arg("address", 0).and_then(|v| v.as_str().map(String::from)).ok_or("toggle needs an address")?;
+                if a.contains('*') && !address::is_valid(&a, true) {
+                    return Err(format!("bad address `{a}`"));
+                }
+                let targets: Vec<String> = self.state.matching(&a).map(|i| self.state.param(i).addr.clone()).collect();
+                if targets.is_empty() {
+                    return Err(format!("`{a}` matches nothing"));
+                }
+                // each match flips from its own value, at the same priority a `set` would use
+                for t in targets {
+                    let v = self.toggled(&t)?;
+                    self.exec(&Op::Set { address: t, value: v }, origin, ctx)?;
+                }
+                Ok(())
             }
             "preset.knob" => {
                 if prio <= PRIORITY_CHAT {
@@ -2457,7 +2487,7 @@ impl Core {
                             .with("confirm", p.confirm)
                             .with("chat", p.chat.unwrap_or(!p.confirm))
                             // stays on for a while or until released (so it can be stopped)
-                            .with("held", p.hold.is_some() || p.toggle || !p.set.is_empty())
+                            .with("held", p.hold.is_some() || p.toggle || p.until_released || !p.set.is_empty())
                             .with(
                                 "knobs",
                                 Value::List(

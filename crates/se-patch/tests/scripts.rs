@@ -433,6 +433,30 @@ async fn folders_hot_load_disable_and_new_patch() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn removed_patches_are_unloaded_kept_aside_and_their_name_is_free_again() {
+    let e = engine(&[("patches/gone/patch.toml", MANIFEST), ("patches/gone/main.lua", STEADY)]).await;
+    e.wait_state("gone", "loaded", T).await;
+    e.run("patch.remove gone").await;
+    wait_for("gone removed", T, || e.hub.snapshot.load().get("patch.gone.state").is_none()).await;
+    assert_eq!(e.hub.query("patches", Value::Null).await.unwrap().as_list().map(<[Value]>::len), Some(0));
+    assert!(!e.dir.path().join("patches/gone").exists());
+    // kept in the hidden bin (never loaded), with its files
+    let bin: Vec<_> = std::fs::read_dir(e.dir.path().join("patches/.removed")).unwrap().flatten().map(|d| d.path()).collect();
+    assert_eq!(bin.len(), 1);
+    assert!(bin[0].file_name().unwrap().to_string_lossy().starts_with("gone-") && bin[0].join("main.lua").is_file());
+    // the name can be used again
+    e.hub.exec(Command::new(Origin::Ui, Op::Action { name: "patch.new".into(), args: Value::map().with("id", "gone").with("kind", "script") })).await.unwrap();
+    e.wait_state("gone", "loaded", T).await;
+    // unknown or hidden ids are refused: nothing else moves
+    for id in ["nope", ".removed", "../gone"] {
+        let _ = e.hub.exec(Command::new(Origin::Ui, Op::Action { name: "patch.remove".into(), args: Value::map().with("id", id) })).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(std::fs::read_dir(e.dir.path().join("patches/.removed")).unwrap().count(), 1);
+    assert!(e.dir.path().join("patches/gone/patch.toml").is_file());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn optional_confetti_and_hype_meter_templates_run() {
     let ex = repo().join("templates/patches/script");
     let mut files: Vec<(String, String)> = Vec::new();

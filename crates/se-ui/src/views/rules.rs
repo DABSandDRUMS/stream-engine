@@ -1,19 +1,18 @@
-//! Reactions (§15.5): "when this happens → do that". The list reads every reaction as a plain
-//! sentence with an on/off switch; the editor is a guided WHEN / ONLY IF / DO form (friendly
-//! event, condition and step pickers) that edits the same text the engine runs. The raw text
-//! (with autocomplete for event types, payload fields, addresses, presets, scenes, commands) and
-//! the file live under "Details". Validation uses the engine's own parsers, "Test it" fires the
-//! event through the simulator, and saving goes through `project.write` into `rules/*.toml`
-//! (comments in the file are kept).
+//! Automation → Events (§15.5): triggers that answer stream, music and show events. A list
+//! pane (grouped by where the event comes from: viewers, stream, music & drums, show, controls)
+//! and the selected trigger: WHEN (event chips), ONLY IF (checks, modes, scenes, cooldowns) and
+//! DO (guided steps that edit the same command lines the engine runs). The exact text and the
+//! file sit under "File". Validation uses the engine's own parsers, "Test" plays the event
+//! through the simulator, and saving goes through `project.write` into `rules/*.toml` (comments
+//! in the file are kept). [`steps_editor`] is shared with saved actions and scenes.
 
-use crate::app::App;
+use crate::app::{App, ViewId};
 use crate::views::live::nice;
-use egui::text::{LayoutJob, TextWrapping};
-use egui::{Align, Color32, CornerRadius, FontId, Layout, Pos2, Rect, RichText, Sense, UiBuilder, Vec2};
+use egui::{Align, Color32, CornerRadius, FontId, Layout, RichText};
 use se_proto::command::tokenize;
 use se_proto::{Op, Value};
 use se_ui_kit::Theme;
-use se_ui_kit::theme::{font, font_medium, font_mono, font_semibold, mix, radius, spacing, type_scale};
+use se_ui_kit::theme::{font, font_medium, font_mono, font_semibold, radius, spacing, type_scale};
 use se_ui_kit::widgets::{self, Kind, Size, icon};
 use std::sync::Arc;
 
@@ -61,6 +60,7 @@ const VERBS: &[&str] = &[
     "animate",
     "trigger",
     "release",
+    "toggle",
     "mode.set",
     "emit",
     "wait",
@@ -82,10 +82,54 @@ const VERBS: &[&str] = &[
 
 // ---- words: events -------------------------------------------------------------------------------
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Group {
+/// Trigger families: how the Events list and the "When" picker are grouped.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum Family {
     Viewers,
+    Stream,
+    Music,
     Show,
+    Controls,
+    Other,
+}
+
+impl Family {
+    const PICKER: [Family; 5] = [Family::Viewers, Family::Stream, Family::Music, Family::Show, Family::Controls];
+
+    fn title(self) -> &'static str {
+        match self {
+            Family::Viewers => "Viewers",
+            Family::Stream => "Stream",
+            Family::Music => "Music & drums",
+            Family::Show => "Show",
+            Family::Controls => "Controls",
+            Family::Other => "Other",
+        }
+    }
+
+    /// The family of an event pattern (the picker's own events first, then by name).
+    fn of(when: &str) -> Family {
+        if let Some(i) = trigger_index(when) {
+            return TRIGGERS[i].family;
+        }
+        let head = when.split('.').next().unwrap_or("");
+        let stream = ["twitch.ad_break", "twitch.stream", "twitch.*", "goal.", "alert.", "obs."];
+        if stream.iter().any(|p| when.starts_with(p)) {
+            Family::Stream
+        } else if matches!(head, "twitch" | "tip" | "tiktok" | "youtube") {
+            Family::Viewers
+        } else if matches!(head, "band" | "beat" | "music" | "drums" | "queue" | "mic")
+            || [".kick", ".snare", ".hat", ".drop", ".section"].iter().any(|s| when.ends_with(s))
+        {
+            Family::Music
+        } else if matches!(head, "mode" | "scene" | "timeline" | "preset" | "show") {
+            Family::Show
+        } else if matches!(head, "deck" | "midi" | "osc" | "voice") {
+            Family::Controls
+        } else {
+            Family::Other
+        }
+    }
 }
 
 /// A friendly event the WHEN picker offers.
@@ -95,39 +139,45 @@ struct Trigger {
     /// Completes "When …".
     sentence: &'static str,
     icon: &'static str,
-    group: Group,
+    family: Family,
 }
 
-const fn trig(pattern: &'static str, label: &'static str, sentence: &'static str, icon: &'static str, group: Group) -> Trigger {
-    Trigger { pattern, label, sentence, icon, group }
+const fn trig(pattern: &'static str, label: &'static str, sentence: &'static str, icon: &'static str, family: Family) -> Trigger {
+    Trigger { pattern, label, sentence, icon, family }
 }
 
 const MODE_START: &str = "mode.enter.*";
 const MODE_END: &str = "mode.exit.*";
 
 const TRIGGERS: &[Trigger] = &[
-    trig("twitch.follow", "Follow", "someone follows", icon::HEART, Group::Viewers),
-    trig("twitch.sub", "Sub", "someone subscribes", icon::STAR, Group::Viewers),
-    trig("twitch.resub", "Resub", "someone resubscribes", icon::STAR, Group::Viewers),
-    trig("twitch.gift", "Gifted subs", "someone gifts subs", icon::GIFT, Group::Viewers),
-    trig("twitch.cheer", "Cheer (bits)", "someone cheers", icon::SPARKLE, Group::Viewers),
-    trig("twitch.raid", "Raid", "someone raids", icon::USERS, Group::Viewers),
-    trig("twitch.redeem", "Channel points", "someone redeems channel points", icon::GIFT, Group::Viewers),
-    trig("twitch.chat", "Chat message", "someone chats", icon::CHAT, Group::Viewers),
-    trig("tip", "Tip", "someone tips", icon::HEART, Group::Viewers),
-    trig("twitch.hype_train.begin", "Hype train", "a hype train starts", icon::ROCKET, Group::Viewers),
-    trig("twitch.ad_break", "Ad break", "an ad break starts", icon::CLOCK, Group::Viewers),
-    trig("twitch.*", "Anything on Twitch", "anything happens on Twitch", icon::TWITCH, Group::Viewers),
-    trig("band.kick", "Kick drum hit", "the kick drum hits", icon::DRUM, Group::Show),
-    trig("band.snare", "Snare hit", "the snare hits", icon::DRUM, Group::Show),
-    trig("band.drop", "Music drop", "the music drops", icon::MUSIC, Group::Show),
-    trig("beat", "Every beat", "a beat lands", icon::MUSIC, Group::Show),
-    trig("deck.key", "Stream Deck button", "a Stream Deck button is pressed", icon::KEYBOARD, Group::Show),
-    trig(MODE_START, "Show mode starts", "any show mode starts", icon::PLAY, Group::Show),
-    trig(MODE_END, "Show mode ends", "any show mode ends", icon::STOP, Group::Show),
-    trig("queue.song_started", "Song request starts", "a requested song starts", icon::QUEUE, Group::Show),
-    trig("timeline.cue", "Timeline moment", "a timeline moment passes", icon::TIMELINE, Group::Show),
+    trig("twitch.follow", "Follow", "someone follows", icon::HEART, Family::Viewers),
+    trig("twitch.sub", "Sub", "someone subscribes", icon::STAR, Family::Viewers),
+    trig("twitch.resub", "Resub", "someone resubscribes", icon::STAR, Family::Viewers),
+    trig("twitch.gift", "Gifted subs", "someone gifts subs", icon::GIFT, Family::Viewers),
+    trig("twitch.cheer", "Cheer (bits)", "someone cheers", icon::SPARKLE, Family::Viewers),
+    trig("twitch.raid", "Raid", "someone raids", icon::USERS, Family::Viewers),
+    trig("twitch.redeem", "Channel points", "someone redeems channel points", icon::GIFT, Family::Viewers),
+    trig("twitch.chat", "Chat message", "someone chats", icon::CHAT, Family::Viewers),
+    trig("tip", "Tip", "someone tips", icon::HEART, Family::Viewers),
+    trig("twitch.hype_train.begin", "Hype train", "a hype train starts", icon::ROCKET, Family::Viewers),
+    trig("twitch.ad_break", "Ad break", "an ad break starts", icon::CLOCK, Family::Stream),
+    trig("goal.reached", "Goal reached", "a goal is reached", icon::TROPHY, Family::Stream),
+    trig("twitch.*", "Anything on Twitch", "anything happens on Twitch", icon::TWITCH, Family::Stream),
+    trig("band.kick", "Kick drum hit", "the kick drum hits", icon::DRUM, Family::Music),
+    trig("band.snare", "Snare hit", "the snare hits", icon::DRUM, Family::Music),
+    trig("band.drop", "Music drop", "the music drops", icon::MUSIC, Family::Music),
+    trig("beat", "Every beat", "a beat lands", icon::MUSIC, Family::Music),
+    trig("queue.song_started", "Song request starts", "a requested song starts", icon::QUEUE, Family::Music),
+    trig(MODE_START, "Show mode starts", "any show mode starts", icon::PLAY, Family::Show),
+    trig(MODE_END, "Show mode ends", "any show mode ends", icon::STOP, Family::Show),
+    trig("timeline.cue", "Timeline moment", "a timeline moment passes", icon::TIMELINE, Family::Show),
+    trig("deck.key", "Stream Deck button", "a Stream Deck button is pressed", icon::KEYBOARD, Family::Controls),
 ];
+
+/// The events the "When" picker offers: (event pattern, label, words after "When …", icon).
+pub fn event_choices() -> impl Iterator<Item = (&'static str, &'static str, &'static str, &'static str)> {
+    TRIGGERS.iter().map(|t| (t.pattern, t.label, t.sentence, t.icon))
+}
 
 fn trigger_index(when: &str) -> Option<usize> {
     let key = if when.starts_with("mode.enter.") {
@@ -138,6 +188,21 @@ fn trigger_index(when: &str) -> Option<usize> {
         when
     };
     TRIGGERS.iter().position(|t| t.pattern == key)
+}
+
+/// The icon of an event pattern (the picker's, else its family's).
+fn event_icon(when: &str) -> &'static str {
+    match trigger_index(when) {
+        Some(i) => TRIGGERS[i].icon,
+        None => match Family::of(when) {
+            Family::Viewers => icon::USERS,
+            Family::Stream => icon::LIVE,
+            Family::Music => icon::MUSIC,
+            Family::Show => icon::PLAY,
+            Family::Controls => icon::CONTROLLER,
+            Family::Other => icon::BOLT,
+        },
+    }
 }
 
 /// Words kept in capitals when a name is shown (`brb` → `BRB`, `fx` → `FX`).
@@ -242,7 +307,7 @@ fn mode_while(m: &str) -> String {
 }
 
 /// Completes "When …" for an event pattern.
-fn when_sentence(when: &str) -> String {
+pub fn when_sentence(when: &str) -> String {
     let when = when.trim();
     if when.is_empty() {
         return "…".into();
@@ -548,54 +613,75 @@ fn when_phrase(when: &str, cond: &str) -> String {
 enum Step {
     Preset,
     Release,
-    Overlay,
     Scene,
     Preview,
-    Lights,
-    Look,
+    LayerFx,
+    LayerVisible,
+    Setting,
+    Animation,
+    Notify,
     Say,
     Sound,
     Mix,
+    Lights,
+    Look,
     Mode,
-    Wait,
-    Marker,
     TimelinePlay,
     TimelineStop,
+    Marker,
+    Wait,
     Custom,
 }
 
+/// Placeholder address of a layer step nothing has been picked for yet (empty segments).
+const BLANK_FX: &str = "scene..node..fx..enabled";
+const BLANK_LAYER: &str = "scene..node..visible";
+
 impl Step {
-    const ALL: [Step; 16] = [
-        Step::Preset,
-        Step::Release,
-        Step::Overlay,
-        Step::Scene,
-        Step::Preview,
-        // before Look: a bare `lights.cue` is a cue list
-        Step::Lights,
-        Step::Look,
-        Step::Say,
-        Step::Sound,
-        Step::Mix,
-        Step::Mode,
-        Step::Wait,
-        Step::Marker,
-        Step::TimelinePlay,
-        Step::TimelineStop,
-        Step::Custom,
+    /// The step picker, in groups (a line between groups).
+    const MENU: [&'static [Step]; 6] = [
+        &[Step::Preset, Step::Release],
+        &[Step::Scene, Step::Preview, Step::LayerFx, Step::LayerVisible, Step::Setting, Step::Animation],
+        &[Step::Notify, Step::Say, Step::Sound, Step::Mix],
+        &[Step::Lights, Step::Look],
+        &[Step::Mode, Step::TimelinePlay, Step::TimelineStop, Step::Marker, Step::Wait],
+        &[Step::Custom],
     ];
+
+    /// The step a command's first word stands for, when that alone decides it.
+    fn from_verb(verb: &str) -> Option<Step> {
+        Some(match verb {
+            "preset.fire" => Step::Preset,
+            "preset.release" => Step::Release,
+            "scene.cut" => Step::Scene,
+            "scene.go" => Step::Preview,
+            "bot.say" => Step::Say,
+            "audio.play" => Step::Sound,
+            "mixer.snapshot.recall" => Step::Mix,
+            // a bare `lights.cue` is a cue list; `look=` is read before this
+            "lights.cue" => Step::Lights,
+            "mode.set" => Step::Mode,
+            "wait" => Step::Wait,
+            "twitch.marker" => Step::Marker,
+            "timeline.play" => Step::TimelinePlay,
+            "timeline.stop" => Step::TimelineStop,
+            _ => return None,
+        })
+    }
 
     fn verb(self) -> &'static str {
         match self {
             Step::Preset => "preset.fire",
             Step::Release => "preset.release",
-            Step::Overlay => "trigger",
             Step::Scene => "scene.cut",
             Step::Preview => "scene.go",
-            Step::Lights | Step::Look => "lights.cue",
+            Step::LayerFx | Step::LayerVisible | Step::Setting => "set",
+            Step::Animation => "trigger",
+            Step::Notify => "emit",
             Step::Say => "bot.say",
             Step::Sound => "audio.play",
             Step::Mix => "mixer.snapshot.recall",
+            Step::Lights | Step::Look => "lights.cue",
             Step::Mode => "mode.set",
             Step::Wait => "wait",
             Step::Marker => "twitch.marker",
@@ -607,21 +693,25 @@ impl Step {
 
     fn label(self) -> &'static str {
         match self {
-            Step::Preset => "Fire a quick effect",
-            Step::Release => "Stop a quick effect",
-            Step::Overlay => "Play an overlay",
+            Step::Preset => "Run a saved action",
+            Step::Release => "Stop a saved action",
             Step::Scene => "Switch to a scene",
             Step::Preview => "Put a scene up next",
-            Step::Lights => "Run a light cue",
-            Step::Look => "Turn on a light look",
+            Step::LayerFx => "Turn a layer effect on/off",
+            Step::LayerVisible => "Show or hide a layer",
+            Step::Setting => "Change a setting",
+            Step::Animation => "Play a source's animation",
+            Step::Notify => "Show a notification",
             Step::Say => "Say something in chat",
             Step::Sound => "Play a sound",
             Step::Mix => "Recall a sound mix",
+            Step::Lights => "Run a light cue",
+            Step::Look => "Turn on a light look",
             Step::Mode => "Change the show mode",
-            Step::Wait => "Wait a moment",
-            Step::Marker => "Add a stream marker",
             Step::TimelinePlay => "Play a timeline",
             Step::TimelineStop => "Stop a timeline",
+            Step::Marker => "Add a stream marker",
+            Step::Wait => "Wait a moment",
             Step::Custom => "Custom command",
         }
     }
@@ -629,16 +719,20 @@ impl Step {
     fn icon(self) -> &'static str {
         match self {
             Step::Preset | Step::Release => icon::BOLT,
-            Step::Overlay => icon::SPARKLE,
-            Step::Scene | Step::Preview => icon::LAYERS,
-            Step::Lights | Step::Look => icon::LIGHT,
+            Step::Scene | Step::Preview => icon::SCENE,
+            Step::LayerFx => icon::WAND,
+            Step::LayerVisible => icon::EYE,
+            Step::Setting => icon::SLIDERS,
+            Step::Animation => icon::SPARKLE,
+            Step::Notify => icon::ALERT,
             Step::Say => icon::CHAT,
             Step::Sound => icon::VOLUME,
-            Step::Mix => icon::SLIDERS,
+            Step::Mix => icon::MIX,
+            Step::Lights | Step::Look => icon::LIGHT,
             Step::Mode => icon::PLAY,
-            Step::Wait => icon::CLOCK,
-            Step::Marker => icon::STAR,
             Step::TimelinePlay | Step::TimelineStop => icon::TIMELINE,
+            Step::Marker => icon::STAR,
+            Step::Wait => icon::CLOCK,
             Step::Custom => icon::CONSOLE,
         }
     }
@@ -652,21 +746,28 @@ impl Step {
         }
     }
 
-    /// What's missing when the step has no target yet (`None` = nothing required).
-    fn missing(self) -> Option<&'static str> {
+    /// What's still missing before the step can run (`None` = ready to go).
+    fn missing(self, args: &[String]) -> Option<&'static str> {
+        let a0 = args.first().map(|a| a.trim()).unwrap_or("");
+        let empty = args.iter().all(|a| a.trim().is_empty());
         Some(match self {
-            Step::Preset | Step::Release => "pick a quick effect",
-            Step::Overlay => "pick an overlay",
-            Step::Scene | Step::Preview => "pick a scene",
-            Step::Lights => "pick a light cue list",
-            Step::Look => "pick a light look",
-            Step::Say => "type what to say",
-            Step::Sound => "pick a sound",
-            Step::Mix => "pick a sound mix",
-            Step::Mode => "pick a show mode",
-            Step::Wait => "say how long to wait",
-            Step::TimelinePlay | Step::TimelineStop => "pick a timeline",
-            Step::Marker | Step::Custom => return None,
+            Step::Preset | Step::Release if empty => "pick a saved action",
+            Step::Scene | Step::Preview if empty => "pick a scene",
+            Step::LayerFx if !layer_picked(a0, true) => "pick a layer effect",
+            Step::LayerVisible if !layer_picked(a0, false) => "pick a layer",
+            Step::Setting if a0.is_empty() => "pick a setting",
+            Step::Setting if args.get(1).is_none_or(|v| v.trim().is_empty()) => "say what to set it to",
+            Step::Animation if empty => "pick a source",
+            Step::Notify if empty => "pick a notification",
+            Step::Say if empty => "type what to say",
+            Step::Sound if empty => "pick a sound",
+            Step::Mix if empty => "pick a sound mix",
+            Step::Lights if empty => "pick a light cue list",
+            Step::Look if empty => "pick a light look",
+            Step::Mode if empty => "pick a show mode",
+            Step::TimelinePlay | Step::TimelineStop if empty => "pick a timeline",
+            Step::Wait if empty => "say how long to wait",
+            _ => return None,
         })
     }
 
@@ -675,15 +776,44 @@ impl Step {
         match self {
             Step::Look => "lights.cue look=".into(),
             Step::Wait => "wait 2s".into(),
+            Step::LayerFx => format!("set {BLANK_FX} true"),
+            Step::LayerVisible => format!("set {BLANK_LAYER} false"),
             k => k.verb().into(),
         }
     }
 }
 
+/// (scene, layer, effect) of a layer address: `scene.<s>.node.<id>.visible` (no effect) or
+/// `scene.<s>.node.<id>.fx.<name>.enabled`. Parts not picked yet are empty.
+fn layer_parts(addr: &str) -> Option<(&str, &str, Option<&str>)> {
+    let (scene, rest) = addr.strip_prefix("scene.")?.split_once(".node.")?;
+    if scene.contains('.') {
+        return None;
+    }
+    if let Some(node) = rest.strip_suffix(".visible") {
+        return (!node.contains('.')).then_some((scene, node, None));
+    }
+    let (node, fx) = rest.strip_suffix(".enabled")?.split_once(".fx.")?;
+    (!node.contains('.')).then_some((scene, node, Some(fx)))
+}
+
+/// A layer step's address has everything picked (`fx`: it names an effect too).
+fn layer_picked(addr: &str, fx: bool) -> bool {
+    layer_parts(addr).is_some_and(|(s, n, f)| !s.is_empty() && !n.is_empty() && f.map_or(!fx, |f| fx && !f.is_empty()))
+}
+
+fn layer_addr(scene: &str, node: &str, fx: Option<&str>) -> String {
+    match fx {
+        Some(f) => format!("scene.{scene}.node.{node}.fx.{f}.enabled"),
+        None => format!("scene.{scene}.node.{node}.visible"),
+    }
+}
+
 /// The friendly shape of a command (`Custom` when the guided editor can't show it).
 fn parse_step(cmd: &str) -> (Step, Vec<String>) {
-    let Ok(toks) = tokenize(cmd) else { return (Step::Custom, Vec::new()) };
-    let Some((verb, rest)) = toks.split_first() else { return (Step::Custom, Vec::new()) };
+    let custom = || (Step::Custom, Vec::new());
+    let Ok(toks) = tokenize(cmd) else { return custom() };
+    let Some((verb, rest)) = toks.split_first() else { return custom() };
     // `lights.cue look=<name>`, `patch.<id>.trigger` / `trigger patch.<id>`
     if verb == "lights.cue"
         && let [one] = rest
@@ -692,26 +822,61 @@ fn parse_step(cmd: &str) -> (Step, Vec<String>) {
         return (Step::Look, vec![look.to_string()]);
     }
     if let Some(id) = verb.strip_prefix("patch.").and_then(|v| v.strip_suffix(".trigger")) {
-        return if rest.is_empty() && !id.is_empty() { (Step::Overlay, vec![id.to_string()]) } else { (Step::Custom, Vec::new()) };
+        return if rest.is_empty() && !id.is_empty() { (Step::Animation, vec![id.to_string()]) } else { custom() };
     }
-    if verb == "trigger" {
-        return match rest {
-            [] => (Step::Overlay, Vec::new()),
-            [a] if a.starts_with("patch.") && !a.contains('=') => (Step::Overlay, vec![a["patch.".len()..].to_string()]),
-            _ => (Step::Custom, Vec::new()),
-        };
+    let layer = |a: &str| layer_parts(a).map(|(_, _, fx)| if fx.is_some() { Step::LayerFx } else { Step::LayerVisible });
+    match verb.as_str() {
+        "trigger" => {
+            return match rest {
+                [] => (Step::Animation, Vec::new()),
+                [a] if a.starts_with("patch.") && !a.contains('=') => (Step::Animation, vec![a["patch.".len()..].to_string()]),
+                _ => custom(),
+            };
+        }
+        "toggle" => {
+            return match rest {
+                [a] if !a.contains('=') => layer(a).map_or_else(custom, |k| (k, vec![a.clone(), "toggle".into()])),
+                _ => custom(),
+            };
+        }
+        "set" => {
+            return match rest {
+                [a, v] if !a.contains('=') => match (layer(a), v.as_str()) {
+                    (Some(k), "true" | "false") => (k, vec![a.clone(), if v == "true" { "on" } else { "off" }.into()]),
+                    _ => (Step::Setting, vec![a.clone(), v.clone()]),
+                },
+                [a] if !a.contains('=') => (Step::Setting, vec![a.clone()]),
+                [] => (Step::Setting, Vec::new()),
+                _ => custom(),
+            };
+        }
+        "animate" => {
+            return match rest {
+                // a duration still being typed stays here; the engine's parser flags it
+                [a, v, d] if !a.contains('=') => (Step::Setting, vec![a.clone(), v.clone(), d.clone()]),
+                _ => custom(),
+            };
+        }
+        "emit" => {
+            return match rest.split_first() {
+                None => (Step::Notify, Vec::new()),
+                Some((ty, kv)) if !ty.contains('=') && kv.iter().all(|t| t.contains('=')) => (Step::Notify, rest.to_vec()),
+                _ => custom(),
+            };
+        }
+        _ => {}
     }
-    let Some(&kind) = Step::ALL.iter().find(|s| s.verb() == verb.as_str()) else { return (Step::Custom, Vec::new()) };
+    let Some(kind) = Step::from_verb(verb) else { return custom() };
     if kind == Step::Say {
         return match rest {
             [one] if one.starts_with("text=") => (kind, vec![one["text=".len()..].to_string()]),
-            _ if rest.iter().any(|a| a.contains('=')) => (Step::Custom, Vec::new()),
+            _ if rest.iter().any(|a| a.contains('=')) => custom(),
             [] => (kind, Vec::new()),
             _ => (kind, vec![rest.join(" ")]),
         };
     }
     if rest.len() > kind.max_args() || rest.iter().any(|a| a.contains('=')) {
-        return (Step::Custom, Vec::new());
+        return custom();
     }
     (kind, rest.to_vec())
 }
@@ -730,11 +895,43 @@ fn quote_arg(a: &str) -> String {
 }
 
 fn build_step(kind: Step, args: &[&str]) -> String {
-    let a0 = args.first().map(|a| a.trim()).unwrap_or("");
+    let arg = |i: usize| args.get(i).map(|a| a.trim()).unwrap_or("");
+    let a0 = arg(0);
     match kind {
-        Step::Overlay if a0.is_empty() => return "trigger".into(),
-        Step::Overlay => return format!("patch.{a0}.trigger"),
+        Step::Animation if a0.is_empty() => return "trigger".into(),
+        Step::Animation => return format!("patch.{a0}.trigger"),
         Step::Look => return format!("lights.cue look={}", if a0.is_empty() { String::new() } else { quote_arg(a0) }),
+        Step::LayerFx | Step::LayerVisible => {
+            let addr = match a0 {
+                "" if kind == Step::LayerFx => BLANK_FX,
+                "" => BLANK_LAYER,
+                a => a,
+            };
+            return match arg(1) {
+                "toggle" => format!("toggle {addr}"),
+                "off" => format!("set {addr} false"),
+                _ => format!("set {addr} true"),
+            };
+        }
+        Step::Setting => {
+            return match (a0, arg(1), arg(2)) {
+                ("", ..) => "set".into(),
+                (a, "", _) => format!("set {a}"),
+                (a, v, "") => format!("set {a} {}", quote_arg(v)),
+                (a, v, d) => format!("animate {a} {} {d}", quote_arg(v)),
+            };
+        }
+        Step::Notify => {
+            let mut out = "emit".to_string();
+            if !a0.is_empty() {
+                out.push(' ');
+                out.push_str(a0);
+                for (k, v) in args[1..].iter().filter_map(|kv| kv.split_once('=')).filter(|(_, v)| !v.trim().is_empty()) {
+                    out.push_str(&format!(" {k}={}", quote_arg(v.trim())));
+                }
+            }
+            return out;
+        }
         _ => {}
     }
     let mut out = kind.verb().to_string();
@@ -761,9 +958,11 @@ struct Names {
     sounds: Vec<(String, String)>,
     mixes: Vec<(String, String)>,
     timelines: Vec<(String, String)>,
-    /// Overlays that can be played (triggered).
-    overlays: Vec<(String, String)>,
+    /// Sources with an animation that can be played (triggered).
+    animations: Vec<(String, String)>,
     looks: Vec<(String, String)>,
+    /// Configured notifications: (the event that shows it, its name).
+    alerts: Vec<(String, String)>,
 }
 
 fn pairs(l: &[Value]) -> Vec<(String, String)> {
@@ -780,6 +979,25 @@ fn plain(l: &[Value], f: fn(&str) -> String) -> Vec<(String, String)> {
     l.iter().filter_map(Value::as_str).map(|s| (s.to_string(), f(s))).collect()
 }
 
+/// The notifications a step can show (`alerts.config`): one per event (the first alert for an
+/// event is the one that shows), leaving out alerts that answer a pattern of events.
+fn alert_choices(cfg: Option<&Value>) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for a in cfg.and_then(|c| c.get_path("alerts")).and_then(Value::as_list).unwrap_or(&[]) {
+        let when = a.get_path("when").and_then(Value::as_str).unwrap_or("").trim();
+        if when.is_empty() || when.contains('*') || out.iter().any(|(w, _)| w == when) {
+            continue;
+        }
+        let label = match (a.get_path("name").and_then(Value::as_str).unwrap_or("").trim(), trigger_index(when)) {
+            ("", Some(i)) => TRIGGERS[i].label.to_string(),
+            ("", None) => nice_name(when),
+            (n, _) => nice_name(n),
+        };
+        out.push((when.to_string(), label));
+    }
+    out
+}
+
 impl Names {
     fn read(app: &App) -> Names {
         let list = |q: &str, k: &str| app.m.q(q).and_then(|v| v.get_path(k)).and_then(Value::as_list).unwrap_or(&[]);
@@ -791,7 +1009,7 @@ impl Names {
             sounds: plain(list("audio.mix", "sounds"), nice_name),
             mixes: pairs(list("mixer.snapshots", "snapshots")),
             timelines: pairs(app.m.q_list("timelines")),
-            overlays: app
+            animations: app
                 .m
                 .q_list("patches")
                 .iter()
@@ -803,6 +1021,7 @@ impl Names {
                 })
                 .collect(),
             looks: pairs(app.m.q_list("lights.palettes")),
+            alerts: alert_choices(app.m.q("alerts.config")),
         }
     }
 
@@ -810,7 +1029,7 @@ impl Names {
         if name.is_empty() {
             return "…".into();
         }
-        // a value filled in when the reaction runs: `{scene}`, `{patch.ad_break.return_scene}`
+        // a value filled in when the trigger fires: `{scene}`, `{patch.ad_break.return_scene}`
         if let Some(inner) = name.strip_prefix('{').and_then(|n| n.strip_suffix('}')) {
             return match inner {
                 "scene" => "the scene on air".into(),
@@ -820,6 +1039,55 @@ impl Names {
         }
         list.iter().find(|(n, _)| n == name).map_or_else(|| nice_name(name), |(_, l)| l.clone())
     }
+}
+
+/// Every layer and its effect switches, from the engine's state (`scene.<s>.node.<id>.visible`,
+/// `….fx.<name>.enabled`). Read only while a layer step is on screen.
+#[derive(Default)]
+struct Layers {
+    /// (scene, layer, its effects)
+    items: Vec<(String, String, Vec<String>)>,
+}
+
+impl Layers {
+    fn read(app: &App) -> Layers {
+        let mut items: Vec<(String, String, Vec<String>)> = Vec::new();
+        // sorted addresses: one layer's settings sit next to each other
+        for (a, _) in app.m.under("scene") {
+            let Some((s, n, fx)) = layer_parts(a) else { continue };
+            if !items.last().is_some_and(|(x, y, _)| x == s && y == n) {
+                items.push((s.to_string(), n.to_string(), Vec::new()));
+            }
+            if let (Some(f), Some(last)) = (fx, items.last_mut()) {
+                last.2.push(f.to_string());
+            }
+        }
+        Layers { items }
+    }
+
+    /// Scenes that have a layer (one with an effect, when `fx`).
+    fn scenes(&self, fx: bool) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for (s, _, f) in &self.items {
+            if (!fx || !f.is_empty()) && !out.contains(s) {
+                out.push(s.clone());
+            }
+        }
+        out
+    }
+
+    fn layers(&self, scene: &str, fx: bool) -> Vec<(String, String)> {
+        self.items.iter().filter(|(s, _, f)| s == scene && (!fx || !f.is_empty())).map(|(_, n, _)| (n.clone(), nice_name(n))).collect()
+    }
+
+    fn effects(&self, scene: &str, layer: &str) -> Vec<(String, String)> {
+        self.items.iter().filter(|(s, n, _)| s == scene && n == layer).flat_map(|(_, _, f)| f.iter().map(|x| (x.clone(), fx_name(x)))).collect()
+    }
+}
+
+/// An effect's name for people: `rgb_split` → "RGB split", `patch.dream` → "Dream".
+fn fx_name(fx: &str) -> String {
+    nice_name(fx.strip_prefix("patch.").unwrap_or(fx))
 }
 
 /// Words for a setting address: `audio.bus.music.gain` → "Music volume", `fx.vhs.amount` → "Vhs".
@@ -852,29 +1120,72 @@ fn clip(s: &str, n: usize) -> String {
     if s.chars().count() <= n { s.to_string() } else { format!("{}…", s.chars().take(n).collect::<String>()) }
 }
 
+/// "Blur on Cam face in Duo", "Cam face in Duo" (the parts of a layer address in words).
+fn layer_words(addr: &str, n: &Names) -> (String, String) {
+    let (s, l, fx) = layer_parts(addr).unwrap_or(("", "", None));
+    let dots = |x: &str, f: fn(&str) -> String| if x.is_empty() { "…".to_string() } else { f(x) };
+    let layer = format!("{} in {}", dots(l, nice_name), Names::label(&n.scenes, s));
+    (fx.map(|f| dots(f, fx_name)).unwrap_or_default(), layer)
+}
+
+/// A value as words: `true` → "on", `false` → "off".
+fn value_words(v: &str) -> String {
+    match v {
+        "true" => "on".into(),
+        "false" => "off".into(),
+        "" => "…".into(),
+        v => clip(v, 24),
+    }
+}
+
 fn step_phrase(cmd: &str, n: &Names) -> String {
     let (kind, args) = parse_step(cmd);
-    let a0 = args.first().map(String::as_str).unwrap_or("");
+    let arg = |i: usize| args.get(i).map(String::as_str).unwrap_or("");
+    let a0 = arg(0);
     match kind {
-        Step::Preset => format!("fire {}", Names::label(&n.presets, a0)),
+        Step::Preset => format!("run {}", Names::label(&n.presets, a0)),
         Step::Release => format!("stop {}", Names::label(&n.presets, a0)),
-        Step::Overlay => format!("play the {} overlay", Names::label(&n.overlays, a0)),
         Step::Scene => format!("switch to {}", Names::label(&n.scenes, a0)),
         Step::Preview => format!("put {} up next", Names::label(&n.scenes, a0)),
+        Step::LayerFx => {
+            let (fx, layer) = layer_words(a0, n);
+            match arg(1) {
+                "toggle" => format!("switch {fx} on or off on {layer}"),
+                "off" => format!("turn off {fx} on {layer}"),
+                _ => format!("turn on {fx} on {layer}"),
+            }
+        }
+        Step::LayerVisible => {
+            let (_, layer) = layer_words(a0, n);
+            match arg(1) {
+                "toggle" => format!("show or hide {layer}"),
+                "off" => format!("hide {layer}"),
+                _ => format!("show {layer}"),
+            }
+        }
+        Step::Setting if a0.is_empty() => "change a setting".into(),
+        Step::Setting if !arg(2).is_empty() => format!("fade {} to {} over {}", setting_words(a0), value_words(arg(1)), arg(2)),
+        Step::Setting => format!("set {} to {}", setting_words(a0), value_words(arg(1))),
+        Step::Animation => format!("play {}", Names::label(&n.animations, a0)),
+        Step::Notify if a0.is_empty() => "show a notification".into(),
+        Step::Notify => match n.alerts.iter().find(|(w, _)| w == a0) {
+            Some((_, l)) => format!("show the {l} notification"),
+            None => format!("send the “{}” event", nice_name(&a0.replace('.', " "))),
+        },
+        Step::Say if a0.is_empty() => "say …".into(),
+        Step::Say => format!("say “{}”", clip(&friendly_text(a0), 56)),
+        Step::Sound => format!("play {}", Names::label(&n.sounds, a0)),
+        Step::Mix => format!("recall the {} mix", Names::label(&n.mixes, a0)),
         Step::Lights => match args.get(1) {
             Some(c) => format!("run light cue {c} of {}", Names::label(&n.cuelists, a0)),
             None => format!("run the {} lights", Names::label(&n.cuelists, a0)),
         },
         Step::Look => format!("turn on the {} light look", Names::label(&n.looks, a0)),
-        Step::Say if a0.is_empty() => "say …".into(),
-        Step::Say => format!("say “{}”", clip(&friendly_text(a0), 56)),
-        Step::Sound => format!("play {}", Names::label(&n.sounds, a0)),
-        Step::Mix => format!("recall the {} mix", Names::label(&n.mixes, a0)),
         Step::Mode => format!("switch to {}", Names::label(&n.modes, a0)),
-        Step::Wait => format!("wait {}", if a0.is_empty() { "…" } else { a0 }),
-        Step::Marker => "add a stream marker".into(),
         Step::TimelinePlay => format!("play the {} timeline", Names::label(&n.timelines, a0)),
         Step::TimelineStop => format!("stop the {} timeline", Names::label(&n.timelines, a0)),
+        Step::Marker => "add a stream marker".into(),
+        Step::Wait => format!("wait {}", if a0.is_empty() { "…" } else { a0 }),
         Step::Custom => custom_phrase(cmd),
     }
 }
@@ -886,8 +1197,8 @@ fn custom_phrase(cmd: &str) -> String {
     let middle = |a: &str| nice_name(a.split('.').nth(1).unwrap_or(a));
     match verb {
         "" => "…".into(),
-        "trigger" => format!("fire {}", middle(arg)),
-        v if v.ends_with(".trigger") => format!("fire {}", middle(v.trim_end_matches(".trigger"))),
+        "trigger" => format!("play {}", middle(arg)),
+        v if v.ends_with(".trigger") => format!("play {}", middle(v.trim_end_matches(".trigger"))),
         "set" | "animate" | "adjust" => format!("change {}", setting_words(arg)),
         "toggle" => format!("switch {} on/off", setting_words(arg)),
         "twitch.shoutout" => "give a shoutout".into(),
@@ -912,7 +1223,7 @@ fn custom_phrase(cmd: &str) -> String {
     }
 }
 
-/// Plain words for command lines ("Fire Hype", "Switch to Duo"), shared with the controller
+/// Plain words for command lines ("Run Hype", "Switch to Duo"), shared with the controller
 /// views. Build once per frame and reuse for every row.
 pub struct Words {
     names: Names,
@@ -935,7 +1246,7 @@ impl Words {
         capitalize(&parts.join(", then "))
     }
 
-    /// A quick effect's display name.
+    /// A saved action's display name.
     pub fn preset(&self, name: &str) -> String {
         Names::label(&self.names.presets, name)
     }
@@ -945,7 +1256,7 @@ impl Words {
         Names::label(&self.names.scenes, name)
     }
 
-    /// (name, display name) of every quick effect / scene.
+    /// (name, display name) of every saved action / scene.
     pub fn presets(&self) -> &[(String, String)] {
         &self.names.presets
     }
@@ -993,9 +1304,9 @@ impl RuleDraft {
             orig: None,
             file: "rules/ui.toml".into(),
             name: String::new(),
-            when: "twitch.follow".into(),
+            when: String::new(),
             cond: String::new(),
-            commands: vec![Step::Preset.verb().into()],
+            commands: Vec::new(),
             cooldown_global: String::new(),
             cooldown_actor: String::new(),
             modes: String::new(),
@@ -1010,11 +1321,11 @@ impl RuleDraft {
     pub fn errors(&self) -> Vec<String> {
         let mut e = Vec::new();
         if self.orig.is_some() && self.name.trim().is_empty() {
-            e.push("Give it a name (under Details).".into());
+            e.push("Give it a name (under File).".into());
         }
         let when = self.when.trim();
         if when.is_empty() {
-            e.push("Pick what it reacts to.".into());
+            e.push("Pick what it answers to.".into());
         } else if !se_proto::address::is_valid(when, true) {
             e.push(format!("“{when}” isn't an event name Stream Engine can watch for."));
         }
@@ -1031,9 +1342,7 @@ impl RuleDraft {
                 continue;
             }
             let (kind, args) = parse_step(c);
-            if let Some(what) = kind.missing()
-                && args.iter().all(|a| a.trim().is_empty())
-            {
+            if let Some(what) = kind.missing(&args) {
                 e.push(format!("Step {}: {what}.", i + 1));
             } else if let Err(err) = Op::parse(c) {
                 e.push(format!("Step {} has a mistake: {err}", i + 1));
@@ -1045,7 +1354,7 @@ impl RuleDraft {
             }
         }
         if !self.file.starts_with("rules/") || !self.file.ends_with(".toml") {
-            e.push("Reactions are saved in the rules folder (Details → Saved in).".into());
+            e.push("Triggers are saved in the rules folder (File → Saved in).".into());
         }
         e
     }
@@ -1082,7 +1391,15 @@ impl RuleDraft {
 
     /// `project.write` args. `file_text` decides between `[[rule]]` entries and a single-rule file.
     pub fn write_args(&self, file_text: Option<&str>) -> Value {
-        let set = self.set_value();
+        self.entry_args(file_text, self.set_value())
+    }
+
+    /// `project.write` args that only switch a saved trigger on or off.
+    pub fn enabled_args(&self, file_text: Option<&str>) -> Value {
+        self.entry_args(file_text, Value::map().with("enabled", if self.enabled { Value::Null } else { Value::Bool(false) }))
+    }
+
+    fn entry_args(&self, file_text: Option<&str>, set: Value) -> Value {
         let parsed = file_text.and_then(|t| t.parse::<toml::Table>().ok());
         let multi = parsed.as_ref().is_some_and(|t| t.get("rule").is_some_and(|r| r.is_array()));
         match &self.orig {
@@ -1103,6 +1420,11 @@ impl RuleDraft {
         }
     }
 
+    /// Same saved form (what Save would write), ignoring the "try it" values.
+    fn same_as(&self, other: &RuleDraft) -> bool {
+        self.file == other.file && self.set_value() == other.set_value()
+    }
+
     pub fn delete_args(&self, file_text: Option<&str>) -> Option<Value> {
         let orig = self.orig.as_ref()?;
         let multi = file_text.and_then(|t| t.parse::<toml::Table>().ok()).is_some_and(|t| t.get("rule").is_some_and(|r| r.is_array()));
@@ -1113,7 +1435,7 @@ impl RuleDraft {
         })
     }
 
-    /// A name for a new reaction from its sentence, unique among `taken`.
+    /// A name for a new trigger from its sentence, unique among `taken`.
     fn auto_name(&self, taken: &[String]) -> String {
         let base = clip(when_phrase(&self.when, &self.cond).trim_start_matches("When "), 60);
         let mut name = base.clone();
@@ -1139,10 +1461,11 @@ impl RuleDraft {
     }
 }
 
-/// A reaction in the list, worded once per `rules`/`presets`/`scenes` reply.
+/// A trigger in the list, worded once per `rules`/`presets`/`scenes` reply.
 struct Row {
     name: String,
-    group: u8,
+    family: Family,
+    icon: &'static str,
     title: String,
     subtitle: String,
     enabled: bool,
@@ -1150,11 +1473,15 @@ struct Row {
     value: Value,
 }
 
-type RowKey = (u64, u64, u64);
+type RowKey = (u64, u64, u64, u64);
 
 #[derive(Default)]
 pub struct RulesEditor {
     pub edit: Option<RuleDraft>,
+    /// The draft as last saved (or opened): Save/Discard show while `edit` differs.
+    base: Option<RuleDraft>,
+    /// "Something else…" picked for the event: the event name is typed.
+    other_event: bool,
     /// Which text field autocompletes (`when`, `if`, `do:<i>`, `raw-…`).
     focus: Option<String>,
     /// The guided "only if" rows and the expression they were read from.
@@ -1170,11 +1497,21 @@ pub struct RulesEditor {
 impl RulesEditor {
     pub fn new_rule(&mut self) {
         self.edit = Some(RuleDraft::new());
+        self.base = None;
+        self.other_event = false;
         self.test_vals.clear();
         self.rows_src = None;
     }
     pub fn editing_name(&self) -> Option<&str> {
         self.edit.as_ref().and_then(|d| d.orig.as_deref())
+    }
+    /// Unsaved changes (a new trigger is unsaved until it's created).
+    fn dirty(&self) -> bool {
+        match (&self.edit, &self.base) {
+            (Some(e), Some(b)) => !e.same_as(b),
+            (Some(_), None) => true,
+            _ => false,
+        }
     }
     /// Open a row of the `rules` query.
     pub fn open(&mut self, r: &Value) {
@@ -1182,7 +1519,7 @@ impl RulesEditor {
         let name = s("name");
         self.rows_src = None;
         self.test_vals.clear();
-        self.edit = Some(RuleDraft {
+        let d = RuleDraft {
             orig: Some(name.clone()),
             file: s("file"),
             name,
@@ -1196,7 +1533,10 @@ impl RulesEditor {
             enabled: r.get_path("enabled").is_none_or(Value::truthy),
             test_args: String::new(),
             filled: false,
-        });
+        };
+        self.other_event = !d.when.is_empty() && trigger_index(&d.when).is_none();
+        self.base = Some(d.clone());
+        self.edit = Some(d);
     }
 }
 
@@ -1207,6 +1547,14 @@ pub fn suggest(field: &str, text: &str, app: &App) -> Vec<String> {
     let last = text.rsplit(|c: char| c.is_whitespace() || c == '(' || c == '!').next().unwrap_or("");
     let mut pool: Vec<String> = Vec::new();
     match field {
+        // a setting: any live address containing what's typed (`blur` finds every blur switch)
+        "addr" => {
+            let l = text.trim().to_lowercase();
+            if l.is_empty() {
+                return Vec::new();
+            }
+            return app.m.state.keys().filter(|a| a.to_lowercase().contains(&l) && a.as_str() != text.trim()).take(8).cloned().collect();
+        }
         "when" => {
             pool.extend(SIM_FOR.iter().map(|(t, _)| t.to_string()));
             pool.extend(app.m.events.iter().map(|e| e.ty.clone()));
@@ -1216,7 +1564,7 @@ pub fn suggest(field: &str, text: &str, app: &App) -> Vec<String> {
             );
         }
         "if" | "cond" => {
-            // `cond`: a condition outside a reaction (no event to read fields from)
+            // `cond`: a condition outside a trigger (no event to read fields from)
             let when = if field == "if" { app.build.rules.edit.as_ref().map(|d| d.when.clone()).unwrap_or_default() } else { String::new() };
             for (ty, fields) in FIELDS {
                 if se_proto::address::matches(&when, ty) {
@@ -1309,28 +1657,37 @@ pub fn text_field(app: &mut App, ui: &mut egui::Ui, key: &str, hint: &str, text:
 
 use widgets::chip;
 
-fn wrapped(ui: &egui::Ui, text: &str, font: FontId, color: Color32, width: f32, rows: usize) -> Arc<egui::Galley> {
-    let mut job = LayoutJob::single_section(text.to_owned(), egui::TextFormat::simple(font, color));
-    job.wrap = TextWrapping { max_width: width, max_rows: rows, break_anywhere: false, overflow_character: Some('…') };
-    ui.painter().layout_job(job)
+/// Width of the Events list pane.
+const LIST_W: f32 = 300.0;
+
+/// `text` cut with "…" so it fits `max_w` in `font`.
+fn fit_text(ui: &egui::Ui, text: &str, font: &FontId, max_w: f32) -> String {
+    let width = |s: &str| ui.painter().layout_no_wrap(s.to_string(), font.clone(), Color32::WHITE).size().x;
+    if width(text) <= max_w {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let (mut lo, mut hi) = (0, chars.len());
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        let s: String = chars[..mid].iter().chain(['…'].iter()).collect();
+        if width(&s) <= max_w { lo = mid } else { hi = mid - 1 }
+    }
+    format!("{}…", chars[..lo].iter().collect::<String>().trim_end())
 }
 
-fn list_group(when: &str) -> u8 {
-    if when.starts_with("twitch.") || when == "tip" || when.starts_with("tip.") {
-        0
-    } else if when.starts_with("band.") || when == "beat" || when.starts_with("music.") || when.starts_with("queue.") {
-        1
-    } else if when.starts_with("mode.") || when.starts_with("deck.") || when.starts_with("timeline.") {
-        2
-    } else {
-        3
+/// "Run Hype" / "Run Hype +2" (the first step, and how many more).
+fn first_action(cmds: &[String], n: &Names) -> String {
+    let steps: Vec<&String> = cmds.iter().filter(|c| !c.trim().is_empty()).collect();
+    match steps.as_slice() {
+        [] => "Does nothing yet".into(),
+        [one] => capitalize(&step_phrase(one, n)),
+        [first, rest @ ..] => format!("{} +{}", capitalize(&step_phrase(first, n)), rest.len()),
     }
 }
 
-const GROUP_TITLES: [&str; 4] = ["From your viewers", "Music and drums", "Your show", "Other"];
-
 fn rows(app: &mut App) -> Arc<Vec<Row>> {
-    let key = (app.m.q_seq("rules"), app.m.q_seq("presets"), app.m.q_seq("scenes"));
+    let key = (app.m.q_seq("rules"), app.m.q_seq("presets"), app.m.q_seq("scenes"), app.m.q_seq("alerts.config"));
     if let Some((k, r)) = &app.build.rules.cache
         && *k == key
     {
@@ -1347,16 +1704,17 @@ fn rows(app: &mut App) -> Arc<Vec<Row>> {
             let cmds: Vec<String> = r.get_path("do").and_then(Value::as_list).unwrap_or(&[]).iter().filter_map(|v| v.as_str().map(String::from)).collect();
             Row {
                 name: s("name"),
-                group: list_group(&when),
+                family: Family::of(&when),
+                icon: event_icon(&when),
                 title: when_phrase(&when, &s("if")),
-                subtitle: format!("→ {}", do_phrase(&cmds, &names)),
+                subtitle: format!("→ {}", first_action(&cmds, &names)),
                 enabled: r.get_path("enabled").is_some_and(Value::truthy),
                 fired_ms: r.get_path("last_fired_ms_ago").and_then(Value::as_i64),
                 value: r.clone(),
             }
         })
         .collect();
-    out.sort_by_key(|r| r.group);
+    out.sort_by_key(|r| r.family);
     let out = Arc::new(out);
     app.build.rules.cache = Some((key, out.clone()));
     out
@@ -1375,126 +1733,85 @@ fn ago(ms: i64) -> String {
     }
 }
 
+/// What the list pane asks for.
+enum ListPick {
+    New,
+    Open(usize),
+}
+
 pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     let t = app.t.clone();
-    let avail = ui.available_size();
-    if avail.x < 820.0 {
-        // narrow (docked panel): the list, or the editor with a way back
+    let rows = rows(app);
+    let selected = app.build.rules.edit.as_ref().map(|d| d.orig.clone().unwrap_or_default());
+    let pick = if ui.available_width() < 820.0 {
+        // narrow (docked panel): the list, or the trigger with a way back
         if app.build.rules.edit.is_some() {
-            if widgets::button_ex(ui, &t, Some(icon::LEFT), "All reactions", Kind::Ghost, Size::Small, 0.0, true).clicked() {
+            if widgets::button_ex(ui, &t, Some(icon::LEFT), "All triggers", Kind::Ghost, Size::Small, 0.0, true).clicked() {
                 app.build.rules.edit = None;
             }
             ui.add_space(spacing::S);
-            editor(app, ui, &t);
+            detail(app, ui, &t);
+            None
         } else {
-            list(app, ui, &t);
+            list_pane(ui, &t, &rows, None)
         }
-        return;
-    }
-    let list_w = (avail.x * 0.34).clamp(380.0, 760.0);
-    let ed_w = avail.x - list_w - spacing::L;
-    ui.horizontal_top(|ui| {
-        ui.allocate_ui_with_layout(Vec2::new(list_w, avail.y), Layout::top_down(Align::Min), |ui| list(app, ui, &t));
-        ui.add_space(spacing::L - ui.spacing().item_spacing.x);
-        ui.allocate_ui_with_layout(Vec2::new(ed_w, avail.y), Layout::top_down(Align::Min), |ui| editor(app, ui, &t));
-    });
-}
-
-fn list(app: &mut App, ui: &mut egui::Ui, t: &Theme) {
-    let rows = rows(app);
-    let on = rows.iter().filter(|r| r.enabled).count();
-    let sub = if rows.is_empty() { String::new() } else { format!("{} reactions · {on} switched on", rows.len()) };
-    let (mut new, mut first) = (false, false);
-    let height = ui.available_height();
-    widgets::titled(
-        ui,
-        t,
-        "Your reactions",
-        &sub,
-        |ui| new = widgets::button_ex(ui, t, Some(icon::PLUS), "New reaction", Kind::Primary, Size::Medium, 0.0, true).clicked(),
-        |ui| {
-            ui.set_width(ui.available_width());
-            if rows.is_empty() {
-                if !app.m.connected {
-                    widgets::empty_state(ui, t, icon::WARN, "Stream Engine isn't running", "Your reactions show up here once it's running.", None);
-                } else if widgets::empty_state(
-                    ui,
-                    t,
-                    icon::BOLT,
-                    "No reactions yet",
-                    "A reaction does something by itself when something happens, like firing Hype when someone cheers.",
-                    Some("New reaction"),
-                ) {
-                    first = true;
-                }
-                return;
+    } else {
+        widgets::split(ui, LIST_W, |ui| list_pane(ui, &t, &rows, selected.as_deref()), |ui| detail(app, ui, &t)).0
+    };
+    match pick {
+        Some(ListPick::New) => app.build.rules.new_rule(),
+        Some(ListPick::Open(i)) => {
+            if let Some(r) = rows.get(i) {
+                app.build.rules.open(&r.value);
             }
-            let groups = rows.iter().map(|r| r.group).collect::<std::collections::BTreeSet<_>>().len();
-            egui::ScrollArea::vertical().id_salt("rules-list").auto_shrink([false, true]).max_height((height - 90.0).max(120.0)).show(ui, |ui| {
-                let mut last = None;
-                for r in rows.iter() {
-                    if groups > 1 && last != Some(r.group) {
-                        if last.is_some() {
-                            ui.add_space(spacing::S);
-                        }
-                        let n = rows.iter().filter(|x| x.group == r.group).count();
-                        widgets::section(ui, t, "", &format!("{} ({n})", GROUP_TITLES[r.group as usize]));
-                        last = Some(r.group);
-                    }
-                    let selected = app.build.rules.editing_name() == Some(r.name.as_str());
-                    let mut en = r.enabled;
-                    let recent = r.fired_ms.is_some_and(|ms| ms < 2500);
-                    let tip = match r.fired_ms {
-                        Some(ms) => format!("{} · last happened {}", r.name, ago(ms)),
-                        None => format!("{} · hasn't happened yet", r.name),
-                    };
-                    let (resp, toggled) = reaction_row(ui, t, &r.title, &r.subtitle, &mut en, selected, recent);
-                    if toggled {
-                        app.m.text(&format!("{} '{}'", if en { "rule.enable" } else { "rule.disable" }, r.name));
-                        app.m.refresh_soon();
-                    } else if resp.on_hover_text(tip).clicked() {
-                        app.build.rules.open(&r.value);
-                    }
-                    ui.add_space(2.0);
-                }
-            });
-        },
-    );
-    if new || first {
-        app.build.rules.new_rule();
+        }
+        None => {}
     }
 }
 
-/// A reaction: on/off switch, the sentence, and what it does. Returns (row, switch flipped).
-fn reaction_row(ui: &mut egui::Ui, t: &Theme, title: &str, subtitle: &str, on: &mut bool, selected: bool, recent: bool) -> (egui::Response, bool) {
-    let w = ui.available_width();
-    let text_x = 12.0 + 40.0 + 14.0;
-    let text_w = (w - text_x - 12.0).max(40.0);
-    let title_c = if *on { t.fg } else { t.text_dim };
-    let tg = wrapped(ui, title, font_medium(type_scale::BODY), title_c, text_w, 2);
-    let sg = wrapped(ui, subtitle, font(type_scale::SMALL + 0.5), t.text_dim, text_w, 2);
-    let h = 11.0 + tg.size().y + 3.0 + sg.size().y + 11.0;
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::click());
-    let p = ui.painter().clone();
-    let r = CornerRadius::same(radius::CONTROL);
-    if selected {
-        p.rect_filled(rect, r, mix(t.surface, t.accent, 0.14));
-    } else if resp.hovered() {
-        p.rect_filled(rect, r, t.surface_hi);
-    }
-    if recent {
-        p.rect_filled(Rect::from_min_size(rect.min + Vec2::new(0.0, 8.0), Vec2::new(3.0, rect.height() - 16.0)), CornerRadius::same(2), t.green);
-    }
-    let top = rect.top() + 11.0;
-    p.galley(Pos2::new(rect.left() + text_x, top), tg.clone(), title_c);
-    p.galley(Pos2::new(rect.left() + text_x, top + tg.size().y + 3.0), sg, t.text_dim);
-    let sw = Rect::from_min_size(Pos2::new(rect.left() + 12.0, rect.top() + 11.0 + (tg.size().y - 22.0) / 2.0), Vec2::new(40.0, 22.0));
-    // a child ui leaves the row's layout cursor alone
-    let toggled = widgets::toggle(&mut ui.new_child(UiBuilder::new().max_rect(sw)), t, on).on_hover_text("Switch on or off right now").changed();
-    (resp.on_hover_cursor(egui::CursorIcon::PointingHand), toggled)
+fn list_pane(ui: &mut egui::Ui, t: &Theme, rows: &[Row], selected: Option<&str>) -> Option<ListPick> {
+    let mut pick = widgets::pane_header(ui, t, "Events", Some(rows.len()), Some("New trigger")).then_some(ListPick::New);
+    egui::ScrollArea::vertical().id_salt("rules-list").auto_shrink([false, false]).show(ui, |ui| {
+        if rows.is_empty() {
+            widgets::hint(ui, t, "No triggers yet.");
+        }
+        let mut last = None;
+        for (i, r) in rows.iter().enumerate() {
+            if last != Some(r.family) {
+                widgets::group_label(ui, t, r.family.title());
+                last = Some(r.family);
+            }
+            let sel = selected == Some(r.name.as_str());
+            let tip = match r.fired_ms {
+                Some(ms) => format!("{}\nLast ran {}", r.title, ago(ms)),
+                None => format!("{}\nHasn't run yet", r.title),
+            };
+            if event_row(ui, t, r, sel).on_hover_text(tip).clicked() && !sel {
+                pick = Some(ListPick::Open(i));
+            }
+        }
+    });
+    pick
 }
 
-// ---- editor --------------------------------------------------------------------------------------
+/// A trigger in the list: its event's icon, "When …", "→ first step", and an on/off dot.
+fn event_row(ui: &mut egui::Ui, t: &Theme, r: &Row, selected: bool) -> egui::Response {
+    // icon column + padding + the dot on the right
+    let text_w = ui.available_width() - 12.0 - 28.0 - 12.0 - 18.0;
+    let title = fit_text(ui, &r.title, &font_medium(type_scale::BODY), text_w);
+    let subtitle = fit_text(ui, &r.subtitle, &font(type_scale::SMALL), text_w);
+    let resp = widgets::list_row(ui, t, r.icon, &title, &subtitle, "", selected);
+    let c = egui::pos2(resp.rect.right() - 16.0, resp.rect.center().y);
+    let recent = r.fired_ms.is_some_and(|ms| ms < 2500);
+    if r.enabled {
+        ui.painter().circle_filled(c, 4.0, if recent { t.accent } else { t.green });
+    } else {
+        ui.painter().circle_stroke(c, 3.5, egui::Stroke::new(1.2, t.text_faint));
+    }
+    resp
+}
+
+// ---- detail --------------------------------------------------------------------------------------
 
 /// Fill cooldown/modes/scenes from the full definitions and fetch the file for write mode.
 fn fill(app: &mut App) {
@@ -1507,32 +1824,37 @@ fn fill(app: &mut App) {
     match app.m.q("config.rules").cloned() {
         None => app.m.query("config.rules", Value::Null),
         Some(cfg) => {
-            if let Some(def) = cfg.as_list().and_then(|l| l.iter().find(|r| r.get_path("name").and_then(Value::as_str) == Some(name.as_str())))
-                && let Some(d) = app.build.rules.edit.as_mut()
-            {
+            if let Some(def) = cfg.as_list().and_then(|l| l.iter().find(|r| r.get_path("name").and_then(Value::as_str) == Some(name.as_str()))) {
                 let dur = |v: Option<&Value>| {
                     v.map(|v| v.as_str().map(String::from).unwrap_or_else(|| format!("{v}ms"))).filter(|s| s != "nullms").unwrap_or_default()
                 };
-                d.cooldown_global = dur(def.get_path("cooldown.global").filter(|v| !v.is_null()));
-                d.cooldown_actor = dur(def.get_path("cooldown.per_actor").filter(|v| !v.is_null()));
+                let global = dur(def.get_path("cooldown.global").filter(|v| !v.is_null()));
+                let actor = dur(def.get_path("cooldown.per_actor").filter(|v| !v.is_null()));
                 let join = |k: &str| def.get_path(k).and_then(Value::as_list).unwrap_or(&[]).iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(", ");
-                d.modes = join("modes");
-                d.scenes = join("scenes");
-                d.filled = true;
+                let (modes, scenes) = (join("modes"), join("scenes"));
+                // the saved form learns them too, so filling in isn't an unsaved change
+                let ed = &mut app.build.rules;
+                for d in [ed.edit.as_mut(), ed.base.as_mut()].into_iter().flatten().filter(|d| d.orig.as_deref() == Some(name.as_str())) {
+                    d.cooldown_global = global.clone();
+                    d.cooldown_actor = actor.clone();
+                    d.modes = modes.clone();
+                    d.scenes = scenes.clone();
+                    d.filled = true;
+                }
             }
             app.m.query_as(&format!("project.read:{file}"), "project.read", Value::map().with("path", file));
         }
     }
 }
 
-/// Lists behind the step pickers (quick effects, modes, cue lists, looks, overlays, sounds,
-/// mixes, timelines), refreshed slowly.
+/// Lists behind the step pickers (saved actions, modes, cue lists, looks, animations, sounds,
+/// mixes, timelines, notifications), refreshed slowly.
 fn fetch_lists(app: &mut App, now: f64) {
     if !app.m.connected || now - app.build.rules.lists_at < 5.0 {
         return;
     }
     app.build.rules.lists_at = now;
-    for q in ["presets", "modes", "lights.cuelists", "lights.palettes", "patches", "audio.mix", "mixer.snapshots", "timelines"] {
+    for q in ["presets", "modes", "lights.cuelists", "lights.palettes", "patches", "audio.mix", "mixer.snapshots", "timelines", "alerts.config"] {
         app.m.query(q, Value::Null);
     }
 }
@@ -1561,121 +1883,101 @@ fn file_text(app: &App, file: &str) -> Option<String> {
     app.m.q(&format!("project.read:{file}")).and_then(|v| v.get_path("text")).and_then(Value::as_str).map(String::from)
 }
 
-fn editor(app: &mut App, ui: &mut egui::Ui, t: &Theme) {
+fn detail(app: &mut App, ui: &mut egui::Ui, t: &Theme) {
     if app.build.rules.edit.is_none() {
-        let mut new = false;
-        widgets::panel(ui, t, |ui| {
-            ui.set_width(ui.available_width());
-            new = widgets::empty_state(
-                ui,
-                t,
-                icon::BOLT,
-                "Pick a reaction to change it",
-                "Or make a new one with New reaction: choose what happens, then what Stream Engine does.",
-                Some("New reaction"),
-            );
-        });
-        if new {
+        if !app.m.connected {
+            widgets::empty_state(ui, t, icon::WARN, "Stream Engine isn't running", "Your triggers show up here once it's running.", None);
+        } else if widgets::empty_state(
+            ui,
+            t,
+            icon::BOLT,
+            "Pick a trigger",
+            "A trigger does something by itself when something happens on stream, in the music or in your show.",
+            Some("New trigger"),
+        ) {
             app.build.rules.new_rule();
         }
         return;
     }
     fill(app);
-    fetch_lists(app, ui.input(|i| i.time));
     sync_rows(app);
+    sync_test_args(app);
     let names = Names::read(app);
+    header(app, ui, t, &names);
     egui::ScrollArea::vertical().id_salt("rule-editor").auto_shrink([false, false]).show(ui, |ui| {
-        // wide screens: WHEN / ONLY IF beside DO / limits
-        let full = ui.available_width();
-        let two = full >= 1500.0;
-        let col = ((full - spacing::L) / 2.0).floor();
-        ui.set_max_width(if two { full } else { full.min(1080.0) });
-        header(app, ui, t, &names);
-        ui.add_space(spacing::L);
-        if two {
-            ui.horizontal_top(|ui| {
-                ui.allocate_ui_with_layout(Vec2::new(col, 0.0), Layout::top_down(Align::Min), |ui| {
-                    when_card(app, ui, t, &names);
-                    ui.add_space(spacing::L);
-                    if_card(app, ui, t, &names);
-                });
-                ui.add_space(spacing::L - ui.spacing().item_spacing.x);
-                ui.allocate_ui_with_layout(Vec2::new(col, 0.0), Layout::top_down(Align::Min), |ui| {
-                    do_card(app, ui, t);
-                    ui.add_space(spacing::L);
-                    limits_card(app, ui, t, &names);
-                    ui.add_space(spacing::M);
-                    footer(app, ui, t);
-                });
-            });
-        } else {
-            when_card(app, ui, t, &names);
-            ui.add_space(spacing::L);
-            if_card(app, ui, t, &names);
-            ui.add_space(spacing::L);
-            do_card(app, ui, t);
-            ui.add_space(spacing::L);
-            limits_card(app, ui, t, &names);
-            ui.add_space(spacing::M);
-            footer(app, ui, t);
-        }
+        ui.set_max_width(ui.available_width().min(980.0));
+        when_section(app, ui, t, &names);
+        if_section(app, ui, t, &names);
+        do_section(app, ui, t);
+        try_section(app, ui, t);
+        file_section(app, ui, t);
         ui.add_space(spacing::XL);
     });
 }
 
 fn header(app: &mut App, ui: &mut egui::Ui, t: &Theme, names: &Names) {
-    sync_test_args(app);
     let Some(d) = app.build.rules.edit.clone() else { return };
+    let dirty = app.build.rules.dirty();
+    let is_new = d.orig.is_none();
     let errs = d.errors();
-    let (mut save, mut test, mut close) = (false, false, false);
-    widgets::panel(ui, t, |ui| {
-        ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
-            if let Some(e) = app.build.rules.edit.as_mut() {
-                widgets::toggle(ui, t, &mut e.enabled).on_hover_text("Off keeps it saved, but it won't happen.");
-                ui.label(RichText::new(if e.enabled { "On" } else { "Off" }).color(t.text_dim));
-                ui.add_space(spacing::S);
-            }
-            let title = if d.orig.is_none() { "New reaction" } else { "Reaction" };
-            ui.label(RichText::new(title).font(font_semibold(type_scale::BODY)).color(t.text_dim));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let tip = if errs.is_empty() { "Save this reaction" } else { "Finish the notes below first" };
-                close = widgets::icon_button(ui, t, icon::CROSS, "Close").clicked();
-                save = widgets::button_ex(ui, t, Some(icon::CHECK), "Save", Kind::Primary, Size::Medium, 0.0, errs.is_empty()).on_hover_text(tip).clicked();
-                test = widgets::button_ex(ui, t, Some(icon::PLAY), "Test it", Kind::Secondary, Size::Medium, 0.0, !d.when.trim().is_empty())
-                    .on_hover_text("Plays the event as if it really happened. Save first to test your changes.")
-                    .clicked();
-            });
-        });
-        ui.add_space(spacing::S);
-        ui.add(egui::Label::new(RichText::new(when_phrase(&d.when, &d.cond)).font(font_semibold(type_scale::HEADING)).color(t.fg)).wrap());
-        ui.add(egui::Label::new(RichText::new(format!("→ {}", do_phrase(&d.commands, names))).size(type_scale::LARGE).color(t.text_dim)).wrap());
-        if !errs.is_empty() {
-            ui.add_space(spacing::M);
-            widgets::callout(ui, t, widgets::Tone::Warn, icon::WARN, "Almost there", &errs.join("\n"), None);
+    let (mut save, mut discard, mut test) = (false, false, false);
+    let mut on = d.enabled;
+    let mut flipped = false;
+    let title = if d.when.trim().is_empty() { "New trigger".to_string() } else { when_phrase(&d.when, &d.cond) };
+    widgets::detail_header(ui, t, event_icon(&d.when), &title, &format!("→ {}", do_phrase(&d.commands, names)), |ui| {
+        if dirty {
+            let (label, tip) = if is_new { ("Create", "Save this trigger") } else { ("Save", "Save your changes") };
+            let tip = if errs.is_empty() { tip } else { "Finish the notes below first" };
+            save = widgets::button_ex(ui, t, Some(icon::CHECK), label, Kind::Primary, Size::Medium, 0.0, errs.is_empty()).on_hover_text(tip).clicked();
+            discard = widgets::button_ex(ui, t, None, if is_new { "Cancel" } else { "Discard" }, Kind::Ghost, Size::Medium, 0.0, true).clicked();
         }
+        test = widgets::button_ex(ui, t, Some(icon::PLAY), "Test", Kind::Secondary, Size::Medium, 0.0, !d.when.trim().is_empty() && !is_new)
+            .on_hover_text(if is_new { "Create it first, then test it." } else { "Plays the event as if it really happened (the saved version)." })
+            .clicked();
+        ui.add_space(spacing::S);
+        flipped = widgets::toggle(ui, t, &mut on).on_hover_text(if on { "On: it runs when this happens." } else { "Off: kept, but it won't run." }).changed();
     });
+    if dirty && !errs.is_empty() {
+        let (tone, title) = if is_new { (widgets::Tone::Info, "To create it") } else { (widgets::Tone::Warn, "Almost there") };
+        widgets::callout(ui, t, tone, icon::INFO, title, &errs.join("\n"), None);
+        ui.add_space(spacing::M);
+    }
+    let ed = &mut app.build.rules;
+    if flipped {
+        for x in [ed.edit.as_mut(), ed.base.as_mut()].into_iter().flatten() {
+            x.enabled = on;
+        }
+        // a saved trigger switches right away, and stays that way
+        if let Some(e) = ed.edit.clone().filter(|e| e.orig.is_some()) {
+            let text = file_text(app, &e.file);
+            app.m.text(&format!("{} '{}'", if on { "rule.enable" } else { "rule.disable" }, e.name.trim()));
+            app.m.action("project.write", e.enabled_args(text.as_deref()));
+            app.m.refresh_soon();
+        }
+    }
     if save {
-        let mut d = d.clone();
+        let mut d = app.build.rules.edit.clone().unwrap_or_else(|| d.clone());
         if d.name.trim().is_empty() {
             let taken: Vec<String> = app.m.q_list("rules").iter().filter_map(|r| r.get_path("name").and_then(Value::as_str).map(String::from)).collect();
             d.name = d.auto_name(&taken);
         }
         let text = file_text(app, &d.file);
         app.m.action("project.write", d.write_args(text.as_deref()));
-        if let Some(e) = app.build.rules.edit.as_mut() {
-            e.name = d.name.clone();
-            e.orig = Some(d.name.trim().to_string());
-        }
-        app.m.toast("Reaction saved.", false);
+        d.orig = Some(d.name.trim().to_string());
+        app.build.rules.base = Some(d.clone());
+        app.build.rules.edit = Some(d.clone());
+        app.m.toast(if is_new { "Trigger created." } else { "Trigger saved." }, false);
         app.m.refresh_soon();
         app.m.query_as(&format!("project.read:{}", d.file), "project.read", Value::map().with("path", d.file.clone()));
     }
+    if discard {
+        let ed = &mut app.build.rules;
+        ed.edit = ed.base.clone();
+        ed.rows_src = None;
+        ed.other_event = ed.edit.as_ref().is_some_and(|d| !d.when.is_empty() && trigger_index(&d.when).is_none());
+    }
     if test {
         app.m.text(&d.test_command());
-    }
-    if close {
-        app.build.rules.edit = None;
     }
 }
 
@@ -1687,42 +1989,40 @@ fn sync_test_args(app: &mut App) {
     d.test_args = args.join(" ");
 }
 
-fn when_card(app: &mut App, ui: &mut egui::Ui, t: &Theme, names: &Names) {
+fn when_section(app: &mut App, ui: &mut egui::Ui, t: &Theme, names: &Names) {
     let when = app.build.rules.edit.as_ref().map(|d| d.when.clone()).unwrap_or_default();
-    let cur = trigger_index(&when);
-    let mut pick: Option<String> = None;
-    widgets::titled(
+    let other = app.build.rules.other_event;
+    let cur = if other { None } else { trigger_index(&when) };
+    let (mut pick, mut pick_other) = (None::<String>, false);
+    widgets::inspector_section(
         ui,
         t,
-        "When this happens",
-        "",
+        "rule-when",
+        "When",
+        true,
         |_| {},
         |ui| {
-            ui.set_width(ui.available_width());
-            for (group, title) in [(Group::Viewers, "From your viewers"), (Group::Show, "From your show")] {
-                widgets::section(ui, t, "", title);
+            for fam in Family::PICKER {
+                widgets::group_label(ui, t, fam.title());
                 ui.horizontal_wrapped(|ui| {
-                    for (i, tr) in TRIGGERS.iter().enumerate().filter(|(_, x)| x.group == group) {
+                    for (i, tr) in TRIGGERS.iter().enumerate().filter(|(_, x)| x.family == fam) {
                         let on = cur == Some(i);
                         if chip(ui, t, tr.icon, tr.label, on).clicked() && !on {
                             pick = Some(tr.pattern.to_string());
                         }
                     }
-                    if group == Group::Show {
-                        let on = cur.is_none();
-                        if chip(ui, t, icon::EDIT, "Something else…", on).clicked() && !on {
-                            pick = Some(String::new());
-                        }
-                    }
                 });
-                ui.add_space(spacing::S);
+            }
+            ui.add_space(spacing::S);
+            if chip(ui, t, icon::EDIT, "Something else…", other).clicked() && !other {
+                pick_other = true;
             }
             let mode = when.strip_prefix("mode.enter.").map(|m| ("mode.enter.", m)).or_else(|| when.strip_prefix("mode.exit.").map(|m| ("mode.exit.", m)));
-            if let Some((prefix, m)) = mode {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Which mode").color(t.text_dim));
+            if let Some((prefix, m)) = mode.filter(|_| !other) {
+                ui.add_space(spacing::S);
+                widgets::prop_row(ui, t, "Which mode", |ui| {
                     let text = if m == "*" || m.is_empty() { "Any mode".to_string() } else { Names::label(&names.modes, m) };
-                    egui::ComboBox::from_id_salt("rule-when-mode").width(200.0).selected_text(text).show_ui(ui, |ui| {
+                    egui::ComboBox::from_id_salt("rule-when-mode").width(220.0).selected_text(text).show_ui(ui, |ui| {
                         if ui.selectable_label(m == "*", "Any mode").clicked() {
                             pick = Some(format!("{prefix}*"));
                         }
@@ -1734,57 +2034,79 @@ fn when_card(app: &mut App, ui: &mut egui::Ui, t: &Theme, names: &Names) {
                     });
                 });
             }
-            if cur.is_none() {
-                ui.label(RichText::new("Event name").color(t.text_dim));
-                field(app, ui, "when", "Start typing, then pick a suggestion", |d| &mut d.when);
-                widgets::hint(ui, t, "Suggestions appear as you type. Recent events are included.");
+            if other {
+                ui.add_space(spacing::S);
+                widgets::prop_row(ui, t, "Event name", |ui| {
+                    ui.vertical(|ui| {
+                        field(app, ui, "when", "Start typing, then pick a suggestion", |d| &mut d.when);
+                        widgets::hint(ui, t, "Suggestions include events that happened recently.");
+                    });
+                });
             }
         },
     );
-    if let (Some(p), Some(d)) = (pick, app.build.rules.edit.as_mut()) {
+    let ed = &mut app.build.rules;
+    if let (Some(p), Some(d)) = (pick, ed.edit.as_mut()) {
         d.when = p;
+        ed.other_event = false;
+    }
+    if pick_other {
+        ed.other_event = true;
+        if let Some(d) = ed.edit.as_mut().filter(|d| trigger_index(&d.when).is_some()) {
+            d.when.clear();
+        }
     }
 }
 
-fn if_card(app: &mut App, ui: &mut egui::Ui, t: &Theme, names: &Names) {
+fn if_section(app: &mut App, ui: &mut egui::Ui, t: &Theme, names: &Names) {
     let when = app.build.rules.edit.as_ref().map(|d| d.when.clone()).unwrap_or_default();
     let fields = fields_for(&when);
     let custom = app.build.rules.custom_cond;
     let mut rows = app.build.rules.rows.clone();
-    let mut changed = false;
-    let mut clear = false;
-    widgets::titled(
+    let (mut changed, mut clear) = (false, false);
+    widgets::inspector_section(
         ui,
         t,
+        "rule-if",
         "Only if",
-        "Optional. Leave it empty to react every time.",
+        true,
         |_| {},
         |ui| {
-            ui.set_width(ui.available_width());
+            widgets::hint(ui, t, "Optional. Leave it all empty to run every time.");
+            ui.add_space(spacing::S);
             if custom {
-                widgets::hint(ui, t, "This reaction uses a custom check. Change it here, or clear it to use the simple choices.");
+                widgets::hint(ui, t, "This trigger uses a custom check. Change it here, or clear it to use the simple choices.");
                 field(app, ui, "if", "event.bits >= 1000 && mode == 'live'", |d| &mut d.cond);
                 clear = widgets::button_ex(ui, t, Some(icon::BROOM), "Clear the check", Kind::Secondary, Size::Small, 0.0, true).clicked();
-                return;
+            } else {
+                let mut remove = None;
+                for (i, c) in rows.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        changed |= cond_row(ui, i, c, &fields, names);
+                        if widgets::icon_button(ui, t, icon::CROSS, "Remove this check").clicked() {
+                            remove = Some(i);
+                        }
+                    });
+                }
+                if let Some(i) = remove {
+                    rows.remove(i);
+                    changed = true;
+                }
+                let label = if rows.is_empty() { "Add a check" } else { "Add another check" };
+                if widgets::button_ex(ui, t, Some(icon::PLUS), label, Kind::Secondary, Size::Small, 0.0, true).clicked() {
+                    rows.push(Cond::new(fields.iter().copied().find(|f| field_info(f).1 == Some(FieldKind::Num)).unwrap_or("mode")));
+                    changed = true;
+                }
             }
-            let mut remove = None;
-            for (i, c) in rows.iter_mut().enumerate() {
-                ui.horizontal(|ui| {
-                    changed |= cond_row(ui, i, c, &fields, names);
-                    if widgets::icon_button(ui, t, icon::CROSS, "Remove this check").clicked() {
-                        remove = Some(i);
-                    }
-                });
-            }
-            if let Some(i) = remove {
-                rows.remove(i);
-                changed = true;
-            }
-            let label = if rows.is_empty() { "Add a check" } else { "Add another check" };
-            if widgets::button_ex(ui, t, Some(icon::PLUS), label, Kind::Secondary, Size::Small, 0.0, true).clicked() {
-                rows.push(Cond::new(fields.iter().copied().find(|f| field_info(f).1 == Some(FieldKind::Num)).unwrap_or("mode")));
-                changed = true;
-            }
+            ui.add_space(spacing::M);
+            let Some(d) = app.build.rules.edit.as_mut() else { return };
+            widgets::prop_row(ui, t, "Don't repeat for", |ui| {
+                ui.add(widgets::field(&mut d.cooldown_global).hint_text("10s").desired_width(80.0));
+                widgets::hint(ui, t, "Same viewer waits");
+                ui.add(widgets::field(&mut d.cooldown_actor).hint_text("5m").desired_width(80.0));
+            });
+            widgets::prop_row(ui, t, "Show modes", |ui| limit_chips(ui, t, &mut d.modes, &names.modes, "Any mode"));
+            widgets::prop_row(ui, t, "Scenes", |ui| limit_chips(ui, t, &mut d.scenes, &names.scenes, "Any scene"));
         },
     );
     let ed = &mut app.build.rules;
@@ -1839,7 +2161,7 @@ fn cond_row(ui: &mut egui::Ui, i: usize, c: &mut Cond, fields: &[&str], names: &
             });
         }
         FieldKind::Num => {
-            changed |= ui.add(se_ui_kit::widgets::field(&mut c.value).hint_text("1000").desired_width(90.0)).changed();
+            changed |= ui.add(widgets::field(&mut c.value).hint_text("1000").desired_width(90.0)).changed();
         }
         FieldKind::Strength => {
             let mut v = c.value.trim().parse::<f32>().unwrap_or(0.5).clamp(0.0, 1.0);
@@ -1851,27 +2173,25 @@ fn cond_row(ui: &mut egui::Ui, i: usize, c: &mut Cond, fields: &[&str], names: &
             ui.label(format!("{:.0}%", v * 100.0));
         }
         FieldKind::Text => {
-            changed |= ui.add(se_ui_kit::widgets::field(&mut c.value).hint_text("Type the text").desired_width(200.0)).changed();
+            changed |= ui.add(widgets::field(&mut c.value).hint_text("Type the text").desired_width(200.0)).changed();
         }
     }
     changed
 }
 
-fn do_card(app: &mut App, ui: &mut egui::Ui, t: &Theme) {
+fn do_section(app: &mut App, ui: &mut egui::Ui, t: &Theme) {
     let Some((mut cmds, when)) = app.build.rules.edit.as_ref().map(|d| (d.commands.clone(), d.when.clone())) else { return };
     let mut changed = false;
-    widgets::titled(
+    widgets::inspector_section(
         ui,
         t,
-        "Do this",
-        "Top to bottom, in order.",
+        "rule-do",
+        "Do",
+        true,
         |_| {},
         |ui| {
-            ui.set_width(ui.available_width());
-            if cmds.is_empty() {
-                widgets::hint(ui, t, "Nothing yet. Add the first thing it should do.");
-                ui.add_space(spacing::S);
-            }
+            widgets::hint(ui, t, "Top to bottom, in order.");
+            ui.add_space(spacing::S);
             changed = steps_editor(app, ui, "", &mut cmds, &when);
         },
     );
@@ -1880,21 +2200,154 @@ fn do_card(app: &mut App, ui: &mut egui::Ui, t: &Theme) {
     }
 }
 
-/// The guided step rows plus "Add a step", editing command lines in place: a reaction's "Do
-/// this", a scene's "When this scene comes on". `salt` keeps the widgets of different lists
-/// apart; `when` is the event the steps answer (for the chat message "Insert" chips; empty =
-/// none). Returns true when `cmds` changed.
+/// Pretend values for testing (the event's numbers and names) and a Test button.
+fn try_section(app: &mut App, ui: &mut egui::Ui, t: &Theme) {
+    let Some(d) = app.build.rules.edit.clone() else { return };
+    if d.orig.is_none() {
+        return;
+    }
+    let mut test = false;
+    widgets::inspector_section(
+        ui,
+        t,
+        "rule-try",
+        "Test with pretend values",
+        false,
+        |_| {},
+        |ui| {
+            let fields: Vec<&str> = fields_for(&d.when)
+                .into_iter()
+                .filter(|f| matches!(field_info(f).1, Some(FieldKind::Num | FieldKind::Strength | FieldKind::Text)) && !matches!(*f, "page" | "currency"))
+                .take(3)
+                .collect();
+            let vals = &mut app.build.rules.test_vals;
+            vals.retain(|(k, _)| fields.contains(&k.as_str()));
+            for f in &fields {
+                if !vals.iter().any(|(k, _)| k == f) {
+                    vals.push((f.to_string(), String::new()));
+                }
+            }
+            if vals.is_empty() {
+                widgets::hint(ui, t, "This event has nothing to fill in.");
+            }
+            for (k, v) in vals.iter_mut() {
+                let sample = match k.as_str() {
+                    "bits" => "1500",
+                    "viewers" => "25",
+                    "tier" => "2",
+                    "months" => "6",
+                    "count" => "5",
+                    "amount" => "5",
+                    "cost" => "500",
+                    "velocity" => "0.8",
+                    "user" | "from" => "Alex",
+                    "reward" => "Hydrate",
+                    _ => "",
+                };
+                widgets::prop_row(ui, t, &field_info(k).0, |ui| {
+                    ui.add(widgets::field(v).hint_text(sample).desired_width(if field_info(k).1 == Some(FieldKind::Text) { 200.0 } else { 100.0 }));
+                });
+            }
+            ui.add_space(spacing::S);
+            test = widgets::button_ex(ui, t, Some(icon::PLAY), "Test with these", Kind::Secondary, Size::Small, 0.0, !d.when.trim().is_empty())
+                .on_hover_text("Plays the event as if it really happened, with these values. Nothing is sent to Twitch.")
+                .clicked();
+        },
+    );
+    if test {
+        sync_test_args(app);
+        if let Some(d) = app.build.rules.edit.as_ref() {
+            app.m.text(&d.test_command());
+        }
+    }
+}
+
+/// Name, file, the exact text the engine runs, and delete.
+fn file_section(app: &mut App, ui: &mut egui::Ui, t: &Theme) {
+    let Some(d) = app.build.rules.edit.clone() else { return };
+    let mut delete = false;
+    widgets::inspector_section(
+        ui,
+        t,
+        "rule-file",
+        "File",
+        false,
+        |_| {},
+        |ui| {
+            widgets::prop_row(ui, t, "Name", |ui| {
+                if let Some(e) = app.build.rules.edit.as_mut() {
+                    ui.add(widgets::field(&mut e.name).hint_text("Made from the sentence when you save").desired_width(320.0));
+                }
+            });
+            widgets::prop_row(ui, t, "Saved in", |ui| {
+                if let Some(e) = app.build.rules.edit.as_mut() {
+                    if e.orig.is_none() {
+                        ui.add(widgets::field(&mut e.file).font(font_mono(type_scale::SMALL + 0.5)).desired_width(240.0));
+                    } else {
+                        ui.label(RichText::new(&e.file).font(font_mono(type_scale::SMALL + 0.5)).color(t.fg));
+                    }
+                }
+                if widgets::button_ex(ui, t, Some(icon::CONSOLE), "Open the file", Kind::Ghost, Size::Small, 0.0, d.orig.is_some()).clicked() {
+                    app.open_in_editor(&d.file, None);
+                }
+            });
+            widgets::hint(ui, t, "Buttons and chat commands use the name to switch it on or off. Below: the exact text Stream Engine runs.");
+            ui.add_space(spacing::S);
+            ui.label(RichText::new("When").color(t.text_dim));
+            field(app, ui, "raw-when", "twitch.cheer · mode.enter.brb · band.drop", |d| &mut d.when);
+            ui.label(RichText::new("Only if").color(t.text_dim));
+            field(app, ui, "raw-if", "event.bits >= 1000 && mode == 'live'", |d| &mut d.cond);
+            ui.label(RichText::new("Do (one command per line, in order; wait 2s pauses)").color(t.text_dim));
+            let n = app.build.rules.edit.as_ref().map_or(0, |d| d.commands.len());
+            for i in 0..n {
+                field(app, ui, &format!("raw-do:{i}"), "preset.fire hype · bot.say 'thanks {user}!'", move |d| &mut d.commands[i]);
+            }
+            if d.orig.is_some() {
+                ui.add_space(spacing::M);
+                ui.horizontal(|ui| {
+                    delete = widgets::hold_button(ui, t, "Delete trigger", t.bright_red, 0.6);
+                    widgets::hint(ui, t, "Press and hold to delete.");
+                });
+            }
+        },
+    );
+    if delete {
+        let text = file_text(app, &d.file);
+        if let Some(args) = d.delete_args(text.as_deref()) {
+            app.m.action("project.write", args);
+            app.m.toast(format!("Deleted “{}”.", d.name.trim()), false);
+        }
+        app.build.rules.edit = None;
+        app.build.rules.base = None;
+        app.m.refresh_soon();
+    }
+}
+
+// ---- steps ---------------------------------------------------------------------------------------
+
+/// The guided step rows plus "Add a step", editing command lines in place: a trigger's "Do",
+/// a saved action's steps, a scene's "When this scene comes on". `salt` keeps the widgets of
+/// different lists apart; `when` is the event the steps answer (for the chat message "Insert"
+/// chips; empty = none). Returns true when `cmds` changed.
 pub fn steps_editor(app: &mut App, ui: &mut egui::Ui, salt: &str, cmds: &mut Vec<String>, when: &str) -> bool {
     let t = app.t.clone();
     fetch_lists(app, ui.input(|i| i.time));
     let names = Names::read(app);
+    let layers = if cmds.iter().any(|c| matches!(parse_step(c).0, Step::LayerFx | Step::LayerVisible)) { Layers::read(app) } else { Layers::default() };
     let (mut edit, mut remove, mut up) = (None, None, None);
     for (i, cmd) in cmds.iter().enumerate() {
-        step_row(app, ui, &t, &names, salt, i, cmd, when, &mut edit, &mut remove, &mut up);
+        step_row(app, ui, &t, (&names, &layers), salt, i, cmd, when, &mut edit, &mut remove, &mut up);
         ui.add_space(spacing::XS);
     }
+    if cmds.is_empty() {
+        widgets::hint(ui, &t, "Nothing yet. Add the first thing it should do.");
+    }
     ui.add_space(spacing::XS);
-    let add = widgets::button_ex(ui, &t, Some(icon::PLUS), "Add a step", Kind::Secondary, Size::Small, 0.0, true).clicked();
+    let mut add = None;
+    egui::ComboBox::from_id_salt((salt, "rule-step-add"))
+        .width(240.0)
+        .selected_text(RichText::new(format!("{}  Add a step", icon::PLUS)).color(t.fg))
+        .show_ui(ui, |ui| step_menu(ui, None, &mut add));
     let mut changed = false;
     if let Some((i, c)) = edit
         && let Some(slot) = cmds.get_mut(i)
@@ -1916,22 +2369,34 @@ pub fn steps_editor(app: &mut App, ui: &mut egui::Ui, salt: &str, cmds: &mut Vec
         cmds.remove(i);
         changed = true;
     }
-    if add {
-        cmds.push(Step::Preset.blank());
+    if let Some(k) = add {
+        cmds.push(k.blank());
         changed = true;
     }
     changed
 }
 
-/// What a step still needs before it can run, in words ("pick a quick effect"); `None` = ready.
+/// The step kinds, grouped, as selectable rows.
+fn step_menu(ui: &mut egui::Ui, cur: Option<Step>, pick: &mut Option<Step>) {
+    for (g, group) in Step::MENU.iter().enumerate() {
+        if g > 0 {
+            ui.separator();
+        }
+        for &s in *group {
+            if ui.selectable_label(cur == Some(s), format!("{}  {}", s.icon(), s.label())).clicked() && cur != Some(s) {
+                *pick = Some(s);
+            }
+        }
+    }
+}
+
+/// What a step still needs before it can run, in words ("pick a saved action"); `None` = ready.
 pub fn step_missing(cmd: &str) -> Option<String> {
     if cmd.trim().is_empty() {
         return Some("say what it should do".into());
     }
     let (kind, args) = parse_step(cmd);
-    if let Some(what) = kind.missing()
-        && args.iter().all(|a| a.trim().is_empty())
-    {
+    if let Some(what) = kind.missing(&args) {
         return Some(what.into());
     }
     Op::parse(cmd).err().map(|e| format!("fix a mistake: {e}"))
@@ -1948,7 +2413,7 @@ pub fn pick_name(
 ) -> Option<String> {
     if opts.is_empty() {
         let mut s = cur.to_string();
-        return ui.add(se_ui_kit::widgets::field(&mut s).hint_text(placeholder).desired_width(width)).changed().then_some(s);
+        return ui.add(widgets::field(&mut s).hint_text(placeholder).desired_width(width)).changed().then_some(s);
     }
     let text = if cur.is_empty() { placeholder.to_string() } else { Names::label(opts, cur) };
     let mut out = None;
@@ -1962,12 +2427,17 @@ pub fn pick_name(
     out
 }
 
+/// Steps whose pickers always go on their own line under the step's kind.
+fn wide(kind: Step) -> bool {
+    matches!(kind, Step::LayerFx | Step::LayerVisible | Step::Setting | Step::Notify | Step::Custom)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn step_row(
     app: &mut App,
     ui: &mut egui::Ui,
     t: &Theme,
-    names: &Names,
+    (names, layers): (&Names, &Layers),
     salt: &str,
     i: usize,
     cmd: &str,
@@ -1981,22 +2451,21 @@ fn step_row(
     egui::Frame::new().fill(t.surface_hi).corner_radius(CornerRadius::same(radius::CONTROL)).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         // narrow places (a side panel): what to pick goes on its own line
-        let narrow = ui.available_width() < 560.0;
+        let own_line = wide(kind) || ui.available_width() < 560.0;
         let mut new_cmd = None;
         ui.horizontal(|ui| {
             ui.label(RichText::new(format!("{}", i + 1)).font(font_semibold(type_scale::BODY)).color(t.text_dim));
-            ui.label(RichText::new(kind.icon()).color(t.accent));
-            let mut k = kind;
-            let kind_w = if narrow { (ui.available_width() - 70.0).max(120.0) } else { 210.0 };
-            egui::ComboBox::from_id_salt((salt, "rule-step-kind", i)).width(kind_w).selected_text(kind.label()).show_ui(ui, |ui| {
-                for s in Step::ALL {
-                    ui.selectable_value(&mut k, s, s.label());
-                }
-            });
-            if k != kind {
+            ui.label(RichText::new(kind.icon()).color(t.text_dim));
+            let mut k = None;
+            let kind_w = if own_line { (ui.available_width() - 70.0).clamp(120.0, 260.0) } else { 220.0 };
+            egui::ComboBox::from_id_salt((salt, "rule-step-kind", i))
+                .width(kind_w)
+                .selected_text(kind.label())
+                .show_ui(ui, |ui| step_menu(ui, Some(kind), &mut k));
+            if let Some(k) = k {
                 *edit = Some((i, if k == Step::Custom { cmd.to_string() } else { k.blank() }));
             }
-            if !narrow {
+            if !own_line {
                 let w = (ui.available_width() - 90.0).clamp(140.0, 360.0);
                 new_cmd = step_args(ui, t, names, (salt, i), kind, &args, w);
             }
@@ -2009,24 +2478,40 @@ fn step_row(
                 }
             });
         });
-        if narrow && !matches!(kind, Step::Custom) {
-            ui.horizontal(|ui| {
-                let w = ui.available_width();
-                new_cmd = step_args(ui, t, names, (salt, i), kind, &args, w);
-            });
+        if own_line {
+            ui.add_space(spacing::XS);
+            let id = (salt, i);
+            match kind {
+                Step::LayerFx | Step::LayerVisible => new_cmd = layer_args(ui, t, names, layers, id, kind, &args),
+                Step::Setting => new_cmd = setting_args(app, ui, t, &format!("addr:{salt}{i}"), &args),
+                Step::Notify => {
+                    let (c, open) = notify_args(ui, t, names, id, &args, when);
+                    new_cmd = c;
+                    if open {
+                        app.open_view(ViewId::Alerts);
+                    }
+                }
+                Step::Custom => {
+                    let mut s = cmd.to_string();
+                    if text_field(app, ui, &format!("{salt}do:{i}"), "e.g. preset.fire hype · bot.say 'thanks {user}!'", &mut s) {
+                        new_cmd = Some(s);
+                    }
+                    if !cmd.trim().is_empty() {
+                        widgets::hint(ui, t, &format!("Does: {}", custom_phrase(cmd)));
+                    }
+                }
+                _ => {
+                    ui.horizontal(|ui| {
+                        let w = ui.available_width();
+                        new_cmd = step_args(ui, t, names, id, kind, &args, w);
+                    });
+                }
+            }
         }
         if let Some(c) = new_cmd {
             *edit = Some((i, c));
         }
-        if kind == Step::Custom {
-            let mut s = cmd.to_string();
-            if text_field(app, ui, &format!("{salt}do:{i}"), "e.g. preset.fire hype · bot.say 'thanks {user}!'", &mut s) {
-                *edit = Some((i, s));
-            }
-            if !cmd.trim().is_empty() {
-                widgets::hint(ui, t, &format!("Does: {}", custom_phrase(cmd)));
-            }
-        } else if kind == Step::Say {
+        if kind == Step::Say {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("Insert").color(t.text_dim));
                 let extra =
@@ -2046,13 +2531,13 @@ fn step_row(
     });
 }
 
-/// The pickers of one step (what to fire, which scene, …). Returns the new command line.
+/// The pickers of one simple step (what to run, which scene, …). Returns the new command line.
 fn step_args(ui: &mut egui::Ui, t: &Theme, names: &Names, id: (&str, usize), kind: Step, args: &[String], w: f32) -> Option<String> {
     let a0 = args.first().cloned().unwrap_or_default();
     let pid = (id.0, "rule-step-arg", id.1);
     let new_arg = match kind {
-        Step::Preset | Step::Release => pick_name(ui, pid, &a0, &names.presets, "Pick an effect", w),
-        Step::Overlay => pick_name(ui, pid, &a0, &names.overlays, "Pick an overlay", w),
+        Step::Preset | Step::Release => pick_name(ui, pid, &a0, &names.presets, "Pick a saved action", w),
+        Step::Animation => pick_name(ui, pid, &a0, &names.animations, "Pick a source", w),
         Step::Scene | Step::Preview => pick_name(ui, pid, &a0, &names.scenes, "Pick a scene", w),
         Step::Look => pick_name(ui, pid, &a0, &names.looks, "Pick a look", w),
         Step::Sound => pick_name(ui, pid, &a0, &names.sounds, "Pick a sound", w),
@@ -2066,28 +2551,138 @@ fn step_args(ui: &mut egui::Ui, t: &Theme, names: &Names, id: (&str, usize), kin
                 out = Some(build_step(kind, &[&l, &cue]));
             }
             let mut c = cue.clone();
-            if ui.add(se_ui_kit::widgets::field(&mut c).hint_text("cue (optional)").desired_width(90.0)).changed() {
+            if ui.add(widgets::field(&mut c).hint_text("cue (optional)").desired_width(90.0)).changed() {
                 out = Some(build_step(kind, &[&a0, &c]));
             }
             return out;
         }
         Step::Say => {
             let mut s = a0.clone();
-            ui.add(se_ui_kit::widgets::field(&mut s).hint_text("Thanks for the support!").desired_width(w)).changed().then_some(s)
+            ui.add(widgets::field(&mut s).hint_text("Thanks for the support!").desired_width(w)).changed().then_some(s)
         }
         Step::Wait => {
             let mut s = a0.clone();
-            let r = ui.add(se_ui_kit::widgets::field(&mut s).hint_text("2s").desired_width(70.0)).changed().then_some(s);
+            let r = ui.add(widgets::field(&mut s).hint_text("2s").desired_width(70.0)).changed().then_some(s);
             widgets::hint(ui, t, "like 2s or 1m");
             r
         }
         Step::Marker => {
             let mut s = a0.clone();
-            ui.add(se_ui_kit::widgets::field(&mut s).hint_text("What happened (optional)").desired_width(w)).changed().then_some(s)
+            ui.add(widgets::field(&mut s).hint_text("What happened (optional)").desired_width(w)).changed().then_some(s)
         }
-        Step::Custom => None,
+        Step::LayerFx | Step::LayerVisible | Step::Setting | Step::Notify | Step::Custom => None,
     };
     new_arg.map(|v| build_step(kind, &[&v]))
+}
+
+/// Scene → layer (→ effect) pickers and On / Off / Switch for a layer step.
+fn layer_args(ui: &mut egui::Ui, t: &Theme, names: &Names, layers: &Layers, id: (&str, usize), kind: Step, args: &[String]) -> Option<String> {
+    let fx = kind == Step::LayerFx;
+    let a0 = args.first().map(String::as_str).unwrap_or("");
+    let mode = args.get(1).map(String::as_str).unwrap_or("on");
+    let (s, l, f) = layer_parts(a0).unwrap_or(("", "", None));
+    let scenes: Vec<(String, String)> = layers
+        .scenes(fx)
+        .into_iter()
+        .map(|s| {
+            let label = Names::label(&names.scenes, &s);
+            (s, label)
+        })
+        .collect();
+    if scenes.is_empty() && s.is_empty() {
+        widgets::hint(ui, t, if fx { "No layer has an effect yet. Add one to a layer in Scenes." } else { "No scene has a layer yet." });
+        return None;
+    }
+    let blank_fx = fx.then_some("");
+    let mut addr = None;
+    let mut new_mode = None;
+    ui.horizontal_wrapped(|ui| {
+        let w = ((ui.available_width() - 230.0) / if fx { 3.0 } else { 2.0 }).clamp(110.0, 220.0);
+        if let Some(ns) = pick_name(ui, (id.0, "layer-scene", id.1), s, &scenes, "Scene", w) {
+            addr = Some(layer_addr(&ns, "", blank_fx));
+        }
+        if !s.is_empty() && let Some(nl) = pick_name(ui, (id.0, "layer-layer", id.1), l, &layers.layers(s, fx), "Layer", w) {
+            addr = Some(layer_addr(s, &nl, blank_fx));
+        }
+        if fx && !l.is_empty() && let Some(nf) = pick_name(ui, (id.0, "layer-fx", id.1), f.unwrap_or(""), &layers.effects(s, l), "Effect", w) {
+            addr = Some(layer_addr(s, l, Some(&nf)));
+        }
+        let labels = if fx { ["On", "Off", "Switch"] } else { ["Show", "Hide", "Switch"] };
+        let mut m = match mode {
+            "off" => 1,
+            "toggle" => 2,
+            _ => 0,
+        };
+        if widgets::segmented(ui, t, &mut m, &labels) {
+            new_mode = Some(["on", "off", "toggle"][m]);
+        }
+    });
+    if mode == "toggle" {
+        widgets::hint(ui, t, "Switch flips it each time: on when it's off, off when it's on.");
+    }
+    match (addr, new_mode) {
+        (None, None) => None,
+        (addr, m) => Some(build_step(kind, &[addr.as_deref().unwrap_or(a0), m.unwrap_or(mode)])),
+    }
+}
+
+/// Setting (searchable address), value, and an optional fade for a "Change a setting" step.
+fn setting_args(app: &mut App, ui: &mut egui::Ui, t: &Theme, key: &str, args: &[String]) -> Option<String> {
+    let arg = |i: usize| args.get(i).cloned().unwrap_or_default();
+    let (mut addr, mut v, mut d) = (arg(0), arg(1), arg(2));
+    let mut changed = text_field(app, ui, key, "Search settings, e.g. blur or music volume", &mut addr);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("To").color(t.text_dim));
+        changed |= ui.add(widgets::field(&mut v).hint_text("0.5 · true · #ff0000").desired_width(140.0)).changed();
+        ui.label(RichText::new("Fade over").color(t.text_dim));
+        changed |= ui.add(widgets::field(&mut d).hint_text("no fade").desired_width(90.0)).changed();
+        if !addr.trim().is_empty() {
+            widgets::hint(ui, t, &setting_name(addr.trim()));
+        }
+    });
+    changed.then(|| build_step(Step::Setting, &[&addr, &v, &d]))
+}
+
+/// Which notification to show, and the name it shows. Returns (new command, open Notifications).
+fn notify_args(ui: &mut egui::Ui, t: &Theme, names: &Names, id: (&str, usize), args: &[String], when: &str) -> (Option<String>, bool) {
+    let a0 = args.first().map(String::as_str).unwrap_or("");
+    if names.alerts.is_empty() && a0.is_empty() {
+        let open = widgets::callout(
+            ui,
+            t,
+            widgets::Tone::Info,
+            icon::ALERT,
+            "No notifications set up yet",
+            "Set one up in Notifications, then pick it here.",
+            Some("Open Notifications"),
+        );
+        return (None, open);
+    }
+    let user = args[1.min(args.len())..].iter().find_map(|kv| kv.strip_prefix("user=")).unwrap_or("").to_string();
+    let others: Vec<&String> = args.iter().skip(1).filter(|kv| !kv.starts_with("user=")).collect();
+    let rebuild = |ty: &str, user: &str| {
+        let u = format!("user={user}");
+        let mut parts: Vec<&str> = vec![ty];
+        if !user.trim().is_empty() {
+            parts.push(&u);
+        }
+        parts.extend(others.iter().map(|s| s.as_str()));
+        build_step(Step::Notify, &parts)
+    };
+    let mut out = None;
+    ui.horizontal_wrapped(|ui| {
+        if let Some(ty) = pick_name(ui, (id.0, "notify", id.1), a0, &names.alerts, "Pick a notification", 240.0) {
+            // a viewer's own name when the trigger answers something a viewer did
+            let u = if user.is_empty() && fields_for(when).contains(&"user") { "{user}".to_string() } else { user.clone() };
+            out = Some(rebuild(&ty, &u));
+        }
+        ui.label(RichText::new("Name shown").color(t.text_dim));
+        let mut u = user.clone();
+        if ui.add(widgets::field(&mut u).hint_text("{user}").desired_width(160.0)).changed() {
+            out = Some(rebuild(a0, &u));
+        }
+    });
+    (out, false)
 }
 
 /// Toggle `item` in a comma-separated list.
@@ -2102,7 +2697,8 @@ fn toggle_csv(csv: &mut String, item: &str) {
     *csv = items.join(", ");
 }
 
-fn limit_chips(ui: &mut egui::Ui, t: &Theme, csv: &mut String, known: &[(String, String)]) {
+/// Chips for a limit list; `none` says what an empty pick means.
+fn limit_chips(ui: &mut egui::Ui, t: &Theme, csv: &mut String, known: &[(String, String)], none: &str) {
     let chosen: Vec<String> = csv.split(',').map(str::trim).filter(|x| !x.is_empty()).map(String::from).collect();
     let mut flip = None;
     ui.horizontal_wrapped(|ui| {
@@ -2116,137 +2712,13 @@ fn limit_chips(ui: &mut egui::Ui, t: &Theme, csv: &mut String, known: &[(String,
                 flip = Some(n.clone());
             }
         }
+        if chosen.is_empty() {
+            widgets::hint(ui, t, none);
+        }
     });
     if let Some(n) = flip {
         toggle_csv(csv, &n);
     }
-}
-
-fn limits_card(app: &mut App, ui: &mut egui::Ui, t: &Theme, names: &Names) {
-    widgets::titled(
-        ui,
-        t,
-        "Limits",
-        "Optional. How often and when it may happen.",
-        |_| {},
-        |ui| {
-            ui.set_width(ui.available_width());
-            let Some(d) = app.build.rules.edit.as_mut() else { return };
-            ui.horizontal(|ui| {
-                ui.label("Don't repeat for");
-                ui.add(se_ui_kit::widgets::field(&mut d.cooldown_global).hint_text("10s").desired_width(70.0));
-                ui.add_space(spacing::L);
-                ui.label("The same viewer waits");
-                ui.add(se_ui_kit::widgets::field(&mut d.cooldown_actor).hint_text("5m").desired_width(70.0));
-            });
-            widgets::hint(ui, t, "Times like 10s, 5m or 1h. Leave empty for no limit.");
-            ui.add_space(spacing::M);
-            widgets::section(ui, t, "", "Only during these show modes");
-            limit_chips(ui, t, &mut d.modes, &names.modes);
-            widgets::hint(ui, t, if d.modes.trim().is_empty() { "None picked: any mode." } else { "Click again to remove." });
-            ui.add_space(spacing::M);
-            widgets::section(ui, t, "", "Only on these scenes");
-            limit_chips(ui, t, &mut d.scenes, &names.scenes);
-            widgets::hint(ui, t, if d.scenes.trim().is_empty() { "None picked: any scene." } else { "Click again to remove." });
-        },
-    );
-}
-
-fn footer(app: &mut App, ui: &mut egui::Ui, t: &Theme) {
-    let Some(d) = app.build.rules.edit.clone() else { return };
-    widgets::panel(ui, t, |ui| {
-        ui.set_width(ui.available_width());
-        ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Try it").font(font_semibold(type_scale::BODY)).color(t.fg));
-            let fields: Vec<&str> = fields_for(&d.when)
-                .into_iter()
-                .filter(|f| matches!(field_info(f).1, Some(FieldKind::Num | FieldKind::Strength | FieldKind::Text)) && !matches!(*f, "page" | "currency"))
-                .take(3)
-                .collect();
-            let vals = &mut app.build.rules.test_vals;
-            vals.retain(|(k, _)| fields.contains(&k.as_str()));
-            for f in &fields {
-                if !vals.iter().any(|(k, _)| k == f) {
-                    vals.push((f.to_string(), String::new()));
-                }
-            }
-            for (k, v) in vals.iter_mut() {
-                let sample = match k.as_str() {
-                    "bits" => "1500",
-                    "viewers" => "25",
-                    "tier" => "2",
-                    "months" => "6",
-                    "count" => "5",
-                    "amount" => "5",
-                    "cost" => "500",
-                    "velocity" => "0.8",
-                    "user" => "Alex",
-                    "from" => "Alex",
-                    "reward" => "Hydrate",
-                    _ => "",
-                };
-                ui.label(RichText::new(field_info(k).0).color(t.text_dim));
-                ui.add(se_ui_kit::widgets::field(v).hint_text(sample).desired_width(if field_info(k).1 == Some(FieldKind::Text) { 140.0 } else { 80.0 }));
-            }
-            if widgets::button_ex(ui, t, Some(icon::PLAY), "Test it", Kind::Secondary, Size::Small, 0.0, !d.when.trim().is_empty())
-                .on_hover_text("Plays the event as if it really happened, with these pretend values. Save first to test your changes.")
-                .clicked()
-            {
-                sync_test_args(app);
-                if let Some(d) = app.build.rules.edit.as_ref() {
-                    app.m.text(&d.test_command());
-                }
-            }
-        });
-        ui.add_space(spacing::S);
-        widgets::details(ui, t, "rule-details", "Details", |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Name").color(t.text_dim));
-                if let Some(e) = app.build.rules.edit.as_mut() {
-                    ui.add(se_ui_kit::widgets::field(&mut e.name).hint_text("Made from the sentence when you save").desired_width(320.0));
-                }
-            });
-            widgets::hint(ui, t, "Buttons and chat commands use this name to switch the reaction on or off.");
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Saved in").color(t.text_dim));
-                if let Some(e) = app.build.rules.edit.as_mut() {
-                    if e.orig.is_none() {
-                        ui.add(se_ui_kit::widgets::field(&mut e.file).font(font_mono(type_scale::SMALL + 0.5)).desired_width(240.0));
-                    } else {
-                        ui.label(RichText::new(&e.file).font(font_mono(type_scale::SMALL + 0.5)).color(t.fg));
-                    }
-                }
-                if widgets::button_ex(ui, t, Some(icon::CONSOLE), "Open the file", Kind::Ghost, Size::Small, 0.0, true).clicked() {
-                    app.open_in_editor(&d.file, None);
-                }
-            });
-            widgets::hint(ui, t, "The exact text Stream Engine runs. Suggestions appear as you type.");
-            ui.label(RichText::new("When").color(t.text_dim));
-            field(app, ui, "raw-when", "twitch.cheer · mode.enter.brb · band.drop", |d| &mut d.when);
-            ui.label(RichText::new("Only if").color(t.text_dim));
-            field(app, ui, "raw-if", "event.bits >= 1000 && mode == 'live'", |d| &mut d.cond);
-            ui.label(RichText::new("Do (one command per line, in order; wait 2s pauses)").color(t.text_dim));
-            let n = app.build.rules.edit.as_ref().map_or(0, |d| d.commands.len());
-            for i in 0..n {
-                field(app, ui, &format!("raw-do:{i}"), "preset.fire hype · bot.say 'thanks {user}!'", move |d| &mut d.commands[i]);
-            }
-        });
-        if d.orig.is_some() {
-            ui.add_space(spacing::M);
-            ui.horizontal(|ui| {
-                if widgets::hold_button(ui, t, "Delete reaction", t.bright_red, 0.6) {
-                    let text = file_text(app, &d.file);
-                    if let Some(args) = d.delete_args(text.as_deref()) {
-                        app.m.action("project.write", args);
-                        app.m.toast(format!("Deleted “{}”.", d.name.trim()), false);
-                    }
-                    app.build.rules.edit = None;
-                    app.m.refresh_soon();
-                }
-                widgets::hint(ui, t, "Press and hold to delete.");
-            });
-        }
-    });
 }
 
 #[cfg(test)]
@@ -2378,6 +2850,14 @@ mod tests {
             "patch.terminal_boot.trigger",
             "wait 2s",
             "bot.say 'HYPE! Thanks {user} for {bits} bits'",
+            "set scene.duo.node.cam.fx.blur.enabled true",
+            "set scene.duo.node.cam.fx.blur.enabled false",
+            "toggle scene.duo.node.cam.fx.patch.dream.enabled",
+            "set scene.duo.node.cam.visible false",
+            "toggle scene.duo.node.cam.visible",
+            "set audio.bus.music.gain 0.5",
+            "animate fx.vhs.amount 1 2s",
+            "emit twitch.follow user='{user}'",
         ] {
             let (k, args) = parse_step(cmd);
             assert_ne!(k, Step::Custom, "{cmd}");
@@ -2393,12 +2873,57 @@ mod tests {
     }
 
     #[test]
-    fn overlay_and_look_steps_read_as_what_they_do() {
-        // both ways of playing an overlay read as one; the guided editor writes the file's way
-        assert_eq!(parse_step("trigger patch.confetti"), (Step::Overlay, vec!["confetti".to_string()]));
-        assert_eq!(build_step(Step::Overlay, &["confetti"]), "patch.confetti.trigger");
-        assert!(Op::parse(&build_step(Step::Overlay, &["confetti"])).is_ok());
-        // triggers with settings, or of something that isn't an overlay, need the raw editor
+    fn layer_setting_and_notification_steps_read_as_what_they_do() {
+        let fx = parse_step("toggle scene.duo.node.cam.fx.blur.enabled");
+        assert_eq!(fx, (Step::LayerFx, vec!["scene.duo.node.cam.fx.blur.enabled".to_string(), "toggle".to_string()]));
+        assert_eq!(parse_step("set scene.duo.node.cam.visible true").0, Step::LayerVisible);
+        // anything but on/off on a layer switch is a plain setting; other toggles need the raw editor
+        assert_eq!(parse_step("set scene.duo.node.cam.visible 1").0, Step::Setting);
+        assert_eq!(parse_step("toggle audio.duck.active").0, Step::Custom);
+        assert_eq!(parse_step("animate fx.vhs.amount 1 2s out_cubic").0, Step::Custom);
+        assert_eq!(parse_step("emit twitch.follow oops").0, Step::Custom);
+        // the engine reads every guided form
+        for (k, args) in [
+            (Step::LayerFx, vec!["scene.duo.node.cam.fx.blur.enabled", "toggle"]),
+            (Step::LayerVisible, vec!["scene.duo.node.cam.visible", "off"]),
+            (Step::Setting, vec!["fx.vhs.amount", "0.4", "500ms"]),
+            (Step::Setting, vec!["show.title", "Hello there"]),
+            (Step::Notify, vec!["twitch.cheer", "user=Alex B", "bits=100"]),
+        ] {
+            let built = build_step(k, &args);
+            assert!(Op::parse(&built).is_ok(), "{built}");
+            assert_eq!(parse_step(&built), (k, args.iter().map(|a| a.to_string()).collect()), "{built}");
+        }
+        let fx = build_step(Step::LayerFx, &["scene.duo.node.cam.fx.blur.enabled", "toggle"]);
+        assert_eq!(fx, "toggle scene.duo.node.cam.fx.blur.enabled");
+        assert!(matches!(Op::parse(&fx), Ok(Op::Action { name, .. }) if name == "toggle"));
+        // a layer step is unfinished until scene, layer (and effect) are picked
+        assert!(step_missing(&Step::LayerFx.blank()).is_some());
+        assert!(step_missing("set scene.duo.node..fx..enabled true").is_some());
+        assert!(step_missing("set scene.duo.node.cam.fx..enabled true").is_some());
+        assert_eq!(step_missing("set scene.duo.node.cam.fx.blur.enabled true"), None);
+        assert!(step_missing(&Step::LayerVisible.blank()).is_some());
+        assert!(step_missing("set fx.vhs.amount").is_some(), "a setting needs a value");
+        assert!(step_missing(&Step::Notify.blank()).is_some());
+        // words
+        let n = Names {
+            scenes: vec![("duo".into(), "Duo".into())],
+            alerts: alert_choices(Some(&Value::map().with("alerts", Value::List(vec![Value::map().with("name", "follow").with("when", "twitch.follow")])))),
+            ..Default::default()
+        };
+        assert_eq!(step_phrase("set scene.duo.node.cam_face.fx.rgb_split.enabled true", &n), "turn on RGB split on Cam face in Duo");
+        assert_eq!(step_phrase("set scene.duo.node.cam_face.visible false", &n), "hide Cam face in Duo");
+        assert_eq!(step_phrase("emit twitch.follow user=Alex", &n), "show the Follow notification");
+        assert_eq!(step_phrase("set audio.bus.music.gain 0.5", &n), "set music volume to 0.5");
+    }
+
+    #[test]
+    fn animation_and_look_steps_read_as_what_they_do() {
+        // both ways of playing a source's animation read as one; the guided editor writes the file's way
+        assert_eq!(parse_step("trigger patch.confetti"), (Step::Animation, vec!["confetti".to_string()]));
+        assert_eq!(build_step(Step::Animation, &["confetti"]), "patch.confetti.trigger");
+        assert!(Op::parse(&build_step(Step::Animation, &["confetti"])).is_ok());
+        // triggers with settings, or of something that isn't a source, need the raw editor
         assert_eq!(parse_step("patch.confetti.trigger count=50").0, Step::Custom);
         assert_eq!(parse_step("trigger fx.glitch").0, Step::Custom);
         // a look is not a cue list
@@ -2406,10 +2931,21 @@ mod tests {
         assert_eq!(parse_step("lights.cue look=warm").0, Step::Look);
         assert!(Op::parse(&build_step(Step::Look, &["warm"])).is_ok());
         // fresh steps are unfinished until something is picked
-        for k in [Step::Overlay, Step::Look] {
+        for k in [Step::Animation, Step::Look] {
             assert_eq!(parse_step(&k.blank()), (k, if k == Step::Look { vec![String::new()] } else { Vec::new() }));
             assert!(step_missing(&k.blank()).is_some(), "{k:?}");
         }
         assert_eq!(step_missing("patch.terminal_boot.trigger"), None);
+    }
+
+    #[test]
+    fn events_group_by_where_they_come_from() {
+        assert_eq!(Family::of("twitch.cheer"), Family::Viewers);
+        assert_eq!(Family::of("twitch.ad_break"), Family::Stream);
+        assert_eq!(Family::of("band.kick"), Family::Music);
+        assert_eq!(Family::of("music.drop"), Family::Music);
+        assert_eq!(Family::of("mode.enter.live"), Family::Show);
+        assert_eq!(Family::of("midi.nano.pad1"), Family::Controls);
+        assert_eq!(Family::of("custom.thing"), Family::Other);
     }
 }

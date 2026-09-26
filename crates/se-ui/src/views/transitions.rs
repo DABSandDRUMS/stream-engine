@@ -1,25 +1,29 @@
-//! Scenes → Transitions: a chooser, not an editor. Transitions are made in code (the built-ins
-//! and `transitions/*.toml`); here the owner picks which ones get used where:
-//! - "Your transitions": the library, each with an animated sketch, one sentence, where it's
-//!   used, and "Try it" (off air);
-//! - "How scenes switch": the project-wide default, `[transitions]` in `project.toml`;
-//! - "Exceptions": a scene's own choice (`[transitions]` in `scenes/<s>.toml`) or a scene pair's
-//!   (`[transitions.from.<scene>]` in the target scene's file).
+//! Scenes → Transitions: how program changes from one scene to the next. A list on the left,
+//! the selected thing on the right:
+//! - "How scenes switch": the project-wide default (`[transitions]` in `project.toml`) and the
+//!   exceptions: a scene's own choice (`[transitions]` in `scenes/<s>.toml`) or a scene pair's
+//!   (`[transitions.from.<scene>]` in the target scene's file);
+//! - every transition (the built-ins, `transitions/*.toml`, custom shader transitions), each
+//!   with an animated sketch, where it's used (and a switch for the default), its settings, and
+//!   "Try it" (off air);
+//! - "New custom transition": a shader patch from the transition template plus a
+//!   `transitions/<id>.toml` that names it, so scenes can pick it.
 //!
 //! A choice is "pick at random from …" (a pool) or "always use …" (a fixed `name`). Files are
 //! edited as text with `toml_edit` (comments survive) and written with `project.write`. The
-//! scene settings panel shows one scene's choice through [`scene_choice`].
+//! scene inspector shows one scene's choice through [`scene_choice`].
 
 use crate::app::App;
 use crate::frames::Canvas;
 use crate::views::live::nice;
+use crate::views::{composition, patches, scene_edit, status};
 use anyhow::{Context as _, Result, bail};
-use egui::{Color32, FontId, Painter, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, UiBuilder, pos2, vec2};
+use egui::{Color32, Painter, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, pos2, vec2};
 use se_core::transitions as catalog;
 use se_proto::{Ease, Op, Value};
 use se_ui_kit::Theme;
-use se_ui_kit::theme::{font, font_medium, mix, radius, spacing, type_scale};
-use se_ui_kit::widgets::{self, Kind, LedState, Size, icon};
+use se_ui_kit::theme::{font_medium, font_mono, mix, radius, spacing, type_scale};
+use se_ui_kit::widgets::{self, Kind, LedState, Size, Tone, icon};
 use std::collections::BTreeMap;
 use toml_edit::{Array, DocumentMut, InlineTable, Item as TomlItem, Table, TableLike};
 
@@ -40,6 +44,12 @@ pub struct TransitionsState {
     try_from: Option<String>,
     try_to: Option<String>,
     adding: Option<Adding>,
+    /// What the detail pane shows (`None` = how scenes switch).
+    sel: Option<Sel>,
+    /// Keep a just-made transition selected until the engine lists it.
+    hold_until: f64,
+    /// Name typed for a new custom transition.
+    new_name: String,
 }
 
 /// A project file as read here, with our latest write shown until the engine's copy is read again.
@@ -355,7 +365,12 @@ pub fn label(app: &App, id: &str) -> String {
         .filter(|s| !s.trim().is_empty())
         .map(String::from)
         .or_else(|| builtin_label(id).map(String::from))
+        .or_else(|| id.strip_prefix("patch.").map(|p| patches::find(app, p).map_or_else(|| nice(p), |v| patches::label(&v))))
         .unwrap_or_else(|| nice(id))
+}
+
+fn text<'a>(v: &'a Value, k: &str) -> &'a str {
+    v.get_path(k).and_then(Value::as_str).unwrap_or("")
 }
 
 // ---- the sketch ----------------------------------------------------------------------------------
@@ -608,6 +623,14 @@ struct Item {
     label: String,
     look: Look,
     motion: Motion,
+    /// Not one of the built-ins: made for this project.
+    custom: bool,
+    /// Has a `transitions/<id>.toml`.
+    file: bool,
+    /// Scenes can pick it by name (a built-in or a file; the engine rejects anything else).
+    pickable: bool,
+    /// The custom shader (patch id) that draws it.
+    patch: Option<String>,
 }
 
 fn items(app: &App) -> Vec<Item> {
@@ -618,6 +641,21 @@ fn items(app: &App) -> Vec<Item> {
             names.push(n);
         }
     }
+    // custom shader transitions without a file naming them: the renderer plays them as
+    // `patch.<id>`, but scenes can't pick them until they have one
+    let named: Vec<&str> = defs
+        .into_iter()
+        .flat_map(|d| d.values())
+        .filter_map(|d| d.get_path("shader").and_then(Value::as_str))
+        .filter_map(|s| s.strip_prefix("patch."))
+        .collect();
+    for p in app.m.q_list("patches").iter().filter(|p| text(p, "kind") == "shader" && text(p, "layer") == "transition") {
+        let id = text(p, "id");
+        let a = format!("patch.{id}");
+        if !id.is_empty() && !named.contains(&id) && !names.contains(&a) {
+            names.push(a);
+        }
+    }
     let mut out: Vec<Item> = names
         .into_iter()
         .filter_map(|id| {
@@ -626,6 +664,7 @@ fn items(app: &App) -> Vec<Item> {
                 Some(d) => {
                     (d.get_path("kind").and_then(Value::as_str).unwrap_or("morph").to_string(), d.get_path("shader").and_then(Value::as_str).map(String::from))
                 }
+                None if id.starts_with("patch.") => ("shader".to_string(), Some(id.clone())),
                 None => {
                     let (k, s) = builtin_def(&id)?;
                     (k.to_string(), s.map(String::from))
@@ -638,19 +677,21 @@ fn items(app: &App) -> Vec<Item> {
             let s = |k: &str| def.and_then(|d| d.get_path(k)).and_then(Value::as_str).unwrap_or("");
             let look = look_of(&kind, shader.as_deref());
             let motion = Motion::new(look, ms, s("ease"), s("enter"), s("exit"), |k| def.and_then(|d| d.get_path(k)).and_then(Value::as_f64));
-            Some(Item { label: label(app, &id), id, look, motion })
+            let builtin = BUILTIN.contains(&id.as_str());
+            Some(Item {
+                label: label(app, &id),
+                look,
+                motion,
+                custom: !builtin,
+                file: def.is_some(),
+                pickable: builtin || def.is_some(),
+                patch: shader.as_deref().and_then(|s| s.strip_prefix("patch.")).map(String::from),
+                id,
+            })
         })
         .collect();
     out.sort_by_key(|i| (i.id == "cut", i.label.to_lowercase()));
     out
-}
-
-/// One line of text cut to `max_w` with "…".
-fn line(p: &Painter, left_center: Pos2, text: &str, font: FontId, color: Color32, max_w: f32) {
-    let mut job = egui::text::LayoutJob::simple_singleline(text.to_string(), font, color);
-    job.wrap = egui::text::TextWrapping::truncate_at_width(max_w.max(10.0));
-    let g = p.layout_job(job);
-    p.galley(left_center - vec2(0.0, g.size().y / 2.0), g, color);
 }
 
 /// "a, b and c".
@@ -892,7 +933,7 @@ pub fn scene_choice(app: &mut App, ui: &mut egui::Ui, scene: &str, text: &str) -
     let project = file_text(app, &mut st, PROJECT, now);
     app.build.transitions = st;
     let default = project.as_deref().map_or(Choice::Inherit, |t| read_choice(t, None));
-    let names: Vec<(String, String)> = items(app).into_iter().map(|i| (i.id, i.label)).collect();
+    let names: Vec<(String, String)> = items(app).into_iter().filter(|i| i.pickable).map(|i| (i.id, i.label)).collect();
     let t = app.t.clone();
     let cur = read_choice(text, None);
     let new = choice_ui(ui, &t, scene, Level::Scene, &cur, &names, &default);
@@ -911,9 +952,24 @@ pub fn scene_choice(app: &mut App, ui: &mut egui::Ui, scene: &str, text: &str) -
 
 // ---- the view ------------------------------------------------------------------------------------
 
+/// Width of the list pane.
+const LIST_W: f32 = 290.0;
+/// Room kept for the list's footer line under its scroll area.
+const FOOTER_H: f32 = 40.0;
+
+/// What the detail pane shows.
+#[derive(Clone, Debug, PartialEq)]
+enum Sel {
+    /// The project default and the exceptions.
+    Switching,
+    One(String),
+    New,
+}
+
 pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     let now = ui.input(|i| i.time);
     poll(app, now);
+    patches::refresh(app, ui);
     let mut st = std::mem::take(&mut app.build.transitions);
     view(app, ui, &mut st, now);
     app.build.transitions = st;
@@ -954,7 +1010,7 @@ fn uses(app: &mut App, st: &mut TransitionsState, all: &[(String, String)], now:
 /// Where a transition is used, in words.
 fn used_words(id: &str, u: &Uses, all: &[(String, String)]) -> String {
     let mut parts = Vec::new();
-    if u.default.mentions(id) || (u.default == Choice::Inherit && id == "fade") {
+    if in_default(&u.default, id) {
         parts.push("by default".to_string());
     }
     let to: Vec<String> = u.scenes.iter().filter(|(_, c)| c.mentions(id)).map(|(s, _)| name_of(s, all)).collect();
@@ -967,90 +1023,173 @@ fn used_words(id: &str, u: &Uses, all: &[(String, String)]) -> String {
     if parts.is_empty() { "Not used right now".to_string() } else { format!("Used {}", and_list(&parts)) }
 }
 
+/// Whether the project default picks `id` (nothing picked = always a Crossfade).
+fn in_default(default: &Choice, id: &str) -> bool {
+    default.mentions(id) || (*default == Choice::Inherit && id == "fade")
+}
+
+/// The project default with `id` added to (`on`) or taken out of what it picks. Nothing picked
+/// means "always a Crossfade", so adding to that keeps the Crossfade in the mix.
+fn toggle_default(cur: &Choice, id: &str, on: bool) -> Choice {
+    match (cur, on) {
+        (c, true) if in_default(c, id) => c.clone(),
+        (Choice::Random { pool, avoid_repeat }, true) => {
+            let mut pool = pool.clone();
+            pool.push((id.to_string(), 1.0));
+            Choice::Random { pool, avoid_repeat: *avoid_repeat }
+        }
+        (Choice::Always(n), true) => Choice::Random { pool: vec![(n.clone(), 1.0), (id.to_string(), 1.0)], avoid_repeat: 1 },
+        (Choice::Inherit, true) => Choice::Random { pool: vec![("fade".into(), 1.0), (id.to_string(), 1.0)], avoid_repeat: 1 },
+        (Choice::Random { pool, avoid_repeat }, false) => {
+            let pool: Vec<(String, f64)> = pool.iter().filter(|(n, _)| n != id).cloned().collect();
+            if pool.is_empty() { Choice::Inherit } else { Choice::Random { pool, avoid_repeat: *avoid_repeat } }
+        }
+        (Choice::Always(n), false) if n == id => Choice::Inherit,
+        (c, false) => c.clone(),
+    }
+}
+
+/// The project default in a few words, for the list row ("Random pick of 3", "Always Cut").
+fn short_words(default: &Choice, names: &[(String, String)]) -> String {
+    match default {
+        Choice::Inherit => format!("Always {}", name_of("fade", names)),
+        Choice::Always(n) => format!("Always {}", name_of(n, names)),
+        Choice::Random { pool, .. } if pool.len() == 1 => format!("Random: {}", name_of(&pool[0].0, names)),
+        Choice::Random { pool, .. } => format!("Random pick of {}", pool.len()),
+    }
+}
+
 fn view(app: &mut App, ui: &mut egui::Ui, st: &mut TransitionsState, now: f64) {
+    let t = app.t.clone();
     let items = items(app);
     let all = scenes(app);
     let u = uses(app, st, &all, now);
-    let names: Vec<(String, String)> = items.iter().map(|i| (i.id.clone(), i.label.clone())).collect();
+    // what the choosers offer: only names the project files can use
+    let names: Vec<(String, String)> = items.iter().filter(|i| i.pickable).map(|i| (i.id.clone(), i.label.clone())).collect();
+    if let Some(Sel::One(id)) = &st.sel
+        && !items.iter().any(|i| i.id == *id)
+        && now > st.hold_until
+    {
+        st.sel = None;
+    }
+    let sel = st.sel.clone().unwrap_or(Sel::Switching);
     let mut edits = Vec::new();
-    let w = ui.available_width();
-    let h = ui.available_height();
-    let two = w >= 1100.0;
-    let left = if two { ((w - spacing::L) * 0.5).min(900.0) } else { w };
-    let right = if two { w - left - spacing::L } else { w };
-    if two {
-        ui.horizontal_top(|ui| {
-            ui.spacing_mut().item_spacing.x = spacing::L;
-            ui.allocate_ui_with_layout(vec2(left, h), egui::Layout::top_down(egui::Align::Min), |ui| {
-                egui::ScrollArea::vertical().id_salt("tr-library").auto_shrink([false, false]).show(ui, |ui| library(app, ui, st, &items, &u, &all, now));
+    let (clicked, _) = widgets::split(
+        ui,
+        LIST_W,
+        |ui| list_pane(ui, &t, &items, &u, &names, &sel),
+        |ui| {
+            egui::ScrollArea::vertical().id_salt("tr-detail").auto_shrink([false, false]).show(ui, |ui| match &sel {
+                Sel::Switching => switching(ui, &t, st, &u, &all, &names, &mut edits),
+                Sel::One(id) => match items.iter().find(|i| i.id == *id) {
+                    Some(it) => detail(app, ui, &t, st, it, &u, &all, &mut edits, now),
+                    None => {
+                        widgets::empty_state(ui, &t, icon::CLOCK, "Making it…", "It shows up here in a moment.", None);
+                    }
+                },
+                Sel::New => new_ui(app, ui, &t, st, &items, now),
             });
-            ui.allocate_ui_with_layout(vec2(right, h), egui::Layout::top_down(egui::Align::Min), |ui| {
-                egui::ScrollArea::vertical().id_salt("tr-choices").auto_shrink([false, false]).show(ui, |ui| {
-                    ui.set_max_width(right);
-                    choices(app, ui, st, &u, &all, &names, &mut edits);
-                });
-            });
-        });
-    } else {
-        egui::ScrollArea::vertical().id_salt("tr-page").auto_shrink([false, false]).show(ui, |ui| {
-            choices(app, ui, st, &u, &all, &names, &mut edits);
-            ui.add_space(spacing::L);
-            library(app, ui, st, &items, &u, &all, now);
-        });
+        },
+    );
+    if let Some(s) = clicked {
+        if s == Sel::New && sel != Sel::New {
+            st.new_name.clear();
+        }
+        st.sel = Some(s);
     }
     for e in edits {
         apply(app, st, e, now);
     }
+    // the sketch moves
+    ui.ctx().request_repaint();
 }
 
-fn choices(app: &mut App, ui: &mut egui::Ui, st: &mut TransitionsState, u: &Uses, all: &[(String, String)], names: &[(String, String)], edits: &mut Vec<Edit>) {
-    let t = app.t.clone();
-    widgets::titled(
+fn list_pane(ui: &mut egui::Ui, t: &Theme, items: &[Item], u: &Uses, names: &[(String, String)], sel: &Sel) -> Option<Sel> {
+    let mut out = None;
+    if widgets::pane_header(ui, t, "Transitions", Some(items.len()), Some("New custom transition")) {
+        out = Some(Sel::New);
+    }
+    egui::ScrollArea::vertical().id_salt("tr-list").auto_shrink([false, false]).max_height((ui.available_height() - FOOTER_H).max(80.0)).show(ui, |ui| {
+        widgets::group_label(ui, t, "Switching");
+        let exceptions = match u.scenes.len() + u.pairs.len() {
+            0 => String::new(),
+            1 => "1 exception".into(),
+            n => format!("{n} exceptions"),
+        };
+        let sub = if u.loaded || u.default != Choice::Inherit { short_words(&u.default, names) } else { "Loading…".into() };
+        if widgets::list_row(ui, t, icon::SLIDERS, "How scenes switch", &sub, &exceptions, *sel == Sel::Switching).clicked() {
+            out = Some(Sel::Switching);
+        }
+        for (label, mine) in [("Built in", false), ("Yours", true)] {
+            let group: Vec<&Item> = items.iter().filter(|i| i.custom == mine).collect();
+            if group.is_empty() {
+                continue;
+            }
+            widgets::group_label(ui, t, label);
+            for it in group {
+                let known = u.loaded || u.default != Choice::Inherit;
+                let trailing = if known && it.pickable && in_default(&u.default, &it.id) { "Default" } else { "" };
+                let ic = if it.look == Look::Own { icon::SPARKLE } else { icon::SHUFFLE };
+                let on = matches!(sel, Sel::One(id) if *id == it.id);
+                let look = look_words(it.look).0;
+                let sub = if look == it.label { speed_words(&it.motion) } else { format!("{look} · {}", speed_words(&it.motion)) };
+                if widgets::list_row(ui, t, ic, &it.label, &sub, trailing, on).clicked() {
+                    out = Some(Sel::One(it.id.clone()));
+                }
+            }
+        }
+    });
+    ui.add_space(spacing::S);
+    widgets::hint(ui, t, "A scene can pick its own in the scene inspector.");
+    out
+}
+
+/// "How scenes switch": the project default and the exceptions.
+fn switching(ui: &mut egui::Ui, t: &Theme, st: &mut TransitionsState, u: &Uses, all: &[(String, String)], names: &[(String, String)], edits: &mut Vec<Edit>) {
+    widgets::detail_header(ui, t, icon::SLIDERS, "How scenes switch", "Every scene switches this way, unless it has an exception.", |_| {});
+    widgets::inspector_section(
         ui,
-        &t,
-        "How scenes switch",
-        "Every scene switches this way, unless it has an exception below.",
+        t,
+        "tr-default",
+        "Default",
+        true,
         |_| {},
         |ui| {
-            ui.set_width(ui.available_width());
             if !u.loaded && u.default == Choice::Inherit {
-                widgets::hint(ui, &t, "Loading…");
-                return;
-            }
-            if let Some(c) = choice_ui(ui, &t, "default", Level::Default, &u.default, names, &u.default) {
+                widgets::hint(ui, t, "Loading…");
+            } else if let Some(c) = choice_ui(ui, t, "default", Level::Default, &u.default, names, &u.default) {
                 edits.push(Edit::Default(c));
             }
         },
     );
-    ui.add_space(spacing::L);
     let count = u.scenes.len() + u.pairs.len();
-    let sub = match count {
-        0 => "Scenes, or moves between two scenes, that switch their own way.".to_string(),
-        1 => "1 exception".to_string(),
-        n => format!("{n} exceptions"),
-    };
-    let mut add = false;
+    let title = if count == 0 { "Exceptions".to_string() } else { format!("Exceptions ({count})") };
     let adding = st.adding.is_some();
-    widgets::titled(
+    let mut add = false;
+    widgets::inspector_section(
         ui,
-        &t,
-        "Exceptions",
-        &sub,
+        t,
+        "tr-exceptions",
+        &title,
+        true,
         |ui| {
             if !adding && all.len() >= 2 {
-                add = widgets::button_ex(ui, &t, Some(icon::PLUS), "Add an exception", Kind::Secondary, Size::Small, 0.0, true).clicked();
+                add = widgets::button_ex(ui, t, Some(icon::PLUS), "Add", Kind::Secondary, Size::Small, 0.0, true)
+                    .on_hover_text("A scene, or a move between two scenes, that switches its own way")
+                    .clicked();
             }
         },
         |ui| {
-            ui.set_width(ui.available_width());
+            widgets::hint(ui, t, "A scene, or a move between two scenes, can switch its own way.");
+            ui.add_space(spacing::S);
             if st.adding.is_some() {
-                add_form(ui, &t, st, u, all, edits);
+                add_form(ui, t, st, u, all, edits);
                 ui.add_space(spacing::M);
             }
             if count == 0 && st.adding.is_none() {
                 widgets::hint(
                     ui,
-                    &t,
+                    t,
                     if all.len() < 2 {
                         "Make a second scene to set how switching between them looks."
                     } else {
@@ -1058,28 +1197,23 @@ fn choices(app: &mut App, ui: &mut egui::Ui, st: &mut TransitionsState, u: &Uses
                     },
                 );
             }
-            // (title, target scene, the scene a pair comes from, choice); one column per ~620 px
-            let rows: Vec<(String, &String, Option<&String>, &Choice)> = u
+            let rows = u
                 .scenes
                 .iter()
                 .map(|(s, c)| (format!("Switching to {}", name_of(s, all)), s, None, c))
-                .chain(u.pairs.iter().map(|(to, from, c)| (format!("From {} to {}", name_of(from, all), name_of(to, all)), to, Some(from), c)))
-                .collect();
-            let cols = ((ui.available_width() / 620.0).floor() as usize).clamp(1, 3).min(rows.len().max(1));
-            ui.columns(cols, |cs| {
-                for (i, (title, to, from, cur)) in rows.into_iter().enumerate() {
-                    let (level, salt) = match from {
-                        None => (Level::Scene, format!("scene-{to}")),
-                        Some(f) => (Level::Pair, format!("pair-{f}-{to}")),
-                    };
-                    if let Some(c) = exception_row(&mut cs[i % cols], &t, &title, &salt, level, cur, names, &u.default) {
-                        edits.push(match from {
-                            None => Edit::Scene(to.clone(), c),
-                            Some(f) => Edit::Pair { to: to.clone(), from: f.clone(), choice: c },
-                        });
-                    }
+                .chain(u.pairs.iter().map(|(to, from, c)| (format!("From {} to {}", name_of(from, all), name_of(to, all)), to, Some(from), c)));
+            for (title, to, from, cur) in rows {
+                let (level, salt) = match from {
+                    None => (Level::Scene, format!("scene-{to}")),
+                    Some(f) => (Level::Pair, format!("pair-{f}-{to}")),
+                };
+                if let Some(c) = exception_row(ui, t, &title, &salt, level, cur, names, &u.default) {
+                    edits.push(match from {
+                        None => Edit::Scene(to.clone(), c),
+                        Some(f) => Edit::Pair { to: to.clone(), from: f.clone(), choice: c },
+                    });
                 }
-            });
+            }
         },
     );
     if add {
@@ -1087,6 +1221,346 @@ fn choices(app: &mut App, ui: &mut egui::Ui, st: &mut TransitionsState, u: &Uses
         let second = all.get(1).map(|(s, _)| s.clone()).unwrap_or_default();
         st.adding = Some(Adding { pair: 0, from: first, to: second });
     }
+}
+
+/// The two scenes "Try it" switches between: the picked ones, else program and another.
+fn try_pair(st: &TransitionsState, all: &[(String, String)], program: &str) -> (String, String) {
+    let valid = |s: &Option<String>| s.as_ref().filter(|s| all.iter().any(|(n, _)| n == *s)).cloned();
+    let from = valid(&st.try_from)
+        .or_else(|| all.iter().any(|(n, _)| n == program).then(|| program.to_string()))
+        .or_else(|| all.first().map(|(n, _)| n.clone()))
+        .unwrap_or_default();
+    let to = valid(&st.try_to).filter(|s| *s != from).or_else(|| all.iter().find(|(n, _)| *n != from).map(|(n, _)| n.clone())).unwrap_or_default();
+    (from, to)
+}
+
+/// One transition: its sketch, where it's used, its settings, and "Try it".
+#[allow(clippy::too_many_arguments)]
+fn detail(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    t: &Theme,
+    st: &mut TransitionsState,
+    it: &Item,
+    u: &Uses,
+    all: &[(String, String)],
+    edits: &mut Vec<Edit>,
+    now: f64,
+) {
+    let program = app.m.str("show.scene.program").to_string();
+    let on_air = status::on_air(app);
+    let (from, to) = try_pair(st, all, &program);
+    let can_try = !on_air && !to.is_empty();
+    let tip = if on_air {
+        "You're on air: trying it would switch scenes for your viewers."
+    } else if to.is_empty() {
+        "Make a second scene to try it."
+    } else {
+        "Switch between the two scenes under Try it, with this transition."
+    };
+    let mut tried = false;
+    let ic = if it.look == Look::Own { icon::SPARKLE } else { icon::SHUFFLE };
+    widgets::detail_header(ui, t, ic, &it.label, look_words(it.look).1, |ui| {
+        tried = widgets::button_ex(ui, t, Some(icon::PLAY), "Try it", Kind::Secondary, Size::Small, 0.0, can_try)
+            .on_hover_text(tip)
+            .on_disabled_hover_text(tip)
+            .clicked();
+    });
+    let w = ui.available_width().min(400.0);
+    let (rect, _) = ui.allocate_exact_size(vec2(w, w * 9.0 / 16.0), Sense::hover());
+    sketch(ui.painter(), t, rect, &it.motion, Some(now));
+    ui.add_space(spacing::XS);
+    widgets::hint(ui, t, "A sketch of how it moves. Try it to see it with your own scenes.");
+    ui.add_space(spacing::M);
+    if !it.pickable {
+        let pid = it.patch.clone().unwrap_or_default();
+        let free = !pid.is_empty() && !BUILTIN.contains(&pid.as_str()) && !defs(app).is_some_and(|d| d.contains_key(&pid));
+        let body = if free {
+            "It needs a name file first. Make one and scenes can pick it like any other."
+        } else {
+            "It needs a name file, but its folder's name is already taken by another transition. Rename its folder, then come back."
+        };
+        if widgets::callout(ui, t, Tone::Warn, icon::WARN, "Scenes can't pick it yet", body, free.then_some("Make it pickable")) {
+            write_name_file(app, &pid, &it.label);
+            st.sel = Some(Sel::One(pid));
+            st.hold_until = now + 8.0;
+        }
+        ui.add_space(spacing::M);
+    }
+    where_used(app, ui, t, st, it, u, all, edits);
+    settings(app, ui, t, it);
+    try_section(app, ui, t, st, all, (&from, &to), &program, on_air);
+    if tried {
+        // already on the "to" scene: play it back the other way instead of jumping first
+        let (a, b) = if program == to { (to, from) } else { (from, to) };
+        try_it(app, &it.id, &a, &b, it.motion.ms);
+    }
+}
+
+/// "Where it's used": the project default (with a switch), and the scenes and scene pairs that
+/// pick it; a row opens the scene.
+#[allow(clippy::too_many_arguments)]
+fn where_used(app: &mut App, ui: &mut egui::Ui, t: &Theme, st: &mut TransitionsState, it: &Item, u: &Uses, all: &[(String, String)], edits: &mut Vec<Edit>) {
+    let id = it.id.as_str();
+    let mut open = None;
+    let mut to_switching = false;
+    widgets::inspector_section(
+        ui,
+        t,
+        ("tr-uses", id),
+        "Where it's used",
+        true,
+        |_| {},
+        |ui| {
+            widgets::hint(ui, t, &format!("{}.", used_words(id, u, all)));
+            ui.add_space(spacing::XS);
+            if it.pickable {
+                let on = in_default(&u.default, id);
+                let next = toggle_default(&u.default, id, !on);
+                let can = in_default(&next, id) != on && (u.loaded || u.default != Choice::Inherit);
+                widgets::prop_row(ui, t, "By default", |ui| {
+                    let tip = match (can, on) {
+                        (false, _) => "A Crossfade is used while nothing else is picked.",
+                        (true, true) => "Stop picking it by default",
+                        (true, false) => "Pick it by default",
+                    };
+                    let mut v = on;
+                    let r = ui.add_enabled_ui(can, |ui| widgets::toggle(ui, t, &mut v)).inner;
+                    if r.on_hover_text(tip).on_disabled_hover_text(tip).changed() {
+                        edits.push(Edit::Default(next.clone()));
+                    }
+                    let words = match &u.default {
+                        Choice::Random { pool, .. } if on && pool.len() > 1 => "One of the random picks",
+                        _ if on => "Every switch uses it",
+                        _ => "Not picked by default",
+                    };
+                    ui.label(RichText::new(words).color(if on { t.fg } else { t.text_dim }));
+                });
+                if !matches!(&u.default, Choice::Always(n) if n == id) && (u.loaded || u.default != Choice::Inherit) {
+                    widgets::prop_row(ui, t, "", |ui| {
+                        if widgets::button_ex(ui, t, None, "Use only this one", Kind::Ghost, Size::Small, 0.0, true)
+                            .on_hover_text("Every switch uses it")
+                            .clicked()
+                        {
+                            edits.push(Edit::Default(Choice::Always(id.to_string())));
+                        }
+                    });
+                }
+                ui.add_space(spacing::S);
+            }
+            let rows: Vec<(String, &String)> = u
+                .scenes
+                .iter()
+                .filter(|(_, c)| c.mentions(id))
+                .map(|(s, _)| (format!("Switching to {}", name_of(s, all)), s))
+                .chain(
+                    u.pairs.iter().filter(|(_, _, c)| c.mentions(id)).map(|(to, from, _)| (format!("From {} to {}", name_of(from, all), name_of(to, all)), to)),
+                )
+                .collect();
+            for (title, scene) in rows {
+                if widgets::list_row(ui, t, icon::SCENE, &title, "", icon::RIGHT, false).on_hover_text("Open this scene").clicked() {
+                    open = Some(scene.clone());
+                }
+            }
+            ui.add_space(spacing::XS);
+            to_switching = widgets::button_ex(ui, t, Some(icon::SLIDERS), "Change how scenes switch", Kind::Ghost, Size::Small, 0.0, true).clicked();
+        },
+    );
+    if let Some(scene) = open {
+        composition::open(app, &scene, None);
+    }
+    if to_switching {
+        st.sel = Some(Sel::Switching);
+    }
+}
+
+/// How long it takes: "Instant", "0.7 s".
+fn speed_words(m: &Motion) -> String {
+    if m.look == Look::Cut { "Instant".to_string() } else { format!("{:.1} s", m.ms as f64 / 1000.0) }
+}
+
+/// How things that are only in one of the two scenes come and go, in words.
+fn style_words(style: &str) -> String {
+    match style {
+        "scale" => "grow".into(),
+        "none" => "cut".into(),
+        s => s.replace('_', " "),
+    }
+}
+
+/// "Settings": what it's made of; a custom shader's own settings and files.
+fn settings(app: &mut App, ui: &mut egui::Ui, t: &Theme, it: &Item) {
+    let p = it.patch.as_deref().and_then(|id| patches::find(app, id));
+    widgets::inspector_section(
+        ui,
+        t,
+        ("tr-settings", &it.id),
+        "Settings",
+        true,
+        |_| {},
+        |ui| {
+            let m = &it.motion;
+            let value = |ui: &mut egui::Ui, s: String| ui.label(RichText::new(s).color(t.fg));
+            widgets::prop_row(ui, t, "Looks like", |ui| value(ui, look_words(it.look).0.to_string()));
+            widgets::prop_row(ui, t, "Speed", |ui| value(ui, speed_words(m)));
+            if matches!(it.look, Look::Glide | Look::GlideGlitch | Look::GlideZoom) {
+                widgets::prop_row(ui, t, "Only in one scene", |ui| value(ui, format!("{} in, {} out", style_words(m.enter), style_words(m.exit))));
+            }
+            let made = match (&it.patch, it.file) {
+                (Some(pid), _) => format!("patches/{pid}/"),
+                (None, true) => format!("transitions/{}.toml", it.id),
+                (None, false) => String::new(),
+            };
+            widgets::prop_row(ui, t, "Made by", |ui| {
+                if made.is_empty() { value(ui, "Built in".into()) } else { ui.label(RichText::new(&made).font(font_mono(type_scale::SMALL + 0.5)).color(t.fg)) }
+            });
+            ui.add_space(spacing::XS);
+            widgets::hint(ui, t, "How long a switch takes can also be set per scene, in the scene inspector.");
+            let Some(p) = &p else { return };
+            let id = text(p, "id").to_string();
+            ui.add_space(spacing::M);
+            if let Some(pr) = patches::problem(app, p) {
+                let title = if pr.still_showing { "Its last change has a mistake" } else { "It has a mistake and can't play" };
+                let body = if pr.location.is_empty() { pr.message.clone() } else { format!("{} ({})", pr.message, pr.location) };
+                if widgets::callout(ui, t, Tone::Danger, icon::WARN, title, &body, Some("Open files")) {
+                    patches::open_files(app, &id);
+                }
+                ui.add_space(spacing::S);
+            }
+            if p.get_path("params").and_then(Value::as_list).is_some_and(|l| !l.is_empty()) {
+                patches::params_ui(app, ui, p);
+                ui.add_space(spacing::S);
+            }
+            ui.horizontal(|ui| {
+                if widgets::button_ex(ui, t, Some(icon::EDIT), "Edit files", Kind::Secondary, Size::Small, 0.0, true).clicked() {
+                    patches::open_files(app, &id);
+                }
+                if widgets::button_ex(ui, t, Some(icon::UNDO), "Reload", Kind::Ghost, Size::Small, 0.0, true).on_hover_text("Read its files again").clicked() {
+                    patches::reload(app, &id);
+                }
+            });
+        },
+    );
+}
+
+/// "Try it": the two scenes it switches between, and the main video to watch it on.
+#[allow(clippy::too_many_arguments)]
+fn try_section(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    t: &Theme,
+    st: &mut TransitionsState,
+    all: &[(String, String)],
+    pair: (&str, &str),
+    program: &str,
+    on_air: bool,
+) {
+    widgets::inspector_section(
+        ui,
+        t,
+        "tr-try",
+        "Try it",
+        true,
+        |_| {},
+        |ui| {
+            if all.len() < 2 {
+                widgets::hint(ui, t, "Make a second scene to try transitions between two scenes.");
+                return;
+            }
+            widgets::prop_row(ui, t, "Between", |ui| {
+                for (salt, cur, which) in [("tr-try-from", pair.0, 0), ("tr-try-to", pair.1, 1)] {
+                    if which == 1 {
+                        ui.label(RichText::new("and").color(t.text_dim));
+                    }
+                    egui::ComboBox::from_id_salt(salt).selected_text(name_of(cur, all)).width(160.0).show_ui(ui, |ui| {
+                        for (n, l) in all {
+                            if ui.selectable_label(n == cur, l).clicked() {
+                                *(if which == 0 { &mut st.try_from } else { &mut st.try_to }) = Some(n.clone());
+                            }
+                        }
+                    });
+                }
+            });
+            ui.add_space(spacing::XS);
+            widgets::hint(
+                ui,
+                t,
+                if on_air {
+                    "You're on air: trying one would switch scenes for your viewers."
+                } else {
+                    "\"Try it\" switches between these two, so you can watch it here."
+                },
+            );
+            ui.add_space(spacing::S);
+            let w = ui.available_width().min(640.0);
+            let tally = if on_air { LedState::Active } else { LedState::Idle };
+            crate::views::monitor::monitor(app, ui, Canvas::Wide, program, if on_air { "ON AIR" } else { "Main video" }, vec2(w, w * 9.0 / 16.0), tally, 30.0);
+        },
+    );
+}
+
+/// A `transitions/<name>.toml` that names the custom shader `patch` (so scenes can pick it).
+fn name_file(label: &str, patch: &str) -> String {
+    format!(
+        "# Made in Stream Engine: the custom transition drawn by patches/{patch}/.\nlabel = {}\nkind = \"shader\"\nshader = \"patch.{patch}\"\n",
+        toml_edit::Value::from(label)
+    )
+}
+
+fn write_name_file(app: &mut App, patch: &str, label: &str) {
+    app.m.action("project.write", Value::map().with("path", format!("transitions/{patch}.toml")).with("text", name_file(label, patch)));
+    app.m.refresh_soon();
+}
+
+/// "New custom transition": a shader from the transition template, named so scenes can pick it.
+fn new_ui(app: &mut App, ui: &mut egui::Ui, t: &Theme, st: &mut TransitionsState, items: &[Item], now: f64) {
+    widgets::detail_header(ui, t, icon::PLUS, "New custom transition", "Starts from a soft diagonal wipe you can change in its files.", |_| {});
+    let template = patches::templates(app, "shader").into_iter().find(|x| x.layer == "transition").map(|x| x.name);
+    widgets::inspector_section(
+        ui,
+        t,
+        "tr-new-name",
+        "Name",
+        true,
+        |_| {},
+        |ui| {
+            widgets::prop_row(ui, t, "Name", |ui| {
+                ui.add(widgets::field(&mut st.new_name).hint_text("e.g. Wipe").desired_width(260.0));
+            });
+        },
+    );
+    let id = scene_edit::slug(&st.new_name);
+    let taken = !id.is_empty()
+        && (BUILTIN.contains(&id.as_str())
+            || items.iter().any(|i| i.id == id || i.patch.as_deref() == Some(id.as_str()))
+            || defs(app).is_some_and(|d| d.contains_key(&id))
+            || patches::find(app, &id).is_some());
+    let ready = !id.is_empty() && !taken && template.is_some();
+    ui.add_space(spacing::S);
+    ui.horizontal(|ui| {
+        if widgets::button_ex(ui, t, Some(icon::CHECK), "Create", Kind::Primary, Size::Medium, 0.0, ready).clicked()
+            && let Some(tpl) = &template
+        {
+            let label = st.new_name.trim().to_string();
+            patches::create(app, &id, "shader", tpl);
+            patches::open_files(app, &id);
+            write_name_file(app, &id, &label);
+            app.m.toast(format!("Made \"{label}\". Its files open in your editor."), false);
+            st.sel = Some(Sel::One(id.clone()));
+            st.hold_until = now + 8.0;
+            st.new_name.clear();
+        }
+        if widgets::button_ex(ui, t, None, "Cancel", Kind::Ghost, Size::Medium, 0.0, true).clicked() {
+            st.sel = None;
+        }
+        if taken {
+            widgets::hint(ui, t, "That name is taken.");
+        } else if template.is_none() {
+            widgets::hint(ui, t, "Loading the starting point…");
+        }
+    });
+    ui.add_space(spacing::S);
+    widgets::hint(ui, t, "Its files open in your editor. Once made, scenes can pick it like any other transition.");
 }
 
 /// One exception: its title, a remove button, and its choice.
@@ -1168,112 +1642,6 @@ fn add_form(ui: &mut egui::Ui, t: &Theme, st: &mut TransitionsState, u: &Uses, a
         });
     });
     st.adding = if close { None } else { Some(a) };
-}
-
-fn library(app: &mut App, ui: &mut egui::Ui, st: &mut TransitionsState, items: &[Item], u: &Uses, all: &[(String, String)], now: f64) {
-    let t = app.t.clone();
-    let program = app.m.str("show.scene.program").to_string();
-    let on_air = crate::views::status::on_air(app);
-    // the two scenes "Try it" switches between
-    let valid = |s: &Option<String>| s.as_ref().filter(|s| all.iter().any(|(n, _)| n == *s)).cloned();
-    let from = valid(&st.try_from)
-        .or_else(|| all.iter().any(|(n, _)| *n == program).then(|| program.clone()))
-        .or_else(|| all.first().map(|(n, _)| n.clone()))
-        .unwrap_or_default();
-    let to = valid(&st.try_to).filter(|s| *s != from).or_else(|| all.iter().find(|(n, _)| *n != from).map(|(n, _)| n.clone())).unwrap_or_default();
-    let can_try = !on_air && !to.is_empty();
-    let mut tried = None;
-    let sub = format!("{} way{} to switch scenes", items.len(), if items.len() == 1 { "" } else { "s" });
-    widgets::titled(
-        ui,
-        &t,
-        "Your transitions",
-        &sub,
-        |_| {},
-        |ui| {
-            ui.set_width(ui.available_width());
-            for it in items {
-                let used = used_words(&it.id, u, all);
-                if lib_row(ui, &t, it, &used, now, can_try, on_air) {
-                    tried = Some(it.clone());
-                }
-            }
-            ui.add_space(spacing::S);
-            widgets::hint(ui, &t, &format!("{}  New kinds of transitions are made for you — ask for the look you want.", icon::SPARKLE));
-            ui.add_space(spacing::L);
-            widgets::section(ui, &t, "", "TRY IT");
-            if all.len() < 2 {
-                widgets::hint(ui, &t, "Make a second scene to try transitions between two scenes.");
-                return;
-            }
-            ui.horizontal(|ui| {
-                for (salt, cur, which) in [("tr-try-from", &from, 0), ("tr-try-to", &to, 1)] {
-                    ui.label(RichText::new(if which == 0 { "Between" } else { "and" }).color(t.text_dim));
-                    egui::ComboBox::from_id_salt(salt).selected_text(name_of(cur, all)).width(170.0).show_ui(ui, |ui| {
-                        for (n, l) in all {
-                            if ui.selectable_label(n == cur, l).clicked() {
-                                if which == 0 {
-                                    st.try_from = Some(n.clone());
-                                } else {
-                                    st.try_to = Some(n.clone());
-                                }
-                            }
-                        }
-                    });
-                }
-            });
-            ui.add_space(spacing::XS);
-            widgets::hint(
-                ui,
-                &t,
-                if on_air {
-                    "You're on air: trying one would switch scenes for your viewers."
-                } else {
-                    "\"Try it\" on a transition switches between these two, so you can watch it here."
-                },
-            );
-            ui.add_space(spacing::S);
-            let w = ui.available_width().min(640.0);
-            let tally = if on_air { LedState::Active } else { LedState::Idle };
-            crate::views::monitor::monitor(app, ui, Canvas::Wide, &program, if on_air { "ON AIR" } else { "Main video" }, vec2(w, w * 9.0 / 16.0), tally, 30.0);
-        },
-    );
-    if let Some(it) = tried {
-        // already on the "to" scene: play it back the other way instead of jumping first
-        let (a, b) = if program == to { (to.clone(), from.clone()) } else { (from.clone(), to.clone()) };
-        try_it(app, &it.id, &a, &b, it.motion.ms);
-    }
-    ui.ctx().request_repaint();
-}
-
-/// A library row: animated sketch, name, what it looks like, where it's used, "Try it".
-/// Returns true when "Try it" was clicked.
-fn lib_row(ui: &mut egui::Ui, t: &Theme, it: &Item, used: &str, now: f64, can_try: bool, on_air: bool) -> bool {
-    let w = ui.available_width();
-    let (rect, resp) = ui.allocate_exact_size(vec2(w, 72.0), Sense::hover());
-    let mut clicked = false;
-    if ui.is_rect_visible(rect) {
-        let p = ui.painter();
-        if resp.hovered() {
-            p.rect_filled(rect, radius::CONTROL, t.surface_hi);
-        }
-        let thumb = Rect::from_min_size(pos2(rect.left() + 8.0, rect.center().y - 27.0), vec2(96.0, 54.0));
-        sketch(p, t, thumb, &it.motion, Some(now));
-        let btn = Rect::from_min_size(pos2(rect.right() - 104.0, rect.center().y - 14.0), vec2(96.0, 28.0));
-        let x = thumb.right() + 14.0;
-        let max_w = btn.left() - spacing::M - x;
-        let top = rect.center().y - 18.0;
-        let sentence = look_words(it.look).1;
-        line(p, pos2(x, top), &it.label, font_medium(type_scale::BODY), t.fg, max_w);
-        line(p, pos2(x, top + 18.0), sentence, font(type_scale::SMALL), t.text_dim, max_w);
-        line(p, pos2(x, top + 35.0), used, font(type_scale::SMALL), t.text_faint, max_w);
-        let mut child = ui.new_child(UiBuilder::new().max_rect(btn).id_salt(("tr-try", &it.id)));
-        let r = widgets::button_ex(&mut child, t, Some(icon::PLAY), "Try it", Kind::Secondary, Size::Small, 96.0, can_try);
-        let tip = if on_air { "You're on air: trying it would switch scenes for your viewers." } else { "Switch between the two scenes below with it." };
-        clicked = r.on_hover_text(tip).on_disabled_hover_text(tip).clicked();
-    }
-    resp.on_hover_text(format!("{}\n{used}", look_words(it.look).1));
-    clicked
 }
 
 /// Show `a`, then switch to `b` with transition `id` at its own speed (off air only).
@@ -1411,5 +1779,31 @@ ms = 1200                      # back from the break: slower
         assert_eq!(look_of("shader", Some("patch.wipe")), Look::Own);
         assert_eq!(look_of("shader", None), Look::Fade);
         assert_eq!(look_of("cut", None), Look::Cut);
+    }
+
+    #[test]
+    fn default_switch_adds_and_removes_one() {
+        let two = Choice::Random { pool: pool(&["morph", "zoomblur"]), avoid_repeat: 1 };
+        assert_eq!(toggle_default(&two, "cut", true), Choice::Random { pool: pool(&["morph", "zoomblur", "cut"]), avoid_repeat: 1 });
+        assert_eq!(toggle_default(&two, "morph", false), Choice::Random { pool: pool(&["zoomblur"]), avoid_repeat: 1 });
+        assert_eq!(
+            toggle_default(&Choice::Random { pool: pool(&["morph"]), avoid_repeat: 1 }, "morph", false),
+            Choice::Inherit,
+            "the last one out: nothing picked"
+        );
+        // nothing picked is "always a Crossfade": adding keeps the Crossfade in the mix
+        assert_eq!(toggle_default(&Choice::Inherit, "morph", true), Choice::Random { pool: pool(&["fade", "morph"]), avoid_repeat: 1 });
+        assert!(in_default(&toggle_default(&Choice::Inherit, "fade", false), "fade"), "the Crossfade can't be switched off by itself");
+        assert_eq!(toggle_default(&Choice::Always("cut".into()), "morph", true), Choice::Random { pool: pool(&["cut", "morph"]), avoid_repeat: 1 });
+        assert_eq!(toggle_default(&Choice::Always("cut".into()), "cut", false), Choice::Inherit);
+        assert_eq!(toggle_default(&Choice::Always("cut".into()), "morph", false), Choice::Always("cut".into()));
+    }
+
+    #[test]
+    fn name_file_makes_a_custom_shader_pickable() {
+        let text = name_file("Neon \"wipe\"", "neon_wipe");
+        let d: se_core::config::TransitionDef = toml::from_str(&text).unwrap();
+        assert_eq!((d.label.as_deref(), d.kind.as_str(), d.shader.as_deref()), (Some("Neon \"wipe\""), "shader", Some("patch.neon_wipe")));
+        assert_eq!(look_of(&d.kind, d.shader.as_deref()), Look::Own);
     }
 }

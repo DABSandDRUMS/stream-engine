@@ -1,40 +1,62 @@
-//! Scenes → Scenes: the composition view (§15.5). Pick a scene on the left (or make one from a
-//! starting layout), arrange its layers on the composite view in the middle, and tune the
-//! selected layer (place, look, an overlay's own settings, when it shows and why it's hidden)
-//! — or the scene's transitions, effects, what it does coming on and going off, and its
-//! background — on the right. Geometry edits go through live state (`set_base`, saved to the
-//! scene file by the engine); everything else edits the scene file with `scene_edit`
-//! (comments kept).
+//! Scenes → Scenes: the one three-pane scene editor (docs/ui-model.md).
+//!
+//! - Left: **Scenes** (pick one, `+` makes one) over **Layers** of the picked scene: the
+//!   sources drawn above every scene ("On every scene", `[overlays.<id>]` in `project.toml`),
+//!   then the scene's own layers front to back (eye, kind, name, effect/∿/⚡ marks; drag to
+//!   reorder; `+` adds a layer).
+//! - Center: the canvas editor for the Main and/or Vertical canvas.
+//! - Right: the inspector of the selected layer (source, transform, crop, look, effects, when
+//!   it shows, enter & exit, arrange) or, with no layer selected, of the scene (name and key,
+//!   transition in, scene effects, what it does starting and ending, background, lights).
+//!
+//! Live numbers (transform, opacity, a layer effect's switch and settings) preview with `set`
+//! while dragged and save with `set_base`, which the engine writes into the scene file.
+//! Everything else edits the file text with `scene_edit` (comments kept) and `project.write`.
 
-use crate::app::App;
+use crate::app::{App, ViewId};
 use crate::views::live::nice;
-use crate::views::{canvas, rules, scene_edit};
+use crate::views::scene_edit::{self, FxEntry, FxHost, FxValue};
+use crate::views::{canvas, links, media, patches, rules, sources};
 use egui::{Align, Layout, RichText, Vec2};
 use se_proto::{Op, Value};
 use se_ui_kit::canvas as kc;
-use se_ui_kit::theme::{font_medium, font_semibold, radius, spacing, type_scale};
+use se_ui_kit::theme::{font_medium, font_mono, radius, spacing, type_scale};
 use se_ui_kit::widgets::{self, Kind, Size, Tone, icon};
+use std::collections::BTreeSet;
+use std::ops::RangeInclusive;
+
+/// Width of the Scenes + Layers column.
+const LEFT_W: f32 = 284.0;
+/// Width of the inspector.
+const RIGHT_W: f32 = 360.0;
+/// Query key of `project.toml` (the "On every scene" settings).
+const PROJECT_KEY: &str = "comp.file:project.toml";
 
 #[derive(Default)]
 pub struct CompositionState {
-    /// Right panel: 0 = selected layer, 1 = scene settings.
-    pub side: usize,
     pub rename: String,
     pub rename_for: String,
     pub new_open: bool,
     pub new_name: String,
     /// "Start from" choice (index into `scene_edit::START_LAYOUTS`).
     pub new_layout: usize,
+    /// A source of the "On every scene" group picked in the Layers list (instead of a layer).
+    pub pinned: Option<String>,
     /// Scene whose file text must be re-read (after a write), and when.
     reread: Option<(String, f64)>,
     asked: Option<(String, u64)>,
     /// Our latest edit of a scene file, shown until the engine's copy catches up.
     local: Option<LocalText>,
-    /// "When this scene comes on / goes off" as edited, unfinished steps included.
+    /// "When this scene starts / ends" as edited, unfinished steps included.
     steps: Vec<StepsDraft>,
     /// The show condition as typed under Details: (layer, text).
     when_buf: Option<(String, String)>,
     patches_at: f64,
+    /// The engine saved a live edit (`set_base`) into this scene's file: read it again.
+    base_written: Option<String>,
+    /// Addresses previewed with `set` while a slider is dragged (released on commit).
+    held: BTreeSet<String>,
+    project: ProjectText,
 }
 
 struct LocalText {
@@ -44,6 +66,14 @@ struct LocalText {
     send_at: Option<f64>,
     /// Reply count of the file query when it was sent; a newer reply replaces this text.
     seq: u64,
+}
+
+/// `project.toml` as read for the "On every scene" group, and our latest edit of it.
+#[derive(Default)]
+struct ProjectText {
+    asked: Option<u64>,
+    reread_at: f64,
+    local: Option<(String, u64)>,
 }
 
 struct StepsDraft {
@@ -124,6 +154,12 @@ pub fn scene_file_changed(app: &mut App, scene: &str) {
     }
 }
 
+/// A live edit was saved with `set_base`: the engine writes it into `scenes/<scene>.toml`, so
+/// our copy of the file is read again (later file edits start from the saved value).
+pub fn base_written(app: &mut App, scene: &str) {
+    app.build.comp.base_written = Some(scene.to_string());
+}
+
 /// Send a debounced edit once it's due (`force`: now).
 fn flush(app: &mut App, now: f64, force: bool) {
     let Some(l) = app.build.comp.local.as_ref() else { return };
@@ -134,10 +170,67 @@ fn flush(app: &mut App, now: f64, force: bool) {
     }
 }
 
-/// Friendly name for a source (`cam_kit` → its device label or "Cam kit"; `patch.x` → "X").
+/// `project.toml` (read once per connection and every few seconds while shown).
+fn project_text(app: &mut App, now: f64) -> Option<String> {
+    let p = &mut app.build.comp.project;
+    if app.m.connected && (p.asked != Some(app.m.conn_gen) || now >= p.reread_at) {
+        p.asked = Some(app.m.conn_gen);
+        p.reread_at = now + 5.0;
+        app.m.query_as(PROJECT_KEY, "project.read", Value::map().with("path", "project.toml"));
+    }
+    let seq = app.m.q_seq(PROJECT_KEY);
+    if let Some((text, s)) = &app.build.comp.project.local
+        && *s == seq
+    {
+        return Some(text.clone());
+    }
+    app.m.q(PROJECT_KEY).and_then(|v| v.get_path("text")).and_then(Value::as_str).map(String::from)
+}
+
+fn write_project(app: &mut App, text: anyhow::Result<String>, now: f64) {
+    match text {
+        Ok(text) => {
+            app.m.action("project.write", Value::map().with("path", "project.toml").with("text", text.as_str()));
+            let seq = app.m.q_seq(PROJECT_KEY);
+            app.build.comp.project.local = Some((text, seq));
+            app.build.comp.project.reread_at = now + 0.5;
+            app.m.refresh_soon();
+        }
+        Err(e) => app.m.toast(format!("Couldn't change the project settings: {e:#}"), true),
+    }
+}
+
+/// Show `scene` (and its layer `layer`) in the scene editor: "Used in" rows on other pages.
+pub fn open(app: &mut App, scene: &str, layer: Option<&str>) {
+    select_scene(app, scene);
+    app.build.canvas.selected = layer.map(String::from);
+    app.open_view(ViewId::Composition);
+}
+
+fn select_scene(app: &mut App, scene: &str) {
+    app.build.canvas.scene = Some(scene.to_string());
+    app.build.canvas.selected = None;
+    app.build.comp.pinned = None;
+    app.build.comp.new_open = false;
+    // edits apply to "Up next": bring the scene there
+    app.m.command(Op::SceneGo { scene: scene.to_string() });
+}
+
+/// Friendly name for a source (`cam_kit` → its label or "Cam kit"; `patch.x` → its label;
+/// `color:#…` → "Solid color").
 pub fn source_label(app: &App, src: &str) -> String {
     if let Some(p) = src.strip_prefix("patch.") {
-        return nice(p);
+        return app
+            .m
+            .q_list("patches")
+            .iter()
+            .find(|e| e.get_path("id").and_then(Value::as_str) == Some(p))
+            .and_then(|e| e.get_path("label").and_then(Value::as_str))
+            .filter(|l| !l.is_empty() && *l != p)
+            .map_or_else(|| nice(p), nice);
+    }
+    if src.starts_with("color:") || src.starts_with('#') {
+        return "Solid color".into();
     }
     app.m
         .q_list("sources")
@@ -160,17 +253,68 @@ fn scenes(app: &App) -> Vec<(String, String, i64)> {
         .collect()
 }
 
+fn scene_label(app: &App, scene: &str) -> String {
+    scenes(app).into_iter().find(|(n, _, _)| n == scene).map_or_else(|| nice(scene), |(_, l, _)| nice(&l))
+}
+
+/// Every source a layer can show: saved cameras and media (also while video isn't running),
+/// then web and generative ones.
+fn all_sources(app: &App) -> Vec<String> {
+    let saved = app.m.q("project.sources").and_then(|v| v.get_path("sources")).and_then(Value::as_list).unwrap_or(&[]);
+    let mut out: Vec<String> = Vec::new();
+    for s in saved.iter().chain(app.m.q_list("sources")) {
+        if let Some(n) = s.get_path("name").and_then(Value::as_str)
+            && !out.iter().any(|o| o == n)
+        {
+            out.push(n.to_string());
+        }
+    }
+    out.extend(
+        app.m
+            .q_list("patches")
+            .iter()
+            .filter(|p| matches!(p.get_path("kind").and_then(Value::as_str), Some("web" | "shader" | "particles" | "script")))
+            .filter(|p| matches!(p.get_path("layer").and_then(Value::as_str), Some("source" | "overlay")))
+            .filter_map(|p| p.get_path("id").and_then(Value::as_str).map(|id| format!("patch.{id}"))),
+    );
+    out
+}
+
+fn patch_entry(app: &App, id: &str) -> Option<Value> {
+    app.m.q_list("patches").iter().find(|p| p.get_path("id").and_then(Value::as_str) == Some(id)).cloned()
+}
+
+/// The five groups of the Add layer menu, in order.
+const GROUPS: [&str; 5] = ["Cameras & capture", "Media", "Web", "Generative", "Color"];
+
+fn group_of(k: sources::SourceKind) -> usize {
+    use sources::SourceKind::*;
+    match k {
+        Camera => 0,
+        Video | Image => 1,
+        Web => 2,
+        Generative => 3,
+        Color => 4,
+    }
+}
+
 pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     let t = app.t.clone();
     let now = ui.input(|i| i.time);
-    if app.m.q_seq("sources") == 0 {
-        app.m.query("sources", Value::Null);
+    for q in ["sources", "project.sources"] {
+        if app.m.q_seq(q) == 0 && app.m.connected {
+            app.m.query(q, Value::Null);
+        }
     }
     crate::views::transitions::poll(app, now);
-    // overlay settings and show conditions follow the overlays' live state
+    links::keep_fresh(app);
+    // source settings and show conditions follow the sources' live state
     if app.m.connected && now - app.build.comp.patches_at > 2.0 {
         app.build.comp.patches_at = now;
         app.m.query("patches", Value::Null);
+    }
+    if let Some(s) = app.build.comp.base_written.take() {
+        app.build.comp.reread = Some((s, now + 0.8));
     }
     flush(app, now, false);
     if app.build.comp.local.as_ref().is_some_and(|l| l.send_at.is_some()) {
@@ -181,81 +325,355 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         let pv = app.m.str("show.scene.preview").to_string();
         if pv.is_empty() { list.first().map(|(n, _, _)| n.clone()).unwrap_or_default() } else { pv }
     });
+    if app.build.comp.pinned.as_ref().is_some_and(|p| !patches::overlay_ids(app).contains(p)) {
+        app.build.comp.pinned = None;
+    }
     let h = ui.available_height();
-    let w = ui.available_width();
-    let left = 230.0;
-    let right = (w * 0.24).clamp(320.0, 400.0);
-    let mid = w - left - right - 2.0 * spacing::L;
+    let pad = 2.0 * spacing::L + 2.0;
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = spacing::L;
-        ui.allocate_ui_with_layout(Vec2::new(left, h), Layout::top_down(Align::Min), |ui| scene_list(app, ui, &list, &scene, now));
-        ui.allocate_ui_with_layout(Vec2::new(mid, h), Layout::top_down(Align::Min), |ui| {
+        ui.allocate_ui_with_layout(Vec2::new(LEFT_W, h), Layout::top_down(Align::Min), |ui| {
+            ui.set_width(LEFT_W);
+            left_column(app, ui, &list, &scene, h, now);
+        });
+        let rest = ui.available_width();
+        ui.allocate_ui_with_layout(Vec2::new(rest, h), Layout::top_down(Align::Min), |ui| {
+            ui.set_width(rest);
+            if app.build.comp.new_open {
+                widgets::panel(ui, &t, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.set_min_height(h - pad);
+                    egui::ScrollArea::vertical().id_salt("comp-new").auto_shrink([false, false]).show(ui, |ui| new_scene_form(app, ui, &list, now));
+                });
+                return;
+            }
             if scene.is_empty() {
                 widgets::panel(ui, &t, |ui| {
                     ui.set_width(ui.available_width());
+                    ui.set_min_height(h - pad);
+                    ui.add_space((h * 0.18).max(0.0));
                     if widgets::empty_state(
                         ui,
                         &t,
                         icon::LAYERS,
-                        "No scenes yet",
-                        "A scene is one arrangement of your cameras and overlays.",
-                        Some("Make your first scene"),
+                        "Scenes",
+                        "A scene is one arrangement of your sources as layers, for the Main and Vertical canvases.",
+                        Some("Create your first scene"),
                     ) {
-                        app.build.comp.new_open = true;
+                        start_new_scene(app);
                     }
                 });
                 return;
             }
-            middle(app, ui, &scene, h, now);
-        });
-        ui.allocate_ui_with_layout(Vec2::new(right, h), Layout::top_down(Align::Min), |ui| {
-            if !scene.is_empty() {
-                side_panel(app, ui, &scene, h, now);
-            }
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = spacing::L;
+                let mid = (rest - RIGHT_W - spacing::L).max(240.0);
+                ui.allocate_ui_with_layout(Vec2::new(mid, h), Layout::top_down(Align::Min), |ui| {
+                    ui.set_width(mid);
+                    center(app, ui, &scene, now);
+                });
+                ui.allocate_ui_with_layout(Vec2::new(RIGHT_W, h), Layout::top_down(Align::Min), |ui| {
+                    ui.set_width(RIGHT_W);
+                    widgets::panel(ui, &t, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.set_min_height(h - pad);
+                        egui::ScrollArea::vertical().id_salt("comp-inspector").auto_shrink([false, false]).show(ui, |ui| inspector(app, ui, &scene, now));
+                    });
+                });
+            });
         });
     });
 }
 
-// ---- left: scenes -------------------------------------------------------------------------------
+fn start_new_scene(app: &mut App) {
+    app.build.comp.new_open = true;
+    app.build.comp.new_name.clear();
+    app.build.comp.new_layout = 0;
+}
 
-fn scene_list(app: &mut App, ui: &mut egui::Ui, list: &[(String, String, i64)], current: &str, now: f64) {
+// ---- left: scenes + layers ------------------------------------------------------------------------
+
+fn left_column(app: &mut App, ui: &mut egui::Ui, list: &[(String, String, i64)], current: &str, h: f32, now: f64) {
     let t = app.t.clone();
-    let program = app.m.str("show.scene.program").to_string();
+    let pad = 2.0 * spacing::L + 2.0;
+    let list_h = (list.len().max(1) as f32 * 40.0).min((h * 0.34).max(80.0));
     widgets::panel(ui, &t, |ui| {
         ui.set_width(ui.available_width());
-        ui.set_min_height(ui.available_height() - 36.0);
-        let creating = app.build.comp.new_open;
-        ui.label(RichText::new(if creating { "New scene" } else { "Your scenes" }).font(font_semibold(type_scale::LARGE)).color(t.fg));
-        ui.add_space(spacing::S);
-        if creating {
-            // the form takes the list's place (it doesn't fit under a long list)
-            egui::ScrollArea::vertical().id_salt("comp-new").show(ui, |ui| new_scene_form(app, ui, list, now));
-            return;
+        if widgets::pane_header(ui, &t, "Scenes", Some(list.len()), Some("New scene")) {
+            start_new_scene(app);
         }
-        egui::ScrollArea::vertical().id_salt("comp-scenes").max_height(ui.available_height() - 60.0).show(ui, |ui| {
-            for (name, label, key) in list {
-                let r = widgets::list_row(ui, &t, icon::LAYERS, &nice(label), if *name == program { "On air" } else { "" }, "", name == current)
-                    .on_hover_text(format!("Press {key} to put it up next"));
-                // number key as a keycap on the right
-                let kc = egui::Rect::from_center_size(egui::pos2(r.rect.right() - 22.0, r.rect.center().y), Vec2::new(22.0, 22.0));
-                ui.painter().rect(kc, 5, t.inset, egui::Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
-                ui.painter().text(kc.center(), egui::Align2::CENTER_CENTER, key.to_string(), se_ui_kit::theme::font_mono(type_scale::SMALL), t.text_dim);
-                if *name == program {
-                    ui.painter().circle_filled(egui::pos2(r.rect.right() - 44.0, r.rect.center().y), 3.5, t.tally_program());
-                }
-                if r.clicked() && name != current {
-                    app.build.canvas.scene = Some(name.clone());
-                    app.build.canvas.selected = None;
-                    // edits apply to "Up next": bring the scene there
-                    app.m.command(Op::SceneGo { scene: name.clone() });
-                }
-            }
-        });
-        ui.add_space(spacing::S);
-        if widgets::button_ex(ui, &t, Some(icon::PLUS), "New scene", Kind::Secondary, Size::Medium, ui.available_width(), true).clicked() {
-            app.build.comp.new_open = true;
+        egui::ScrollArea::vertical().id_salt("comp-scenes").max_height(list_h).auto_shrink([false, true]).show(ui, |ui| scene_rows(app, ui, list, current));
+    });
+    ui.add_space(spacing::M);
+    let rest = (ui.available_height() - pad).max(160.0);
+    widgets::panel(ui, &t, |ui| {
+        ui.set_width(ui.available_width());
+        ui.set_min_height(rest);
+        if current.is_empty() {
+            widgets::pane_header(ui, &t, "Layers", None, None);
+            widgets::hint(ui, &t, "Layers of the picked scene show here.");
+        } else {
+            layers_pane(app, ui, current, rest, now);
         }
     });
+}
+
+fn scene_rows(app: &mut App, ui: &mut egui::Ui, list: &[(String, String, i64)], current: &str) {
+    let t = app.t.clone();
+    let program = app.m.str("show.scene.program").to_string();
+    let preview = app.m.str("show.scene.preview").to_string();
+    if list.is_empty() {
+        widgets::hint(ui, &t, "No scenes yet.");
+    }
+    for (name, label, key) in list {
+        let (state, tip) = if *name == program && crate::views::status::on_air(app) {
+            (Some(t.tally_program()), "On air")
+        } else if *name == preview {
+            (Some(t.tally_preview()), "Up next")
+        } else {
+            (None, "")
+        };
+        // an icon slot for the tally dot
+        let r = widgets::list_row(ui, &t, " ", &nice(label), "", "", name == current);
+        if let Some(c) = state {
+            ui.painter().circle_filled(egui::pos2(r.rect.left() + 20.0, r.rect.center().y), 4.0, c);
+        }
+        let cap = egui::Rect::from_center_size(egui::pos2(r.rect.right() - 22.0, r.rect.center().y), Vec2::new(22.0, 22.0));
+        ui.painter().rect(cap, 5, t.inset, egui::Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
+        ui.painter().text(cap.center(), egui::Align2::CENTER_CENTER, key.to_string(), font_mono(type_scale::SMALL), t.text_dim);
+        let r = r.on_hover_text(if tip.is_empty() { format!("Key {key}") } else { format!("{tip} · key {key}") });
+        if r.clicked() {
+            if name == current {
+                // the scene's own settings
+                app.build.canvas.selected = None;
+                app.build.comp.pinned = None;
+                app.build.comp.new_open = false;
+            } else {
+                select_scene(app, name);
+            }
+        }
+    }
+}
+
+/// One row of the scene's layer list (front first).
+struct LayerRow {
+    id: String,
+    src: String,
+    name: String,
+    sub: String,
+    visible: bool,
+    fx: usize,
+    modulated: bool,
+    triggered: bool,
+    waiting: bool,
+    on_canvas: bool,
+}
+
+fn layer_rows(app: &App, scene: &str, text: Option<&str>, canvas_name: &str) -> Vec<LayerRow> {
+    // the file first (a layer just added isn't in the loaded config yet), else the config
+    let layers = match text {
+        Some(x) => scene_edit::layers(x, canvas_name),
+        None => canvas::node_ids(app, scene)
+            .into_iter()
+            .map(|id| scene_edit::LayerInfo { src: app.build.node_src(scene, &id).unwrap_or(&id).to_string(), id, fx: 0 })
+            .collect(),
+    };
+    let mut rows: Vec<(usize, i64, LayerRow)> = layers
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            let p = format!("scene.{scene}.node.{}", l.id);
+            let same_src = layers.iter().filter(|o| o.src == l.src).count() > 1;
+            let row = LayerRow {
+                id: l.id.clone(),
+                src: l.src.clone(),
+                name: source_label(app, &l.src),
+                sub: if same_src { nice(&l.id) } else { String::new() },
+                visible: app.m.get(&format!("{p}.visible")).is_none_or(Value::truthy),
+                fx: l.fx,
+                modulated: links::modulated(app, &format!("{p}.")),
+                triggered: links::triggered(app, &format!("{p}.")),
+                waiting: node_when(app, scene, &l.id).is_some_and(|w| !when_now(app, &w).unwrap_or(false)),
+                on_canvas: app.m.get(&format!("{p}.rect.{canvas_name}")).is_some(),
+            };
+            (i, app.m.get(&format!("{p}.z.{canvas_name}")).and_then(Value::as_i64).unwrap_or(0), row)
+        })
+        .collect();
+    // later entries (and higher z) draw on top: list them first
+    rows.sort_by_key(|(i, z, _)| (std::cmp::Reverse(*z), std::cmp::Reverse(*i)));
+    rows.into_iter().map(|(_, _, r)| r).collect()
+}
+
+fn add_popup_id(scene: &str) -> egui::Id {
+    egui::Id::new(("comp-add-layer", scene))
+}
+
+fn layers_pane(app: &mut App, ui: &mut egui::Ui, scene: &str, h: f32, now: f64) {
+    let t = app.t.clone();
+    let text = scene_text(app, scene, now);
+    let canvas_name = canvas::edit_canvas(app);
+    let rows = layer_rows(app, scene, text.as_deref(), canvas_name);
+    let header = ui.scope(|ui| widgets::pane_header(ui, &t, "Layers", Some(rows.len()), Some("Add layer")));
+    egui::Popup::new(add_popup_id(scene), ui.ctx().clone(), header.response.rect, ui.layer_id())
+        .kind(egui::PopupKind::Menu)
+        .layout(Layout::top_down_justified(Align::Min))
+        .align(egui::RectAlign::BOTTOM_END)
+        .open_memory(header.inner.then_some(egui::SetOpenCommand::Toggle))
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .width(300.0)
+        .show(|ui| add_layer_menu(app, ui, scene, text.as_deref(), now));
+    let overlays = patches::overlay_ids(app);
+    egui::ScrollArea::vertical().id_salt("comp-layers").max_height((h - 44.0).max(80.0)).auto_shrink([false, true]).show(ui, |ui| {
+        if !overlays.is_empty() {
+            widgets::group_label(ui, &t, "On every scene");
+            let project = project_text(app, now);
+            for id in &overlays {
+                pinned_row(app, ui, id, project.as_deref(), now);
+            }
+        }
+        widgets::group_label(ui, &t, &scene_label(app, scene));
+        if rows.is_empty() {
+            widgets::hint(ui, &t, "No layers yet.");
+        }
+        for row in &rows {
+            layer_row(app, ui, scene, row, text.as_deref(), now);
+        }
+    });
+}
+
+fn pinned_row(app: &mut App, ui: &mut egui::Ui, id: &str, project: Option<&str>, now: f64) {
+    let t = app.t.clone();
+    let src = format!("patch.{id}");
+    let shown = project.is_none_or(|p| patches::on_every_scene(p, id));
+    let selected = app.build.comp.pinned.as_deref() == Some(id);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = spacing::XS;
+        let tip = if shown { "Drawn above every scene: click to stop" } else { "Only where you place it: click to draw it above every scene" };
+        if widgets::icon_button(ui, &t, if shown { icon::EYE } else { icon::EYE_OFF }, tip).clicked() {
+            match project {
+                Some(p) => write_project(app, patches::set_on_every_scene(p, id, !shown), now),
+                None => app.m.toast("The project settings aren't loaded yet. Try again in a second.", true),
+            }
+        }
+        let kind = sources::source_kind(app, &src);
+        let trailing = if shown { "" } else { "off" };
+        if widgets::list_row(ui, &t, kind.icon(), &source_label(app, &src), "", trailing, selected).clicked() {
+            app.build.comp.pinned = Some(id.to_string());
+            app.build.canvas.selected = None;
+        }
+    });
+}
+
+fn layer_row(app: &mut App, ui: &mut egui::Ui, scene: &str, row: &LayerRow, text: Option<&str>, now: f64) {
+    let t = app.t.clone();
+    let selected = app.build.comp.pinned.is_none() && app.build.canvas.selected.as_deref() == Some(row.id.as_str());
+    let mut marks = Vec::new();
+    let mut words = Vec::new();
+    if row.fx > 0 {
+        marks.push(format!("{} {}", icon::WAND, row.fx));
+        words.push(if row.fx == 1 { "1 effect".to_string() } else { format!("{} effects", row.fx) });
+    }
+    if row.modulated {
+        marks.push(links::SINE.to_string());
+        words.push("a setting follows a signal".into());
+    }
+    if row.triggered {
+        marks.push(icon::BOLT.to_string());
+        words.push("a trigger changes it".into());
+    }
+    if row.waiting {
+        marks.push(icon::CLOCK.to_string());
+        words.push("hidden right now by its show rule".into());
+    }
+    if !row.on_canvas {
+        words.push(format!("not on the {} canvas", if canvas::edit_canvas(app) == "tall" { "vertical" } else { "main" }));
+    }
+    let resp = ui
+        .horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = spacing::XS;
+            let tip = if row.visible { "Shown: click to hide" } else { "Hidden: click to show" };
+            if widgets::icon_button(ui, &t, if row.visible { icon::EYE } else { icon::EYE_OFF }, tip).clicked() {
+                app.m.command(Op::SetBase { address: format!("scene.{scene}.node.{}.visible", row.id), value: Value::Bool(!row.visible) });
+                base_written(app, scene);
+            }
+            let kind = sources::source_kind(app, &row.src);
+            ui.dnd_drag_source(egui::Id::new(("comp-layer-drag", scene, &row.id)), row.id.clone(), |ui| {
+                widgets::list_row(ui, &t, kind.icon(), &row.name, &row.sub, &marks.join("  "), selected)
+            })
+        })
+        .inner;
+    let (inner, resp) = (resp.inner, resp.response);
+    let inner = if words.is_empty() { inner } else { inner.on_hover_text(words.join(" · ")) };
+    if inner.clicked() {
+        app.build.canvas.selected = Some(row.id.clone());
+        app.build.comp.pinned = None;
+        app.select(format!("scene.{scene}.node.{}", row.id));
+    }
+    // dropping another layer here puts it just in front of (upper half) or behind this one
+    if let Some(p) = resp.dnd_hover_payload::<String>()
+        && *p != row.id
+        && let Some(pos) = ui.ctx().pointer_interact_pos()
+    {
+        let y = if pos.y < resp.rect.center().y { resp.rect.top() } else { resp.rect.bottom() };
+        ui.painter().hline(resp.rect.x_range(), y, egui::Stroke::new(2.0, t.accent));
+    }
+    if let Some(p) = resp.dnd_release_payload::<String>()
+        && *p != row.id
+        && let Some(text) = text
+    {
+        let in_front = ui.ctx().pointer_interact_pos().is_some_and(|pos| pos.y < resp.rect.center().y);
+        write_scene(app, scene, scene_edit::place_layer(text, &p, &row.id, in_front), now);
+    }
+}
+
+fn add_layer_menu(app: &mut App, ui: &mut egui::Ui, scene: &str, text: Option<&str>, now: f64) {
+    let t = app.t.clone();
+    let mut groups: [Vec<String>; 5] = Default::default();
+    for s in all_sources(app) {
+        let k = sources::source_kind(app, &s);
+        groups[group_of(k)].push(s);
+    }
+    let mut pick = None;
+    egui::ScrollArea::vertical().max_height(440.0).show(ui, |ui| {
+        for (g, srcs) in groups.iter().enumerate() {
+            if g == 4 {
+                widgets::group_label(ui, &t, GROUPS[g]);
+                if widgets::list_row(ui, &t, icon::PALETTE, "Solid color", "Fills the canvas; pick the color after", "", false).clicked() {
+                    pick = Some("color:#000000".to_string());
+                }
+                continue;
+            }
+            if srcs.is_empty() {
+                continue;
+            }
+            widgets::group_label(ui, &t, GROUPS[g]);
+            for s in srcs {
+                let k = sources::source_kind(app, s);
+                if widgets::list_row(ui, &t, k.icon(), &source_label(app, s), "", "", false).clicked() {
+                    pick = Some(s.clone());
+                }
+            }
+        }
+    });
+    ui.separator();
+    if widgets::button_ex(ui, &t, Some(icon::PLUS), "New source…", Kind::Ghost, Size::Small, 0.0, true).clicked() {
+        app.open_view(ViewId::Sources);
+        ui.close();
+    }
+    if let Some(src) = pick {
+        match text {
+            Some(text) => match scene_edit::add_layer(text, &src) {
+                Ok((text, id)) => {
+                    write_scene(app, scene, Ok(text), now);
+                    app.build.canvas.selected = Some(id);
+                    app.build.comp.pinned = None;
+                }
+                Err(e) => write_scene(app, scene, Err(e), now),
+            },
+            None => app.m.toast("The scene file isn't loaded yet. Try again in a second.", true),
+        }
+        ui.close();
+    }
 }
 
 /// Cameras to fill a starting layout with, best first: (name, picture width / height). Cameras
@@ -291,45 +709,47 @@ pub fn cameras(app: &App) -> Vec<(String, f64)> {
     names.into_iter().map(|n| (n, 16.0 / 9.0)).collect()
 }
 
-/// Name + "Start from" layouts + Create.
+/// New scene: a starting layout (drawn as tiles), a name, then Create.
 fn new_scene_form(app: &mut App, ui: &mut egui::Ui, list: &[(String, String, i64)], now: f64) {
     let t = app.t.clone();
-    ui.add(se_ui_kit::widgets::field(&mut app.build.comp.new_name).hint_text("Name, e.g. Chill cams").desired_width(ui.available_width()));
-    ui.add_space(spacing::S);
-    ui.label(RichText::new("Start from").font(font_medium(type_scale::SMALL + 0.5)).color(t.text_dim));
+    widgets::detail_header(ui, &t, icon::LAYERS, "New scene", "Pick how it starts, name it, then create it.", |_| {});
+    widgets::group_label(ui, &t, "Start from");
     let cams = cameras(app);
-    let gap = spacing::S;
-    let tile_w = ((ui.available_width() - gap) / 2.0).floor();
+    let tile_w = 188.0;
     let tile = Vec2::new(tile_w, tile_w * 9.0 / 16.0 + 24.0);
-    for row in scene_edit::START_LAYOUTS.iter().enumerate().collect::<Vec<_>>().chunks(2) {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = gap;
-            for (i, l) in row {
-                let usable = l.slots() == 0 || !cams.is_empty();
-                let r = layout_tile(ui, &t, tile, l, app.build.comp.new_layout == *i, usable);
-                let r = if usable { r } else { r.on_hover_text("Needs a camera: set one up under Settings → Devices.") };
-                if r.clicked() && usable {
-                    app.build.comp.new_layout = *i;
-                }
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::splat(spacing::S);
+        for (i, l) in scene_edit::START_LAYOUTS.iter().enumerate() {
+            let usable = l.slots() == 0 || !cams.is_empty();
+            let r = layout_tile(ui, &t, tile, l, app.build.comp.new_layout == i, usable);
+            let r = if usable { r } else { r.on_hover_text("Needs a camera source. Add one in Sources.") };
+            if r.clicked() && usable {
+                app.build.comp.new_layout = i;
             }
-        });
-        ui.add_space(gap);
-    }
+        }
+    });
     let layout = scene_edit::START_LAYOUTS.get(app.build.comp.new_layout).unwrap_or(&scene_edit::START_LAYOUTS[0]);
+    ui.add_space(spacing::S);
     if layout.slots() > 0 {
         if cams.is_empty() {
-            widgets::hint(ui, &t, "No cameras yet. Set them up under Settings → Devices, or start from Blank.");
+            widgets::hint(ui, &t, "No camera sources yet. Add one in Sources, or start from Blank.");
         } else {
             let shown: Vec<String> = (0..layout.slots()).map(|i| source_label(app, &cams[i % cams.len()].0)).collect();
-            widgets::hint(ui, &t, &format!("Shows {}. Swap cameras after.", join_words(&shown)));
+            widgets::hint(ui, &t, &format!("Shows {}. You can swap sources after.", join_words(&shown)));
         }
+    } else {
+        widgets::hint(ui, &t, "An empty canvas. Add layers after.");
     }
-    ui.add_space(spacing::S);
+    ui.add_space(spacing::M);
+    widgets::prop_row(ui, &t, "Name", |ui| {
+        ui.add(widgets::field(&mut app.build.comp.new_name).hint_text("e.g. Chill cams").desired_width(ui.available_width().min(320.0)));
+    });
+    ui.add_space(spacing::M);
     ui.horizontal(|ui| {
         let name = scene_edit::slug(&app.build.comp.new_name);
         let taken = list.iter().any(|(n, _, _)| *n == name);
         let ok = !name.is_empty() && !taken && (layout.slots() == 0 || !cams.is_empty());
-        if widgets::button_ex(ui, &t, None, "Create", Kind::Primary, Size::Small, 0.0, ok).clicked() {
+        if widgets::button_ex(ui, &t, None, "Create", Kind::Primary, Size::Medium, 0.0, ok).clicked() {
             let label = app.build.comp.new_name.trim().to_string();
             let key = (1..=9).find(|k| !list.iter().any(|(_, _, used)| used == k));
             let sizes = [crate::views::monitor::canvas_size("wide"), crate::views::monitor::canvas_size("tall")].map(|[w, h]| [w as f64, h as f64]);
@@ -338,6 +758,7 @@ fn new_scene_form(app: &mut App, ui: &mut egui::Ui, list: &[(String, String, i64
                     app.m.action("project.write", Value::map().with("path", file_path(&name)).with("text", text));
                     app.build.canvas.scene = Some(name.clone());
                     app.build.canvas.selected = None;
+                    app.build.comp.pinned = None;
                     app.build.comp.new_open = false;
                     app.build.comp.new_name.clear();
                     app.build.comp.reread = Some((name, now + 0.5));
@@ -346,11 +767,11 @@ fn new_scene_form(app: &mut App, ui: &mut egui::Ui, list: &[(String, String, i64
                 Err(e) => app.m.toast(format!("Couldn't make the scene: {e:#}"), true),
             }
         }
-        if widgets::button_ex(ui, &t, None, "Cancel", Kind::Ghost, Size::Small, 0.0, true).clicked() {
+        if widgets::button_ex(ui, &t, None, "Cancel", Kind::Ghost, Size::Medium, 0.0, true).clicked() {
             app.build.comp.new_open = false;
         }
         if taken {
-            widgets::hint(ui, &t, "That name is taken");
+            widgets::hint(ui, &t, "That name is taken.");
         }
     });
 }
@@ -379,9 +800,9 @@ fn layout_tile(ui: &mut egui::Ui, t: &se_ui_kit::Theme, size: Vec2, l: &scene_ed
     } else {
         t.surface
     };
-    p.rect(rect, se_ui_kit::theme::radius::CONTROL, bg, egui::Stroke::new(1.0, if selected { t.accent } else { t.border }), egui::StrokeKind::Inside);
+    p.rect(rect, radius::CONTROL, bg, egui::Stroke::new(1.0, if selected { t.accent } else { t.border }), egui::StrokeKind::Inside);
     let screen = egui::Rect::from_min_size(rect.min + Vec2::splat(6.0), Vec2::new(size.x - 12.0, (size.x - 12.0) * 9.0 / 16.0));
-    p.rect_filled(screen, 4, egui::Color32::from_rgb(6, 7, 9));
+    p.rect_filled(screen, 4, t.inset);
     let fill = if usable { if selected { t.accent } else { t.text_dim } } else { t.text_faint };
     for r in l.wide {
         let b = egui::Rect::from_min_size(
@@ -389,329 +810,785 @@ fn layout_tile(ui: &mut egui::Ui, t: &se_ui_kit::Theme, size: Vec2, l: &scene_ed
             Vec2::new(r[2] as f32 * screen.width(), r[3] as f32 * screen.height()),
         )
         .shrink(1.0);
-        p.rect(b, 2, se_ui_kit::theme::mix(egui::Color32::from_rgb(6, 7, 9), fill, 0.55), egui::Stroke::new(1.0, fill), egui::StrokeKind::Inside);
+        p.rect(b, 2, se_ui_kit::theme::mix(t.inset, fill, 0.55), egui::Stroke::new(1.0, fill), egui::StrokeKind::Inside);
     }
     let text = if usable { t.fg } else { t.text_faint };
     p.text(egui::pos2(rect.center().x, rect.bottom() - 11.0), egui::Align2::CENTER_CENTER, l.label, font_medium(type_scale::SMALL), text);
     if usable { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp }
 }
 
-// ---- middle: composite view + layers --------------------------------------------------------------
+// ---- center: the canvas -----------------------------------------------------------------------------
 
-fn middle(app: &mut App, ui: &mut egui::Ui, scene: &str, h: f32, now: f64) {
+fn center(app: &mut App, ui: &mut egui::Ui, scene: &str, now: f64) {
     let t = app.t.clone();
-    let live = app.m.str("show.scene.program") == scene;
     canvas::toolbar(app, ui);
     ui.add_space(spacing::S);
-    if live {
-        widgets::callout(ui, &t, widgets::Tone::Danger, icon::LIVE, "This scene is on air", "Your viewers see every change right away.", None);
+    if crate::views::status::on_air(app) && app.m.str("show.scene.program") == scene {
+        widgets::callout(ui, &t, Tone::Danger, icon::LIVE, "On air: viewers see every change right away.", "", None);
         ui.add_space(spacing::S);
     }
-    let layers_h = 250.0;
-    let avail = Vec2::new(ui.available_width(), (h - layers_h - 90.0 - if live { 80.0 } else { 0.0 }).max(200.0));
-    canvas::editors(app, ui, scene, avail);
-    ui.add_space(spacing::M);
-    layers(app, ui, scene, now);
-}
-
-fn layers(app: &mut App, ui: &mut egui::Ui, scene: &str, now: f64) {
-    let t = app.t.clone();
-    let canvas_name = canvas::edit_canvas(app);
-    let mut nodes = canvas::editor_nodes(app, scene, canvas_name);
-    nodes.sort_by_key(|n| std::cmp::Reverse(n.z));
-    let mut add = None;
-    widgets::titled(
-        ui,
-        &t,
-        "Layers",
-        "Top of the list is in front. Click one to change it.",
-        |ui| {
-            add = Some(widgets::button_ex(ui, &t, Some(icon::PLUS), "Add layer", Kind::Primary, Size::Small, 0.0, true));
-        },
-        |ui| {
-            if nodes.is_empty() {
-                widgets::hint(ui, &t, "This scene is empty. Add a camera or an overlay.");
-                return;
-            }
-            egui::ScrollArea::vertical().id_salt("comp-layers").max_height(ui.available_height().max(120.0)).show(ui, |ui| {
-                for n in &nodes {
-                    let src = app.build.node_src(scene, &n.id).unwrap_or(&n.id).to_string();
-                    let label = source_label(app, &src);
-                    let sub = if n.id != src { n.id.replace('_', " ") } else { String::new() };
-                    let selected = app.build.canvas.selected.as_deref() == Some(n.id.as_str());
-                    ui.horizontal_top(|ui| {
-                        let vis_a = format!("scene.{scene}.node.{}.visible", n.id);
-                        let mut vis = n.visible;
-                        let row_h = if sub.is_empty() { 40.0 } else { 54.0 };
-                        let toggled = ui
-                            .vertical(|ui| {
-                                ui.add_space((row_h - 22.0) / 2.0);
-                                widgets::toggle(ui, &t, &mut vis).on_hover_text(if vis { "Showing: click to hide" } else { "Hidden: click to show" }).changed()
-                            })
-                            .inner;
-                        if toggled {
-                            app.m.command(Op::SetBase { address: vis_a, value: Value::Bool(vis) });
-                        }
-                        let ic = if src.starts_with("patch.") { icon::SPARKLE } else { icon::CAMERA };
-                        let waiting = node_when(app, scene, &n.id).is_some_and(|w| !when_now(app, &w).unwrap_or(false));
-                        let trailing = if waiting {
-                            "hidden right now"
-                        } else if n.modulated {
-                            "moves with music"
-                        } else {
-                            ""
-                        };
-                        if widgets::list_row(ui, &t, ic, &label, &sub, trailing, selected).clicked() {
-                            app.build.canvas.selected = Some(n.id.clone());
-                            app.build.comp.side = 0;
-                        }
-                    });
+    let avail = Vec2::new(ui.available_width(), (ui.available_height() - spacing::S).max(200.0));
+    let area = canvas::editors(app, ui, scene, avail);
+    let empty = scene_text(app, scene, now).is_some_and(|x| scene_edit::layer_order(&x, "wide").is_empty());
+    if empty {
+        ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space((area.height() * 0.5 - 44.0).max(0.0));
+                ui.label(RichText::new("This scene has no layers yet.").font(font_medium(type_scale::BODY)).color(t.fg));
+                ui.add_space(spacing::S);
+                if widgets::button_ex(ui, &t, Some(icon::PLUS), "Add layer", Kind::Primary, Size::Medium, 0.0, true).clicked() {
+                    egui::Popup::open_id(ui.ctx(), add_popup_id(scene));
                 }
             });
-        },
-    );
-    if let Some(r) = add {
-        egui::Popup::menu(&r).show(|ui| add_layer_menu(app, ui, scene, now));
-    }
-}
-
-fn add_layer_menu(app: &mut App, ui: &mut egui::Ui, scene: &str, now: f64) {
-    let t = app.t.clone();
-    ui.set_min_width(260.0);
-    let cams: Vec<String> = app.m.q_list("sources").iter().filter_map(|s| s.get_path("name").and_then(Value::as_str).map(String::from)).collect();
-    let overlays: Vec<String> = app
-        .m
-        .q_list("patches")
-        .iter()
-        .filter(|p| matches!(p.get_path("kind").and_then(Value::as_str), Some("web" | "shader" | "particles" | "script")))
-        .filter_map(|p| p.get_path("id").or_else(|| p.get_path("name")).and_then(Value::as_str).map(|id| format!("patch.{id}")))
-        .collect();
-    let mut pick = None;
-    ui.label(RichText::new("Cameras & media").font(font_medium(type_scale::SMALL)).color(t.text_dim));
-    for c in &cams {
-        if ui.button(format!("{}  {}", icon::CAMERA, source_label(app, c))).clicked() {
-            pick = Some(c.clone());
-        }
-    }
-    if !overlays.is_empty() {
-        ui.add_space(spacing::S);
-        ui.label(RichText::new("Overlays").font(font_medium(type_scale::SMALL)).color(t.text_dim));
-        for o in &overlays {
-            if ui.button(format!("{}  {}", icon::SPARKLE, source_label(app, o))).clicked() {
-                pick = Some(o.clone());
-            }
-        }
-    }
-    if let Some(src) = pick {
-        let now_text = scene_text(app, scene, now);
-        match now_text {
-            Some(text) => write_scene(app, scene, scene_edit::add_layer(&text, &src), now),
-            None => app.m.toast("The scene file isn't loaded yet. Try again in a second.", true),
-        }
-        ui.close();
-    }
-}
-
-// ---- right: selected layer / scene settings ---------------------------------------------------------
-
-fn side_panel(app: &mut App, ui: &mut egui::Ui, scene: &str, h: f32, now: f64) {
-    let t = app.t.clone();
-    widgets::panel(ui, &t, |ui| {
-        ui.set_width(ui.available_width());
-        ui.set_min_height(h - 36.0);
-        let mut side = app.build.comp.side;
-        if widgets::segmented(ui, &t, &mut side, &["Selected layer", "Scene settings"]) {
-            app.build.comp.side = side;
-        }
-        ui.add_space(spacing::M);
-        egui::ScrollArea::vertical().id_salt("comp-side").auto_shrink([false, false]).show(ui, |ui| {
-            if app.build.comp.side == 0 {
-                layer_panel(app, ui, scene, now);
-            } else {
-                scene_panel(app, ui, scene, now);
-            }
         });
+    }
+}
+
+// ---- right: the inspector ------------------------------------------------------------------------------
+
+fn inspector(app: &mut App, ui: &mut egui::Ui, scene: &str, now: f64) {
+    if let Some(id) = app.build.comp.pinned.clone() {
+        pinned_inspector(app, ui, &id, now);
+        return;
+    }
+    let text = scene_text(app, scene, now);
+    let exists = |app: &App, id: &str| match text.as_deref() {
+        Some(x) => scene_edit::layer_order(x, "wide").iter().any(|l| l == id),
+        None => canvas::node_ids(app, scene).iter().any(|l| l == id),
+    };
+    match app.build.canvas.selected.clone() {
+        Some(sel) if exists(app, &sel) => layer_inspector(app, ui, scene, &sel, text.as_deref(), now),
+        Some(_) if text.is_some() => {
+            app.build.canvas.selected = None;
+            scene_inspector(app, ui, scene, text.as_deref(), now);
+        }
+        _ => scene_inspector(app, ui, scene, text.as_deref(), now),
+    }
+}
+
+fn canvas_word(canvas_name: &str) -> &'static str {
+    if canvas_name == "tall" { "Vertical" } else { "Main" }
+}
+
+/// A numeric setting on a slider (`%` shows 0–1 as percent).
+fn slider(ui: &mut egui::Ui, v: &mut f64, range: RangeInclusive<f64>, suffix: &str, badge: bool) -> egui::Response {
+    let span = range.end() - range.start();
+    let decimals = if span <= 0.2 {
+        3
+    } else if span <= 4.0 {
+        2
+    } else if span <= 10.0 {
+        1
+    } else {
+        0
+    };
+    // fixed value box and ∿ slot, so rows line up and never run past the inspector
+    const VALUE_W: f32 = 64.0;
+    let gap = ui.spacing().item_spacing.x;
+    let badge_w = if badge { 28.0 + gap } else { 0.0 };
+    ui.spacing_mut().slider_width = (ui.available_width() - VALUE_W - gap - badge_w - 2.0).max(40.0);
+    ui.spacing_mut().interact_size.x = VALUE_W;
+    let s = egui::Slider::new(v, range);
+    let s = if suffix == "%" {
+        s.custom_formatter(|v, _| format!("{:.0}%", v * 100.0)).custom_parser(|s| s.trim().trim_end_matches('%').trim().parse::<f64>().ok().map(|x| x / 100.0))
+    } else {
+        s.suffix(suffix).fixed_decimals(decimals)
+    };
+    ui.add(s)
+}
+
+/// Preview a dragged live setting with `set`; save it with `set_base` (the engine writes it into
+/// the scene file) when the drag ends or a value is typed.
+fn commit_live(app: &mut App, scene: &str, addr: &str, r: &egui::Response, v: f64) {
+    let value = Value::Float((v * 10000.0).round() / 10000.0);
+    if r.drag_stopped() || (r.changed() && !r.dragged()) {
+        app.m.command(Op::SetBase { address: addr.to_string(), value });
+        if app.build.comp.held.remove(addr) {
+            app.m.command(Op::Release { address: addr.to_string() });
+        }
+        base_written(app, scene);
+    } else if r.dragged() && r.changed() {
+        app.m.command(Op::Set { address: addr.to_string(), value });
+        app.build.comp.held.insert(addr.to_string());
+    }
+}
+
+/// A live layer number: label, slider, and ∿ (`follow`: the range a signal moves it over).
+#[allow(clippy::too_many_arguments)]
+fn live_row(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    scene: &str,
+    label: &str,
+    addr: &str,
+    default: f64,
+    range: RangeInclusive<f64>,
+    suffix: &str,
+    follow: Option<(f64, f64)>,
+) {
+    let t = app.t.clone();
+    let cur = app.m.get(addr).and_then(Value::as_f64).unwrap_or(default);
+    widgets::prop_row(ui, &t, label, |ui| {
+        let mut v = cur;
+        let r = slider(ui, &mut v, range, suffix, follow.is_some());
+        commit_live(app, scene, addr, &r, v);
+        if let Some(rg) = follow {
+            links::modulate_button(app, ui, addr, label, rg);
+        }
     });
 }
 
-fn layer_panel(app: &mut App, ui: &mut egui::Ui, scene: &str, now: f64) {
+fn layer_title(app: &App, row_id: &str, src: &str) -> String {
+    let label = source_label(app, src);
+    let plain = src.strip_prefix("patch.").unwrap_or(src);
+    if row_id == src || row_id == plain || src.starts_with("color:") || src.starts_with('#') { label } else { nice(row_id) }
+}
+
+fn layer_inspector(app: &mut App, ui: &mut egui::Ui, scene: &str, sel: &str, text: Option<&str>, now: f64) {
     let t = app.t.clone();
     let canvas_name = canvas::edit_canvas(app);
-    let Some(sel) = app.build.canvas.selected.clone() else {
-        widgets::empty_state(ui, &t, icon::HAND, "Pick a layer", "Click a layer on the picture or in the list to change it.", None);
-        return;
-    };
-    let Some(node) = canvas::editor_nodes(app, scene, canvas_name).into_iter().find(|n| n.id == sel) else {
-        widgets::hint(ui, &t, "That layer isn't on this screen.");
-        return;
-    };
-    let src = app.build.node_src(scene, &sel).unwrap_or(&sel).to_string();
+    let src = app
+        .build
+        .node_src(scene, sel)
+        .map(String::from)
+        .or_else(|| text.and_then(|x| scene_edit::layer_prop(x, sel, "src")))
+        .unwrap_or_else(|| sel.to_string());
+    let kind = sources::source_kind(app, &src);
     let p = format!("scene.{scene}.node.{sel}");
-    ui.label(RichText::new(source_label(app, &src)).font(font_semibold(type_scale::HEADING)).color(t.fg));
-    widgets::hint(
+    let title = layer_title(app, sel, &src);
+    let mut edit_source = false;
+    let color = src.starts_with("color:") || src.starts_with('#');
+    widgets::detail_header(ui, &t, kind.icon(), &title, &format!("{} · {}", source_label(app, &src), kind.label()), |ui| {
+        if !color {
+            edit_source = widgets::button_ex(ui, &t, None, "Edit source", Kind::Secondary, Size::Small, 0.0, true).clicked();
+        }
+    });
+    if edit_source {
+        sources::open(app, ui.ctx(), &src);
+    }
+    let node = canvas::editor_nodes(app, scene, canvas_name).into_iter().find(|n| n.id == sel);
+    let visible = app.m.get(&format!("{p}.visible")).is_none_or(Value::truthy);
+    let when = text.and_then(|x| scene_edit::layer_when(x, sel));
+    show_status(app, ui, visible, when.as_deref());
+    let Some(text) = text else {
+        widgets::hint(ui, &t, "Loading the scene…");
+        return;
+    };
+
+    // what it shows
+    widgets::inspector_section(ui, &t, ("layer-source", scene), "Source", true, |_| {}, |ui| source_section(app, ui, scene, sel, &src, kind, text, now));
+
+    // place and motion
+    let cw = canvas_word(canvas_name);
+    widgets::inspector_section(
         ui,
         &t,
-        match app.build.canvas.pick {
-            canvas::Pick::Tall => "Changes apply to the vertical video.",
-            canvas::Pick::Wide => "Changes apply to the main video.",
-            canvas::Pick::Both => "Editing the main video. Pick Vertical above to change the vertical one.",
+        ("layer-transform", scene),
+        "Transform",
+        true,
+        |ui| {
+            widgets::hint(ui, &t, cw);
+        },
+        |ui| match &node {
+            Some(n) => transform_section(app, ui, scene, sel, &src, n, canvas_name),
+            None => {
+                widgets::hint(ui, &t, &format!("This layer isn't on the {} canvas.", cw.to_lowercase()));
+            }
         },
     );
-    // a camera layer can show another camera in the same place
-    let cams = cameras(app);
-    if cams.len() > 1 && cams.iter().any(|(c, _)| *c == src) {
-        ui.add_space(spacing::S);
-        let mut pick = None;
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Camera").color(t.text_dim));
-            egui::ComboBox::from_id_salt(("comp-swap", &sel)).selected_text(source_label(app, &src)).width(ui.available_width() - 8.0).show_ui(ui, |ui| {
-                for (c, _) in &cams {
-                    if ui.selectable_label(*c == src, source_label(app, c)).clicked() && *c != src {
-                        pick = Some(c.clone());
+
+    if let Some(n) = &node {
+        widgets::inspector_section(
+            ui,
+            &t,
+            ("layer-crop", scene),
+            "Crop",
+            false,
+            |ui| {
+                widgets::hint(ui, &t, cw);
+            },
+            |ui| {
+                let mut crop = n.crop;
+                let mut changed = false;
+                let mut done = false;
+                for (i, label) in ["Left", "Top", "Right", "Bottom"].iter().enumerate() {
+                    widgets::prop_row(ui, &t, label, |ui| {
+                        let mut v = crop[i] as f64;
+                        let r = slider(ui, &mut v, 0.0..=0.45, "%", false);
+                        crop[i] = v as f32;
+                        changed |= r.changed();
+                        done |= r.drag_stopped() || (r.changed() && !r.dragged());
+                    });
+                }
+                if changed || done {
+                    canvas::apply_shape(app, scene, canvas_name, sel, crop, n.radius, done);
+                }
+            },
+        );
+    }
+
+    widgets::inspector_section(
+        ui,
+        &t,
+        ("layer-look", scene),
+        "Look",
+        true,
+        |_| {},
+        |ui| look_section(app, ui, scene, sel, node.as_ref(), canvas_name, text, now),
+    );
+
+    let mut add = None;
+    widgets::inspector_section(
+        ui,
+        &t,
+        ("layer-fx", scene),
+        "Effects",
+        true,
+        |ui| {
+            add = Some(widgets::icon_button(ui, &t, icon::PLUS, "Add effect"));
+        },
+        |ui| effect_cards(app, ui, scene, FxHost::Layer(sel), text, now),
+    );
+    if let Some(r) = add {
+        egui::Popup::menu(&r).width(380.0).show(|ui| add_fx_menu(app, ui, scene, FxHost::Layer(sel), text, now));
+    }
+
+    widgets::inspector_section(
+        ui,
+        &t,
+        ("layer-visibility", scene),
+        "Visibility",
+        true,
+        |_| {},
+        |ui| {
+            widgets::prop_row(ui, &t, "Shown", |ui| {
+                let mut v = visible;
+                if widgets::toggle(ui, &t, &mut v).changed() {
+                    app.m.command(Op::SetBase { address: format!("{p}.visible"), value: Value::Bool(v) });
+                    base_written(app, scene);
+                }
+                links::trigger_badge(app, ui, &format!("{p}.visible"), "Shown");
+            });
+            show_when(app, ui, scene, sel, &src, text, when.as_deref(), now);
+        },
+    );
+
+    widgets::inspector_section(
+        ui,
+        &t,
+        ("layer-motion", scene),
+        "Enter & exit",
+        false,
+        |_| {},
+        |ui| {
+            widgets::hint(ui, &t, "How it comes in and goes out when the scene changes with a glide.");
+            ui.add_space(spacing::XS);
+            for (key, label) in [("enter", "Enter"), ("exit", "Exit")] {
+                let cur = scene_edit::layer_prop(text, sel, key);
+                widgets::prop_row(ui, &t, label, |ui| {
+                    let shown = cur.as_deref().map_or("The transition's", |c| style_label(c));
+                    let mut pick = None;
+                    egui::ComboBox::from_id_salt(("layer-anim", key, sel)).width(ui.available_width() - 8.0).selected_text(shown).show_ui(ui, |ui| {
+                        if ui.selectable_label(cur.is_none(), "The transition's").clicked() {
+                            pick = Some(None);
+                        }
+                        for s in STYLES {
+                            if ui.selectable_label(cur.as_deref() == Some(s), style_label(s)).clicked() {
+                                pick = Some(Some(s));
+                            }
+                        }
+                    });
+                    if let Some(v) = pick
+                        && v != cur.as_deref()
+                    {
+                        write_scene(app, scene, scene_edit::set_layer_prop(text, sel, key, v), now);
+                    }
+                });
+            }
+        },
+    );
+
+    widgets::inspector_section(
+        ui,
+        &t,
+        ("layer-arrange", scene),
+        "Arrange",
+        true,
+        |_| {},
+        |ui| {
+            widgets::prop_row(ui, &t, "Order", |ui| {
+                let mut mv = None;
+                if widgets::button_ex(ui, &t, Some(icon::UP), "Forward", Kind::Secondary, Size::Small, 0.0, true).clicked() {
+                    mv = Some(true);
+                }
+                if widgets::button_ex(ui, &t, Some(icon::DOWN), "Back", Kind::Secondary, Size::Small, 0.0, true).clicked() {
+                    mv = Some(false);
+                }
+                if let Some(fwd) = mv {
+                    write_scene(app, scene, scene_edit::move_layer(text, sel, fwd), now);
+                }
+            });
+            widgets::prop_row(ui, &t, "Copy", |ui| {
+                if widgets::button_ex(ui, &t, Some(icon::COPY), "Duplicate layer", Kind::Secondary, Size::Small, 0.0, true).clicked() {
+                    match scene_edit::duplicate_layer(text, sel) {
+                        Ok((text, id)) => {
+                            write_scene(app, scene, Ok(text), now);
+                            app.build.canvas.selected = Some(id);
+                        }
+                        Err(e) => write_scene(app, scene, Err(e), now),
+                    }
+                }
+            });
+            ui.add_space(spacing::S);
+            if widgets::hold_button(ui, &t, "Remove layer", t.bright_red, 0.8) {
+                write_scene(app, scene, scene_edit::remove_layer(text, sel), now);
+                app.build.canvas.selected = None;
+            }
+        },
+    );
+}
+
+/// Enter/exit styles a layer can use (`none`: it just appears).
+const STYLES: [&str; 7] = ["fade", "scale", "slide_left", "slide_right", "slide_up", "slide_down", "none"];
+
+fn style_label(s: &str) -> &str {
+    match s {
+        "fade" => "Fade",
+        "scale" => "Grow / shrink",
+        "slide_left" => "Slide left",
+        "slide_right" => "Slide right",
+        "slide_up" => "Slide up",
+        "slide_down" => "Slide down",
+        "none" | "cut" => "None (cut)",
+        other => other,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn source_section(app: &mut App, ui: &mut egui::Ui, scene: &str, sel: &str, src: &str, kind: sources::SourceKind, text: &str, now: f64) {
+    let t = app.t.clone();
+    let mut swap: Option<(String, bool)> = None;
+    if matches!(kind, sources::SourceKind::Color) {
+        let hex = src.strip_prefix("color:").unwrap_or(src);
+        let mut c = se_ui_kit::theme::hex(hex).unwrap_or(egui::Color32::BLACK);
+        widgets::prop_row(ui, &t, "Color", |ui| {
+            if egui::color_picker::color_edit_button_srgba(ui, &mut c, egui::color_picker::Alpha::Opaque).changed() {
+                swap = Some((format!("color:#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b()), true));
+            }
+        });
+    } else {
+        let group = group_of(kind);
+        let options: Vec<String> = all_sources(app).into_iter().filter(|s| group_of(sources::source_kind(app, s)) == group).collect();
+        widgets::prop_row(ui, &t, "Shows", |ui| {
+            egui::ComboBox::from_id_salt(("layer-src", sel)).width(ui.available_width() - 8.0).selected_text(source_label(app, src)).show_ui(ui, |ui| {
+                for s in &options {
+                    if ui.selectable_label(s == src, source_label(app, s)).clicked() && s != src {
+                        swap = Some((s.clone(), false));
                     }
                 }
             });
         });
-        if let Some(c) = pick
-            && let Some(text) = scene_text(app, scene, now)
-        {
-            match scene_edit::set_layer_source(&text, &sel, &c) {
-                Ok((text, id)) => {
+    }
+    if let Some((new, soon)) = swap {
+        match scene_edit::set_layer_source(text, sel, &new) {
+            Ok((text, id)) => {
+                if soon {
+                    write_scene_soon(app, scene, Ok(text), now);
+                } else {
                     write_scene(app, scene, Ok(text), now);
-                    app.build.canvas.selected = Some(id);
                 }
-                Err(e) => write_scene(app, scene, Err(e), now),
+                app.build.canvas.selected = Some(id);
             }
+            Err(e) => write_scene(app, scene, Err(e), now),
         }
     }
-    let text = scene_text(app, scene, now);
-    let when = text.as_deref().and_then(|x| scene_edit::layer_when(x, &sel));
-    show_status(app, ui, node.visible, when.as_deref());
-    // an overlay's own settings (its text, colors, …)
-    if let Some(id) = src.strip_prefix("patch.") {
-        overlay_settings(app, ui, id);
+    // a web or generative source's own settings (the same everywhere it shows)
+    if let Some(id) = src.strip_prefix("patch.")
+        && let Some(p) = patch_entry(app, id)
+        && p.get_path("params").and_then(Value::as_list).is_some_and(|l| !l.is_empty())
+    {
+        ui.add_space(spacing::XS);
+        widgets::details(ui, &t, ("layer-src-settings", sel), "Source settings", |ui| {
+            widgets::hint(ui, &t, "Shared by every scene that shows this source.");
+            patches::params_ui(app, ui, &p);
+        });
     }
-    ui.add_space(spacing::M);
-    show_when(app, ui, scene, &sel, &src, text.as_deref(), when.as_deref(), now);
-    ui.add_space(spacing::M);
+}
 
-    // quick placements
-    widgets::section(ui, &t, "", "PLACE IT");
-    let [cw, ch] = crate::views::monitor::canvas_size(canvas_name);
+/// Where a quick placement puts the layer.
+fn place_rect(i: usize, r: [f32; 4]) -> [f32; 4] {
+    let [_, _, w, h] = r;
+    match i {
+        0 => kc::fill_canvas(),
+        1 => [0.0, 0.0, 0.5, 1.0],
+        2 => [0.5, 0.0, 0.5, 1.0],
+        3 => [0.0, 0.0, 1.0, 0.5],
+        4 => [0.0, 0.5, 1.0, 0.5],
+        5 => [0.02, 0.03, 0.3, 0.3],
+        6 => [0.68, 0.03, 0.3, 0.3],
+        7 => [0.02, 0.67, 0.3, 0.3],
+        8 => [0.68, 0.67, 0.3, 0.3],
+        _ => [(1.0 - w) / 2.0, (1.0 - h) / 2.0, w, h],
+    }
+}
+
+const PLACES: [&str; 10] =
+    ["Fill the canvas", "Left half", "Right half", "Top half", "Bottom half", "Top left", "Top right", "Bottom left", "Bottom right", "Center"];
+
+fn transform_section(app: &mut App, ui: &mut egui::Ui, scene: &str, sel: &str, src: &str, n: &kc::CanvasNode, canvas_name: &str) {
+    let t = app.t.clone();
+    let p = format!("scene.{scene}.node.{sel}");
     let mut place = None;
-    ui.horizontal_wrapped(|ui| {
-        let [_, _, nw, nh] = node.rect;
-        for (label, r) in [
-            ("Full screen", kc::fill_canvas()),
-            ("Left half", [0.0, 0.0, 0.5, 1.0]),
-            ("Right half", [0.5, 0.0, 0.5, 1.0]),
-            ("Corner", [0.68, 0.66, 0.3, 0.3]),
-            ("Center", [(1.0 - nw) / 2.0, (1.0 - nh) / 2.0, nw, nh]),
-        ] {
-            if widgets::button_ex(ui, &t, None, label, Kind::Secondary, Size::Small, 0.0, true).clicked() {
-                place = Some(r);
+    widgets::prop_row(ui, &t, "Place", |ui| {
+        let r = widgets::button_ex(ui, &t, Some(icon::GRID), "Place  \u{f078}", Kind::Secondary, Size::Small, 0.0, true);
+        egui::Popup::menu(&r).show(|ui| {
+            for (i, label) in PLACES.iter().enumerate() {
+                if ui.button(*label).clicked() {
+                    place = Some(place_rect(i, n.rect));
+                }
             }
-        }
-        if widgets::button_ex(ui, &t, None, "Fit camera shape", Kind::Secondary, Size::Small, 0.0, true)
-            .on_hover_text("Make the box 16:9 so the camera isn't squashed")
-            .clicked()
-        {
-            place = Some(kc::fit_aspect(node.rect, 16.0 / 9.0, [cw, ch]));
-        }
+            ui.separator();
+            if ui.button("Fit the picture's shape").on_hover_text("Resize the box so the picture isn't squashed").clicked() {
+                let aspect = cameras(app).into_iter().find(|(c, _)| c == src).map_or(16.0 / 9.0, |(_, a)| a) as f32;
+                place = Some(kc::fit_aspect(n.rect, aspect, crate::views::monitor::canvas_size(canvas_name)));
+            }
+        });
     });
     if let Some(r) = place {
-        canvas::apply_rect(app, scene, canvas_name, &sel, r);
+        canvas::apply_rect(app, scene, canvas_name, sel, r);
     }
-    ui.add_space(spacing::M);
-
-    // position & size in %
-    widgets::section(ui, &t, "", "POSITION & SIZE");
-    let mut r = node.rect;
+    let mut r = n.rect;
     let mut changed = false;
-    egui::Grid::new("comp-rect").num_columns(4).spacing([10.0, 6.0]).show(ui, |ui| {
-        for (i, label) in ["Left", "Top", "Width", "Height"].iter().enumerate() {
-            ui.label(RichText::new(*label).color(t.text_dim));
-            let mut pct = r[i] * 100.0;
-            if ui.add(egui::DragValue::new(&mut pct).range(if i < 2 { -50.0..=100.0 } else { 1.0..=200.0 }).speed(0.2).suffix("%").fixed_decimals(0)).changed()
-            {
-                r[i] = pct / 100.0;
-                changed = true;
+    for (label, a, b) in [("Position", 0, 1), ("Size", 2, 3)] {
+        widgets::prop_row(ui, &t, label, |ui| {
+            for (i, axis) in [(a, if a == 0 { "X " } else { "W " }), (b, if b == 1 { "Y " } else { "H " })] {
+                let mut pct = r[i] * 100.0;
+                let range = if i < 2 { -50.0..=100.0 } else { 1.0..=200.0 };
+                if ui.add(egui::DragValue::new(&mut pct).range(range).speed(0.2).prefix(axis).suffix("%").fixed_decimals(1)).changed() {
+                    r[i] = pct / 100.0;
+                    changed = true;
+                }
             }
-            if i % 2 == 1 {
-                ui.end_row();
-            }
-        }
-    });
+        });
+    }
     if changed {
-        canvas::apply_rect(app, scene, canvas_name, &sel, r);
+        canvas::apply_rect(app, scene, canvas_name, sel, r);
     }
-    ui.add_space(spacing::M);
+    ui.add_space(spacing::XS);
+    widgets::hint(ui, &t, &format!("Scale, rotation and offset move the picture without changing its box. {} lets one follow the music.", links::SINE));
+    live_row(app, ui, scene, "Scale", &format!("{p}.scale"), 1.0, 0.1..=4.0, "×", Some((0.8, 1.3)));
+    live_row(app, ui, scene, "Rotation", &format!("{p}.rotation"), 0.0, -180.0..=180.0, "°", Some((-15.0, 15.0)));
+    live_row(app, ui, scene, "Offset X", &format!("{p}.offset_x"), 0.0, -1000.0..=1000.0, " px", Some((-60.0, 60.0)));
+    live_row(app, ui, scene, "Offset Y", &format!("{p}.offset_y"), 0.0, -1000.0..=1000.0, " px", Some((-60.0, 60.0)));
+}
 
-    // look
-    widgets::section(ui, &t, "", "LOOK");
-    let mut rad = node.radius;
-    let rr = rounded_corners(ui, &t, &mut rad);
-    if rr.changed() || rr.drag_stopped() {
-        canvas::apply_shape(app, scene, canvas_name, &sel, node.crop, rad, !rr.dragged());
+#[allow(clippy::too_many_arguments)]
+fn look_section(app: &mut App, ui: &mut egui::Ui, scene: &str, sel: &str, n: Option<&kc::CanvasNode>, canvas_name: &str, text: &str, now: f64) {
+    let t = app.t.clone();
+    let p = format!("scene.{scene}.node.{sel}");
+    live_row(app, ui, scene, "Opacity", &format!("{p}.opacity"), 1.0, 0.0..=1.0, "%", Some((0.0, 1.0)));
+    if let Some(n) = n {
+        let addr = format!("{p}.radius.{canvas_name}");
+        widgets::prop_row(ui, &t, "Corners", |ui| {
+            let mut v = n.radius as f64;
+            let r = slider(ui, &mut v, 0.0..=120.0, " px", true);
+            if r.changed() || r.drag_stopped() {
+                canvas::apply_shape(app, scene, canvas_name, sel, n.crop, v as f32, !r.dragged());
+            }
+            links::modulate_button(app, ui, &addr, "Corners", (0.0, 60.0));
+        });
     }
-    let op_a = format!("{p}.opacity");
-    let mut op = app.m.get(&op_a).and_then(Value::as_f64).unwrap_or(1.0) as f32;
-    let r2 = widgets::labeled_slider(ui, &t, "Opacity", &mut op, 0.0..=1.0, "");
-    if r2.changed() {
-        app.m.command(Op::SetBase { address: op_a.clone(), value: Value::Float((op as f64 * 100.0).round() / 100.0) });
-    }
-    ui.add_space(spacing::S);
-    widgets::details(ui, &t, ("crop", &sel), "Crop the edges", |ui| {
-        let mut crop = node.crop;
-        let mut changed = false;
-        let mut done = false;
-        for (i, label) in ["Left", "Top", "Right", "Bottom"].iter().enumerate() {
-            let r = widgets::labeled_slider(ui, &t, label, &mut crop[i], 0.0..=0.45, "");
-            changed |= r.changed();
-            done |= r.drag_stopped() || (r.changed() && !r.dragged());
-        }
-        if changed || done {
-            canvas::apply_shape(app, scene, canvas_name, &sel, crop, node.radius, done);
+    let blend = scene_edit::layer_prop(text, sel, "blend").unwrap_or_else(|| "normal".into());
+    widgets::prop_row(ui, &t, "Blend", |ui| {
+        let modes = [("normal", "Normal"), ("add", "Add (brighten)"), ("screen", "Screen (lighten)"), ("multiply", "Multiply (darken)")];
+        let shown = modes.iter().find(|(m, _)| *m == blend || (blend == "additive" && *m == "add")).map_or(blend.as_str(), |(_, l)| *l);
+        let mut pick = None;
+        egui::ComboBox::from_id_salt(("layer-blend", sel)).width(ui.available_width() - 8.0).selected_text(shown).show_ui(ui, |ui| {
+            for (m, l) in modes {
+                if ui.selectable_label(blend == m, l).clicked() && blend != m {
+                    pick = Some(m);
+                }
+            }
+        });
+        if let Some(m) = pick {
+            write_scene(app, scene, scene_edit::set_layer_prop(text, sel, "blend", (m != "normal").then_some(m)), now);
         }
     });
-    ui.add_space(spacing::M);
-
-    // effects on the layer
-    widgets::section(ui, &t, "", "EFFECTS ON THIS LAYER");
-    if let Some(text) = scene_text(app, scene, now) {
-        let on = scene_edit::layer_effects(&text, &sel);
-        effect_toggles(app, ui, &on, |fx, want| scene_edit::set_layer_effect(&text, &sel, fx, want), scene, now);
+    let mut mask = scene_edit::layer_prop(text, sel, "mask").unwrap_or_default();
+    widgets::prop_row(ui, &t, "Mask", |ui| {
+        widgets::hint(ui, &t, "White shows the layer, black hides it.");
+    });
+    if media::picker(app, ui, ("layer-mask", scene, sel), media::MediaKind::Image, &mut mask) {
+        write_scene(app, scene, scene_edit::set_layer_prop(text, sel, "mask", Some(mask.as_str())), now);
     }
-    ui.add_space(spacing::M);
+}
 
-    // order + remove
-    widgets::section(ui, &t, "", "ARRANGE");
-    ui.horizontal(|ui| {
-        let mut mv = None;
-        if widgets::button_ex(ui, &t, Some(icon::UP), "Bring forward", Kind::Secondary, Size::Small, 0.0, true).clicked() {
-            mv = Some(true);
+// ---- effects ----------------------------------------------------------------------------------------------
+
+fn host_key(host: FxHost) -> String {
+    match host {
+        FxHost::Layer(id) => format!("layer:{id}"),
+        FxHost::Scene => "scene".into(),
+    }
+}
+
+/// The effect cards of a layer or the whole scene.
+fn effect_cards(app: &mut App, ui: &mut egui::Ui, scene: &str, host: FxHost, text: &str, now: f64) {
+    let t = app.t.clone();
+    let list = scene_edit::fx_list(text, host);
+    if list.is_empty() {
+        widgets::hint(
+            ui,
+            &t,
+            match host {
+                FxHost::Layer(_) => "No effects on this layer. Add one with +.",
+                FxHost::Scene => "No effects on the whole scene. Add one with +.",
+            },
+        );
+    }
+    for e in &list {
+        effect_card(app, ui, scene, host, text, e, now);
+        ui.add_space(spacing::XS);
+    }
+}
+
+fn effect_card(app: &mut App, ui: &mut egui::Ui, scene: &str, host: FxHost, text: &str, e: &FxEntry, now: f64) {
+    let t = app.t.clone();
+    let base = match host {
+        FxHost::Layer(id) => Some(format!("scene.{scene}.node.{id}.fx.{}", e.name)),
+        FxHost::Scene => None,
+    };
+    let open_id = egui::Id::new(("comp-fx-open", scene, host_key(host), &e.name));
+    let mut open: bool = ui.data(|d| d.get_temp(open_id)).unwrap_or(false);
+    let enabled_addr = base.as_ref().map(|b| format!("{b}.enabled"));
+    let live = enabled_addr.as_ref().and_then(|a| app.m.get(a)).map(Value::truthy);
+    let mut remove = false;
+    egui::Frame::new().fill(t.inset).stroke(egui::Stroke::new(1.0, t.border)).corner_radius(radius::CONTROL).inner_margin(egui::Margin::symmetric(10, 6)).show(
+        ui,
+        |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let mut on = live.unwrap_or(e.enabled);
+                let tip = match host {
+                    FxHost::Layer(_) => "On or off (saved)",
+                    FxHost::Scene => "On, or off: then it only shows while something fires it",
+                };
+                if widgets::toggle(ui, &t, &mut on).on_hover_text(tip).changed() {
+                    match (&enabled_addr, live) {
+                        // a switch the engine knows: live, and saved into the file by the engine
+                        (Some(a), Some(_)) if !e.bare => {
+                            app.m.command(Op::SetBase { address: a.clone(), value: Value::Bool(on) });
+                            base_written(app, scene);
+                        }
+                        _ => write_scene(app, scene, scene_edit::set_fx_enabled(text, host, &e.name, on), now),
+                    }
+                }
+                let name = RichText::new(scene_edit::effect_name(&e.name)).font(font_medium(type_scale::BODY)).color(if on { t.fg } else { t.text_dim });
+                if ui.add(egui::Label::new(name).sense(egui::Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    open = !open;
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = spacing::XS;
+                    if widgets::icon_button(ui, &t, icon::TRASH, "Remove this effect").clicked() {
+                        remove = true;
+                    }
+                    if widgets::icon_button(ui, &t, if open { icon::UP } else { icon::DOWN }, if open { "Hide settings" } else { "Settings" }).clicked() {
+                        open = !open;
+                    }
+                    if let Some(a) = &enabled_addr {
+                        links::trigger_badge(app, ui, a, &scene_edit::effect_name(&e.name));
+                    }
+                });
+            });
+            if open {
+                ui.add_space(spacing::XS);
+                let about = scene_edit::effect_about(&e.name);
+                if !about.is_empty() {
+                    widgets::hint(ui, &t, about);
+                }
+                fx_settings(app, ui, scene, host, base.as_deref(), text, e, now);
+            }
+        },
+    );
+    ui.data_mut(|d| d.insert_temp(open_id, open));
+    if remove {
+        write_scene(app, scene, scene_edit::remove_fx(text, host, &e.name), now);
+    }
+}
+
+/// The settings of one effect entry: built-ins from the library table, custom effects from their
+/// manifest's numeric settings.
+#[allow(clippy::too_many_arguments)]
+fn fx_settings(app: &mut App, ui: &mut egui::Ui, scene: &str, host: FxHost, base: Option<&str>, text: &str, e: &FxEntry, now: f64) {
+    let t = app.t.clone();
+    if let Some(def) = scene_edit::effect_def(&e.name) {
+        fx_number(app, ui, scene, host, base, text, e, &NumSpec::from(&scene_edit::STRENGTH), now);
+        if def.id == "lut" {
+            let mut file = e.text("file").unwrap_or("").to_string();
+            if media::picker(app, ui, ("fx-lut", scene, host_key(host)), media::MediaKind::Lut, &mut file) {
+                let v = (!file.is_empty()).then(|| FxValue::Text(file.clone()));
+                write_scene(app, scene, scene_edit::set_fx_param(text, host, &e.name, "file", v.as_ref()), now);
+            }
         }
-        if widgets::button_ex(ui, &t, Some(icon::DOWN), "Send back", Kind::Secondary, Size::Small, 0.0, true).clicked() {
-            mv = Some(false);
+        let mut done: Vec<&str> = Vec::new();
+        for p in def.params {
+            if done.contains(&p.name) {
+                continue;
+            }
+            // red/green/blue triples read as one color
+            if let Some(stem) = p.name.strip_suffix("_r")
+                && let (Some(g), Some(b)) =
+                    (def.params.iter().find(|q| q.name == format!("{stem}_g")), def.params.iter().find(|q| q.name == format!("{stem}_b")))
+            {
+                done.extend([p.name, g.name, b.name]);
+                fx_color(app, ui, scene, host, text, e, [p, g, b], if stem == "key" { "Key color" } else { "Color" }, now);
+                continue;
+            }
+            fx_number(app, ui, scene, host, base, text, e, &NumSpec::from(p), now);
         }
-        if let Some(fwd) = mv
-            && let Some(text) = scene_text(app, scene, now)
-        {
-            write_scene(app, scene, scene_edit::move_layer(&text, &sel, fwd), now);
+        return;
+    }
+    // a custom effect: its numeric settings, per layer
+    let Some(id) = e.name.strip_prefix("patch.") else { return };
+    let Some(pe) = patch_entry(app, id) else {
+        widgets::hint(ui, &t, "This effect isn't in the project any more.");
+        return;
+    };
+    for q in pe.get_path("params").and_then(Value::as_list).unwrap_or(&[]) {
+        let ty = q.get_path("type").and_then(Value::as_str).unwrap_or("float");
+        if !matches!(ty, "float" | "int") {
+            continue;
+        }
+        let Some(name) = q.get_path("name").and_then(Value::as_str) else { continue };
+        let range = q.get_path("range").and_then(Value::as_list).map(|l| l.iter().filter_map(Value::as_f64).collect::<Vec<_>>()).unwrap_or_default();
+        let default = q.get_path("default").and_then(Value::as_f64).unwrap_or(0.0);
+        let (min, max) = match range.as_slice() {
+            [lo, hi] if lo < hi => (*lo, *hi),
+            _ => (default.min(0.0), default.max(1.0)),
+        };
+        let label = nice(name);
+        fx_number(app, ui, scene, host, base, text, e, &NumSpec { key: name, label: &label, default, min, max, unit: "" }, now);
+    }
+}
+
+/// A numeric effect setting: key, label, default, range and unit.
+struct NumSpec<'a> {
+    key: &'a str,
+    label: &'a str,
+    default: f64,
+    min: f64,
+    max: f64,
+    unit: &'a str,
+}
+
+impl From<&scene_edit::FxParam> for NumSpec<'static> {
+    fn from(p: &scene_edit::FxParam) -> Self {
+        NumSpec { key: p.name, label: p.label, default: p.default, min: p.min, max: p.max, unit: p.unit }
+    }
+}
+
+/// One numeric effect setting. Written in the layer's entry, it is the layer's own live setting
+/// (`scene.<s>.node.<id>.fx.<fx>.<key>`: previewed while dragged, saved by the engine, ∿);
+/// otherwise a change writes it into the entry first.
+#[allow(clippy::too_many_arguments)]
+fn fx_number(app: &mut App, ui: &mut egui::Ui, scene: &str, host: FxHost, base: Option<&str>, text: &str, e: &FxEntry, p: &NumSpec, now: f64) {
+    let t = app.t.clone();
+    let key = p.key;
+    let written = e.num(key);
+    let live = base.map(|b| format!("{b}.{key}")).filter(|a| written.is_some() && app.m.get(a).is_some());
+    let cur = live
+        .as_ref()
+        .and_then(|a| app.m.get(a))
+        .and_then(Value::as_f64)
+        .or(written)
+        .or_else(|| app.m.get(&format!("fx.{}.{key}", e.name)).and_then(Value::as_f64))
+        .unwrap_or(p.default);
+    let unit = match p.unit {
+        "" => "",
+        "px" => " px",
+        "Hz" => " Hz",
+        "EV" => " EV",
+        u => u,
+    };
+    let pct = p.unit.is_empty() && p.min == 0.0 && p.max == 1.0;
+    widgets::prop_row(ui, &t, p.label, |ui| {
+        let mut v = cur.clamp(p.min, p.max);
+        let r = slider(ui, &mut v, p.min..=p.max, if pct { "%" } else { unit }, live.is_some());
+        match &live {
+            Some(a) => commit_live(app, scene, a, &r, v),
+            None if r.changed() => write_scene_soon(app, scene, scene_edit::set_fx_param(text, host, &e.name, key, Some(&FxValue::Num(v))), now),
+            None => {}
+        }
+        if let Some(a) = &live {
+            links::modulate_button(app, ui, a, p.label, (p.min, p.max));
         }
     });
-    ui.add_space(spacing::S);
-    if widgets::hold_button(ui, &t, "Remove layer", t.bright_red, 0.8)
-        && let Some(text) = scene_text(app, scene, now)
-    {
-        write_scene(app, scene, scene_edit::remove_layer(&text, &sel), now);
-        app.build.canvas.selected = None;
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fx_color(app: &mut App, ui: &mut egui::Ui, scene: &str, host: FxHost, text: &str, e: &FxEntry, rgb: [&scene_edit::FxParam; 3], label: &str, now: f64) {
+    let t = app.t.clone();
+    let mut c = rgb.map(|p| e.num(p.name).unwrap_or(p.default) as f32);
+    widgets::prop_row(ui, &t, label, |ui| {
+        if egui::color_picker::color_edit_button_rgb(ui, &mut c).changed() {
+            let mut out = Ok(text.to_string());
+            for (p, v) in rgb.iter().zip(c) {
+                out = out.and_then(|x| scene_edit::set_fx_param(&x, host, &e.name, p.name, Some(&FxValue::Num(v as f64))));
+            }
+            write_scene_soon(app, scene, out, now);
+        }
+    });
+}
+
+/// "+" on Effects: every built-in that fits, then the project's own effects.
+fn add_fx_menu(app: &mut App, ui: &mut egui::Ui, scene: &str, host: FxHost, text: &str, now: f64) {
+    let t = app.t.clone();
+    let have: Vec<String> = scene_edit::fx_list(text, host).into_iter().map(|e| e.name).collect();
+    let mut pick: Option<(String, Vec<(String, FxValue)>)> = None;
+    egui::ScrollArea::vertical().max_height(460.0).show(ui, |ui| {
+        widgets::group_label(ui, &t, "Built in");
+        for e in scene_edit::EFFECTS.iter().filter(|e| e.on_layers && !(host == FxHost::Scene && e.id == "chroma_key")) {
+            ui.add_enabled_ui(!have.iter().any(|h| h == e.id), |ui| {
+                if widgets::list_row(ui, &t, icon::WAND, e.label, e.about, "", false).clicked() {
+                    pick = Some((e.id.to_string(), scene_edit::fx_defaults(e.id)));
+                }
+            });
+        }
+        let custom: Vec<Value> = app.m.q_list("patches").iter().filter(|p| p.get_path("layer").and_then(Value::as_str) == Some("effect")).cloned().collect();
+        if !custom.is_empty() {
+            widgets::group_label(ui, &t, "Your effects");
+        }
+        for p in &custom {
+            let Some(id) = p.get_path("id").and_then(Value::as_str) else { continue };
+            let name = format!("patch.{id}");
+            let about = p.get_path("description").and_then(Value::as_str).unwrap_or("");
+            ui.add_enabled_ui(!have.contains(&name), |ui| {
+                if widgets::list_row(ui, &t, icon::SPARKLE, &source_label(app, &name), about, "", false).clicked() {
+                    // numeric settings at their defaults, so each is this layer's own
+                    let params = p
+                        .get_path("params")
+                        .and_then(Value::as_list)
+                        .unwrap_or(&[])
+                        .iter()
+                        .filter(|q| matches!(q.get_path("type").and_then(Value::as_str), Some("float" | "int")))
+                        .filter_map(|q| Some((q.get_path("name")?.as_str()?.to_string(), FxValue::Num(q.get_path("default")?.as_f64()?))))
+                        .collect();
+                    pick = Some((name.clone(), params));
+                }
+            });
+        }
+    });
+    if let Some((fx, params)) = pick {
+        let params = if matches!(host, FxHost::Scene) { Vec::new() } else { params };
+        write_scene(app, scene, scene_edit::add_fx(text, host, &fx, &params), now);
+        ui.data_mut(|d| d.insert_temp(egui::Id::new(("comp-fx-open", scene, host_key(host), &fx)), true));
+        ui.close();
     }
 }
 
 // ---- when a layer shows ------------------------------------------------------------------------------
 
-/// A layer's show condition from the loaded scene definition (first video that has the layer).
+/// A layer's show condition from the loaded scene definition (first canvas that has the layer).
 fn node_when(app: &App, scene: &str, id: &str) -> Option<String> {
     let Some(Value::Map(canvases)) = app.build.scene_config(scene)?.get_path("canvas") else { return None };
     canvases
@@ -726,7 +1603,7 @@ fn node_when(app: &App, scene: &str, id: &str) -> Option<String> {
         .map(String::from)
 }
 
-/// Is a show condition true right now? `Err` (its mistake) when it can't be read: the video
+/// Is a show condition true right now? `Err` (its mistake) when it can't be read: the canvas
 /// then never shows the layer.
 fn when_now(app: &App, when: &str) -> Result<bool, String> {
     let e = se_expr::Expr::parse(when).map_err(|e| e.msg)?;
@@ -749,18 +1626,16 @@ fn check_words(app: &App, c: &scene_edit::LayerCheck) -> String {
         Mode { mode, not } => format!("the show mode {} {}", if *not { "isn't" } else { "is" }, rules::nice_name(mode)),
         Song { playing: true } => "a song request is playing".into(),
         Song { playing: false } => "no song request is playing".into(),
-        Overlay { id, playing } => {
-            format!("the {} overlay {}", source_label(app, &format!("patch.{id}")), if *playing { "is playing" } else { "isn't playing" })
-        }
+        Source { id, playing } => format!("{} {}", source_label(app, &format!("patch.{id}")), if *playing { "is playing" } else { "isn't playing" }),
     }
 }
 
-/// Why the selected layer isn't on the video right now (nothing when it is).
+/// Why the selected layer isn't on the canvas right now (nothing when it is).
 fn show_status(app: &App, ui: &mut egui::Ui, visible: bool, when: Option<&str>) {
     let t = &app.t;
     if !visible {
+        widgets::callout(ui, t, Tone::Info, icon::EYE_OFF, "Hidden", "Its eye is off. Turn it on in the Layers list or under Visibility.", None);
         ui.add_space(spacing::S);
-        widgets::callout(ui, t, Tone::Info, icon::EYE_OFF, "Switched off", "You switched it off in the Layers list. Turn it back on there.", None);
         return;
     }
     let Some(when) = when else { return };
@@ -778,40 +1653,27 @@ fn show_status(app: &App, ui: &mut egui::Ui, visible: bool, when: Option<&str>) 
                         format!("It only shows when {}. Not true right now: {}.", all.join(" and "), not.join(", "))
                     }
                 }
-                None => "It only shows when its own rule is true (see Details under Show this layer), and right now it isn't.".into(),
+                None => "It only shows when its own rule is true (see Visibility), and right now it isn't.".into(),
             };
-            ui.add_space(spacing::S);
             widgets::callout(ui, t, Tone::Warn, icon::EYE_OFF, "Hidden right now", &body, None);
+            ui.add_space(spacing::S);
         }
         Err(_) => {
-            ui.add_space(spacing::S);
             widgets::callout(
                 ui,
                 t,
                 Tone::Danger,
                 icon::WARN,
                 "Its show rule has a mistake",
-                "So it never shows. Fix it under Details below, or pick Always.",
+                "So it never shows. Fix it under Visibility, or pick Always.",
                 None,
             );
+            ui.add_space(spacing::S);
         }
     }
 }
 
-/// The overlay's own settings (the same controls as on the Overlays tab).
-fn overlay_settings(app: &mut App, ui: &mut egui::Ui, id: &str) {
-    let Some(p) = app.m.q_list("patches").iter().find(|p| p.get_path("id").and_then(Value::as_str) == Some(id)).cloned() else { return };
-    if p.get_path("params").and_then(Value::as_list).is_none_or(|l| l.is_empty()) {
-        return;
-    }
-    let t = app.t.clone();
-    ui.add_space(spacing::M);
-    widgets::section(ui, &t, "", "OVERLAY SETTINGS");
-    widgets::hint(ui, &t, "The same overlay looks like this in every scene. Changes show right away.");
-    crate::views::patches::params_ui(app, ui, &p);
-}
-
-const CHECK_KINDS: [&str; 3] = ["The show mode", "A song request", "An overlay"];
+const CHECK_KINDS: [&str; 3] = ["The show mode", "A song request", "A source playing"];
 
 /// A new check of kind `k` (index into [`CHECK_KINDS`]) with a sensible first choice.
 fn new_check(app: &App, scene: &str, src: &str, k: usize) -> scene_edit::LayerCheck {
@@ -824,7 +1686,7 @@ fn new_check(app: &App, scene: &str, src: &str, k: usize) -> scene_edit::LayerCh
         }
         1 => Song { playing: true },
         _ => {
-            // another overlay in this scene first (like "while the intro plays")
+            // another source in this scene first (like "while the intro plays")
             let ids: Vec<&str> = app.m.q_list("patches").iter().filter_map(|p| p.get_path("id").and_then(Value::as_str)).collect();
             let pick = ids
                 .iter()
@@ -833,38 +1695,35 @@ fn new_check(app: &App, scene: &str, src: &str, k: usize) -> scene_edit::LayerCh
                     s != src && app.build.node_src(scene, &s).is_some()
                 })
                 .or(ids.first());
-            Overlay { id: pick.map_or_else(String::new, |s| s.to_string()), playing: true }
+            Source { id: pick.map_or_else(String::new, |s| s.to_string()), playing: true }
         }
     }
 }
 
-/// "Show this layer: Always / Only when …" with plain checks; anything else as text under Details.
+/// "Shows: Always / Only when …" with plain checks; anything else as text under Details.
 #[allow(clippy::too_many_arguments)]
-fn show_when(app: &mut App, ui: &mut egui::Ui, scene: &str, sel: &str, src: &str, text: Option<&str>, when: Option<&str>, now: f64) {
+fn show_when(app: &mut App, ui: &mut egui::Ui, scene: &str, sel: &str, src: &str, text: &str, when: Option<&str>, now: f64) {
     use scene_edit::LayerCheck::*;
     let t = app.t.clone();
-    widgets::section(ui, &t, "", "SHOW THIS LAYER");
-    let Some(text) = text else {
-        widgets::hint(ui, &t, "Loading…");
-        return;
-    };
     let mut write: Option<Option<String>> = None;
     let mut only = usize::from(when.is_some());
-    if widgets::segmented(ui, &t, &mut only, &["Always", "Only when…"]) {
-        write = Some(if only == 0 {
-            None
-        } else {
-            let k = if app.m.q_list("modes").is_empty() { 1 } else { 0 };
-            new_check(app, scene, src, k).text()
-        });
-    }
+    widgets::prop_row(ui, &t, "When", |ui| {
+        if widgets::segmented(ui, &t, &mut only, &["Always", "Only when…"]) {
+            write = Some(if only == 0 {
+                None
+            } else {
+                let k = if app.m.q_list("modes").is_empty() { 1 } else { 0 };
+                new_check(app, scene, src, k).text()
+            });
+        }
+    });
     if let Some(w) = when {
         ui.add_space(spacing::S);
         match scene_edit::parse_layer_when(w) {
             Some(mut checks) => {
                 let modes: Vec<(String, String)> =
                     app.m.q_list("modes").iter().filter_map(Value::as_str).map(|m| (m.to_string(), rules::nice_name(m))).collect();
-                let overlays: Vec<(String, String)> = app
+                let playable: Vec<(String, String)> = app
                     .m
                     .q_list("patches")
                     .iter()
@@ -877,13 +1736,13 @@ fn show_when(app: &mut App, ui: &mut egui::Ui, scene: &str, sel: &str, src: &str
                     if i > 0 {
                         ui.label(RichText::new("and").color(t.text_dim));
                     }
-                    egui::Frame::new().fill(t.surface_hi).corner_radius(radius::CONTROL).inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
+                    egui::Frame::new().fill(t.inset).corner_radius(radius::CONTROL).inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.horizontal(|ui| {
                             let k = match c {
                                 Mode { .. } => 0,
                                 Song { .. } => 1,
-                                Overlay { .. } => 2,
+                                Source { .. } => 2,
                             };
                             let mut pick = k;
                             egui::ComboBox::from_id_salt(("layer-check-kind", sel, i))
@@ -925,13 +1784,13 @@ fn show_when(app: &mut App, ui: &mut egui::Ui, scene: &str, sel: &str, src: &str
                                     changed = true;
                                 }
                             }
-                            Overlay { id, playing } => {
+                            Source { id, playing } => {
                                 if let Some(o) = rules::pick_name(
                                     ui,
-                                    ("layer-check-overlay", sel, i),
+                                    ("layer-check-source", sel, i),
                                     id,
-                                    &overlays,
-                                    "Pick an overlay",
+                                    &playable,
+                                    "Pick a source",
                                     (ui.available_width() - 8.0).max(120.0),
                                 ) {
                                     *id = o;
@@ -961,20 +1820,12 @@ fn show_when(app: &mut App, ui: &mut egui::Ui, scene: &str, sel: &str, src: &str
                 }
             }
             None => {
-                widgets::callout(
-                    ui,
-                    &t,
-                    Tone::Info,
-                    icon::EDIT,
-                    "It has its own rule",
-                    "Change it under Details below, or pick Always to show it all the time.",
-                    None,
-                );
+                widgets::callout(ui, &t, Tone::Info, icon::EDIT, "It has its own rule", "Change it under Details below, or pick Always.", None);
             }
         }
         ui.add_space(spacing::XS);
         widgets::details(ui, &t, ("layer-when-raw", sel), "Details", |ui| {
-            widgets::hint(ui, &t, "The rule as Stream Engine reads it. It shows the layer while this is true.");
+            widgets::hint(ui, &t, "The rule as Stream Engine reads it. The layer shows while this is true.");
             let mut buf = match &app.build.comp.when_buf {
                 Some((n, b)) if n == sel => b.clone(),
                 _ => w.to_string(),
@@ -1005,158 +1856,296 @@ fn show_when(app: &mut App, ui: &mut egui::Ui, scene: &str, sel: &str, src: &str
     }
 }
 
-/// Toggle rows for the built-in effects (and effect overlays), writing the scene file on change.
-fn effect_toggles(app: &mut App, ui: &mut egui::Ui, on: &[String], edit: impl Fn(&str, bool) -> anyhow::Result<String>, scene: &str, now: f64) {
-    let t = app.t.clone();
-    let mut change = None;
-    for (id, name) in scene_edit::EFFECTS {
-        let mut v = on.iter().any(|n| n == id);
-        ui.horizontal(|ui| {
-            if widgets::toggle(ui, &t, &mut v).changed() {
-                change = Some((id.to_string(), v));
-            }
-            ui.label(RichText::new(*name).color(if v { t.fg } else { t.text_dim }));
-        });
-    }
-    for extra in on.iter().filter(|n| !scene_edit::EFFECTS.iter().any(|(id, _)| id == n)) {
-        let mut v = true;
-        ui.horizontal(|ui| {
-            if widgets::toggle(ui, &t, &mut v).changed() {
-                change = Some((extra.clone(), false));
-            }
-            ui.label(RichText::new(scene_edit::effect_name(extra)).color(t.fg));
-        });
-    }
-    if let Some((fx, want)) = change {
-        let r = edit(&fx, want);
-        write_scene(app, scene, r, now);
-    }
-}
+// ---- the scene --------------------------------------------------------------------------------------------
 
-fn scene_panel(app: &mut App, ui: &mut egui::Ui, scene: &str, now: f64) {
+fn scene_inspector(app: &mut App, ui: &mut egui::Ui, scene: &str, text: Option<&str>, now: f64) {
     let t = app.t.clone();
-    let Some(text) = scene_text(app, scene, now) else {
-        widgets::hint(ui, &t, "Loading…");
+    let list = scenes(app);
+    let label = scene_label(app, scene);
+    let program = app.m.str("show.scene.program") == scene;
+    let preview = app.m.str("show.scene.preview") == scene;
+    let key = text.and_then(scene_edit::key);
+    let state = if program {
+        if crate::views::status::on_air(app) { "On air" } else { "Program (off air)" }
+    } else if preview {
+        "Up next"
+    } else {
+        "Not showing"
+    };
+    let sub = match key {
+        Some(k) => format!("Scene · key {k} · {state}"),
+        None => format!("Scene · {state}"),
+    };
+    widgets::detail_header(ui, &t, icon::LAYERS, &label, &sub, |_| {});
+    let Some(text) = text else {
+        widgets::hint(ui, &t, "Loading the scene…");
         return;
     };
-    let label = app
-        .m
-        .q_list("scenes")
-        .iter()
-        .find(|s| s.get_path("name").and_then(Value::as_str) == Some(scene))
-        .and_then(|s| s.get_path("label").and_then(Value::as_str))
-        .unwrap_or(scene)
-        .to_string();
-    let label = nice(&label);
     if app.build.comp.rename_for != scene {
         app.build.comp.rename_for = scene.to_string();
         app.build.comp.rename = label.clone();
     }
-    widgets::section(ui, &t, "", "NAME");
-    ui.horizontal(|ui| {
-        ui.add(se_ui_kit::widgets::field(&mut app.build.comp.rename).desired_width(ui.available_width() - 96.0));
-        let new = app.build.comp.rename.trim().to_string();
-        if widgets::button_ex(ui, &t, None, "Rename", Kind::Secondary, Size::Small, 0.0, !new.is_empty() && new != label).clicked() {
-            write_scene(app, scene, scene_edit::set_label(&text, &new), now);
-        }
-    });
-    ui.add_space(spacing::M);
 
-    widgets::section(ui, &t, "", "SWITCHING TO THIS SCENE");
-    if let Some(r) = crate::views::transitions::scene_choice(app, ui, scene, &text) {
-        write_scene(app, scene, r, now);
-    }
-    ui.add_space(spacing::S);
-    let speeds: [(&str, Option<[i64; 2]>); 4] = [("Auto", None), ("Fast", Some([250, 450])), ("Normal", Some([500, 900])), ("Slow", Some([1000, 1600]))];
-    let cur = scene_edit::speed(&text);
-    let mut i = speeds.iter().position(|(_, s)| *s == cur).unwrap_or(0);
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("Speed").color(t.text_dim));
-        if widgets::segmented(ui, &t, &mut i, &["Auto", "Fast", "Normal", "Slow"]) {
-            write_scene(app, scene, scene_edit::set_speed(&text, speeds[i].1), now);
-        }
-    });
-    if cur.is_some() && !speeds.iter().any(|(_, s)| *s == cur) {
-        let [lo, hi] = cur.unwrap_or_default();
-        widgets::hint(ui, &t, &format!("Custom: {:.1}–{:.1} seconds", lo as f64 / 1000.0, hi as f64 / 1000.0));
-    }
-    ui.add_space(spacing::M);
-
-    widgets::section(ui, &t, "", "EFFECTS ON THE WHOLE SCENE");
-    let on = scene_edit::scene_effects(&text);
-    effect_toggles(app, ui, &on, |fx, want| scene_edit::set_scene_effect(&text, fx, want), scene, now);
-    ui.add_space(spacing::M);
-
-    widgets::section(ui, &t, "", "WHEN THIS SCENE COMES ON");
-    widgets::hint(ui, &t, "Stream Engine does these, top to bottom, every time you switch to this scene.");
-    steps_block(app, ui, scene, &text, "on_enter", now);
-    ui.add_space(spacing::M);
-    widgets::section(ui, &t, "", "WHEN IT GOES OFF");
-    widgets::hint(ui, &t, "Done when you switch away from it.");
-    steps_block(app, ui, scene, &text, "on_exit", now);
-    ui.add_space(spacing::M);
-
-    widgets::section(ui, &t, "", "BACKGROUND");
-    let bg = scene_edit::background(&text);
-    let mut c = bg.as_deref().and_then(se_ui_kit::theme::hex).unwrap_or(egui::Color32::BLACK);
-    ui.horizontal(|ui| {
-        let r = egui::color_picker::color_edit_button_srgba(ui, &mut c, egui::color_picker::Alpha::Opaque).on_hover_text("Pick the background color");
-        if r.changed() {
-            let hex = format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b());
-            write_scene_soon(app, scene, scene_edit::set_background(&text, Some(&hex)), now);
-        }
-        ui.label(RichText::new(if bg.is_some() { "Your color" } else { "Black (the default)" }).color(t.fg));
-        if bg.is_some() {
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if widgets::button_ex(ui, &t, None, "Use black", Kind::Ghost, Size::Small, 0.0, true).clicked() {
-                    write_scene(app, scene, scene_edit::set_background(&text, None), now);
+    widgets::inspector_section(
+        ui,
+        &t,
+        "scene-main",
+        "Scene",
+        true,
+        |_| {},
+        |ui| {
+            widgets::prop_row(ui, &t, "Name", |ui| {
+                let new = app.build.comp.rename.trim().to_string();
+                let can = !new.is_empty() && new != label;
+                ui.add(widgets::field(&mut app.build.comp.rename).desired_width((ui.available_width() - if can { 84.0 } else { 0.0 }).max(80.0)));
+                if can && widgets::button_ex(ui, &t, None, "Rename", Kind::Secondary, Size::Small, 0.0, true).clicked() {
+                    write_scene(app, scene, scene_edit::set_label(text, &new), now);
                 }
             });
-        }
-    });
-    widgets::hint(ui, &t, "Shows wherever no layer covers the video.");
-    ui.add_space(spacing::M);
-
-    widgets::section(ui, &t, "", "MORE");
-    ui.horizontal(|ui| {
-        if widgets::button_ex(ui, &t, Some(icon::COPY), "Duplicate", Kind::Secondary, Size::Small, 0.0, true).clicked() {
-            let base = format!("{} copy", label);
-            let used: Vec<String> = scenes(app).into_iter().map(|(n, _, _)| n).collect();
-            let mut name = scene_edit::slug(&base);
-            let mut n = 2;
-            while used.contains(&name) {
-                name = format!("{}_{n}", scene_edit::slug(&base));
-                n += 1;
-            }
-            match scene_edit::duplicate(&text, &base, None) {
-                Ok(copy) => {
-                    app.m.action("project.write", Value::map().with("path", file_path(&name)).with("text", copy));
-                    app.build.canvas.scene = Some(name.clone());
-                    app.build.comp.reread = Some((name, now + 0.5));
-                    app.m.refresh_soon();
+            widgets::prop_row(ui, &t, "Key", |ui| {
+                let mut pick = None;
+                let shown = key.map_or_else(|| "None".to_string(), |k| k.to_string());
+                let combo = egui::ComboBox::from_id_salt(("scene-key", scene)).width(ui.available_width() - 8.0).selected_text(shown).show_ui(ui, |ui| {
+                    if ui.selectable_label(key.is_none(), "None").clicked() {
+                        pick = Some(None);
+                    }
+                    for k in 1..=9i64 {
+                        let other = list.iter().find(|(n, _, used)| n != scene && *used == k).map(|(_, l, _)| nice(l));
+                        let words = match other {
+                            Some(o) => format!("{k}  (also {o})"),
+                            None => k.to_string(),
+                        };
+                        if ui.selectable_label(key == Some(k), words).clicked() {
+                            pick = Some(Some(k));
+                        }
+                    }
+                });
+                combo.response.on_hover_text("Press this number key to put the scene up next.");
+                if let Some(k) = pick
+                    && k != key
+                {
+                    write_scene(app, scene, scene_edit::set_key(text, k), now);
                 }
-                Err(e) => app.m.toast(format!("Couldn't copy the scene: {e:#}"), true),
+            });
+        },
+    );
+
+    widgets::inspector_section(
+        ui,
+        &t,
+        "scene-transition",
+        "Transition in",
+        true,
+        |_| {},
+        |ui| {
+            if let Some(r) = crate::views::transitions::scene_choice(app, ui, scene, text) {
+                write_scene(app, scene, r, now);
             }
-        }
-    });
-    ui.add_space(spacing::S);
-    let on_air = app.m.str("show.scene.program") == scene;
-    if on_air {
-        widgets::hint(ui, &t, "Switch to another scene before deleting this one.");
-    } else if widgets::hold_button(ui, &t, "Delete scene", t.bright_red, 1.0) {
-        app.m.action("project.write", Value::map().with("path", file_path(scene)).with("delete", true));
-        // an edit still waiting to be saved would bring it back
-        if app.build.comp.local.as_ref().is_some_and(|l| l.scene == scene) {
-            app.build.comp.local = None;
-        }
-        app.build.canvas.scene = None;
-        app.build.canvas.selected = None;
-        app.m.refresh_soon();
+            ui.add_space(spacing::S);
+            let speeds: [(&str, Option<[i64; 2]>); 4] =
+                [("Auto", None), ("Fast", Some([250, 450])), ("Normal", Some([500, 900])), ("Slow", Some([1000, 1600]))];
+            let cur = scene_edit::speed(text);
+            let i = speeds.iter().position(|(_, s)| *s == cur).unwrap_or(0);
+            widgets::prop_row(ui, &t, "Speed", |ui| {
+                let names = ["Auto", "Fast", "Normal", "Slow"];
+                let shown = if cur.is_some() && !speeds.iter().any(|(_, s)| *s == cur) { "Custom" } else { names[i] };
+                let mut pick = None;
+                egui::ComboBox::from_id_salt(("scene-speed", scene)).width(ui.available_width() - 8.0).selected_text(shown).show_ui(ui, |ui| {
+                    for (j, n) in names.iter().enumerate() {
+                        if ui.selectable_label(shown == *n, *n).clicked() {
+                            pick = Some(j);
+                        }
+                    }
+                });
+                if let Some(j) = pick
+                    && speeds[j].1 != cur
+                {
+                    write_scene(app, scene, scene_edit::set_speed(text, speeds[j].1), now);
+                }
+            });
+            if cur.is_some() && !speeds.iter().any(|(_, s)| *s == cur) {
+                let [lo, hi] = cur.unwrap_or_default();
+                widgets::hint(ui, &t, &format!("Custom: {:.1}–{:.1} seconds", lo as f64 / 1000.0, hi as f64 / 1000.0));
+            }
+        },
+    );
+
+    let mut add = None;
+    widgets::inspector_section(
+        ui,
+        &t,
+        "scene-fx",
+        "Scene effects",
+        true,
+        |ui| {
+            add = Some(widgets::icon_button(ui, &t, icon::PLUS, "Add effect"));
+        },
+        |ui| effect_cards(app, ui, scene, FxHost::Scene, text, now),
+    );
+    if let Some(r) = add {
+        egui::Popup::menu(&r).width(380.0).show(|ui| add_fx_menu(app, ui, scene, FxHost::Scene, text, now));
     }
+
+    widgets::inspector_section(
+        ui,
+        &t,
+        "scene-enter",
+        "When this scene starts",
+        true,
+        |_| {},
+        |ui| {
+            widgets::hint(ui, &t, "Done top to bottom every time this scene goes on air.");
+            steps_block(app, ui, scene, text, "on_enter", now);
+        },
+    );
+    widgets::inspector_section(
+        ui,
+        &t,
+        "scene-exit",
+        "When it ends",
+        false,
+        |_| {},
+        |ui| {
+            widgets::hint(ui, &t, "Done when another scene takes over.");
+            steps_block(app, ui, scene, text, "on_exit", now);
+        },
+    );
+
+    widgets::inspector_section(
+        ui,
+        &t,
+        "scene-bg",
+        "Background",
+        false,
+        |_| {},
+        |ui| {
+            let bg = scene_edit::background(text);
+            let mut c = bg.as_deref().and_then(se_ui_kit::theme::hex).unwrap_or(egui::Color32::BLACK);
+            widgets::prop_row(ui, &t, "Color", |ui| {
+                let r = egui::color_picker::color_edit_button_srgba(ui, &mut c, egui::color_picker::Alpha::Opaque)
+                    .on_hover_text("Shows wherever no layer covers the canvas");
+                if r.changed() {
+                    let hex = format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b());
+                    write_scene_soon(app, scene, scene_edit::set_background(text, Some(&hex)), now);
+                }
+                if bg.is_some() {
+                    if widgets::button_ex(ui, &t, None, "Use black", Kind::Ghost, Size::Small, 0.0, true).clicked() {
+                        write_scene(app, scene, scene_edit::set_background(text, None), now);
+                    }
+                } else {
+                    widgets::hint(ui, &t, "Black");
+                }
+            });
+        },
+    );
+
+    lights_section(app, ui, scene, text, now);
+
+    widgets::inspector_section(
+        ui,
+        &t,
+        "scene-danger",
+        "Duplicate or delete",
+        false,
+        |_| {},
+        |ui| {
+            if widgets::button_ex(ui, &t, Some(icon::COPY), "Duplicate scene", Kind::Secondary, Size::Small, 0.0, true).clicked() {
+                let base = format!("{label} copy");
+                let used: Vec<String> = list.iter().map(|(n, _, _)| n.clone()).collect();
+                let mut name = scene_edit::slug(&base);
+                let mut n = 2;
+                while used.contains(&name) {
+                    name = format!("{}_{n}", scene_edit::slug(&base));
+                    n += 1;
+                }
+                match scene_edit::duplicate(text, &base, None) {
+                    Ok(copy) => {
+                        app.m.action("project.write", Value::map().with("path", file_path(&name)).with("text", copy));
+                        app.build.canvas.scene = Some(name.clone());
+                        app.build.canvas.selected = None;
+                        app.build.comp.reread = Some((name, now + 0.5));
+                        app.m.refresh_soon();
+                    }
+                    Err(e) => app.m.toast(format!("Couldn't copy the scene: {e:#}"), true),
+                }
+            }
+            ui.add_space(spacing::S);
+            if program {
+                widgets::hint(ui, &t, "Switch to another scene before deleting this one.");
+            } else if widgets::hold_button(ui, &t, "Delete scene", t.bright_red, 1.0) {
+                app.m.action("project.write", Value::map().with("path", file_path(scene)).with("delete", true));
+                // an edit still waiting to be saved would bring it back
+                if app.build.comp.local.as_ref().is_some_and(|l| l.scene == scene) {
+                    app.build.comp.local = None;
+                }
+                app.build.canvas.scene = None;
+                app.build.canvas.selected = None;
+                app.m.refresh_soon();
+            }
+        },
+    );
 }
 
-/// A scene's "when it comes on / goes off" steps (`key`: `on_enter` / `on_exit`). Unfinished
-/// steps stay on the page; the file gets the finished ones.
+/// Lights on this scene (`[lights]`): a look held and/or a cue list run while it's on air.
+fn lights_section(app: &mut App, ui: &mut egui::Ui, scene: &str, text: &str, now: f64) {
+    for q in ["lights.palettes", "lights.cuelists"] {
+        if app.m.q_seq(q) == 0 && app.m.connected {
+            app.m.query(q, Value::Null);
+        }
+    }
+    let pairs = |l: &[Value]| -> Vec<(String, String)> {
+        l.iter()
+            .filter_map(|v| {
+                let n = v.get_path("name").and_then(Value::as_str)?.to_string();
+                let label = v.get_path("label").and_then(Value::as_str).filter(|s| !s.is_empty()).map_or_else(|| nice(&n), nice);
+                Some((n, label))
+            })
+            .collect()
+    };
+    let looks = pairs(app.m.q_list("lights.palettes"));
+    let cues = pairs(app.m.q_list("lights.cuelists"));
+    let (look, cue) = scene_edit::lights(text);
+    if looks.is_empty() && cues.is_empty() && look.is_none() && cue.is_none() {
+        return;
+    }
+    let t = app.t.clone();
+    widgets::inspector_section(
+        ui,
+        &t,
+        "scene-lights",
+        "Lights",
+        false,
+        |_| {},
+        |ui| {
+            for (key, label, opts, cur) in [("look", "Look", &looks, &look), ("cue", "Cue list", &cues, &cue)] {
+                widgets::prop_row(ui, &t, label, |ui| {
+                    let shown =
+                        cur.as_deref().map_or_else(|| "None".to_string(), |c| opts.iter().find(|(n, _)| n == c).map_or_else(|| nice(c), |(_, l)| l.clone()));
+                    let mut pick = None;
+                    egui::ComboBox::from_id_salt(("scene-lights", key, scene)).width(ui.available_width() - 8.0).selected_text(shown).show_ui(ui, |ui| {
+                        if ui.selectable_label(cur.is_none(), "None").clicked() {
+                            pick = Some(None);
+                        }
+                        for (n, l) in opts {
+                            if ui.selectable_label(cur.as_deref() == Some(n), l).clicked() {
+                                pick = Some(Some(n.clone()));
+                            }
+                        }
+                    });
+                    if let Some(v) = pick
+                        && v != *cur
+                    {
+                        write_scene(app, scene, scene_edit::set_lights(text, key, v.as_deref()), now);
+                    }
+                });
+            }
+            widgets::hint(ui, &t, "Held or run while this scene is on air.");
+        },
+    );
+}
+
+/// A scene's "when it starts / ends" steps (`key`: `on_enter` / `on_exit`). Unfinished steps
+/// stay on the page; the file gets the finished ones.
 fn steps_block(app: &mut App, ui: &mut egui::Ui, scene: &str, text: &str, key: &'static str, now: f64) {
     let t = app.t.clone();
     let file = scene_edit::scene_commands(text, key);
@@ -1175,9 +2164,6 @@ fn steps_block(app: &mut App, ui: &mut egui::Ui, scene: &str, text: &str, key: &
         d.seen = file.clone();
     }
     let mut cmds = d.cmds.clone();
-    if cmds.is_empty() {
-        widgets::hint(ui, &t, "Nothing yet.");
-    }
     let changed = rules::steps_editor(app, ui, &format!("scene-{key}-"), &mut cmds, "");
     for (i, c) in cmds.iter().enumerate() {
         if let Some(what) = rules::step_missing(c) {
@@ -1195,24 +2181,92 @@ fn steps_block(app: &mut App, ui: &mut egui::Ui, scene: &str, text: &str, key: &
     }
 }
 
-/// "Rounded corners" as a Square … Round slider (0–120 px on the canvas, no units shown).
-fn rounded_corners(ui: &mut egui::Ui, t: &se_ui_kit::Theme, rad: &mut f32) -> egui::Response {
-    ui.vertical(|ui| {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Rounded corners").font(font_medium(type_scale::SMALL + 0.5)).color(t.text_dim));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let word = match *rad {
-                    r if r < 1.0 => "Square",
-                    r if r < 30.0 => "A little",
-                    r if r < 70.0 => "Rounded",
-                    _ => "Very round",
+// ---- On every scene --------------------------------------------------------------------------------------
+
+fn pinned_inspector(app: &mut App, ui: &mut egui::Ui, id: &str, now: f64) {
+    let t = app.t.clone();
+    let src = format!("patch.{id}");
+    let kind = sources::source_kind(app, &src);
+    let mut edit_source = false;
+    widgets::detail_header(ui, &t, kind.icon(), &source_label(app, &src), &format!("On every scene · {}", kind.label()), |ui| {
+        edit_source = widgets::button_ex(ui, &t, None, "Edit source", Kind::Secondary, Size::Small, 0.0, true).clicked();
+    });
+    if edit_source {
+        sources::open(app, ui.ctx(), &src);
+    }
+    let Some(project) = project_text(app, now) else {
+        widgets::hint(ui, &t, "Loading the project settings…");
+        return;
+    };
+    let s = patches::overlay_settings(&project, id);
+    widgets::inspector_section(
+        ui,
+        &t,
+        "pinned-where",
+        "Drawn on",
+        true,
+        |_| {},
+        |ui| {
+            let on = |c: &str| s.canvases.as_ref().is_none_or(|l| l.iter().any(|x| x == c));
+            let mut pick: Option<Vec<&str>> = None;
+            for (c, label) in [("wide", "Main"), ("tall", "Vertical")] {
+                widgets::prop_row(ui, &t, label, |ui| {
+                    let mut v = on(c);
+                    if widgets::toggle(ui, &t, &mut v).changed() {
+                        let mut next: Vec<&str> = ["wide", "tall"].into_iter().filter(|x| if *x == c { v } else { on(x) }).collect();
+                        next.sort();
+                        pick = Some(next);
+                    }
+                });
+            }
+            if let Some(list) = pick {
+                let both = list.len() == 2;
+                write_project(app, patches::set_overlay_canvases(&project, id, if both { None } else { Some(list.as_slice()) }), now);
+            }
+            widgets::hint(ui, &t, "Drawn above every scene. To show it in some scenes only, switch it off here and add it as a layer where you want it.");
+        },
+    );
+    widgets::inspector_section(
+        ui,
+        &t,
+        "pinned-place",
+        "Placement",
+        false,
+        |_| {},
+        |ui| {
+            for (c, label) in [("wide", "Main"), ("tall", "Vertical")] {
+                let words = match s.rect.iter().find(|(k, _)| k == c) {
+                    Some((_, r)) => format!("{:.0}%, {:.0}% · {:.0} × {:.0}%", r[0] * 100.0, r[1] * 100.0, r[2] * 100.0, r[3] * 100.0),
+                    None => "Fits the whole canvas".into(),
                 };
-                ui.label(RichText::new(word).color(t.fg));
+                widgets::prop_row(ui, &t, label, |ui| {
+                    ui.label(RichText::new(words).color(t.fg));
+                });
+            }
+            widgets::prop_row(ui, &t, "Order", |ui| {
+                ui.label(RichText::new(if s.z == 0 { "Default".to_string() } else { s.z.to_string() }).color(t.fg));
             });
-        });
-        ui.spacing_mut().slider_width = ui.available_width();
-        ui.spacing_mut().interact_size.y = 20.0;
-        ui.add(egui::Slider::new(rad, 0.0..=120.0).show_value(false))
-    })
-    .inner
+            if let Some(w) = &s.when {
+                widgets::prop_row(ui, &t, "Shows when", |ui| {
+                    ui.label(RichText::new(w).font(font_mono(type_scale::SMALL)).color(t.fg));
+                });
+            }
+            widgets::hint(ui, &t, "Placement and order are set in project.toml.");
+        },
+    );
+    if let Some(p) = patch_entry(app, id)
+        && p.get_path("params").and_then(Value::as_list).is_some_and(|l| !l.is_empty())
+    {
+        widgets::inspector_section(
+            ui,
+            &t,
+            "pinned-settings",
+            "Source settings",
+            true,
+            |_| {},
+            |ui| {
+                patches::params_ui(app, ui, &p);
+            },
+        );
+    }
 }

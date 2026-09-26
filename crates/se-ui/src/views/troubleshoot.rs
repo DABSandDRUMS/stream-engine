@@ -1,10 +1,10 @@
 //! Settings → Troubleshooting: the power tools, kept out of the way (§15.5). Test events
-//! (simulator), "why did that happen?" (trace), messages and errors (console), live signal
-//! graphs (scopes), and signal → setting links (bindings).
+//! (simulator), "why did that happen?" (trace), messages and errors (console), and live signal
+//! graphs (scopes). Signal → setting links live in Automation → Modulation.
 
 use crate::app::App;
 use crate::panels::Panel;
-use crate::views::{modulate, tools};
+use crate::views::tools;
 use se_ui_kit::widgets;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -14,17 +14,11 @@ pub enum Tool {
     Why,
     Messages,
     Signals,
-    Links,
 }
 
 impl Tool {
-    const ALL: [(Tool, &'static str); 5] = [
-        (Tool::Test, "Test events"),
-        (Tool::Why, "Why did that happen?"),
-        (Tool::Messages, "Messages & errors"),
-        (Tool::Signals, "Live signals"),
-        (Tool::Links, "Signal links"),
-    ];
+    const ALL: [(Tool, &'static str); 4] =
+        [(Tool::Test, "Test events"), (Tool::Why, "Why did that happen?"), (Tool::Messages, "Messages & errors"), (Tool::Signals, "Live signals")];
 
     /// The tool that replaces an old dock panel.
     pub fn for_panel(p: Panel) -> Tool {
@@ -32,7 +26,6 @@ impl Tool {
             Panel::Trace => Tool::Why,
             Panel::Console => Tool::Messages,
             Panel::Scopes => Tool::Signals,
-            Panel::Modulate => Tool::Links,
             _ => Tool::Test,
         }
     }
@@ -52,11 +45,10 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     }
     ui.add_space(se_ui_kit::theme::spacing::M);
     let blurb = match app.troubleshoot.tool {
-        Tool::Test => "Pretend something happened (a raid, a big cheer, a gift bomb) to test your reactions and alerts. Nothing is sent to Twitch.",
+        Tool::Test => "Pretend something happened (a raid, a big cheer, a gift bomb) to test your triggers and alerts. Nothing is sent to Twitch.",
         Tool::Why => "Pick something that happened and see, step by step, what it set off.",
         Tool::Messages => "What Stream Engine is saying, including mistakes in your settings files. “Open file” takes you straight to the line.",
         Tool::Signals => "Graphs of live signals like drum hits, music level and controller moves.",
-        Tool::Links => "Settings that follow a signal, e.g. zoom that pulses with the bass.",
     };
     widgets::hint(ui, &t, blurb);
     ui.add_space(se_ui_kit::theme::spacing::M);
@@ -68,7 +60,6 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
             Tool::Why => tools::trace(app, ui),
             Tool::Messages => tools::console(app, ui),
             Tool::Signals => tools::scopes(app, ui),
-            Tool::Links => modulate::ui(app, ui),
         }
     });
 }

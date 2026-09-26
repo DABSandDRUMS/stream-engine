@@ -475,6 +475,44 @@ fn wildcard_addresses_in_commands_hit_every_match() {
 }
 
 #[test]
+fn toggle_flips_switches_and_numbers_like_a_set_from_the_same_origin() {
+    let mut c = core();
+    run(&mut c, 5);
+    let vis = "scene.duo.node.cam_face.visible";
+    assert_eq!(c.get(vis), Some(&Value::Bool(true)));
+    let ui = |line: &str| Input::Command { cmd: Command::new(Origin::Ui, Op::parse(line).unwrap()) };
+    c.submit(ui(&format!("toggle {vis}")));
+    run(&mut c, 5);
+    assert_eq!(c.get(vis), Some(&Value::Bool(false)), "a switch flips");
+    c.submit(ui(&format!("toggle address={vis}")));
+    run(&mut c, 5);
+    assert_eq!(c.get(vis), Some(&Value::Bool(true)), "and flips back");
+    // numbers go between 0 and their declared max (1 without a range)
+    c.submit(Input::Declare { address: "fx.shake.amount".into(), meta: Meta::float(0.0, [0.0, 12.0]) });
+    run(&mut c, 5);
+    c.submit(ui("toggle fx.shake.amount"));
+    run(&mut c, 5);
+    assert_eq!(f(&c, "fx.shake.amount"), 12.0);
+    c.submit(ui("toggle fx.shake.amount"));
+    run(&mut c, 5);
+    assert_eq!(f(&c, "fx.shake.amount"), 0.0);
+    // it lands as an override at the origin's priority, so releasing it restores the base
+    c.submit(ui(&format!("toggle {vis}")));
+    run(&mut c, 5);
+    assert_eq!(c.get(vis), Some(&Value::Bool(false)));
+    c.submit(Input::Command { cmd: Command::new(Origin::Ui, Op::Release { address: vis.into() }) });
+    run(&mut c, 5);
+    assert_eq!(c.get(vis), Some(&Value::Bool(true)));
+    // wildcards flip every match; unknown settings are an error
+    c.submit(ui("toggle scene.*.node.cam_face.visible"));
+    run(&mut c, 5);
+    assert_eq!(c.get(vis), Some(&Value::Bool(false)));
+    c.submit(ui("toggle nothing.here"));
+    let out = run(&mut c, 5);
+    assert!(out.iter().any(|o| matches!(o, Output::Ack { ok: false, error: Some(e), .. } if e.contains("matches nothing"))));
+}
+
+#[test]
 fn patch_trigger_publishes_its_payload_in_the_same_tick_as_the_edge() {
     let mut c = core();
     let fire = |c: &mut Core, payload: Value, user: &str| {
@@ -498,6 +536,33 @@ fn patch_trigger_publishes_its_payload_in_the_same_tick_as_the_edge() {
     c.submit(Input::Command { cmd: Command::new(Origin::Cli, Op::Trigger { address: "fx.glitch".into(), payload: Value::map().with("bits", 1) }) });
     c.step();
     assert!(c.get("fx.glitch.payload.bits").is_none());
+}
+
+#[test]
+fn a_saved_action_held_until_released_keeps_its_steps_until_let_go() {
+    let files = vec![
+        file("project", "project", "schema = 1"),
+        file("scenes", "duo", "[canvas.wide]\nnodes = [{ src = \"cam_face\" }]"),
+        file("presets", "hide", "until_released = true\ndo = [\"set scene.duo.node.cam_face.visible false\"]"),
+        file("presets", "blip", "do = [\"set scene.duo.node.cam_face.visible false\"]"),
+    ];
+    let cfg = Config::build(&files);
+    assert!(cfg.errors.is_empty(), "{:?}", cfg.errors);
+    let mut c = Core::new(cfg, 1_000 * MS);
+    let vis = "scene.duo.node.cam_face.visible";
+    let ui = |op: Op| Input::Command { cmd: Command::new(Origin::Ui, op) };
+    run(&mut c, 5);
+    c.submit(ui(Op::PresetFire { name: "hide".into(), payload: Value::Null }));
+    run(&mut c, 5_000);
+    assert!(c.get("preset.hide.active").is_some_and(Value::truthy), "stays on while held");
+    assert_eq!(c.get(vis), Some(&Value::Bool(false)));
+    c.submit(ui(Op::PresetRelease { name: "hide".into() }));
+    run(&mut c, 5);
+    assert_eq!(c.get(vis), Some(&Value::Bool(true)), "letting go undoes its steps");
+    // without it, a list of steps is a one-shot that ends by itself
+    c.submit(ui(Op::PresetFire { name: "blip".into(), payload: Value::Null }));
+    run(&mut c, 50);
+    assert!(!c.get("preset.blip.active").is_some_and(Value::truthy));
 }
 
 #[test]

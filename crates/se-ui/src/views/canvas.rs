@@ -1,7 +1,7 @@
-//! The composite-view editor (§15.5): drag, resize, crop and round the layers of a scene on the
-//! main and/or vertical video. Drags preview live through a UI override (`set`), and commit once
-//! on release with `set_base` (persisted to `scenes/<scene>.toml` by the engine, comments kept),
-//! then release the override.
+//! The canvas editor in the middle of Scenes → Scenes: drag, resize, crop and round the layers
+//! of a scene on the Main and/or Vertical canvas. Drags preview live through a UI override
+//! (`set`), and commit once on release with `set_base` (saved into `scenes/<scene>.toml` by the
+//! engine, comments kept), then release the override.
 
 use crate::app::App;
 use crate::frames::Canvas;
@@ -61,7 +61,8 @@ impl Default for CanvasState {
 /// Live overrides are sent at most this often while dragging.
 const LIVE_MS: u128 = 33;
 
-fn node_ids(app: &App, scene: &str) -> Vec<String> {
+/// Layer names of `scene` as the engine loaded it.
+pub fn node_ids(app: &App, scene: &str) -> Vec<String> {
     app.m
         .q_list("scenes")
         .iter()
@@ -88,9 +89,8 @@ pub fn editor_nodes(app: &App, scene: &str, canvas: &str) -> Vec<CanvasNode> {
             z: app.m.get(&format!("{p}.z.{canvas}")).and_then(Value::as_i64).unwrap_or(0) as i32,
             visible: app.m.get(&format!("{p}.visible")).is_none_or(Value::truthy),
             locked: false,
-            modulated: app.is_modulated(&format!("{p}.rect.{canvas}"))
-                || app.is_modulated(&format!("{p}.offset_x"))
-                || app.is_modulated(&format!("{p}.offset_y")),
+            modulated: ["offset_x", "offset_y", "scale", "rotation", "opacity"].iter().any(|k| app.is_modulated(&format!("{p}.{k}")))
+                || app.is_modulated(&format!("{p}.rect.{canvas}")),
         };
         if let Some(d) = app.build.canvas.drafts.get(&(canvas.to_string(), id.clone())) {
             n.rect = d.rect;
@@ -149,6 +149,9 @@ fn apply_edit(app: &mut App, scene: &str, canvas: &str, e: CanvasEdit) {
             app.m.command(Op::Release { address: a });
         }
         app.build.canvas.last_live = None;
+        if !changes.is_empty() {
+            crate::views::composition::base_written(app, scene);
+        }
     } else {
         let due = app.build.canvas.last_live.is_none_or(|t| t.elapsed().as_millis() >= LIVE_MS);
         if due && !changes.is_empty() {
@@ -162,7 +165,7 @@ fn apply_edit(app: &mut App, scene: &str, canvas: &str, e: CanvasEdit) {
     }
 }
 
-/// Editing options above the composite view: which screen(s), snapping, and a "Guides" menu.
+/// Editing options above the canvas: which canvas(es), snapping, and a "Guides" menu.
 pub fn toolbar(app: &mut App, ui: &mut egui::Ui) {
     let t = app.t.clone();
     ui.horizontal(|ui| {
@@ -207,7 +210,7 @@ pub fn toolbar(app: &mut App, ui: &mut egui::Ui) {
     });
 }
 
-/// Replace a layer's rectangle on `canvas` (quick placements from the layer panel).
+/// Replace a layer's rectangle on `canvas` (placements and typed values from the inspector).
 pub fn apply_rect(app: &mut App, scene: &str, canvas: &str, node: &str, rect: [f32; 4]) {
     let Some(n) = editor_nodes(app, scene, canvas).into_iter().find(|n| n.id == node) else { return };
     let e = CanvasEdit { node: node.to_string(), kind: kc::EditKind::Move, rect, crop: n.crop, radius: n.radius, finished: true };
@@ -222,7 +225,7 @@ pub fn apply_shape(app: &mut App, scene: &str, canvas: &str, node: &str, crop: [
     apply_edit(app, scene, canvas, e);
 }
 
-fn editor(app: &mut App, ui: &mut egui::Ui, scene: &str, canvas: &str, size: Vec2) {
+fn editor(app: &mut App, ui: &mut egui::Ui, scene: &str, canvas: &str, size: Vec2) -> egui::Rect {
     let t = app.t.clone();
     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
@@ -240,7 +243,7 @@ fn editor(app: &mut App, ui: &mut egui::Ui, scene: &str, canvas: &str, size: Vec
         }
     }
     let nodes = editor_nodes(app, scene, canvas);
-    let live = app.m.str("show.scene.program") == scene;
+    let live = crate::views::status::on_air(app) && app.m.str("show.scene.program") == scene;
     let opts = CanvasOpts {
         canvas_px: monitor::canvas_size(canvas),
         grid: app.build.canvas.grid,
@@ -258,45 +261,51 @@ fn editor(app: &mut App, ui: &mut egui::Ui, scene: &str, canvas: &str, size: Vec
     let r = kc::canvas_editor(&mut child, &t, egui::Id::new(("canvas-editor", scene, canvas)), size, &nodes, sel.as_deref(), &opts);
     if r.selected != sel {
         app.build.canvas.selected = r.selected.clone();
+        app.build.comp.pinned = None;
         if let Some(id) = &r.selected {
             app.select(format!("scene.{scene}.node.{id}"));
         }
     }
     if let Some(e) = r.edit {
         app.build.canvas.selected = Some(e.node.clone());
+        app.build.comp.pinned = None;
         apply_edit(app, scene, canvas, e);
         ui.ctx().request_repaint();
     }
+    rect
 }
 
-/// The composite view(s) of `scene`, sized to fit `avail`.
-pub fn editors(app: &mut App, ui: &mut egui::Ui, scene: &str, avail: Vec2) {
+/// The canvas editor(s) of `scene`, sized to fit `avail`. Returns the area they cover.
+pub fn editors(app: &mut App, ui: &mut egui::Ui, scene: &str, avail: Vec2) -> egui::Rect {
     let gap = se_ui_kit::theme::spacing::L;
     match app.build.canvas.pick {
         Pick::Wide => {
             let w = avail.x.min(avail.y * 16.0 / 9.0).max(160.0);
-            editor(app, ui, scene, "wide", Vec2::new(w, w * 9.0 / 16.0));
+            editor(app, ui, scene, "wide", Vec2::new(w, w * 9.0 / 16.0))
         }
         Pick::Tall => {
             let h = avail.y.min(avail.x * 16.0 / 9.0).max(160.0);
             ui.horizontal(|ui| {
                 ui.add_space(((avail.x - h * 9.0 / 16.0) / 2.0).max(0.0));
-                editor(app, ui, scene, "tall", Vec2::new(h * 9.0 / 16.0, h));
-            });
+                editor(app, ui, scene, "tall", Vec2::new(h * 9.0 / 16.0, h))
+            })
+            .inner
         }
         Pick::Both => {
             // main + vertical of equal height side by side: w_main = h·16/9, w_vert = h·9/16
             let h = ((avail.x - gap) / (16.0 / 9.0 + 9.0 / 16.0)).min(avail.y).max(120.0);
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = gap;
-                editor(app, ui, scene, "wide", Vec2::new(h * 16.0 / 9.0, h));
-                editor(app, ui, scene, "tall", Vec2::new(h * 9.0 / 16.0, h));
-            });
+                let a = editor(app, ui, scene, "wide", Vec2::new(h * 16.0 / 9.0, h));
+                let b = editor(app, ui, scene, "tall", Vec2::new(h * 9.0 / 16.0, h));
+                a.union(b)
+            })
+            .inner
         }
     }
 }
 
-/// The canvas the layer panel edits: the one shown, or the main one when both are.
+/// The canvas the inspector edits: the one shown, or the main one when both are.
 pub fn edit_canvas(app: &App) -> &'static str {
     if app.build.canvas.pick == Pick::Tall { "tall" } else { "wide" }
 }

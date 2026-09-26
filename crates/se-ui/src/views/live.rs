@@ -69,7 +69,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                 ui.horizontal_top(|ui| {
                     ui.spacing_mut().item_spacing.x = spacing::L;
                     ui.allocate_ui_with_layout(Vec2::new(w - right - spacing::L, 0.0), Layout::top_down(Align::Min), |ui| {
-                        widgets::titled(ui, &t, "Quick effects", &show::pads_source(app), |_| {}, |ui| show::pads(app, ui));
+                        widgets::titled(ui, &t, "Buttons", &show::pads_source(app), |_| {}, |ui| show::pads(app, ui));
                     });
                     ui.allocate_ui_with_layout(Vec2::new(right, 0.0), Layout::top_down(Align::Min), |ui| {
                         widgets::titled(ui, &t, "Running now", "", |_| {}, |ui| show::active(app, ui));
@@ -112,7 +112,7 @@ impl Geometry {
 
 fn effects_column(app: &mut App, ui: &mut egui::Ui) {
     let t = app.t.clone();
-    widgets::titled(ui, &t, "Quick effects", &show::pads_source(app), |_| {}, |ui| show::pads(app, ui));
+    widgets::titled(ui, &t, "Buttons", &show::pads_source(app), |_| {}, |ui| show::pads(app, ui));
     ui.add_space(spacing::L);
     widgets::titled(ui, &t, "Running now", "", |_| {}, |ui| show::active(app, ui));
 }

@@ -56,7 +56,7 @@ keys are sent to the device. Unplugging and replugging the deck reconnects withi
 |---|---|
 | State | `controllers.<deck>.{connected, page, serial, model, firmware, brightness}`, `controllers.page` (primary deck; the UI pad grid mirrors it) |
 | Events | `deck.key {deck, page, key, down}`, `deck.connected`, `deck.disconnected` |
-| Actions | `deck.page <name\|next\|prev>`, `deck.press {key, page?}` / `deck.release` (run a key as if pressed — the UI pads use this), `deck.brightness <0–100>`, `deck.assign {page, key, preset\|scene\|toggle\|momentary\|do\|page\|ptt, label?, icon?, color?, hold?, confirm?}` / `{…, clear = true}` (edits `controllers/deck.toml`, comments kept), `deck.refresh` |
+| Actions | `deck.page <name\|next\|prev>`, `deck.press {key, page?}` / `deck.release` (run a key as if pressed — the UI pads use this), `deck.brightness <0–100>`, `deck.assign {page, key, preset\|scene (+cut)\|toggle\|momentary\|do (+release)\|page\|ptt, label?, icon?, color?, hold?, confirm?}` / `{…, clear = true}` (edits `controllers/deck.toml`, comments kept; `do`/`release` are command lists run on press and on key-up), `deck.refresh` |
 | Queries | `controllers.page {page?}`, `controllers.pages`, `controllers.deck` (status + every page), `controllers.deck.preview {since?}` (key images as base64 JPEG) |
 | Health | `health.deck` |
 
@@ -198,7 +198,7 @@ view), then move a control:
   button (`[control.cc.N] switch = "momentary"`) and mapped;
 * a Stream Deck key pressed while learning gets the target assigned.
 
-Targets: any address, `preset.<name>`, `scene.<name>`, or `do:<command>`. The mapping is written
+Targets: any address, `preset.<name>`, `scene.<name>`, or `do:<commands>` (one command per line). The mapping is written
 to the device's controllers file (created for unconfigured devices, with `usb =` when
 identical units are connected), the project reloads, and `midi.learned {target, signal, device,
 control, file}` is emitted. Learning times out after 30 s (`midi.learn.timeout`).

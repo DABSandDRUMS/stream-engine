@@ -19,7 +19,8 @@ Every patch gets the same addresses:
 
 ## 1. Create a patch
 
-- **UI:** *Views → Patches → New patch* (id, kind, template, "open in editor").
+- **UI:** *Sources → + → Web page / Generative* (web pages and visuals), *Scenes → Effects*
+  (custom effects, sound processors), *Scenes → Transitions* (custom transitions).
 - **CLI:** `streamctl do patch.new id=my_fx kind=script template=default open=true`
 - **By hand:** make `patches/my_fx/` with a `patch.toml` and the entry file — it appears as soon as `patch.toml` exists.
 
@@ -35,7 +36,9 @@ only in the current project. For example:
 `streamctl do patch.new id=ringmod kind=dsp template=ringmod`.
 
 Other actions: `patch.reload [id]` (re-read from disk; no id = all), `patch.disable <id>`,
-`patch.enable <id>` (also resumes a suspended script), `patch.open <id>` (editor). The editor
+`patch.enable <id>` (also resumes a suspended script), `patch.open <id>` (editor),
+`patch.remove <id>` (unloads it and moves its folder to `patches/.removed/<id>-<unix time>/`,
+which is never loaded; move it back to restore it). The editor
 is `editor=` from the action, else `$STREAM_ENGINE_EDITOR`, `omarchy-launch-editor`, `$VISUAL`,
 then `xdg-open`.
 
@@ -319,14 +322,14 @@ Rules:
   page can never be given everything. Empty or malformed patterns (`lights..cue`, spaces) are
   errors too, reported as `patch.toml:0: grants: …`.
 - Never grantable, whatever the pattern: `api.*` (tokens, device pairing), `secrets.*`,
-  `project.*` (file writes, reload), `patch.new`, `patch.open`, any secret-carrying action
+  `project.*` (file writes, reload), `patch.new`, `patch.open`, `patch.remove`, any secret-carrying action
   (`*.key.set`, `*.secret.set`, `*.token.set`), `set_base` (project edits), and `panic`,
   `clean`, `undo`, `redo`.
 - Changing `grants` and saving takes effect on the page's existing token immediately (the log
   says `patch.<id>: page permissions now [...]`); removing them drops the page back to its own
   namespace.
-- *Scenes → Overlays* shows each patch's grants in plain words ("Can also control:
-  lights, Cam1") on its card.
+- *Sources → Sources* shows each web page's grants in plain words ("Can also control:
+  lights, Cam1") in its inspector.
 
 ### Bringing your own overlay pages
 
@@ -366,7 +369,7 @@ plus the shared `patches/_lib/win31/`.
    Insert viewer text with `textContent` only. Alert sounds already play from the alert queue;
    don't add page sounds for them.
 4. **Settings as params.** Each thing the owner should change becomes a manifest param whose
-   `description` is the plain label shown in *Scenes → Overlays* (keep it under ~20
+   `description` is the plain label shown in *Sources → Sources* (keep it under ~20
    characters): `title` ("Title"), `count_to` ("Countdown", `minutes` | `clock_time`),
    `minutes`, `clock_time` on terminal_title; `prompt`, `lines` ("Chat lines to keep"),
    `show_alerts` on terminal_chat; `brand` ("Name on boot screen") on terminal_boot. Read them

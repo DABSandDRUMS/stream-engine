@@ -2,6 +2,7 @@
 //! rules, layouts, shortcuts written with `toml_edit`, comments preserved), the `project.read`
 //! and `project.files` queries, and `show.live_since` (uptime shown in the status bar).
 
+mod sources;
 use crate::daemon::Ctx;
 use anyhow::{Context, Result, anyhow, bail};
 use se_proto::{Meta, Value};
@@ -11,6 +12,8 @@ use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, TableLike};
 
 /// Validate a project-relative path: relative, no `..` or root, nothing hidden. Shared by config
 /// files ([`check_path`]) and media files (`assets::check_asset_path`).
+pub(super) static CONFIG_WRITE: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
 pub fn check_relative(rel: &str) -> Result<()> {
     let p = Path::new(rel);
     if rel.is_empty() || p.is_absolute() {
@@ -248,6 +251,7 @@ fn remove_entry(doc: &mut DocumentMut, key: &str, i: usize) -> Result<()> {
 pub fn write(ctx: &Ctx, args: &Value) -> Result<Option<String>> {
     let rel = args.get_path("path").and_then(Value::as_str).ok_or_else(|| anyhow!("project.write needs `path`"))?;
     check_path(rel)?;
+    let _write_guard = CONFIG_WRITE.lock();
     let abs = ctx.project.root().join(rel);
     let src = match std::fs::read_to_string(&abs) {
         Ok(s) => Some(s),
@@ -270,6 +274,7 @@ pub fn write(ctx: &Ctx, args: &Value) -> Result<Option<String>> {
 pub fn register_queries(ctx: &Ctx) {
     let root = ctx.project.root().to_path_buf();
     ctx.hub.register_query(
+    sources::start(ctx);
         "project.read",
         Arc::new(move |_, args| {
             let root = root.clone();

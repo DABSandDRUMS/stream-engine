@@ -768,7 +768,7 @@ enum Editor {
         index: Option<usize>,
         at: String,
         label: String,
-        commands: String,
+        commands: Vec<String>,
         pos: Pos2,
     },
     Key {
@@ -790,8 +790,8 @@ enum Editor {
         kind: ActionKind,
         target: String,
         cue: String,
-        on: String,
-        off: String,
+        on: Vec<String>,
+        off: Vec<String>,
         pos: Pos2,
     },
     Track {
@@ -963,8 +963,9 @@ fn edit_args(timeline: &str, track: &str) -> Value {
     Value::map().with("timeline", timeline).with("track", track)
 }
 
-fn lines(text: &str) -> Vec<String> {
-    text.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect()
+/// Command lines as saved: trimmed, empty steps dropped.
+fn clean(cmds: &[String]) -> Vec<String> {
+    cmds.iter().map(|c| c.trim()).filter(|c| !c.is_empty()).map(String::from).collect()
 }
 
 // ---------------------------------------------------------------- view
@@ -978,6 +979,8 @@ pub fn ui(app: &mut App, ui: &mut Ui) {
     let t = app.t.clone();
     let mut out = Vec::new();
     view(&app.m, &t, &mut st, ui, &mut out, now);
+    // the moment/section editor edits action lists with the shared step editor (needs the app)
+    editor_window(app, &ui.ctx().clone(), &t, &mut st, &mut out);
     if !out.is_empty() {
         st.refresh_soon(now);
     }
@@ -1027,7 +1030,6 @@ fn view(m: &Model, t: &Theme, st: &mut TlState, ui: &mut Ui, out: &mut Vec<Op>, 
         }
     });
     ui.allocate_rect(full, Sense::hover());
-    editor_window(ui.ctx(), t, st, out, m);
 }
 
 /// One line of text cut with "…" to `width`.
@@ -1742,7 +1744,7 @@ fn cue_lane(
             index: None,
             at: format!("{:.3}", snap(axis.t(p.x))),
             label: String::new(),
-            commands: String::new(),
+            commands: Vec::new(),
             pos: p,
         });
     }
@@ -1828,7 +1830,7 @@ fn cue_lane(
                 index: Some(ci),
                 at: format!("{:.3}", cue.at),
                 label: cue.label.clone().unwrap_or_default(),
-                commands: cue.commands.join("\n"),
+                commands: cue.commands.clone(),
                 pos,
             });
         };
@@ -2040,8 +2042,8 @@ fn region_lane(
             kind: ActionKind::Preset,
             target: String::new(),
             cue: String::new(),
-            on: String::new(),
-            off: String::new(),
+            on: Vec::new(),
+            off: Vec::new(),
             pos: p,
         });
     }
@@ -2139,8 +2141,8 @@ fn region_lane(
                 RegionAction::Commands(..) => (ActionKind::Commands, String::new(), String::new()),
             };
             let (on, off) = match &r.action {
-                RegionAction::Commands(on, off) => (on.join("\n"), off.join("\n")),
-                _ => (String::new(), String::new()),
+                RegionAction::Commands(on, off) => (on.clone(), off.clone()),
+                _ => (Vec::new(), Vec::new()),
             };
             st.editor = Some(Editor::Region {
                 timeline: tl.name.clone(),
@@ -2237,7 +2239,7 @@ const TRACK_WORDS: [(&str, &str, &str); 3] = [
     ("regions", "Sections", "Keep something on for a stretch, like a light look during the chorus."),
 ];
 
-fn editor_window(ctx: &egui::Context, t: &Theme, st: &mut TlState, out: &mut Vec<Op>, m: &Model) {
+fn editor_window(app: &mut App, ctx: &egui::Context, t: &Theme, st: &mut TlState, out: &mut Vec<Op>) {
     let Some(mut ed) = st.editor.take() else { return };
     let title = match &ed {
         Editor::Cue { index: None, .. } => "Add a moment",
@@ -2264,27 +2266,22 @@ fn editor_window(ctx: &egui::Context, t: &Theme, st: &mut TlState, out: &mut Vec
         None => win.anchor(Align2::CENTER_TOP, [0.0, 90.0]),
     };
     win.show(ctx, |ui| {
-        ui.set_max_width(460.0);
+        ui.set_max_width(if matches!(ed, Editor::Cue { .. } | Editor::Region { .. }) { 560.0 } else { 460.0 });
         match &mut ed {
             Editor::Cue { timeline, track, index, at, label, commands, .. } => {
                 egui::Grid::new("tl-ed-cue").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
                     field(ui, t, "Time", at, "seconds or m:ss", 120.0);
                     field(ui, t, "Name", label, "optional, like “drop”", 240.0);
-                    ui.label(RichText::new("What happens").color(t.text_dim));
-                    ui.add(
-                        egui::TextEdit::multiline(commands)
-                            .hint_text("one command per line\npreset.fire drop\nset fx.glow.amount 1")
-                            .font(font_mono(type_scale::BODY - 1.0))
-                            .desired_rows(4)
-                            .desired_width(320.0),
-                    );
-                    ui.end_row();
                 });
+                ui.add_space(spacing::S);
+                ui.label(RichText::new("What happens").color(t.text_dim));
+                ui.add_space(spacing::XS);
+                crate::views::rules::steps_editor(app, ui, "tl-cue-do", commands, "timeline.cue");
                 let at_v = time_ok(t, ui, at);
-                let ok = at_v.is_some() && (index.is_some() || !lines(commands).is_empty() || !label.trim().is_empty());
+                let ok = at_v.is_some() && (index.is_some() || !clean(commands).is_empty() || !label.trim().is_empty());
                 let (save, delete, cancel) = editor_buttons(ui, t, "Save", ok, index.is_some(), "Delete");
                 if save && let Some(at_v) = at_v {
-                    let mut args = edit_args(timeline, track).with("at", at_v).with("do", lines(commands));
+                    let mut args = edit_args(timeline, track).with("at", at_v).with("do", clean(commands));
                     if !label.trim().is_empty() || index.is_some() {
                         args = args.with("label", label.trim());
                     }
@@ -2343,55 +2340,54 @@ fn editor_window(ctx: &egui::Context, t: &Theme, st: &mut TlState, out: &mut Vec
                     ui.label(RichText::new("While it's on").color(t.text_dim));
                     let kinds = [ActionKind::Preset, ActionKind::Cuelist, ActionKind::Fx, ActionKind::Commands];
                     let cur = kinds.iter().position(|k| std::mem::discriminant(k) == std::mem::discriminant(kind)).unwrap_or(0);
-                    if let Some(n) = choices(ui, t, &["Quick effect", "Light cue list", "Effect", "Commands"], cur) {
+                    if let Some(n) = choices(ui, t, &["Saved action", "Light cue list", "Effect", "Actions"], cur) {
                         *kind = kinds[n].clone();
                     }
                     ui.add_space(spacing::XS);
-                    egui::Grid::new("tl-ed-region-do").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| match kind {
+                    match kind {
                         ActionKind::Preset => {
-                            ui.label(RichText::new("Quick effect").color(t.text_dim));
-                            let presets: Vec<(String, String)> = m
-                                .q_list("presets")
-                                .iter()
-                                .filter_map(|p| opt_s(p, "name").map(|n| (n.clone(), opt_s(p, "label").map_or_else(|| nice(&n), |l| nice(&l.to_lowercase())))))
-                                .collect();
-                            let shown = presets
-                                .iter()
-                                .find(|(n, _)| n == target)
-                                .map_or_else(|| if target.is_empty() { "Pick one".to_string() } else { nice(target) }, |(_, l)| l.clone());
-                            egui::ComboBox::from_id_salt("tl-ed-preset").width(220.0).selected_text(shown).show_ui(ui, |ui| {
-                                for (n, l) in presets {
-                                    ui.selectable_value(target, n, l);
-                                }
+                            egui::Grid::new("tl-ed-region-do").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                                ui.label(RichText::new("Saved action").color(t.text_dim));
+                                let presets: Vec<(String, String)> = app
+                                    .m
+                                    .q_list("presets")
+                                    .iter()
+                                    .filter_map(|p| {
+                                        opt_s(p, "name").map(|n| (n.clone(), opt_s(p, "label").map_or_else(|| nice(&n), |l| nice(&l.to_lowercase()))))
+                                    })
+                                    .collect();
+                                let shown = presets
+                                    .iter()
+                                    .find(|(n, _)| n == target)
+                                    .map_or_else(|| if target.is_empty() { "Pick one".to_string() } else { nice(target) }, |(_, l)| l.clone());
+                                egui::ComboBox::from_id_salt("tl-ed-preset").width(220.0).selected_text(shown).show_ui(ui, |ui| {
+                                    for (n, l) in presets {
+                                        ui.selectable_value(target, n, l);
+                                    }
+                                });
+                                ui.end_row();
                             });
-                            ui.end_row();
                         }
                         ActionKind::Cuelist => {
-                            field(ui, t, "Cue list", target, "cue list name", 180.0);
-                            field(ui, t, "Cue", cue, "optional", 120.0);
+                            egui::Grid::new("tl-ed-region-do").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                                field(ui, t, "Cue list", target, "cue list name", 180.0);
+                                field(ui, t, "Cue", cue, "optional", 120.0);
+                            });
                         }
-                        ActionKind::Fx => field(ui, t, "Effect", target, "effect name", 180.0),
+                        ActionKind::Fx => {
+                            egui::Grid::new("tl-ed-region-do")
+                                .num_columns(2)
+                                .spacing([12.0, 8.0])
+                                .show(ui, |ui| field(ui, t, "Effect", target, "effect name", 180.0));
+                        }
                         ActionKind::Commands => {
                             ui.label(RichText::new("When it starts").color(t.text_dim));
-                            ui.add(
-                                egui::TextEdit::multiline(on)
-                                    .hint_text("one command per line")
-                                    .font(font_mono(type_scale::BODY - 1.0))
-                                    .desired_rows(3)
-                                    .desired_width(300.0),
-                            );
-                            ui.end_row();
+                            crate::views::rules::steps_editor(app, ui, "tl-region-on", on, "timeline.cue");
+                            ui.add_space(spacing::S);
                             ui.label(RichText::new("When it ends").color(t.text_dim));
-                            ui.add(
-                                egui::TextEdit::multiline(off)
-                                    .hint_text("one command per line")
-                                    .font(font_mono(type_scale::BODY - 1.0))
-                                    .desired_rows(3)
-                                    .desired_width(300.0),
-                            );
-                            ui.end_row();
+                            crate::views::rules::steps_editor(app, ui, "tl-region-off", off, "timeline.cue");
                         }
-                    });
+                    }
                 }
                 let (sv, ev) = (time_ok(t, ui, start), time_ok(t, ui, end));
                 let span_ok = matches!((sv, ev), (Some(a), Some(b)) if b > a);
@@ -2400,7 +2396,7 @@ fn editor_window(ctx: &egui::Context, t: &Theme, st: &mut TlState, out: &mut Vec
                 }
                 let action_ok = index.is_some()
                     || match kind {
-                        ActionKind::Commands => !lines(on).is_empty(),
+                        ActionKind::Commands => !clean(on).is_empty(),
                         _ => !target.trim().is_empty(),
                     };
                 let (save, delete, cancel) = editor_buttons(ui, t, "Save", span_ok && action_ok, index.is_some(), "Delete");
@@ -2417,7 +2413,7 @@ fn editor_window(ctx: &egui::Context, t: &Theme, st: &mut TlState, out: &mut Vec
                                 ActionKind::Cuelist if cue.trim().is_empty() => args.with("cuelist", target.trim()),
                                 ActionKind::Cuelist => args.with("cuelist", target.trim()).with("cue", cue.trim()),
                                 ActionKind::Fx => args.with("fx", target.trim()),
-                                ActionKind::Commands => args.with("do", lines(on)).with("undo", lines(off)),
+                                ActionKind::Commands => args.with("do", clean(on)).with("undo", clean(off)),
                             };
                             out.push(act("timeline.edit.region.add", args));
                         }

@@ -1,55 +1,58 @@
-//! Scenes → Overlays (§6, §15.5): every overlay, animated background, particle effect
-//! and video/audio effect as a card: what it is, whether it's working, a Try it button (asks
-//! first when on air), on/off, and its settings as real controls (colors, sliders, switches).
-//! "New" makes one from the shipped templates. File locations, script CPU and errors with line
-//! numbers live under Details.
+//! Shared helpers for the engine's patches: web pages and generative visuals (Sources),
+//! custom effects and sound processors (Scenes → Effects), custom transitions. Their settings
+//! as real controls, the shipped templates, creating, renaming, removing, turning on/off,
+//! opening and reloading their files, problems in plain words, and the "On every scene"
+//! placement of overlay-layer patches (`[overlays.<id>]` in project.toml). No page of its own.
 
 use crate::app::App;
 use crate::views::composition::source_label;
 use crate::views::live::nice;
-use egui::{Align, Color32, Layout, RichText, Vec2};
+use anyhow::{Result, anyhow};
+use egui::Color32;
 use se_proto::{Op, Value};
-use se_ui_kit::theme::{font_mono, font_semibold, mix, radius, spacing, type_scale};
-use se_ui_kit::widgets::{self, Kind, Size, Tone, icon};
-
-/// Kinds a user can create: (kind, friendly name, one-line explanation).
-const NEW_KINDS: &[(&str, &str, &str)] = &[
-    ("web", "Web overlay", "A web page drawn over the video: alerts, chat, labels, goals."),
-    ("script", "Animated graphics", "Shapes and text that react to events, drawn by a small script."),
-    ("particles", "Particles", "Confetti, sparks and snow that burst on cue."),
-    ("shader", "Background or video effect", "A GPU effect: animated backgrounds or a look applied to the video."),
-    ("dsp", "Audio effect", "Processes sound on a sound channel."),
-];
-
-#[derive(Clone, Default)]
-struct NewForm {
-    open: bool,
-    name: String,
-    kind: usize,
-    template: String,
-}
+use se_ui_kit::widgets;
+use toml_edit::{Array, DocumentMut, Item, Table, value};
 
 fn action(app: &mut App, name: &str, args: Value) {
     app.m.command(Op::Action { name: name.into(), args });
 }
 
-/// What a patch is, in words.
-fn kind_name(kind: &str, layer: &str) -> &'static str {
-    match (kind, layer) {
-        ("web", _) => "Web overlay",
-        ("shader", "source") => "Animated background",
-        ("shader", "transition") => "Transition",
-        ("shader", _) => "Video effect",
-        ("particles", _) => "Particles",
-        ("script", _) => "Animated graphics",
-        ("dsp", _) => "Audio effect",
-        _ => "Overlay",
+fn text<'a>(p: &'a Value, k: &str) -> &'a str {
+    p.get_path(k).and_then(Value::as_str).unwrap_or("")
+}
+
+/// Keep the `patches` list fresh (every second) and the templates (every 30 s) while a page
+/// that shows them is on screen.
+pub fn refresh(app: &mut App, ui: &egui::Ui) {
+    let now = ui.input(|i| i.time);
+    let poll = egui::Id::new("patches-poll");
+    let last: f64 = ui.data_mut(|d| d.get_temp(poll)).unwrap_or(-100.0);
+    if now - last > 1.0 && app.m.connected {
+        ui.data_mut(|d| d.insert_temp(poll, now));
+        app.m.query("patches", Value::Null);
+        let asked = egui::Id::new("patch-templates-poll");
+        let t_last: f64 = ui.data_mut(|d| d.get_temp(asked)).unwrap_or(-100.0);
+        if app.m.q("patch.templates").is_none() || now - t_last > 30.0 {
+            ui.data_mut(|d| d.insert_temp(asked, now));
+            app.m.query("patch.templates", Value::Null);
+        }
     }
 }
 
-/// Plain descriptions for the overlays that ship with Stream Engine (their manifests are
-/// written for developers). The owner's own overlays show their own description.
-fn plain_description(id: &str) -> Option<&'static str> {
+/// One entry of the `patches` query by id.
+pub fn find(app: &App, id: &str) -> Option<Value> {
+    app.m.q_list("patches").iter().find(|p| text(p, "id") == id).cloned()
+}
+
+/// The name shown for a patch: its label, else its id in words.
+pub fn label(p: &Value) -> String {
+    let (l, id) = (text(p, "label"), text(p, "id"));
+    if l.is_empty() || l == id { nice(id) } else { l.to_string() }
+}
+
+/// Plain descriptions for the patches that ship with Stream Engine (their manifests are written
+/// for developers). The owner's own patches show their own description.
+pub fn plain_description(id: &str) -> Option<&'static str> {
     Some(match id {
         "alertbox" => "Pops up when someone follows, subscribes, cheers, raids or tips.",
         "chatbox" => "Shows your chat on stream. Deleted messages disappear from it too.",
@@ -69,19 +72,69 @@ fn plain_description(id: &str) -> Option<&'static str> {
     })
 }
 
-fn kind_icon(kind: &str) -> &'static str {
-    match kind {
-        "web" => icon::IMAGE,
-        "shader" => icon::PALETTE,
-        "particles" => icon::STAR,
-        "script" => icon::BOLT,
-        "dsp" => icon::VOLUME,
-        _ => icon::SPARKLE,
+/// What a patch does, in one sentence (plain wording for shipped ones).
+pub fn description(p: &Value) -> String {
+    plain_description(text(p, "id")).map(String::from).unwrap_or_else(|| text(p, "description").to_string())
+}
+
+/// Running state in words and whether it needs attention: ("Working" | "Off" | "Has a problem"
+/// | "Paused: too slow", problem).
+pub fn status(app: &App, p: &Value) -> (&'static str, bool) {
+    let id = text(p, "id");
+    let st = app.m.get(&format!("patch.{id}.state")).and_then(Value::as_str).unwrap_or(text(p, "state"));
+    match st {
+        _ if !enabled(app, p) => ("Off", false),
+        "error" => ("Has a problem", true),
+        "suspended" => ("Paused: too slow", true),
+        _ => ("Working", false),
     }
 }
 
+/// Turned on (not disabled by the owner).
+pub fn enabled(app: &App, p: &Value) -> bool {
+    let st = app.m.get(&format!("patch.{}.state", text(p, "id"))).and_then(Value::as_str).unwrap_or(text(p, "state"));
+    p.get_path("enabled").is_none_or(Value::truthy) && st != "disabled"
+}
+
+/// A patch's problem: the message, where it is (`file:line`, may be empty) and whether the
+/// previous version is still showing.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Problem {
+    pub message: String,
+    pub location: String,
+    pub still_showing: bool,
+}
+
+pub fn problem(app: &App, p: &Value) -> Option<Problem> {
+    let id = text(p, "id");
+    let live = app.m.get(&format!("patch.{id}.error")).and_then(Value::as_str).unwrap_or("");
+    let message = if live.is_empty() { text(p, "error") } else { live };
+    let st = app.m.get(&format!("patch.{id}.state")).and_then(Value::as_str).unwrap_or(text(p, "state"));
+    if message.is_empty() || st != "error" {
+        return None;
+    }
+    let location = match (p.get_path("error_file").and_then(Value::as_str), p.get_path("error_line").and_then(Value::as_i64)) {
+        (Some(f), Some(l)) if l > 0 => format!("{f}:{l}"),
+        (Some(f), _) => f.to_string(),
+        _ => String::new(),
+    };
+    Some(Problem { message: message.to_string(), location, still_showing: p.get_path("live").is_some_and(Value::truthy) })
+}
+
+/// Everything beyond itself a patch's files let it control, in words ("lights", "chat", …).
+pub fn grants_words(app: &App, p: &Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for g in p.get_path("grants").and_then(Value::as_list).unwrap_or(&[]).iter().filter_map(Value::as_str) {
+        let w = grant_words(app, g);
+        if !out.contains(&w) {
+            out.push(w);
+        }
+    }
+    out
+}
+
 /// A manifest grant in words: `lights.*` → "lights", `source.cam1` → the camera's name,
-/// `patch.confetti` → "the Confetti overlay".
+/// `patch.confetti` → "“Confetti”".
 fn grant_words(app: &App, grant: &str) -> String {
     let mut segs = grant.split('.');
     let root = segs.next().unwrap_or("");
@@ -89,13 +142,13 @@ fn grant_words(app: &App, grant: &str) -> String {
     match (root, named) {
         ("source" | "sources", Some(n)) => source_label(app, n),
         ("source" | "sources", None) => "cameras and other sources".into(),
-        ("patch", Some(n)) => format!("the {} overlay", nice(n)),
-        ("patch", None) => "other overlays".into(),
+        ("patch", Some(n)) => format!("\u{201c}{}\u{201d}", nice(n)),
+        ("patch", None) => "other sources and effects".into(),
         ("scene", Some(n)) if !["go", "cut", "take"].contains(&n) => format!("the {} scene", nice(n)),
         ("scene", _) => "scenes".into(),
         ("lights" | "dmx", _) => "lights".into(),
         ("mixer" | "audio", _) => "sound".into(),
-        ("preset", _) => "presets".into(),
+        ("preset", _) => "saved actions".into(),
         ("mode", _) => "the show mode".into(),
         ("tts", _) => "the read-out voice".into(),
         ("bot" | "chat", _) => "chat".into(),
@@ -105,331 +158,159 @@ fn grant_words(app: &App, grant: &str) -> String {
     }
 }
 
-pub fn ui(app: &mut App, ui: &mut egui::Ui) {
-    let t = app.t.clone();
-    let now = ui.input(|i| i.time);
-    let poll = egui::Id::new("patches-view-poll");
-    let last: f64 = ui.data_mut(|d| d.get_temp(poll)).unwrap_or(-10.0);
-    if now - last > 1.0 {
-        ui.data_mut(|d| d.insert_temp(poll, now));
-        app.m.query("patches", Value::Null);
-        if app.m.q("patch.templates").is_none() || now - last > 30.0 {
-            app.m.query("patch.templates", Value::Null);
-        }
-    }
-    let form_id = egui::Id::new("patches-view-new");
-    let mut form: NewForm = ui.data_mut(|d| d.get_temp(form_id)).unwrap_or_default();
-    let mut patches = app.m.q_list("patches").to_vec();
-    patches.sort_by_key(|p| {
-        let kind = p.get_path("kind").and_then(Value::as_str).unwrap_or("");
-        (
-            ["web", "script", "particles", "shader", "dsp"].iter().position(|k| *k == kind).unwrap_or(9),
-            p.get_path("label").and_then(Value::as_str).unwrap_or("").to_lowercase(),
-        )
-    });
+// ---- templates and actions ------------------------------------------------------------------
 
-    ui.horizontal(|ui| {
-        widgets::hint(ui, &t, "Everything you can put on top of your video, plus effects. Settings change live.");
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if widgets::button_ex(ui, &t, Some(icon::PLUS), "New overlay or effect", Kind::Primary, Size::Medium, 0.0, true).clicked() {
-                form.open = !form.open;
-            }
-        });
-    });
-    ui.add_space(spacing::M);
-    if form.open {
-        new_form(app, ui, &mut form);
-        ui.add_space(spacing::M);
-    }
-    ui.data_mut(|d| d.insert_temp(form_id, form));
-
-    if patches.is_empty() {
-        widgets::panel(ui, &t, |ui| {
-            ui.set_width(ui.available_width());
-            let msg =
-                if app.m.query_errors.contains_key("patches") { "The overlay loader isn't running." } else { "Make your first overlay with the button above." };
-            widgets::empty_state(ui, &t, icon::SPARKLE, "No overlays yet", msg, None);
-        });
-        return;
-    }
-    let gap = spacing::L;
-    egui::ScrollArea::vertical().id_salt("patches").auto_shrink([false, false]).show(ui, |ui| {
-        let w = ui.available_width();
-        let cols = ((w + gap) / (460.0 + gap)).floor().clamp(1.0, 4.0) as usize;
-        let cw = (w - gap * (cols as f32 - 1.0)) / cols as f32;
-        for (ri, row) in patches.chunks(cols).enumerate() {
-            // cards in a row share the height of the tallest one (measured last frame)
-            let hid = egui::Id::new(("patch-row-h", ri, cols));
-            let row_h: f32 = ui.data(|d| d.get_temp(hid)).unwrap_or(0.0);
-            let mut tallest = 0.0_f32;
-            ui.horizontal_top(|ui| {
-                ui.spacing_mut().item_spacing.x = gap;
-                for p in row {
-                    let natural = ui.allocate_ui_with_layout(Vec2::new(cw, 0.0), Layout::top_down(Align::Min), |ui| patch_card(app, ui, p, row_h)).inner;
-                    tallest = tallest.max(natural);
-                }
-            });
-            if (tallest - row_h).abs() > 0.5 {
-                ui.data_mut(|d| d.insert_temp(hid, tallest));
-                ui.ctx().request_repaint();
-            }
-            ui.add_space(gap);
-        }
-    });
+/// A shipped starting point (`patch.templates`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Template {
+    pub kind: String,
+    pub name: String,
+    pub description: String,
+    /// `source` | `overlay` | `effect` | `transition` | `audio-effect` | `audio-source`.
+    pub layer: String,
 }
 
-fn new_form(app: &mut App, ui: &mut egui::Ui, form: &mut NewForm) {
-    let t = app.t.clone();
-    widgets::titled(
-        ui,
-        &t,
-        "New overlay or effect",
-        "Starts from a ready-made template you can change.",
-        |_| {},
-        |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Name").color(t.text_dim));
-                ui.add(se_ui_kit::widgets::field(&mut form.name).hint_text("e.g. Sub goal bar").desired_width(260.0));
-            });
-            ui.add_space(spacing::S);
-            ui.horizontal_wrapped(|ui| {
-                for (i, (_, name, blurb)) in NEW_KINDS.iter().enumerate() {
-                    let r = widgets::button_ex(
-                        ui,
-                        &t,
-                        Some(kind_icon(NEW_KINDS[i].0)),
-                        name,
-                        if form.kind == i { Kind::Primary } else { Kind::Secondary },
-                        Size::Small,
-                        0.0,
-                        true,
-                    );
-                    if r.on_hover_text(*blurb).clicked() {
-                        form.kind = i;
-                    }
-                }
-            });
-            let (kind, _, blurb) = NEW_KINDS[form.kind];
-            widgets::hint(ui, &t, blurb);
-            let templates: Vec<(String, String)> = app
-                .m
-                .q_list("patch.templates")
-                .iter()
-                .filter(|v| v.get_path("kind").and_then(Value::as_str) == Some(kind))
-                .map(|v| {
-                    (
-                        v.get_path("name").and_then(Value::as_str).unwrap_or("").to_string(),
-                        v.get_path("description").and_then(Value::as_str).unwrap_or("").to_string(),
-                    )
-                })
-                .collect();
-            if !templates.iter().any(|(n, _)| *n == form.template) {
-                form.template = templates.first().map(|(n, _)| n.clone()).unwrap_or_else(|| "default".into());
-            }
-            if templates.len() > 1 {
-                ui.add_space(spacing::S);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Start from").color(t.text_dim));
-                    egui::ComboBox::from_id_salt("patch-new-template").selected_text(nice(&form.template)).show_ui(ui, |ui| {
-                        for (n, d) in &templates {
-                            ui.selectable_value(&mut form.template, n.clone(), nice(n)).on_hover_text(d);
-                        }
-                    });
-                });
-            }
-            ui.add_space(spacing::M);
-            let id = crate::views::scene_edit::slug(&form.name);
-            let taken = app.m.q_list("patches").iter().any(|p| p.get_path("id").and_then(Value::as_str) == Some(id.as_str()));
-            ui.horizontal(|ui| {
-                if widgets::button_ex(ui, &t, Some(icon::CHECK), "Create", Kind::Primary, Size::Medium, 0.0, !id.is_empty() && !taken).clicked() {
-                    action(app, "patch.new", Value::map().with("id", id.clone()).with("kind", kind).with("template", form.template.clone()).with("open", true));
-                    app.m.toast(format!("Made \"{}\". Its files open in your editor.", form.name.trim()), false);
-                    form.name.clear();
-                    form.open = false;
-                    app.m.refresh_soon();
-                }
-                if widgets::button_ex(ui, &t, None, "Cancel", Kind::Ghost, Size::Medium, 0.0, true).clicked() {
-                    form.open = false;
-                }
-                if taken {
-                    widgets::hint(ui, &t, "That name is taken.");
-                }
-            });
-        },
-    );
+/// Templates of `kind` (`web`, `shader`, `particles`, `script`, `dsp`), in the engine's order.
+pub fn templates(app: &App, kind: &str) -> Vec<Template> {
+    app.m
+        .q_list("patch.templates")
+        .iter()
+        .filter(|v| text(v, "kind") == kind)
+        .map(|v| Template { kind: kind.to_string(), name: text(v, "name").into(), description: text(v, "description").into(), layer: text(v, "layer").into() })
+        .collect()
 }
 
-/// One overlay card. `min_h` = the row's height (tallest card's natural height); returns this
-/// card's natural height (without the stretch) so rows can also shrink.
-fn patch_card(app: &mut App, ui: &mut egui::Ui, p: &Value, min_h: f32) -> f32 {
-    let t = app.t.clone();
-    let s = |k: &str| p.get_path(k).and_then(Value::as_str).unwrap_or("").to_string();
-    let id = s("id");
-    let kind = s("kind");
-    let st = app.m.get(&format!("patch.{id}.state")).and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| s("state"));
-    let err = {
-        let live = app.m.get(&format!("patch.{id}.error")).and_then(Value::as_str).unwrap_or("").to_string();
-        if live.is_empty() { s("error") } else { live }
-    };
-    let enabled = p.get_path("enabled").is_none_or(Value::truthy) && st != "disabled";
-    let title = if s("label").is_empty() || s("label") == id { nice(&id) } else { s("label") };
-    let (status, color) = match st.as_str() {
-        _ if !enabled => ("Off", t.text_dim),
-        "error" => ("Has a problem", t.bright_red),
-        "suspended" => ("Paused: too slow", t.yellow),
-        _ => ("Working", t.green),
-    };
-    let border = if st == "error" { mix(t.border, t.bright_red, 0.6) } else { t.border };
-    egui::Frame::new()
-        .fill(t.surface)
-        .stroke(egui::Stroke::new(1.0, border))
-        .corner_radius(radius::CARD)
-        .inner_margin(egui::Margin::same(spacing::L as i8))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            // the frame adds its margins and stroke around this; a card may grow (settings
-            // open), which raises the row height for its neighbours next frame
-            ui.set_min_height((min_h - 2.0 * spacing::L - 2.0).max(0.0));
-            let top = ui.cursor().top();
-            ui.horizontal(|ui| {
-                let (r, _) = ui.allocate_exact_size(Vec2::splat(40.0), egui::Sense::hover());
-                ui.painter().rect_filled(r, radius::CONTROL, mix(t.surface, t.accent, 0.16));
-                ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, kind_icon(&kind), se_ui_kit::theme::font(18.0), t.accent);
-                ui.vertical(|ui| {
-                    ui.label(RichText::new(&title).font(font_semibold(type_scale::LARGE)).color(t.fg));
-                    ui.label(RichText::new(kind_name(&kind, &s("layer"))).color(t.text_dim));
-                });
-                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                    let mut on = enabled || st == "suspended";
-                    if widgets::toggle(ui, &t, &mut on).on_hover_text(if on { "Turn off" } else { "Turn on" }).changed() {
-                        action(app, if on { "patch.enable" } else { "patch.disable" }, Value::map().with("id", id.clone()));
-                    }
-                });
-            });
-            let desc = plain_description(&id).map(String::from).unwrap_or_else(|| s("description"));
-            if !desc.is_empty() {
-                ui.add_space(spacing::S);
-                ui.label(RichText::new(desc).color(t.text_dim));
-            }
-            let mut extra: Vec<String> = Vec::new();
-            for g in p.get_path("grants").and_then(Value::as_list).unwrap_or(&[]).iter().filter_map(Value::as_str) {
-                let w = grant_words(app, g);
-                if !extra.contains(&w) {
-                    extra.push(w);
-                }
-            }
-            if !extra.is_empty() {
-                ui.add_space(spacing::S);
-                widgets::callout(
-                    ui,
-                    &t,
-                    Tone::Info,
-                    icon::MOD,
-                    &format!("Can also control: {}", extra.join(", ")),
-                    "Its files give it this extra control. To take it away, use Edit files under Details.",
-                    None,
-                );
-            }
-            ui.add_space(spacing::S);
-            let confirm_id = egui::Id::new(("patch-try-confirm", &id));
-            let on_air = crate::views::status::on_air(app);
-            let mut confirm = on_air && ui.data(|d| d.get_temp::<bool>(confirm_id)).unwrap_or(false);
-            ui.horizontal(|ui| {
-                widgets::badge(ui, &t, status, color);
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if st == "suspended" && widgets::button_ex(ui, &t, Some(icon::PLAY), "Resume", Kind::Secondary, Size::Small, 0.0, true).clicked() {
-                        action(app, "patch.enable", Value::map().with("id", id.clone()));
-                    }
-                    if p.get_path("trigger").is_some_and(Value::truthy) {
-                        let (label, kind, tip) = if on_air {
-                            ("Try it on air", Kind::Live, "You're on air: your viewers will see it.")
-                        } else {
-                            ("Try it", Kind::Secondary, "Plays it once now. You're off air: only you see it.")
-                        };
-                        if widgets::button_ex(ui, &t, Some(icon::PLAY), label, kind, Size::Small, 0.0, enabled).on_hover_text(tip).clicked() {
-                            if on_air {
-                                confirm = !confirm;
-                            } else {
-                                try_overlay(app, &id);
-                            }
-                        }
-                    }
-                });
-            });
-            if confirm {
-                ui.add_space(spacing::S);
-                let go = widgets::callout(
-                    ui,
-                    &t,
-                    Tone::Danger,
-                    icon::LIVE,
-                    "Your viewers will see this",
-                    "You're on air, so it plays on stream right now.",
-                    Some("Try it on air"),
-                );
-                if go {
-                    try_overlay(app, &id);
-                    confirm = false;
-                } else if widgets::button_ex(ui, &t, None, "Cancel", Kind::Ghost, Size::Small, 0.0, true).clicked() {
-                    confirm = false;
-                }
-            }
-            ui.data_mut(|d| d.insert_temp(confirm_id, confirm));
-            if st == "error" && !err.is_empty() {
-                ui.add_space(spacing::S);
-                let still = p.get_path("live").is_some_and(Value::truthy);
-                widgets::hint(
-                    ui,
-                    &t,
-                    if still {
-                        "Its last change has a mistake, so the previous version is still showing."
-                    } else {
-                        "It has a mistake and can't show until it's fixed."
-                    },
-                );
-            }
-            if p.get_path("params").and_then(Value::as_list).is_some_and(|l| !l.is_empty()) {
-                ui.add_space(spacing::S);
-                widgets::details(ui, &t, ("patch-settings", &id), "Settings", |ui| params_ui(app, ui, p));
-            }
-            widgets::details(ui, &t, ("patch-details", &id), "Details", |ui| {
-                widgets::fact(ui, &t, "Folder", &format!("patches/{id}/"));
-                if !err.is_empty() {
-                    let loc = match (p.get_path("error_file").and_then(Value::as_str), p.get_path("error_line").and_then(Value::as_i64)) {
-                        (Some(f), Some(l)) if l > 0 => format!("{f}:{l}"),
-                        (Some(f), _) => f.to_string(),
-                        _ => String::new(),
-                    };
-                    ui.label(RichText::new(format!("{loc} {err}")).font(font_mono(type_scale::SMALL)).color(t.bright_red));
-                }
-                if let Some(sc) = p.get_path("script") {
-                    let n = |k: &str| sc.get_path(k).and_then(Value::as_f64).unwrap_or(0.0);
-                    let budget = p.get_path("budget.cpu_ms").and_then(Value::as_f64).unwrap_or(2.0);
-                    widgets::fact(ui, &t, "Script time", &format!("{:.2} ms (max {:.2}, allowed {budget})", n("cpu_ms_avg"), n("cpu_ms_peak")));
-                    widgets::fact(ui, &t, "Memory", &format!("{} KB", n("memory_kb") as u64));
-                }
-                ui.horizontal(|ui| {
-                    if widgets::button_ex(ui, &t, Some(icon::EDIT), "Edit files", Kind::Ghost, Size::Small, 0.0, true).clicked() {
-                        action(app, "patch.open", Value::map().with("id", id.clone()));
-                    }
-                    if widgets::button_ex(ui, &t, Some(icon::UNDO), "Reload", Kind::Ghost, Size::Small, 0.0, true).clicked() {
-                        action(app, "patch.reload", Value::map().with("id", id.clone()));
-                    }
-                });
-            });
-            ui.cursor().top() - top + 2.0 * spacing::L + 2.0
-        })
-        .inner
+/// Make `patches/<id>/` from a template (nothing opens; the patch appears in `patches` once
+/// loaded).
+pub fn create(app: &mut App, id: &str, kind: &str, template: &str) {
+    action(app, "patch.new", Value::map().with("id", id).with("kind", kind).with("template", template));
+    app.m.refresh_soon();
 }
 
-/// Play an overlay once (its trigger).
-fn try_overlay(app: &mut App, id: &str) {
+/// Open the patch's main file in the owner's editor.
+pub fn open_files(app: &mut App, id: &str) {
+    action(app, "patch.open", Value::map().with("id", id));
+}
+
+/// Load the patch's files again.
+pub fn reload(app: &mut App, id: &str) {
+    action(app, "patch.reload", Value::map().with("id", id));
+}
+
+pub fn set_enabled(app: &mut App, id: &str, on: bool) {
+    action(app, if on { "patch.enable" } else { "patch.disable" }, Value::map().with("id", id));
+}
+
+/// Fire the patch's trigger once.
+pub fn play_once(app: &mut App, id: &str) {
     app.m.command(Op::Trigger { address: format!("patch.{id}"), payload: Value::Null });
 }
 
-/// An overlay's settings as real controls (colors, sliders, switches, text), saved as they
-/// change. `p` is the overlay's entry in the `patches` query. Shared by the Overlays cards and
-/// the Scenes page's layer panel.
+/// Change the name shown for the patch (its manifest `label`).
+pub fn rename(app: &mut App, id: &str, label: &str) {
+    app.m.action("project.write", Value::map().with("path", format!("patches/{id}/patch.toml")).with("set", Value::map().with("label", label.trim())));
+}
+
+/// Remove the patch (its folder is kept aside in `patches/.removed/`).
+pub fn remove(app: &mut App, id: &str) {
+    action(app, "patch.remove", Value::map().with("id", id));
+    app.m.refresh_soon();
+}
+
+// ---- "On every scene" (overlay-layer patches) ---------------------------------------------
+
+/// Ids of the patches drawn above every scene (manifest layer `overlay`).
+pub fn overlay_ids(app: &App) -> Vec<String> {
+    app.m.q_list("patches").iter().filter(|p| text(p, "layer") == "overlay").map(|p| text(p, "id").to_string()).collect()
+}
+
+/// `[overlays.<id>]` in project.toml (every key optional).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct OverlaySettings {
+    /// None = the default (main, vertical and preview); empty = drawn nowhere by itself.
+    pub canvases: Option<Vec<String>>,
+    /// Per canvas placement (normalized x, y, w, h); none = fit to the whole canvas.
+    pub rect: Vec<(String, [f64; 4])>,
+    pub z: i64,
+    pub when: Option<String>,
+}
+
+fn overlay_table<'a>(doc: &'a DocumentMut, id: &str) -> Option<&'a Item> {
+    doc.get("overlays").and_then(|o| o.get(id))
+}
+
+pub fn overlay_settings(project_toml: &str, id: &str) -> OverlaySettings {
+    let Ok(doc) = project_toml.parse::<DocumentMut>() else { return OverlaySettings::default() };
+    let Some(t) = overlay_table(&doc, id) else { return OverlaySettings::default() };
+    let num = |v: &toml_edit::Value| v.as_float().or_else(|| v.as_integer().map(|i| i as f64));
+    let rect = t
+        .get("rect")
+        .and_then(Item::as_table_like)
+        .map(|r| {
+            r.iter()
+                .filter_map(|(canvas, v)| {
+                    let a = v.as_array()?;
+                    let xs: Vec<f64> = a.iter().filter_map(num).collect();
+                    (xs.len() == 4).then(|| (canvas.to_string(), [xs[0], xs[1], xs[2], xs[3]]))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    OverlaySettings {
+        canvases: t.get("canvases").and_then(Item::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()),
+        rect,
+        z: t.get("z").and_then(Item::as_integer).unwrap_or(0),
+        when: t.get("when").and_then(Item::as_str).map(String::from),
+    }
+}
+
+/// Drawn above every scene by itself (the default), rather than only where a scene places it.
+pub fn on_every_scene(project_toml: &str, id: &str) -> bool {
+    overlay_settings(project_toml, id).canvases.is_none_or(|c| !c.is_empty())
+}
+
+/// `canvases` of `[overlays.<id>]`: `None` removes the key (the default: every canvas), and the
+/// table when nothing else is left in it.
+pub fn set_overlay_canvases(project_toml: &str, id: &str, canvases: Option<&[&str]>) -> Result<String> {
+    let mut doc: DocumentMut = project_toml.parse()?;
+    match canvases {
+        Some(list) => {
+            let overlays = doc.entry("overlays").or_insert_with(|| {
+                let mut t = Table::new();
+                t.set_implicit(true);
+                Item::Table(t)
+            });
+            let overlays = overlays.as_table_like_mut().ok_or_else(|| anyhow!("[overlays] isn't a table"))?;
+            let entry = overlays.entry(id).or_insert(Item::Table(Table::new()));
+            let t = entry.as_table_like_mut().ok_or_else(|| anyhow!("[overlays.{id}] isn't a table"))?;
+            t.insert("canvases", value(list.iter().copied().collect::<Array>()));
+        }
+        None => {
+            if let Some(overlays) = doc.get_mut("overlays").and_then(Item::as_table_like_mut) {
+                if let Some(t) = overlays.get_mut(id).and_then(Item::as_table_like_mut) {
+                    t.remove("canvases");
+                    if t.is_empty() {
+                        overlays.remove(id);
+                    }
+                }
+                if overlays.is_empty() {
+                    doc.remove("overlays");
+                }
+            }
+        }
+    }
+    Ok(doc.to_string())
+}
+
+/// Show above every scene (`on`), or only where a scene places it (`canvases = []`).
+pub fn set_on_every_scene(project_toml: &str, id: &str, on: bool) -> Result<String> {
+    set_overlay_canvases(project_toml, id, if on { None } else { Some(&[]) })
+}
+
+// ---- settings -------------------------------------------------------------------------------
+
+/// A patch's settings as real controls (colors, sliders with ∿ modulation, switches, choices,
+/// text), one property row each, saved as they change. `p` is its entry in the `patches` query.
 pub fn params_ui(app: &mut App, ui: &mut egui::Ui, p: &Value) {
     for q in p.get_path("params").and_then(Value::as_list).unwrap_or(&[]) {
         param_row(app, ui, q);
@@ -464,91 +345,135 @@ fn color_value(c: Color32, like: &Value) -> Value {
     }
 }
 
-/// One setting as a real control, saved with `set_base`.
+/// One setting as a property row, saved with `set_base`.
 fn param_row(app: &mut App, ui: &mut egui::Ui, q: &Value) {
     let t = app.t.clone();
-    let s = |k: &str| q.get_path(k).and_then(Value::as_str).unwrap_or("").to_string();
-    let addr = s("address");
-    let ty = s("type");
+    let addr = text(q, "address").to_string();
+    let ty = text(q, "type").to_string();
     let default = q.get_path("default").cloned().unwrap_or(Value::Null);
     let cur = app.m.get(&addr).cloned().or_else(|| q.get_path("value").cloned()).unwrap_or_else(|| default.clone());
-    let label = if s("description").is_empty() { nice(&s("name")) } else { s("description") };
+    let label = if text(q, "description").is_empty() { nice(text(q, "name")) } else { text(q, "description").to_string() };
     let mut set = None;
-    ui.horizontal(|ui| {
-        // a third of the row (less in the Scenes page's side panel), text on the left
-        let lw = (ui.available_width() * 0.34).clamp(90.0, 150.0);
-        ui.allocate_ui_with_layout(Vec2::new(lw, 24.0), Layout::left_to_right(Align::Center), |ui| {
-            ui.set_min_width(lw);
-            ui.add(egui::Label::new(RichText::new(&label).color(t.text_dim)).truncate()).on_hover_text(&label);
-        });
-        match ty.as_str() {
-            "color" => {
-                let mut c = rgba(&cur).unwrap_or(Color32::WHITE);
-                if egui::color_picker::color_edit_button_srgba(ui, &mut c, egui::color_picker::Alpha::OnlyBlend).changed() {
-                    set = Some(color_value(c, &default));
-                }
+    widgets::prop_row(ui, &t, &label, |ui| match ty.as_str() {
+        "color" => {
+            let mut c = rgba(&cur).unwrap_or(Color32::WHITE);
+            if egui::color_picker::color_edit_button_srgba(ui, &mut c, egui::color_picker::Alpha::OnlyBlend).changed() {
+                set = Some(color_value(c, &default));
             }
-            "bool" => {
-                let mut b = cur.truthy();
-                if widgets::toggle(ui, &t, &mut b).changed() {
-                    set = Some(Value::Bool(b));
-                }
+        }
+        "bool" => {
+            let mut b = cur.truthy();
+            if widgets::toggle(ui, &t, &mut b).changed() {
+                set = Some(Value::Bool(b));
             }
-            "enum" => {
-                let opts: Vec<String> =
-                    q.get_path("options").and_then(Value::as_list).unwrap_or(&[]).iter().filter_map(|v| v.as_str().map(String::from)).collect();
-                let c = cur.as_str().unwrap_or("").to_string();
-                if opts.len() <= 4 {
-                    let labels: Vec<String> = opts.iter().map(|o| nice(o)).collect();
-                    let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-                    let mut i = opts.iter().position(|o| *o == c).unwrap_or(0);
-                    if widgets::segmented(ui, &t, &mut i, &refs) {
-                        set = Some(Value::Str(opts[i].clone()));
-                    }
-                } else {
-                    egui::ComboBox::from_id_salt(("param", &addr)).selected_text(nice(&c)).show_ui(ui, |ui| {
-                        for o in &opts {
-                            if ui.selectable_label(*o == c, nice(o)).clicked() {
-                                set = Some(Value::Str(o.clone()));
-                            }
+        }
+        "enum" => {
+            let opts: Vec<String> = q.get_path("options").and_then(Value::as_list).unwrap_or(&[]).iter().filter_map(|v| v.as_str().map(String::from)).collect();
+            let c = cur.as_str().unwrap_or("").to_string();
+            if opts.len() <= 4 {
+                let labels: Vec<String> = opts.iter().map(|o| nice(o)).collect();
+                let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+                let mut i = opts.iter().position(|o| *o == c).unwrap_or(0);
+                if widgets::segmented(ui, &t, &mut i, &refs) {
+                    set = Some(Value::Str(opts[i].clone()));
+                }
+            } else {
+                egui::ComboBox::from_id_salt(("param", &addr)).selected_text(nice(&c)).show_ui(ui, |ui| {
+                    for o in &opts {
+                        if ui.selectable_label(*o == c, nice(o)).clicked() {
+                            set = Some(Value::Str(o.clone()));
                         }
-                    });
-                }
+                    }
+                });
             }
-            "float" | "int" => {
-                let (lo, hi) = match q.get_path("range").and_then(Value::as_list) {
-                    Some([a, b, ..]) => (a.as_f64().unwrap_or(0.0), b.as_f64().unwrap_or(1.0)),
-                    _ => (0.0, cur.as_f64().unwrap_or(1.0).abs().max(1.0) * 2.0),
-                };
-                // while dragging, the slider keeps its own value; it's saved on release
-                let key = egui::Id::new(("param-drag", &addr));
-                let mut x = ui.data(|d| d.get_temp::<f64>(key)).unwrap_or_else(|| cur.as_f64().unwrap_or(0.0));
-                ui.spacing_mut().slider_width = (ui.available_width() - 70.0).max(80.0);
-                ui.spacing_mut().interact_size.y = 18.0;
-                let slider = egui::Slider::new(&mut x, lo..=hi);
-                let slider = if ty == "int" { slider.integer() } else { slider.max_decimals(2) };
-                let r = ui.add(slider);
-                if r.dragged() {
-                    ui.data_mut(|d| d.insert_temp(key, x));
-                } else {
-                    ui.data_mut(|d| d.remove::<f64>(key));
-                }
-                if r.drag_stopped() || (r.changed() && !r.dragged()) {
-                    set = Some(if ty == "int" { Value::Int(x.round() as i64) } else { Value::Float((x * 1000.0).round() / 1000.0) });
-                }
+        }
+        "float" | "int" => {
+            let (lo, hi) = match q.get_path("range").and_then(Value::as_list) {
+                Some([a, b, ..]) => (a.as_f64().unwrap_or(0.0), b.as_f64().unwrap_or(1.0)),
+                _ => (0.0, cur.as_f64().unwrap_or(1.0).abs().max(1.0) * 2.0),
+            };
+            // while dragging, the slider keeps its own value; it's saved on release
+            let key = egui::Id::new(("param-drag", &addr));
+            let mut x = ui.data(|d| d.get_temp::<f64>(key)).unwrap_or_else(|| cur.as_f64().unwrap_or(0.0));
+            ui.spacing_mut().slider_width = (ui.available_width() - 110.0).max(80.0);
+            let slider = egui::Slider::new(&mut x, lo..=hi);
+            let slider = if ty == "int" { slider.integer() } else { slider.max_decimals(2) };
+            let slider = match q.get_path("unit").and_then(Value::as_str) {
+                Some(u) if !u.is_empty() => slider.suffix(format!(" {u}")),
+                _ => slider,
+            };
+            let r = ui.add(slider);
+            if r.dragged() {
+                ui.data_mut(|d| d.insert_temp(key, x));
+            } else {
+                ui.data_mut(|d| d.remove::<f64>(key));
             }
-            _ => {
-                let key = egui::Id::new(("param-text", &addr));
-                let mut buf: String = ui.data_mut(|d| d.get_temp(key)).unwrap_or_else(|| cur.as_str().map(String::from).unwrap_or_else(|| cur.to_string()));
-                let r = ui.add(se_ui_kit::widgets::field(&mut buf).desired_width((ui.available_width() - 8.0).max(80.0)));
-                if r.lost_focus() && buf != cur.as_str().unwrap_or("") {
-                    set = Some(Value::Str(buf.clone()));
-                }
+            if r.drag_stopped() || (r.changed() && !r.dragged()) {
+                set = Some(if ty == "int" { Value::Int(x.round() as i64) } else { Value::Float((x * 1000.0).round() / 1000.0) });
+            }
+            // ∿ link a signal to it, beside the slider
+            crate::views::links::modulate_button(app, ui, &addr, &label, (lo, hi));
+        }
+        _ => {
+            let key = egui::Id::new(("param-text", &addr));
+            let mut buf: String = ui.data_mut(|d| d.get_temp(key)).unwrap_or_else(|| cur.as_str().map(String::from).unwrap_or_else(|| cur.to_string()));
+            let r = ui.add(widgets::field(&mut buf).desired_width((ui.available_width() - 8.0).max(80.0)));
+            if r.lost_focus() && buf != cur.as_str().unwrap_or("") {
+                set = Some(Value::Str(buf.clone()));
+            }
+            if r.has_focus() {
                 ui.data_mut(|d| d.insert_temp(key, buf));
+            } else {
+                ui.data_mut(|d| d.remove::<String>(key));
             }
         }
     });
     if let Some(v) = set {
         app.m.command(Op::SetBase { address: addr, value: v });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PROJECT: &str = "# my show\nschema = 1\n\n[overlays.chatbox]\nz = 2\nwhen = \"mode == 'live'\"\nrect.wide = [0.7, 0.1, 0.28, 0.6]\n";
+
+    #[test]
+    fn overlay_settings_read_every_key_and_default_to_every_scene() {
+        let s = overlay_settings(PROJECT, "chatbox");
+        assert_eq!(s.canvases, None);
+        assert_eq!(s.z, 2);
+        assert_eq!(s.when.as_deref(), Some("mode == 'live'"));
+        assert_eq!(s.rect, vec![("wide".to_string(), [0.7, 0.1, 0.28, 0.6])]);
+        assert!(on_every_scene(PROJECT, "chatbox"));
+        // no table at all: the engine default
+        assert_eq!(overlay_settings(PROJECT, "alertbox"), OverlaySettings::default());
+        assert!(on_every_scene(PROJECT, "alertbox"));
+    }
+
+    #[test]
+    fn on_every_scene_round_trips_and_keeps_the_rest_of_the_file() {
+        let off = set_on_every_scene(PROJECT, "chatbox", false).unwrap();
+        assert!(!on_every_scene(&off, "chatbox"));
+        assert_eq!(overlay_settings(&off, "chatbox").canvases, Some(vec![]));
+        assert!(off.starts_with("# my show\n"), "comments kept");
+        let on = set_on_every_scene(&off, "chatbox", true).unwrap();
+        assert!(on_every_scene(&on, "chatbox"));
+        assert_eq!(overlay_settings(&on, "chatbox").z, 2, "other keys stay");
+
+        // a patch without a table: off adds `[overlays.<id>]`, on removes it again
+        let off = set_on_every_scene("schema = 1\n", "alertbox", false).unwrap();
+        assert!(off.contains("[overlays.alertbox]") && !off.contains("[overlays]\n"), "{off}");
+        assert!(!on_every_scene(&off, "alertbox"));
+        assert_eq!(set_on_every_scene(&off, "alertbox", true).unwrap().trim(), "schema = 1");
+    }
+
+    #[test]
+    fn overlay_canvases_pick_some_canvases() {
+        let some = set_overlay_canvases(PROJECT, "chatbox", Some(&["wide"])).unwrap();
+        assert_eq!(overlay_settings(&some, "chatbox").canvases, Some(vec!["wide".to_string()]));
+        assert!(on_every_scene(&some, "chatbox"), "drawn by itself (on the main canvas)");
+        assert!(set_overlay_canvases("overlays = 3\n", "x", Some(&[])).is_err());
     }
 }

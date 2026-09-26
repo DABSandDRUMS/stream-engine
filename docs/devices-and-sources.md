@@ -3,6 +3,44 @@
 Operator notes for the device registry (`se-devices`, PLAN §3.5) and camera/media sources
 (`se-video-in`, PLAN §4.2).
 
+## Manage sources in the app
+
+Open **Sources → Sources** to make, edit, or remove sources: cameras and capture cards, media
+files (videos, pictures, GIFs), web pages and generative visuals. A source is a saved project
+definition; a discovered device is only an available choice. Discovery does not create source
+files or add scene layers.
+
+Choose **+** (or **New source**), pick a kind, set it up, then **Create**. Camera setup uses the
+device's stable identity and supported format, size and frame rate; manual device entry
+remains available. Media sources expose looping and speed. Changes to a saved source keep its
+unrelated color, control or effect settings. **Add to scene…** places it as a new layer.
+**Sources → Files → Make a source** starts a draft from a picture or video.
+
+**Remove** (hold) deletes the source definition, not the underlying media file or physical
+device. If a scene still uses it, the page names those scenes and removal waits until it is
+taken out of them. A missing or unplugged source remains editable and removable. Removing a
+web page or generative visual moves its folder to `patches/.removed/<id>-<time>/`
+(`patch.remove`).
+
+Audio capture inputs belong in **Sound → Mix → Manage inputs**. Recording source selection
+belongs in **Settings → Accounts & app → Recording**; it is independent of scene source setup.
+
+### Saved-source API
+
+`project.sources` lists saved source definitions with origin paths, scene references and
+parse errors, independently of video capture. `sources` remains the running video inventory.
+
+- `project.source.save {name, create?, label?, device, format, size, fps}` saves a camera.
+- `project.source.save {name, create?, label?, file, loop?, rate?}` saves a media-file source
+  (`file`: a video, or a PNG/JPEG/WebP picture or GIF, in `assets/`).
+- `project.source.remove {name}` removes an unused source definition.
+
+Use `create: true` for a new source; edits require an existing name. Names and source types
+stay fixed on edit. New media selections must be video assets inside the project. Success
+emits `project.sources.changed {name, action}` after persistence and reload; failure emits
+`project.source.failed {name, error}` without discarding the editor's draft.
+
+
 ## Stable identities
 
 Every device gets an identity that survives reboots and replugging:
@@ -143,12 +181,17 @@ hold = "700ms"                             # a bad picture must persist this lon
 ```
 
 ```toml
-# media file
+# media file: a video, or a picture (PNG, JPEG, WebP) or GIF
 file    = "assets/brb.mp4"
 loop    = true
 rate    = 1.0
 hwaccel = "auto"                           # auto (NVDEC, CPU fallback) | cuda (NVDEC only) | none
 ```
+
+A file with a single picture (PNG, JPEG, WebP, a one-frame GIF) is decoded once and held: it
+never restarts and never sends `source.ended`. Animated GIFs play at their own frame timing and
+loop like videos. RGB and palette pictures (PNG, GIF) keep full color and transparency (RGBA);
+YUV files (video, JPEG) use NV12. SVG is not a source format.
 
 Only sources in use are captured: the renderer's `render.sources.used` list, or (until the
 renderer publishes it) every source referenced by a scene. A source that stops being used keeps

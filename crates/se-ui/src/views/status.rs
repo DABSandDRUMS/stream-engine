@@ -61,19 +61,21 @@ fn check_info(check: &str) -> (&'static str, Option<Panel>) {
         "twitch" => ("Twitch", Some(Panel::View(ViewId::Setup))),
         "youtube" => ("Song requests", Some(Panel::View(ViewId::Setup))),
         "relay" => ("Tips & public queue", Some(Panel::View(ViewId::Setup))),
-        "sources" | "devices" => ("Cameras & devices", Some(Panel::View(ViewId::Devices))),
+        "sources" | "devices" => ("Devices", Some(Panel::View(ViewId::Devices))),
         "audio" => ("Sound", Some(Panel::View(ViewId::Audio))),
         "mixer" => ("Mixing desk", Some(Panel::View(ViewId::Mixer))),
         "dmx" | "lights" => ("Lights", Some(Panel::View(ViewId::Lights))),
         "deck" | "midi" | "input" | "voice" => ("Buttons & pedals", Some(Panel::View(ViewId::Controllers))),
         "render" | "gpu" => ("Video", Some(Panel::View(ViewId::Performance))),
-        "patches" | "cef" => ("Overlays", Some(Panel::View(ViewId::Patches))),
-        "tts" => ("Text to speech", Some(Panel::View(ViewId::Tts))),
+        "patches" | "cef" => ("Sources", Some(Panel::View(ViewId::Sources))),
+        "tts" => ("Read-out voice", Some(Panel::View(ViewId::Tts))),
         "timecode" => ("Timelines", Some(Panel::View(ViewId::Timeline))),
         "clips" | "recordings" => ("Recordings", Some(Panel::View(ViewId::Sessions))),
         "backup" => ("Backups", Some(Panel::View(ViewId::Maintenance))),
         "versions" => ("Project history", Some(Panel::View(ViewId::History))),
-        "alerts" | "bot" | "player" => ("Community", Some(Panel::View(ViewId::Alerts))),
+        "alerts" => ("Notifications", Some(Panel::View(ViewId::Alerts))),
+        "bot" => ("Chat bot", Some(Panel::View(ViewId::ChatBot))),
+        "player" => ("Song requests", Some(Panel::View(ViewId::Songs))),
         "disk" => ("Disk space", Some(Panel::View(ViewId::Maintenance))),
         "idle_inhibitor" => ("Screen saver", None),
         "night_light" => ("Night light", None),
@@ -244,9 +246,9 @@ pub fn warnings(app: &App) -> Vec<Warning> {
         if a.ends_with(".error") && v.as_str().is_some_and(|s| !s.is_empty()) {
             let name = a.trim_start_matches("patch.").trim_end_matches(".error");
             w.push(Warning {
-                text: format!("Overlay \"{name}\" has an error. The previous version is still showing."),
+                text: format!("Source \"{name}\" has an error. The previous version is still showing."),
                 fail: false,
-                open: Some(Panel::View(ViewId::Patches)),
+                open: Some(Panel::View(ViewId::Sources)),
                 setup: false,
             });
         }

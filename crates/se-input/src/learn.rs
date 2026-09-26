@@ -100,9 +100,12 @@ pub fn plan(target: &str, meta: Option<&Meta>, cfg: &Config, src: &Source) -> Re
 /// Button semantics of a target: presets, scenes, commands, toggles, triggers.
 fn action_entries(target: &str, meta: Option<&Meta>, cfg: &Config) -> Option<Vec<(String, toml_edit::Value)>> {
     let v = |s: &str| toml_edit::Value::from(s);
-    if let Some(cmd) = target.strip_prefix("do:") {
+    // `do:<cmd>`, one command per line
+    if let Some(cmds) = target.strip_prefix("do:") {
         let mut a = Array::new();
-        a.push(cmd.trim());
+        for c in cmds.lines().map(str::trim).filter(|c| !c.is_empty()) {
+            a.push(c);
+        }
         return Some(vec![("do".into(), toml_edit::Value::Array(a))]);
     }
     if let Some(rest) = target.strip_prefix("preset.") {
@@ -301,6 +304,9 @@ mod tests {
         let bool_meta = Meta::boolean(false);
         let Plan::Map { entries, .. } = plan("fx.vhs.enabled", Some(&bool_meta), &c, &s).unwrap() else { panic!() };
         assert_eq!(entries[0].0, "toggle");
+        let Plan::Map { entries, .. } = plan("do:preset.fire hype\n\nscene.take", None, &c, &s).unwrap() else { panic!() };
+        let cmds: Vec<&str> = entries[0].1.as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
+        assert_eq!((entries[0].0.as_str(), cmds), ("do", vec!["preset.fire hype", "scene.take"]), "one command per line");
         let mut e = src(Moved::Relative, Kind::Rel { cc: 16, enc: crate::midi::controls::RelEnc::SignMag });
         e.control = "enc.1".into();
         let meta = Meta::float(0.2, [0.0, 2.0]);

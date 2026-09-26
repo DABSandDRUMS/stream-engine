@@ -214,16 +214,16 @@ pub fn pads(app: &mut App, ui: &mut egui::Ui) {
         let (title, body, action, view) = if deck_page {
             (
                 "No buttons assigned",
-                "This Stream Deck page is blank. Assign a scene, quick effect or action to a key in Buttons & pedals.",
+                "This Stream Deck page is blank. Assign a scene or saved action to a key in Buttons & pedals.",
                 "Assign buttons",
                 ViewId::Controllers,
             )
         } else {
             (
-                "No quick effects yet",
-                "Create an effect when you're ready. Nothing is added or triggered automatically.",
-                "Make a quick effect",
-                ViewId::QuickEffects,
+                "No buttons yet",
+                "Pads mirror your Stream Deck page. Put saved actions or scenes on keys to see them here.",
+                "Set up buttons",
+                ViewId::Controllers,
             )
         };
         if widgets::empty_state(ui, &t, icon::BOLT, title, body, Some(action)) {

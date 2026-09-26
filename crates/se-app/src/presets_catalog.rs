@@ -232,6 +232,7 @@ fn summary(p: &se_core::config::PresetDef) -> Value {
         .with("mode", p.mode.clone().map(Value::Str).unwrap_or_default())
         .with("hold_ms", p.hold.map(|h| Value::Int(h.ms() as i64)).unwrap_or_default())
         .with("toggle", p.toggle)
+        .with("until_released", p.until_released)
         .with("settings", p.set.len() as i64)
         .with("set", strs(p.set.keys().cloned().collect()))
         .with("steps", (p.commands.len() + p.on_release.len()) as i64)

@@ -1,8 +1,10 @@
 //! Media-file sources: FFmpeg demux + decode (NVDEC through the `*_cuvid` decoders when
-//! available, CPU otherwise), converted into NV12 (opaque) or RGBA (straight alpha) video slots
-//! and paced against the master clock (loop, rate, pause, seek). Each file also publishes its
-//! timeline identity (`file:<hash>`, ISRC from its tags) and feeds timelines following it the
-//! exact position of every shown frame (§2.7).
+//! available, CPU otherwise), converted into NV12 (opaque video) or RGBA (straight alpha, and
+//! RGB/palette pictures at full color) video slots and paced against the master clock (loop,
+//! rate, pause, seek). A file with a single picture (PNG, JPEG, WebP, a one-frame GIF) is shown
+//! once and held; animated GIFs loop like videos. Each file also publishes its timeline
+//! identity (`file:<hash>`, ISRC from its tags) and feeds timelines following it the exact
+//! position of every shown frame (§2.7).
 
 use crate::config::{FileDef, HwAccel, SourceDef};
 use crate::status::{CpuMeter, OWNER, Publisher, Status};
@@ -113,10 +115,18 @@ fn cuvid_name(id: ff::codec::Id) -> Option<&'static str> {
 }
 
 fn pix_has_alpha(p: ff::format::Pixel) -> bool {
-    p.descriptor().is_some_and(|d| {
-        // SAFETY: descriptors are static tables owned by libavutil.
-        unsafe { (*d.as_ptr()).flags & ffi::AV_PIX_FMT_FLAG_ALPHA as u64 != 0 }
-    })
+    pix_flags(p) & ffi::AV_PIX_FMT_FLAG_ALPHA as u64 != 0
+}
+
+/// RGB or palette pixels (pictures, GIFs): kept as RGBA, since NV12 would blur colored edges and
+/// re-encode them with a guessed matrix.
+fn pix_is_rgb(p: ff::format::Pixel) -> bool {
+    pix_flags(p) & (ffi::AV_PIX_FMT_FLAG_RGB | ffi::AV_PIX_FMT_FLAG_PAL) as u64 != 0
+}
+
+fn pix_flags(p: ff::format::Pixel) -> u64 {
+    // SAFETY: descriptors are static tables owned by libavutil.
+    p.descriptor().map_or(0, |d| unsafe { (*d.as_ptr()).flags })
 }
 
 fn open_decoder(stream: &ff::format::stream::Stream, hw: HwAccel, alpha_side: bool) -> Result<(ff::decoder::Video, String), String> {
@@ -283,8 +293,8 @@ fn play(hub: &Arc<Hub>, def: &mut Arc<SourceDef>, st: &Status, writer: &mut Vide
     if w == 0 || h == 0 {
         return Exit::Lost(format!("{name}: video has no size"));
     }
-    let alpha = alpha_side || pix_has_alpha(dec.format());
-    let (slot_fmt, stride) = if alpha { (PixelFormat::Rgba8, w * 4) } else { (PixelFormat::Nv12, (w + 1) & !1) };
+    let rgba = alpha_side || pix_has_alpha(dec.format()) || pix_is_rgb(dec.format());
+    let (slot_fmt, stride) = if rgba { (PixelFormat::Rgba8, w * 4) } else { (PixelFormat::Nv12, (w + 1) & !1) };
     let bt709 = match dec.color_space() {
         ff::color::Space::BT709 => true,
         ff::color::Space::Unspecified => h >= 720,
@@ -295,7 +305,7 @@ fn play(hub: &Arc<Hub>, def: &mut Arc<SourceDef>, st: &Status, writer: &mut Vide
         let mut i = st.info.lock();
         i.path = file.path.display().to_string();
         i.identity = file.rel.clone();
-        i.format = if alpha { "rgba".into() } else { "nv12".into() };
+        i.format = if rgba { "rgba".into() } else { "nv12".into() };
         i.width = w;
         i.height = h;
         i.matrix = if bt709 { "bt709" } else { "bt601" }.into();
@@ -304,15 +314,15 @@ fn play(hub: &Arc<Hub>, def: &mut Arc<SourceDef>, st: &Status, writer: &mut Vide
         i.decoder = decoder_name.clone();
         i.error.clear();
     }
-    hub.log("info", OWNER, format!("{name}: playing {} ({w}x{h} @ {fps_nominal:.2} fps, {decoder_name}, {})", file.rel, if alpha { "rgba" } else { "nv12" }));
+    hub.log("info", OWNER, format!("{name}: playing {} ({w}x{h} @ {fps_nominal:.2} fps, {decoder_name}, {})", file.rel, if rgba { "rgba" } else { "nv12" }));
     pubs.set("path", Value::Str(file.path.display().to_string()));
     pubs.set("width", Value::Int(w as i64));
     pubs.set("height", Value::Int(h as i64));
-    pubs.set("format", Value::Str(if alpha { "rgba" } else { "nv12" }.into()));
+    pubs.set("format", Value::Str(if rgba { "rgba" } else { "nv12" }.into()));
     pubs.set(
         "matrix",
         Value::Str(
-            if alpha {
+            if rgba {
                 ""
             } else if bt709 {
                 "bt709"
@@ -325,7 +335,7 @@ fn play(hub: &Arc<Hub>, def: &mut Arc<SourceDef>, st: &Status, writer: &mut Vide
     pubs.set(
         "range",
         Value::Str(
-            if alpha {
+            if rgba {
                 ""
             } else if full {
                 "full"
@@ -365,6 +375,11 @@ fn play(hub: &Arc<Hub>, def: &mut Arc<SourceDef>, st: &Status, writer: &mut Vide
     let mut dropped: u64 = 0;
     let mut last_pub = 0u64;
     let mut paused_since: Option<u64> = None;
+    // frames decoded since the start of the file (None after a seek into the middle): a whole
+    // pass with one frame is a still picture, held instead of looped
+    let mut pass: Option<u64> = Some(0);
+    let mut any_frame = false;
+    let mut still = false;
     st.capturing.store(true, Ordering::Relaxed);
     pubs.set("capturing", Value::Bool(true));
     pubs.set("playing", Value::Bool(true));
@@ -398,7 +413,7 @@ fn play(hub: &Arc<Hub>, def: &mut Arc<SourceDef>, st: &Status, writer: &mut Vide
             pace.pending = Some(se_clock::now());
             pace.base_pts = last_pts;
         }
-        if let Some(target) = seek_target.take() {
+        if let Some(target) = seek_target.take().filter(|_| !still) {
             let ts = (target * ffi::AV_TIME_BASE as f64) as i64;
             if let Err(e) = ictx.seek(ts, ..ts) {
                 hub.log("warn", OWNER, format!("{name}: seek {target:.2}s: {e}"));
@@ -407,11 +422,16 @@ fn play(hub: &Arc<Hub>, def: &mut Arc<SourceDef>, st: &Status, writer: &mut Vide
             eof_sent = false;
             ended = false;
             pace.pending = Some(se_clock::now());
+            pass = (target == 0.0).then_some(0);
             // decode forward to the exact target
             let mut skip_until = Some(target);
             while let Some(t) = skip_until {
                 match next_frame(&mut ictx, &mut dec, &mut pkt, &mut frame, idx, &mut eof_sent) {
                     Ok(true) => {
+                        any_frame = true;
+                        if let Some(n) = &mut pass {
+                            *n += 1;
+                        }
                         let pts = frame.timestamp().unwrap_or(0) as f64 * tb_s;
                         if pts + 0.5 / fps_nominal >= t {
                             skip_until = None;
@@ -460,13 +480,37 @@ fn play(hub: &Arc<Hub>, def: &mut Arc<SourceDef>, st: &Status, writer: &mut Vide
         }
 
         match next_frame(&mut ictx, &mut dec, &mut pkt, &mut frame, idx, &mut eof_sent) {
-            Ok(true) => {}
+            Ok(true) => {
+                any_frame = true;
+                if let Some(n) = &mut pass {
+                    *n += 1;
+                }
+            }
             Ok(false) => {
                 // end of file
+                match pass {
+                    // a single picture: keep showing it; there is nothing to loop and it never ends
+                    Some(1) => {
+                        still = true;
+                        ended = true;
+                        st.set_fps(0.0);
+                        pubs.set("fps", Value::Float(0.0));
+                        pubs.set("playing", Value::Bool(false));
+                        feed.stop(last_pts, true);
+                        continue;
+                    }
+                    Some(0) if !any_frame => return Exit::Lost(format!("{name}: {} has no pictures", file.rel)),
+                    // the rewind didn't take (a demuxer that can't seek): start the file over
+                    Some(0) => return Exit::Reopen,
+                    _ => {}
+                }
                 if looping {
-                    let _ = ictx.seek(0, ..0);
+                    if ictx.seek(0, ..0).is_err() {
+                        return Exit::Reopen;
+                    }
                     dec.flush();
                     eof_sent = false;
+                    pass = Some(0);
                     pace.pending = Some(last_due + (frame_ns as f64 / pace.rate) as u64);
                 } else {
                     ended = true;

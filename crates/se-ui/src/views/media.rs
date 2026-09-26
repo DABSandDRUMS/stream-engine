@@ -1,8 +1,9 @@
-//! Scenes → Media: the project's pictures, videos, sounds, color looks and fonts (the files in
+//! Sources → Files: the project's pictures, videos, sounds, color looks and fonts (the files in
 //! `assets/`). Add files by dropping them on the window or with the desktop's file chooser
-//! (xdg-desktop-portal), see them as a grid with thumbnails, listen to sounds, rename them
-//! (everything that uses a file follows) and delete them (with a warning when something still
-//! uses them). Also home of [`picker`], the compact "choose a file" control other editors use.
+//! (xdg-desktop-portal), browse them as a list grouped by kind with a picture per file, listen to
+//! sounds, rename them (everything that uses a file follows), delete them (with a warning when
+//! something still uses them) and make a source from a picture or video. Also home of
+//! [`picker`], the compact "choose a file" control other editors use.
 //!
 //! Engine side: `project.assets`, `project.import`, `project.asset.rename`,
 //! `project.asset.delete` (docs/api.md).
@@ -23,7 +24,7 @@ use std::time::{Duration, Instant};
 const FONT_ICON: &str = "\u{f031}";
 const UPLOAD: &str = "\u{f093}";
 
-/// What kind of file a [`picker`] offers (or the Media tab shows).
+/// What kind of file a [`picker`] offers (or Files shows).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MediaKind {
     Image,
@@ -36,7 +37,7 @@ pub enum MediaKind {
 }
 
 impl MediaKind {
-    /// The five real kinds, in the order the Media tab shows them.
+    /// The five real kinds, in the order Files shows them.
     pub const ALL: [MediaKind; 5] = [MediaKind::Image, MediaKind::Video, MediaKind::Sound, MediaKind::Lut, MediaKind::Font];
 
     /// The engine's name for the kind (also its folder under `assets/`); empty for `Any`.
@@ -152,7 +153,7 @@ impl Asset {
     }
 }
 
-/// Where an import started (the Media tab, or a picker waiting for its file).
+/// Where an import started (Files, or a picker waiting for its file).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Target {
     Library,
@@ -346,7 +347,7 @@ fn probe_seconds(abs: &Path) -> Option<f32> {
     String::from_utf8_lossy(&out.stdout).trim().parse::<f32>().ok().filter(|s| s.is_finite() && *s > 0.0)
 }
 
-/// Everything the Media tab and the pickers share (kept in egui's memory, one per window).
+/// Everything Files and the pickers share (kept in egui's memory, one per window).
 #[derive(Default)]
 struct Media {
     /// `project.assets` reply the list was built from.
@@ -363,7 +364,7 @@ struct Media {
     notice: Option<(Tone, String, String)>,
     /// When the notice appeared (good news goes away by itself).
     notice_at: Option<Instant>,
-    /// Media tab: kind filter (0 = all), search, selected file, rename box, delete confirm.
+    /// Files: kind filter (0 = all), search, selected file, rename box, delete confirm.
     filter: usize,
     search: String,
     selected: Option<String>,
@@ -457,7 +458,7 @@ impl Media {
                 "project.imported" => {
                     refresh = true;
                     let (src, path) = (s("src"), s("path"));
-                    // a single file added on the Media tab opens it; a batch leaves the selection
+                    // a single file added on Files opens it; a batch leaves the selection
                     let alone = self.imports.iter().filter(|i| i.target == Target::Library && !matches!(i.state, ImportState::Failed(_))).count() == 1;
                     if let Some(i) = self.imports.iter_mut().find(|i| i.src == src && matches!(i.state, ImportState::Copying)) {
                         i.state = ImportState::Done;
@@ -497,7 +498,7 @@ impl Media {
                     if self.selected.as_deref() == Some(s("path").as_str()) {
                         self.selected = None;
                     }
-                    self.notice = Some((Tone::Ok, format!("Deleted \u{201c}{}\u{201d}", nice(&file_stem(&s("path")))), "It's gone from your media.".into()));
+                    self.notice = Some((Tone::Ok, format!("Deleted \u{201c}{}\u{201d}", nice(&file_stem(&s("path")))), "It's gone from your files.".into()));
                 }
                 "project.asset.failed" => {
                     refresh = true;
@@ -599,7 +600,7 @@ async fn choose_files(kind: MediaKind) -> Result<Vec<PathBuf>, String> {
     };
     let all = filter(if kind == MediaKind::Any { "Everything Stream Engine can use" } else { kind.label() }, &kinds);
     let mut req = SelectedFiles::open_file()
-        .title(if kind == MediaKind::Any { "Add to your media".to_string() } else { format!("Add a {}", kind.one()) }.as_str())
+        .title(if kind == MediaKind::Any { "Add to your files".to_string() } else { format!("Add a {}", kind.one()) }.as_str())
         .accept_label("Add")
         .modal(true)
         .multiple(kind == MediaKind::Any)
@@ -674,15 +675,16 @@ fn user_words(file: &str) -> String {
     let q = |what: &str| format!("{what} \u{201c}{}\u{201d}", nice(&id));
     match dir {
         "scenes" => q("scene"),
-        "presets" => q("quick effect"),
-        "patches" => q("overlay"),
+        "presets" => q("saved action"),
+        // a web page, generative visual or custom effect: its own name says which
+        "patches" => format!("\u{201c}{}\u{201d}", nice(&id)),
         "transitions" => q("transition"),
         "alerts" => q("alert"),
         "timelines" => q("timeline"),
-        "sources" => q("video"),
+        "sources" => q("source"),
         "mixes" => q("mix"),
         "rewards" => q("channel reward"),
-        "rules" => "your reactions".into(),
+        "rules" => "your automation".into(),
         "lights" => "your lights".into(),
         "controllers" => "your buttons & pedals".into(),
         "commands" => "your chat commands".into(),
@@ -692,7 +694,7 @@ fn user_words(file: &str) -> String {
     }
 }
 
-/// "scene “Duo”, quick effect “Hype” and 2 more".
+/// "scene “Duo”, saved action “Hype” and 2 more".
 fn used_words(files: &[String], max: usize) -> String {
     let mut words: Vec<String> = Vec::new();
     for f in files {
@@ -1020,102 +1022,195 @@ pub fn picker(app: &mut App, ui: &mut egui::Ui, id: impl std::hash::Hash, kind: 
     changed
 }
 
-// ---- the Media tab --------------------------------------------------------------------------
+/// Paint the picture of the project file `path` (a picture's or video's thumbnail) into
+/// `rect`, letterboxed. False when there's none (other kinds, missing file, still loading).
+pub fn file_preview(app: &mut App, ui: &mut egui::Ui, rect: Rect, path: &str) -> bool {
+    let t = app.t.clone();
+    let st = shared(ui.ctx());
+    let Ok(mut m) = st.lock() else { return false };
+    m.poll(app, Duration::from_secs(10));
+    m.pump(app, ui.ctx());
+    let Some(a) = m.assets.iter().find(|a| a.path == path).cloned() else { return false };
+    let pv = m.thumbs.get(ui.ctx(), &a);
+    if pv.as_ref().is_none_or(|p| p.tex.is_none()) {
+        return false;
+    }
+    paint_preview(ui, &t, rect, &a, pv.as_ref(), false, CornerRadius::same(radius::TILE), None);
+    true
+}
 
+// ---- Sources → Files ------------------------------------------------------------------------
+
+/// Width of the list pane.
+const LIST_W: f32 = 296.0;
+
+/// "Show" choices of the list: all files, then each kind.
+fn filter_kind(filter: usize) -> Option<MediaKind> {
+    filter.checked_sub(1).and_then(|i| MediaKind::ALL.get(i).copied())
+}
+
+/// Sources → Files: the files as a list grouped by kind (search, "Show" filter, one "+" to
+/// import), the selected file on the right (preview, about, used by, name, delete, "Make a
+/// source"). Files dropped anywhere on the page are imported.
 pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     let t = app.t.clone();
     let st = shared(ui.ctx());
-    let Ok(mut m) = st.lock() else { return };
-    m.poll(app, Duration::from_secs(3));
-    m.pump(app, ui.ctx());
-
-    // drag & drop anywhere on this tab
-    let (dropped, hovering) = ui.ctx().input(|i| {
-        let files: Vec<PathBuf> = i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect();
-        (files, !i.raw.hovered_files.is_empty())
-    });
-    for p in dropped {
-        m.import(app, &p, Target::Library, MediaKind::Any);
-    }
     let area = ui.max_rect();
-
-    let counts: Vec<usize> = MediaKind::ALL.iter().map(|k| m.assets.iter().filter(|a| a.kind == *k).count()).collect();
-    ui.horizontal(|ui| {
-        widgets::hint(ui, &t, "Pictures, videos, sounds, color looks and fonts for your scenes, overlays and quick effects. Drop files here to add them.");
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let busy = m.chooser.is_some();
-            let label = if busy { "Choosing…" } else { "Import files…" };
-            if named(widgets::button_ex(ui, &t, Some(UPLOAD), label, Kind::Primary, Size::Medium, 0.0, !busy), label).clicked() {
-                m.choose(Target::Library, MediaKind::Any);
-            }
-            if m.assets.len() > 8 {
-                ui.add(widgets::field(&mut m.search).hint_text("Search your media").desired_width(240.0));
-            }
+    let hovering = {
+        let Ok(mut m) = st.lock() else { return };
+        m.poll(app, Duration::from_secs(3));
+        m.pump(app, ui.ctx());
+        // drag & drop anywhere on this page
+        let (dropped, hovering) = ui.ctx().input(|i| {
+            let files: Vec<PathBuf> = i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect();
+            (files, !i.raw.hovered_files.is_empty())
         });
-    });
-    ui.add_space(spacing::M);
-    if !m.assets.is_empty() {
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = spacing::S;
-            if widgets::chip(ui, &t, icon::GRID, &format!("All  {}", m.assets.len()), m.filter == 0).clicked() {
-                m.filter = 0;
+        for p in dropped {
+            m.import(app, &p, Target::Library, MediaKind::Any);
+        }
+        if m.selected.as_ref().is_some_and(|p| m.seq > 0 && !m.assets.iter().any(|a| a.path == *p)) {
+            m.selected = None;
+        }
+        if m.selected.is_none() {
+            let first = m.assets.iter().find(|a| filter_kind(m.filter).is_none_or(|k| a.kind == k)).map(|a| a.path.clone());
+            m.selected = first;
+        }
+        hovering
+    };
+    widgets::split(
+        ui,
+        LIST_W,
+        |ui| {
+            if let Ok(mut m) = st.lock() {
+                list_pane(ui, &t, &mut m);
             }
-            for (i, k) in MediaKind::ALL.iter().enumerate() {
-                if widgets::chip(ui, &t, k.icon(), &format!("{}  {}", k.label(), counts[i]), m.filter == i + 1).clicked() {
-                    m.filter = i + 1;
-                }
-            }
-        });
-        ui.add_space(spacing::M);
-    }
-    status(ui, &t, &mut m);
-
-    let scroll_h = ui.available_height();
-    if m.assets.is_empty() {
-        widgets::panel(ui, &t, |ui| {
-            ui.set_width(ui.available_width());
-            let body = if app.m.connected {
-                "Media is the pictures, videos, sounds, color looks and fonts your scenes, overlays and quick effects use. Drag files onto this window, or use Import files…"
-            } else {
-                "Stream Engine isn't running. Start it to see and add your media."
-            };
-            widgets::empty_state(ui, &t, UPLOAD, "No media yet", body, None);
-        });
-    } else {
-        let sel = m.selected.clone().and_then(|p| m.assets.iter().find(|a| a.path == p).cloned());
-        let avail = ui.available_width();
-        let side_w = if sel.is_some() { (avail * 0.28).clamp(340.0, 480.0) } else { 0.0 };
-        let grid_w = if sel.is_some() { avail - side_w - spacing::L } else { avail };
-        ui.horizontal_top(|ui| {
-            ui.spacing_mut().item_spacing.x = spacing::L;
-            ui.allocate_ui_with_layout(Vec2::new(grid_w, scroll_h), Layout::top_down(Align::Min), |ui| {
-                ui.set_width(grid_w);
-                egui::ScrollArea::vertical().id_salt("media-grid").max_height(scroll_h).auto_shrink([false, false]).show(ui, |ui| {
-                    grid(app, ui, &t, &mut m);
+        },
+        |ui| {
+            if let Ok(mut m) = st.lock() {
+                egui::ScrollArea::vertical().id_salt("files-detail").auto_shrink([false, false]).show(ui, |ui| {
+                    status(ui, &t, &mut m);
+                    match m.selected.clone().and_then(|p| m.assets.iter().find(|a| a.path == p).cloned()) {
+                        Some(a) => details(app, ui, &t, &mut m, &a),
+                        None => {
+                            let body = if app.m.connected {
+                                "Pictures, videos, sounds, color looks and fonts your sources, effects and alerts use. Drop files anywhere on this page to add them."
+                            } else {
+                                "Stream Engine isn't running. Start it to see and add your files."
+                            };
+                            if widgets::empty_state(ui, &t, UPLOAD, "Files", body, app.m.connected.then_some("Import files…")) {
+                                m.choose(Target::Library, MediaKind::Any);
+                            }
+                        }
+                    }
                 });
-            });
-            if let Some(a) = sel {
-                ui.allocate_ui_with_layout(Vec2::new(side_w, scroll_h), Layout::top_down(Align::Min), |ui| {
-                    ui.set_width(side_w);
-                    egui::ScrollArea::vertical().id_salt("media-details").max_height(scroll_h).auto_shrink([false, true]).show(ui, |ui| {
-                        details(app, ui, &t, &mut m, &a);
-                    });
-                });
+                confirm_play(app, ui.ctx(), &mut m);
             }
-        });
-    }
-
+        },
+    );
     if hovering {
         let p = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("media-drop")));
         let r = area.shrink(spacing::S);
         p.rect(r, CornerRadius::same(radius::CARD), mix(t.bg, t.accent, 0.18).gamma_multiply(0.92), Stroke::new(2.0, t.accent), StrokeKind::Inside);
         p.text(r.center() - Vec2::new(0.0, 18.0), Align2::CENTER_CENTER, UPLOAD, font(36.0), t.accent);
-        p.text(r.center() + Vec2::new(0.0, 22.0), Align2::CENTER_CENTER, "Drop to add to your media", font_semibold(type_scale::HEADING), t.fg);
+        p.text(r.center() + Vec2::new(0.0, 22.0), Align2::CENTER_CENTER, "Drop to add to your files", font_semibold(type_scale::HEADING), t.fg);
     }
-    confirm_play(app, ui.ctx(), &mut m);
 }
 
-/// Import progress, import problems and rename/delete problems.
+/// The list pane: heading with "+" (import), "Show" filter, search, files grouped by kind.
+fn list_pane(ui: &mut egui::Ui, t: &Theme, m: &mut Media) {
+    let busy = m.chooser.is_some();
+    ui.add_enabled_ui(!busy, |ui| {
+        if widgets::pane_header(ui, t, "Files", Some(m.assets.len()), Some(if busy { "Waiting for the file chooser…" } else { "Import files…" })) {
+            m.choose(Target::Library, MediaKind::Any);
+        }
+    });
+    if m.assets.is_empty() {
+        return;
+    }
+    let count = |k: Option<MediaKind>| m.assets.iter().filter(|a| k.is_none_or(|k| a.kind == k)).count();
+    let shown = |f: usize| match filter_kind(f) {
+        None => format!("All files  {}", count(None)),
+        Some(k) => format!("{}  {}", k.label(), count(Some(k))),
+    };
+    let mut filter = m.filter;
+    egui::ComboBox::from_id_salt("files-filter").selected_text(shown(filter)).width(ui.available_width()).show_ui(ui, |ui| {
+        for f in 0..=MediaKind::ALL.len() {
+            ui.selectable_value(&mut filter, f, shown(f));
+        }
+    });
+    m.filter = filter;
+    if m.assets.len() > 8 {
+        ui.add_space(spacing::S);
+        ui.add(widgets::field(&mut m.search).hint_text("Search your files").desired_width(f32::INFINITY));
+    }
+    ui.add_space(spacing::XS);
+    let q = m.search.trim().to_lowercase();
+    let kinds: Vec<MediaKind> = filter_kind(m.filter).map_or_else(|| MediaKind::ALL.to_vec(), |k| vec![k]);
+    let mut picked = None;
+    egui::ScrollArea::vertical().id_salt("files-list").auto_shrink([false, false]).show(ui, |ui| {
+        let mut any = false;
+        for k in kinds {
+            let items: Vec<Asset> =
+                m.assets.iter().filter(|a| a.kind == k && (q.is_empty() || a.title().to_lowercase().contains(&q) || a.name.contains(&q))).cloned().collect();
+            if items.is_empty() {
+                continue;
+            }
+            any = true;
+            widgets::group_label(ui, t, k.label());
+            for a in &items {
+                let used = if a.used_by.is_empty() { "not used yet".to_string() } else { format!("used by {}", used_words(&a.used_by, 1)) };
+                let sub = format!("{} · {used}", size_words(a.bytes));
+                let thumb = matches!(a.kind, MediaKind::Image | MediaKind::Video);
+                let w = ui.available_width() - if thumb { 64.0 } else { 24.0 } - 28.0;
+                let (title, sub) = (clip_to(ui, &a.title(), font_medium(type_scale::BODY), w), clip_to(ui, &sub, font(type_scale::SMALL), w));
+                let selected = m.selected.as_deref() == Some(a.path.as_str());
+                let row = named(widgets::list_row(ui, t, a.kind.icon(), &title, &sub, "", selected), &a.title());
+                if thumb && let Some(tex) = m.thumbs.get(ui.ctx(), a).and_then(|pv| pv.tex) {
+                    let sq = Rect::from_min_size(Pos2::new(row.rect.right() - 10.0 - 40.0, row.rect.center().y - 20.0), Vec2::splat(40.0));
+                    let uv = cover_uv(tex.size(), sq.size());
+                    egui::Image::new(egui::load::SizedTexture::new(tex.id(), sq.size()))
+                        .uv(uv)
+                        .corner_radius(CornerRadius::same(radius::CONTROL))
+                        .paint_at(ui, sq);
+                }
+                if row.on_hover_text(a.title()).clicked() {
+                    picked = Some(a.path.clone());
+                }
+            }
+        }
+        if !any {
+            ui.add_space(spacing::S);
+            widgets::hint(ui, t, if q.is_empty() { "None of these yet." } else { "Nothing matches." });
+        }
+    });
+    if let Some(p) = picked {
+        if m.selected.as_ref() != Some(&p) {
+            m.confirm_delete = false;
+        }
+        m.selected = Some(p);
+    }
+}
+
+/// `text` cut with "…" to fit `max_w` in `fid`.
+fn clip_to(ui: &egui::Ui, text: &str, fid: egui::FontId, max_w: f32) -> String {
+    let fits = |s: &str| ui.painter().layout_no_wrap(s.to_string(), fid.clone(), Color32::WHITE).size().x <= max_w;
+    if fits(text) {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let (mut lo, mut hi) = (0, chars.len());
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if fits(&format!("{}…", chars[..mid].iter().collect::<String>().trim_end())) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    format!("{}…", chars[..lo].iter().collect::<String>().trim_end())
+}
+
+/// Import progress, import problems and rename/delete results.
 fn status(ui: &mut egui::Ui, t: &Theme, m: &mut Media) {
     let copying: Vec<&str> =
         m.imports.iter().filter(|i| i.target == Target::Library && matches!(i.state, ImportState::Copying)).map(|i| i.file.as_str()).collect();
@@ -1127,7 +1222,7 @@ fn status(ui: &mut egui::Ui, t: &Theme, m: &mut Media) {
     let done = m.imports.iter().filter(|i| i.target == Target::Library && matches!(i.state, ImportState::Done)).count();
     if done > 0 && copying.is_empty() {
         let title = if done == 1 { "Added 1 file".to_string() } else { format!("Added {done} files") };
-        let body = if done == 1 { "It's in your media now and ready to use." } else { "They're in your media now and ready to use." };
+        let body = if done == 1 { "It's in your files now and ready to use." } else { "They're in your files now and ready to use." };
         widgets::callout(ui, t, Tone::Ok, icon::CHECK, &title, body, None);
         ui.add_space(spacing::M);
     }
@@ -1152,113 +1247,46 @@ fn status(ui: &mut egui::Ui, t: &Theme, m: &mut Media) {
     }
 }
 
-/// One card: a group per kind (or just the chosen kind), tiles filling the width.
-fn grid(app: &mut App, ui: &mut egui::Ui, t: &Theme, m: &mut Media) {
-    let q = m.search.trim().to_lowercase();
-    let kinds: Vec<MediaKind> = if m.filter == 0 { MediaKind::ALL.to_vec() } else { vec![MediaKind::ALL[m.filter - 1]] };
-    let groups: Vec<(MediaKind, Vec<Asset>)> = kinds
-        .into_iter()
-        .map(|k| {
-            (k, m.assets.iter().filter(|a| a.kind == k && (q.is_empty() || a.title().to_lowercase().contains(&q) || a.name.contains(&q))).cloned().collect())
-        })
-        .collect();
-    let total: usize = groups.iter().map(|(_, g)| g.len()).sum();
-    let title = if m.filter == 0 { "Your media" } else { MediaKind::ALL[m.filter - 1].label() };
-    let sub = match (total, q.is_empty()) {
-        (1, true) => "1 file".to_string(),
-        (n, true) => format!("{n} files"),
-        (1, false) => "1 file matches".to_string(),
-        (n, false) => format!("{n} files match"),
-    };
-    widgets::titled(
-        ui,
-        t,
-        title,
-        &sub,
-        |_| {},
-        |ui| {
-            ui.set_width(ui.available_width());
-            if total == 0 {
-                let (ic, head, body) = match (q.is_empty(), m.filter) {
-                    (false, _) => (icon::SEARCH, "Nothing matches".to_string(), "Try another word, or clear the search."),
-                    (true, f) => {
-                        let k = MediaKind::ALL[f.max(1) - 1];
-                        let body = match k {
-                            MediaKind::Image => "Logos, backgrounds and pictures to show on screen.",
-                            MediaKind::Video => "Clips and loops to play in a scene.",
-                            MediaKind::Sound => "Short sounds for quick effects, alerts and buttons.",
-                            MediaKind::Lut => "Color looks (.cube files) change how a camera's colors look.",
-                            _ => "Fonts for text on screen.",
-                        };
-                        (k.icon(), format!("No {} yet", k.label().to_lowercase()), body)
-                    }
-                };
-                widgets::empty_state(ui, t, ic, &head, body, None);
-                return;
-            }
-            let gap = spacing::M;
-            let avail = ui.available_width();
-            let cols = ((avail + gap) / (210.0 + gap)).floor().max(1.0) as usize;
-            let w = ((avail - gap * (cols - 1) as f32) / cols as f32).floor();
-            let mut first = true;
-            for (k, items) in &groups {
-                if items.is_empty() {
-                    continue;
-                }
-                if groups.len() > 1 {
-                    if !first {
-                        ui.add_space(spacing::S);
-                    }
-                    widgets::section(ui, t, k.icon(), k.label());
-                }
-                first = false;
-                for row in items.chunks(cols) {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = gap;
-                        for a in row {
-                            tile(app, ui, t, m, a, w);
-                        }
-                    });
-                    ui.add_space(gap);
-                }
-            }
-        },
-    );
-}
-
-fn tile(app: &mut App, ui: &mut egui::Ui, t: &Theme, m: &mut Media, a: &Asset, w: f32) {
-    let pic_h = (w * 9.0 / 16.0).round();
-    let h = pic_h + 62.0;
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::click());
-    if !ui.is_rect_visible(rect) {
-        return;
+/// The selected file: header (with "Make a source" for pictures and videos), its picture or
+/// waveform, then About, Used by, Name and Delete.
+fn details(app: &mut App, ui: &mut egui::Ui, t: &Theme, m: &mut Media, a: &Asset) {
+    if m.rename_for != a.path {
+        m.rename_for = a.path.clone();
+        m.rename = a.title();
+        m.confirm_delete = false;
     }
-    let selected = m.selected.as_deref() == Some(a.path.as_str());
-    let hovered = resp.hovered();
-    let p = ui.painter();
-    let (fill, stroke) = if selected {
-        (mix(t.surface, t.accent, 0.14), t.accent)
-    } else if hovered {
-        (mix(t.surface_hi, t.fg, 0.04), mix(t.border, t.fg, 0.15))
-    } else {
-        (t.surface_hi, t.border)
+    let kind_word = match a.kind {
+        MediaKind::Image => "Picture",
+        MediaKind::Video => "Video",
+        MediaKind::Sound => "Sound",
+        MediaKind::Lut => "Color look",
+        MediaKind::Font => "Font",
+        MediaKind::Any => "File",
     };
-    p.rect(rect, CornerRadius::same(radius::TILE), fill, Stroke::new(1.0, stroke), StrokeKind::Inside);
-    let pic = Rect::from_min_size(rect.min + Vec2::splat(6.0), Vec2::new(w - 12.0, pic_h - 6.0));
+    let sourceable = a.kind == MediaKind::Video || (a.kind == MediaKind::Image && crate::views::sources::is_picture_file(&a.path));
+    let mut make_source = false;
+    widgets::detail_header(ui, t, a.kind.icon(), &a.title(), &format!("{kind_word} · {} · {}", a.ext(), size_words(a.bytes)), |ui| {
+        if sourceable {
+            make_source =
+                named(widgets::button_ex(ui, t, Some(icon::CAMERA), "Make a source", Kind::Secondary, Size::Small, 0.0, app.m.connected), "Make a source")
+                    .on_hover_text("Show it in scenes: makes a source from this file")
+                    .clicked();
+        }
+    });
+    if make_source {
+        crate::views::sources::new_from_file(app, ui.ctx(), &a.path);
+    }
+
+    let w = ui.available_width().min(560.0);
+    let h = if a.kind == MediaKind::Sound { 120.0 } else { (w * 9.0 / 16.0).round() };
+    let (pic, _) = ui.allocate_exact_size(Vec2::new(w, h), Sense::hover());
     let pv = m.thumbs.get(ui.ctx(), a);
     let seconds = pv.as_ref().and_then(|pv| pv.seconds);
-    paint_preview(ui, t, pic, a, pv.as_ref(), true, CornerRadius::same(radius::TILE - 3), m.progress(&a.path));
-    // length chip (videos, sounds)
-    if let Some(s) = seconds.filter(|_| matches!(a.kind, MediaKind::Video | MediaKind::Sound)) {
-        let g = ui.painter().layout_no_wrap(length_words(s), font_mono(type_scale::SMALL), Color32::WHITE);
-        let chip = Rect::from_min_size(pic.right_bottom() + Vec2::new(-g.size().x - 14.0 - 6.0, -22.0 - 6.0), Vec2::new(g.size().x + 14.0, 22.0));
-        ui.painter().rect_filled(chip, CornerRadius::same(6), Color32::from_black_alpha(170));
-        ui.painter().galley(chip.center() - g.size() / 2.0, g, Color32::WHITE);
-    }
+    paint_preview(ui, t, pic, a, pv.as_ref(), false, CornerRadius::same(radius::TILE), m.progress(&a.path));
     if a.kind == MediaKind::Sound {
         let blocked = preview_blocker(app, a);
         let playing = m.is_playing(&a.path);
-        let r = play_button(ui, t, pic.center(), (pic_h * 0.2).clamp(16.0, 30.0), playing, blocked.is_none(), egui::Id::new(("media-play", &a.path)));
+        let r = play_button(ui, t, pic.center(), 28.0, playing, blocked.is_none(), egui::Id::new(("media-play-big", &a.path)));
         let r = r.on_hover_text(blocked.unwrap_or(if playing { "Stop" } else { "Listen" }));
         if r.clicked() {
             if playing {
@@ -1267,160 +1295,127 @@ fn tile(app: &mut App, ui: &mut egui::Ui, t: &Theme, m: &mut Media, a: &Asset, w
                 m.preview(app, a, false);
             }
         }
+        if let Some(why) = blocked {
+            ui.add_space(spacing::S);
+            widgets::hint(ui, t, why);
+        }
     }
-    let x = rect.left() + 12.0;
-    let tw = w - 24.0;
-    let name = one_line(ui, &a.title(), font_medium(type_scale::BODY), t.fg, tw);
-    ui.painter().galley(Pos2::new(x, pic.bottom() + 10.0), name, t.fg);
-    let used = if a.used_by.is_empty() { "Not used yet".to_string() } else { format!("Used by {}", used_words(&a.used_by, 1)) };
-    let sub = one_line(ui, &format!("{} · {used}", size_words(a.bytes)), font(type_scale::SMALL), t.text_dim, tw);
-    ui.painter().galley(Pos2::new(x, pic.bottom() + 32.0), sub, t.text_dim);
-    let resp = named(resp, &a.title()).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(a.title());
-    if resp.clicked() {
-        m.selected = if selected { None } else { Some(a.path.clone()) };
-        m.confirm_delete = false;
-    }
-}
+    ui.add_space(spacing::L);
 
-/// The selected file in one card: preview, facts, where it's used, rename, delete.
-fn details(app: &mut App, ui: &mut egui::Ui, t: &Theme, m: &mut Media, a: &Asset) {
-    if m.rename_for != a.path {
-        m.rename_for = a.path.clone();
-        m.rename = a.title();
-        m.confirm_delete = false;
-    }
-    widgets::panel(ui, t, |ui| {
-        ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(a.kind.icon()).size(type_scale::LARGE).color(t.accent));
-            let w = ui.available_width() - 40.0;
-            let g = one_line(ui, &a.title(), font_semibold(type_scale::LARGE), t.fg, w);
-            ui.label(g).on_hover_text(a.title());
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if widgets::icon_button(ui, t, icon::CROSS, "Close").clicked() {
-                    m.selected = None;
-                }
+    widgets::inspector_section(
+        ui,
+        t,
+        ("files-about", &a.path),
+        "About",
+        true,
+        |_| {},
+        |ui| {
+            widgets::prop_row(ui, t, "Type", |ui| widgets::hint(ui, t, &format!("{kind_word} ({})", a.ext())));
+            widgets::prop_row(ui, t, "Size", |ui| widgets::hint(ui, t, &size_words(a.bytes)));
+            if let Some(s) = seconds.filter(|_| matches!(a.kind, MediaKind::Video | MediaKind::Sound)) {
+                widgets::prop_row(ui, t, "Length", |ui| widgets::hint(ui, t, &length_words(s)));
+            }
+            widgets::prop_row(ui, t, "In your project", |ui| {
+                ui.add(egui::Label::new(RichText::new(&a.path).font(font_mono(type_scale::SMALL)).color(t.text_dim)).truncate()).on_hover_text(&a.path);
             });
-        });
-        ui.add_space(spacing::M);
-        let w = ui.available_width();
-        let h = if a.kind == MediaKind::Sound { 120.0 } else { (w * 9.0 / 16.0).round().min(220.0) };
-        let (pic, _) = ui.allocate_exact_size(Vec2::new(w, h), Sense::hover());
-        let pv = m.thumbs.get(ui.ctx(), a);
-        let seconds = pv.as_ref().and_then(|pv| pv.seconds);
-        paint_preview(ui, t, pic, a, pv.as_ref(), false, CornerRadius::same(radius::TILE), m.progress(&a.path));
-        if a.kind == MediaKind::Sound {
-            let blocked = preview_blocker(app, a);
-            let playing = m.is_playing(&a.path);
-            let r = play_button(ui, t, pic.center(), 28.0, playing, blocked.is_none(), egui::Id::new(("media-play-big", &a.path)));
-            let r = r.on_hover_text(blocked.unwrap_or(if playing { "Stop" } else { "Listen" }));
-            if r.clicked() {
-                if playing {
-                    m.stop(app);
-                } else {
-                    m.preview(app, a, false);
-                }
+        },
+    );
+    widgets::inspector_section(
+        ui,
+        t,
+        ("files-used", &a.path),
+        "Used by",
+        true,
+        |_| {},
+        |ui| {
+            if a.used_by.is_empty() {
+                widgets::hint(ui, t, "Nothing uses it yet.");
             }
-            if let Some(why) = blocked {
-                ui.add_space(spacing::S);
-                ui.add(egui::Label::new(RichText::new(why).size(type_scale::SMALL + 0.5).color(t.text_dim)).wrap());
-            }
-        }
-        ui.add_space(spacing::M);
-        let kind_word = match a.kind {
-            MediaKind::Image => "Picture",
-            MediaKind::Video => "Video",
-            MediaKind::Sound => "Sound",
-            MediaKind::Lut => "Color look",
-            MediaKind::Font => "Font",
-            MediaKind::Any => "File",
-        };
-        widgets::fact(ui, t, "Type", &format!("{kind_word} ({})", a.ext()));
-        widgets::fact(ui, t, "Size", &size_words(a.bytes));
-        if let Some(s) = seconds.filter(|_| matches!(a.kind, MediaKind::Video | MediaKind::Sound)) {
-            widgets::fact(ui, t, "Length", &length_words(s));
-        }
-        ui.add_space(spacing::S);
-        ui.label(RichText::new("Used by").color(t.text_dim));
-        if a.used_by.is_empty() {
-            ui.label(RichText::new("Nothing uses it yet.").color(t.fg));
-        } else {
             let mut seen: Vec<String> = Vec::new();
             for f in &a.used_by {
                 let w = user_words(f);
-                if seen.contains(&w) {
-                    continue;
+                if !seen.contains(&w) {
+                    widgets::list_row(ui, t, icon::LINK, &upper_first(&w), "", "", false);
+                    seen.push(w);
                 }
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(icon::LINK).size(type_scale::SMALL).color(t.text_dim));
-                    ui.add(egui::Label::new(RichText::new(upper_first(&w)).color(t.fg)).truncate());
-                });
-                seen.push(w);
             }
-        }
-
-        ui.add_space(spacing::L);
-        widgets::section(ui, t, icon::EDIT, "Name");
-        let changed = m.rename.trim() != a.title() && !m.rename.trim().is_empty();
-        let mut go = false;
-        ui.horizontal(|ui| {
-            let r = ui.add(widgets::field(&mut m.rename).hint_text("A name you'll recognise").desired_width((w - 110.0).max(120.0)));
-            go = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && changed;
-            if named(widgets::button_ex(ui, t, None, "Rename", Kind::Secondary, Size::Medium, 96.0, changed), "Rename").clicked() {
-                go = true;
-            }
-        });
-        widgets::hint(ui, t, "Everything that uses it keeps working.");
-        if go {
-            app.m.action("project.asset.rename", Value::map().with("path", a.path.clone()).with("name", m.rename.trim().to_string()));
-            m.notice = None;
-        }
-
-        ui.add_space(spacing::L);
-        if !m.confirm_delete {
+        },
+    );
+    let mut rename = false;
+    widgets::inspector_section(
+        ui,
+        t,
+        ("files-name", &a.path),
+        "Name",
+        true,
+        |_| {},
+        |ui| {
+            let changed = m.rename.trim() != a.title() && !m.rename.trim().is_empty();
             ui.horizontal(|ui| {
+                let r = ui
+                    .add(widgets::field(&mut m.rename).hint_text("A name you'll recognise").desired_width((ui.available_width() - 110.0).clamp(120.0, 320.0)));
+                rename = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && changed;
+                if named(widgets::button_ex(ui, t, None, "Rename", Kind::Secondary, Size::Medium, 96.0, changed), "Rename").clicked() {
+                    rename = true;
+                }
+            });
+            widgets::hint(ui, t, "Everything that uses it keeps working.");
+        },
+    );
+    if rename {
+        app.m.action("project.asset.rename", Value::map().with("path", a.path.clone()).with("name", m.rename.trim().to_string()));
+        m.notice = None;
+    }
+    let mut delete = None;
+    widgets::inspector_section(
+        ui,
+        t,
+        ("files-delete", &a.path),
+        "Delete",
+        m.confirm_delete,
+        |_| {},
+        |ui| {
+            if !m.confirm_delete {
                 if named(widgets::button_ex(ui, t, Some(icon::TRASH), "Delete…", Kind::Danger, Size::Medium, 0.0, true), "Delete…").clicked() {
                     m.confirm_delete = true;
                     m.scroll_confirm = true;
                 }
-            });
-            ui.add_space(spacing::S);
-            widgets::details(ui, t, ("media-details", &a.path), "Details", |ui| {
-                ui.label(RichText::new("Where it is in your project").color(t.text_dim));
-                ui.add(egui::Label::new(RichText::new(&a.path).font(font_mono(type_scale::SMALL)).color(t.fg)).wrap());
-            });
-            return;
-        }
-        let used = !a.used_by.is_empty();
-        let (title, body) = if used {
-            (
-                format!("\u{201c}{}\u{201d} is still used", a.title()),
-                format!(
-                    "{} uses it. If you delete it, that spot will be empty until you pick another {}.",
-                    upper_first(&used_words(&a.used_by, 3)),
-                    a.kind.one()
-                ),
-            )
-        } else {
-            (format!("Delete \u{201c}{}\u{201d}?", a.title()), format!("The {} is removed from your project.", a.kind.one()))
-        };
-        widgets::callout(ui, t, if used { Tone::Warn } else { Tone::Danger }, icon::TRASH, &title, &body, None);
-        ui.add_space(spacing::M);
-        let row = ui.horizontal(|ui| {
-            let label = if used { "Delete anyway" } else { "Delete" };
-            if named(widgets::button_ex(ui, t, Some(icon::TRASH), label, Kind::Danger, Size::Medium, 0.0, true), label).clicked() {
-                app.m.action("project.asset.delete", Value::map().with("path", a.path.clone()).with("force", used));
-                m.confirm_delete = false;
-                m.notice = None;
+                return;
             }
-            if named(widgets::button_ex(ui, t, None, "Keep it", Kind::Secondary, Size::Medium, 0.0, true), "Keep it").clicked() {
-                m.confirm_delete = false;
+            let used = !a.used_by.is_empty();
+            let (title, body) = if used {
+                (
+                    format!("\u{201c}{}\u{201d} is still used", a.title()),
+                    format!(
+                        "{} uses it. If you delete it, that spot will be empty until you pick another {}.",
+                        upper_first(&used_words(&a.used_by, 3)),
+                        a.kind.one()
+                    ),
+                )
+            } else {
+                (format!("Delete \u{201c}{}\u{201d}?", a.title()), format!("The {} is removed from your project.", a.kind.one()))
+            };
+            widgets::callout(ui, t, if used { Tone::Warn } else { Tone::Danger }, icon::TRASH, &title, &body, None);
+            ui.add_space(spacing::M);
+            let row = ui.horizontal(|ui| {
+                let label = if used { "Delete anyway" } else { "Delete" };
+                if named(widgets::button_ex(ui, t, Some(icon::TRASH), label, Kind::Danger, Size::Medium, 0.0, true), label).clicked() {
+                    delete = Some(used);
+                }
+                if named(widgets::button_ex(ui, t, None, "Keep it", Kind::Secondary, Size::Medium, 0.0, true), "Keep it").clicked() {
+                    m.confirm_delete = false;
+                }
+            });
+            if std::mem::take(&mut m.scroll_confirm) {
+                row.response.scroll_to_me(Some(Align::BOTTOM));
             }
-        });
-        if std::mem::take(&mut m.scroll_confirm) {
-            row.response.scroll_to_me(Some(Align::BOTTOM));
-        }
-    });
+        },
+    );
+    if let Some(force) = delete {
+        app.m.action("project.asset.delete", Value::map().with("path", a.path.clone()).with("force", force));
+        m.confirm_delete = false;
+        m.notice = None;
+    }
 }
 
 /// Give a painted button its words for screen readers (and UI tests).
@@ -1455,11 +1450,14 @@ mod tests {
         let files =
             vec!["scenes/duo.toml".to_string(), "presets/big_hype.toml".to_string(), "patches/alertbox/index.html".to_string(), "rules/main.toml".to_string()];
         assert_eq!(used_words(&files[..1], 3), "scene \u{201c}Duo\u{201d}");
-        assert_eq!(used_words(&files[..2], 3), "scene \u{201c}Duo\u{201d} and quick effect \u{201c}Big hype\u{201d}");
-        assert_eq!(used_words(&files, 3), "scene \u{201c}Duo\u{201d}, quick effect \u{201c}Big hype\u{201d} and 2 more");
+        assert_eq!(used_words(&files[..2], 3), "scene \u{201c}Duo\u{201d} and saved action \u{201c}Big hype\u{201d}");
+        assert_eq!(used_words(&files, 3), "scene \u{201c}Duo\u{201d}, saved action \u{201c}Big hype\u{201d} and 2 more");
         // a one-line tile still names the first place
         assert_eq!(used_words(&files, 1), "scene \u{201c}Duo\u{201d} and 3 more");
         // the same place mentioned by two files counts once
-        assert_eq!(used_words(&["rules/a.toml".into(), "rules/b.toml".into()], 3), "your reactions");
+        assert_eq!(used_words(&["rules/a.toml".into(), "rules/b.toml".into()], 3), "your automation");
+        // a patch folder is named by itself; a source file is a source
+        assert_eq!(user_words("patches/alertbox/index.html"), "\u{201c}Alertbox\u{201d}");
+        assert_eq!(user_words("sources/brb.toml"), "source \u{201c}BRB\u{201d}");
     }
 }

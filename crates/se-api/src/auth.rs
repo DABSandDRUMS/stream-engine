@@ -6,10 +6,10 @@ use se_proto::{Op, address};
 use std::collections::HashMap;
 
 /// Namespaces and actions that stay full-access only whatever a web patch's grants say (§19):
-/// API tokens and device pairing, secrets, project file writes, creating patches and launching
-/// an editor. Secret-carrying actions ([`Op::is_secret`]) and `set_base` are never grantable either.
+/// API tokens and device pairing, secrets, project file writes, creating and removing patches and
+/// launching an editor. Secret-carrying actions ([`Op::is_secret`]) and `set_base` are never grantable either.
 const ADMIN_NAMESPACES: &[&str] = &["api", "secrets", "project"];
-const ADMIN_ACTIONS: &[&str] = &["patch.new", "patch.open"];
+const ADMIN_ACTIONS: &[&str] = &["patch.new", "patch.open", "patch.remove"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Scope {
@@ -30,7 +30,7 @@ impl Scope {
     /// `scene.cut`, `scene.take`, `preset.fire`, `preset.release`, `mode.set`). The patch's own
     /// `patch.<id>` subtree is always writable; a grant (an address pattern, `*`/`**` as in
     /// set/animate/release) covers every target it matches and everything beneath it. Admin
-    /// targets (`api.*`, `secrets.*`, `project.*`, `patch.new`, `patch.open`, secret-carrying
+    /// targets (`api.*`, `secrets.*`, `project.*`, `patch.new`, `patch.open`, `patch.remove`, secret-carrying
     /// actions) and ops without a target (`set_base`, panic, clean, undo, redo) are never granted.
     pub fn allows(&self, op: &Op) -> bool {
         match self {
@@ -203,9 +203,21 @@ mod tests {
         // the manifest rejects `*`; the scope stays safe even if one got through
         let p = Scope::Patch("x".into(), vec!["*".into(), "**".into()]);
         assert!(p.allows(&act("lights.cue")) && p.allows(&Op::ModeSet { mode: "live".into() }));
-        for name in ["api.token.rotate", "api.device.add", "secrets.set", "project.write", "patch.new", "patch.open", "youtube.key.set", "twitch.token.set"] {
+        for name in [
+            "api.token.rotate",
+            "api.device.add",
+            "secrets.set",
+            "project.write",
+            "patch.new",
+            "patch.open",
+            "patch.remove",
+            "youtube.key.set",
+            "twitch.token.set",
+        ] {
             assert!(!p.allows(&act(name)), "{name}");
         }
+        // a patch folder named `remove` doesn't own `patch.remove`
+        assert!(!Scope::Patch("remove".into(), vec![]).allows(&act("patch.remove")));
         assert!(!p.allows(&set("secrets.youtube")));
         for op in [Op::Panic, Op::Clean, Op::Undo, Op::Redo, Op::SetBase { address: "x.y".into(), value: Value::Null }] {
             assert!(!p.allows(&op), "{op:?}");

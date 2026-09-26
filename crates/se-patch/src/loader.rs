@@ -761,6 +761,24 @@ fn action(loader: &Arc<Mutex<Loader>>, name: &str, args: &Value) -> Result<(), S
             hub.log("info", TARGET, format!("opened `{id}` with {used}"));
             Ok(())
         }
-        other => Err(format!("unknown action `{other}` (patch.new, patch.reload, patch.enable, patch.disable, patch.open)")),
+        "patch.remove" => {
+            // the folder moves to `patches/.removed/<id>-<unix time>/` (hidden folders are never
+            // loaded), so a removed patch can be brought back by moving it again
+            let id = arg_str(args, "id", 0).ok_or("missing patch id")?;
+            let mut l = loader.lock();
+            let dir = l.patches_dir().join(id);
+            if id.is_empty() || id.starts_with('.') || id.contains(['/', '\\']) || !dir.is_dir() {
+                return Err(format!("unknown patch `{id}`"));
+            }
+            let bin = l.patches_dir().join(".removed");
+            std::fs::create_dir_all(&bin).map_err(|e| format!("{}: {e}", bin.display()))?;
+            let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+            let to = bin.join(format!("{id}-{secs}"));
+            std::fs::rename(&dir, &to).map_err(|e| format!("move {} to {}: {e}", dir.display(), to.display()))?;
+            l.reload(id, true);
+            l.hub.log("info", TARGET, format!("removed patch `{id}` (kept in {})", to.display()));
+            Ok(())
+        }
+        other => Err(format!("unknown action `{other}` (patch.new, patch.reload, patch.enable, patch.disable, patch.open, patch.remove)")),
     }
 }

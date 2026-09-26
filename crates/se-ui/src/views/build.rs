@@ -76,25 +76,23 @@ const KINDS: &[(&str, &str, &str, &str)] = &[
 
 /// The full view that edits a project kind (views owned by other subsystems), if one exists.
 pub fn view_for_kind(kind: &str) -> Option<ViewId> {
-    let aliases: &[&str] = match kind.split('/').next().unwrap_or(kind) {
-        "lights" => &["lights", "light"],
-        "timelines" => &["timeline"],
-        "mixes" => &["mixer", "mix"],
-        "controllers" => &["controllers", "controller", "deck"],
-        "commands" => &["chatbot", "bot"],
-        "alerts" => &["alerts", "alert"],
-        "rewards" => &["rewards", "twitch"],
-        "patches" => &["patches", "patch"],
-        _ => &[],
-    };
-    ViewId::ALL
-        .iter()
-        .find(|(v, _, label)| {
-            let dbg = format!("{v:?}").to_lowercase();
-            let lbl = label.to_lowercase();
-            aliases.iter().any(|a| dbg == *a || lbl.split_whitespace().next() == Some(a))
-        })
-        .map(|(v, _, _)| *v)
+    Some(match kind.split('/').next().unwrap_or(kind) {
+        "scenes" => ViewId::Composition,
+        "transitions" => ViewId::Transitions,
+        "sources" | "patches" => ViewId::Sources,
+        "assets" => ViewId::Media,
+        "alerts" => ViewId::Alerts,
+        "rules" => ViewId::Reactions,
+        "controllers" => ViewId::Controllers,
+        "commands" => ViewId::Chatbot,
+        "presets" => ViewId::Actions,
+        "bindings" => ViewId::Modulation,
+        "timelines" => ViewId::Timeline,
+        "mixes" => ViewId::Mixer,
+        "lights" => ViewId::Lights,
+        "rewards" => ViewId::Twitch,
+        _ => return None,
+    })
 }
 
 fn matches(filter: &str, s: &str) -> bool {
