@@ -1111,8 +1111,9 @@ it does not add new audio buses or invent tracks that the audio system does not 
   and preflight. OBS tracks and tall-canvas recording are reported, not assumed. Preserve OBS's
   per-file path and master-clock mapping (including split recordings) in `meta.toml`.
 - The existing session journal (`events.jsonl.zst`, `signals.bin`, `markers.json`, `meta.toml`)
-  remains the authoritative raw record. Copy the journal and a snapshot of the project's text
-  configuration into the show's `data/` at close. Do not copy secrets, assets or runtime DB.
+  remains the authoritative raw record. Snapshot project text configuration when recording starts,
+  then copy the closed journal into the show's `data/`. Exclude credential-named settings, assets
+  and the runtime DB; keep credentials in the keyring rather than project text files.
   The recording retention policy must never delete a file required by a queued job or an
   unreviewed / approved-but-not-uploaded clip. No automatic deletion while on air.
 
@@ -1314,7 +1315,7 @@ Each milestone ends with a **live smoke run**: the actual app, real devices, out
 | **M7** | Lights | Fixture profiles + library, patch, groups, stage layout, RDM discovery attempt, programmer, palettes, cue lists with tracking/fades/follows, playbacks with HTP/LTP merge, effects engine (beat-synced), palette sharing with video, visualizer, limiter, Enttec DMX USB PRO output (sACN/Art-Net kept), Lights view | A cue list with fades and follows runs from a deck key and from an X-TOUCH fader; a beat-synced color chase follows the band mix tempo; editing a palette updates every cue using it; limiter provably caps flash rate |
 | **M8** | Control surfaces + mixer | Stream Deck Original V2 (pages, rendered keys, feedback, page editor), X-TOUCH MINI in MC mode (encoders with LED-ring feedback, buttons with LEDs, fader with pickup), FBV Express (footswitch presets, expression pedal as a signal), OSC, voice push-to-talk + grammar, **`se-mixer` UCNET adapter** once the 16R is connected (control, meters, two-way sync, snapshots), Mixer + Controllers views | Same preset fireable from deck, MIDI, footswitch, voice, keybind, and chat; X-TOUCH encoder rings follow state changes made elsewhere; the X-TOUCH fader picks up without jumps; with the 16R: moving a fader in UC Surface updates our state and the encoder ring, and a preset crossfades a mix snapshot |
 | **M9** | Timelines + timecode | Generic timelines (cue tracks, automation lanes, region tracks), timecode sources (internal, media position, MTC in, LTC in, manual), MTC/LTC out, chase/freewheel/track-on-jump, record mode, timeline editor, offline analysis for library songs (beat grid, sections) | Nightly-song chorus cue fires on time from the YouTube player position; a lighting cue list + automation lane follow incoming MTC and survive a locate jump with correct tracked state; LTC out is readable by an external decoder |
-| **M10** | Clips | Hype detector patch, markers + Twitch stream markers, OBS recording mapping, post-stream job, session review + clip review queue | After a stream, a review queue has ranked wide + tall clips with captions and without the music track |
+| **M10** | Recordings + clips | Auto recording into a chosen show folder, session journal and time-aligned timeline with full-show speech transcript, song/talk/marker candidates, optional omp ranking with deterministic fallback, wide + tall clips, review and feedback | A show records automatically in the selected folder; its timeline makes song, chat, scene and light context inspectable; a requested-song clip keeps performance + backing music, shows an informational DMCA badge, and can be reviewed/retrimmed |
 | **M11** | Extras | Omarchy polish (bar widget, menu entries, keybind/rule examples, PKGBUILD), first-run wizard, TTS (Kokoro), giveaways, credits, remote mod access via the relay, TikTok events (best-effort) | Fresh machine → install package → wizard → working starter project live on stream |
 | **M12** | Live instrument FX (optional; needs the 16R's multichannel USB) | Multichannel drum inputs via the 16R, `drums` bus, per-drum onset triggers (+ e-drum MIDI via the 24c DIN port), low-latency monitor path, sampler layering, `dsp` wasm patches | Snare hits fire visuals/lights reliably with no false triggers from bleed; processed drums on stream; if monitoring, measured round trip ≤ 10 ms |
 
@@ -1369,9 +1370,14 @@ Each milestone ends with a **live smoke run**: the actual app, real devices, out
 | M7 | ENTTEC output 44 Hz, jitter p99 0.02 ms; the Main cue list runs from `lights.go` | Fixture list (§28.3); deck LX GO key and X-TOUCH fader presses (`scripts/acceptance-surfaces.sh cuelist`) |
 | M8 | The same preset fired by voice (Whisper), keybind/CLI and VIP chat, each with its own origin; UCNET control of the 16R at 10.0.0.187 (earlier session) | Deck, X-TOUCH, FBV presses and ring check (`scripts/acceptance-surfaces.sh`); the 16R back on the LAN (plus the two `ufw` rules in docs/devices-and-sources.md for discovery) |
 | M9 | MTC in/out; LTC out read back by `ltcdump` | — |
-| M10 | Full job on a 3-minute generated session: ranked wide + tall clips, captions, music track dropped (NVENC) | A real session recorded with OBS in Advanced output, tracks 1–6 (docs/obs.md step 6) |
+| M10 | Full job on a 3-minute generated session: 3 ranked wide + tall NVENC clips, captions, music track dropped for talk clips; separate manual song cut retained music/performance and saved review feedback. Isolated engine indexed a recorded show and displayed its song, mode, chat, marker and clip lanes plus recorded track status in Clipping at 1720×1080 and 3440×1440. | A real session recorded with OBS in Advanced output, tracks 1–6 (docs/obs.md step 6) |
 | M11 | Package builds (all libraries resolve, no file conflicts); a fresh home's first start creates the starter project and Get started opens | `sudo pacman -U` of the package (needs the owner's password) |
 | M12 | — | The 16R's multichannel USB connection |
+
+The guarded eight-hour private release soak is running with simulator events and a forced restart.
+Short release/debug runs passed log-lag, event-rate, restart and state-restore checks; the long run
+has no final result yet. Its render, audio and hardware paths are disabled so it cannot certify
+live frame timing or xruns.
 
 **Remaining risks (not open decisions):**
 - **YouTube API quota:** 100 text searches/day, accepted; mitigated by the cache/library.

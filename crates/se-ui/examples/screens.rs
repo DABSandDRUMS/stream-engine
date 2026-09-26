@@ -25,6 +25,14 @@ fn pump(h: &mut Harness<'_, App>, ms: u64) {
     }
 }
 
+fn click(h: &mut Harness<'_, App>, pos: egui::Pos2) {
+    h.input_mut().events.extend([
+        egui::Event::PointerMoved(pos),
+        egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::default() },
+        egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::default() },
+    ]);
+}
+
 fn main() {
     let (w, hgt) = arg("--size")
         .and_then(|s| {
@@ -85,6 +93,28 @@ fn main() {
                 pump(&mut h, 300);
             }
             shots += save(&mut h, &out, &name);
+            if page == Page::Recordings {
+                // The custom-drawn segmented control has no accesskit button nodes.
+                // Its position is fixed relative to the top-left, independent of viewport width.
+                for (x, suffix) in [(172.0, "streams"), (251.0, "clips")] {
+                    click(&mut h, egui::pos2(x, 190.0));
+                    pump(&mut h, 1200);
+                    shots += save(&mut h, &out, &format!("{name}-{suffix}"));
+                    if suffix == "streams" {
+                        let pick = h.state().m.q_list("sessions").iter().enumerate().find_map(|(index, session)| {
+                            let id = session.get_path("id").and_then(se_proto::Value::as_str)?;
+                            let summary = h.state().m.q(&format!("clips.session:{id}"))?;
+                            summary.get_path("recordings").and_then(se_proto::Value::as_list).filter(|r| !r.is_empty()).map(|_| index)
+                        });
+                        if let Some(index) = pick {
+                            // The list starts just below the tabs; each card and gap occupy ~100 px.
+                            click(&mut h, egui::pos2(200.0, 265.0 + index as f32 * 100.0));
+                            pump(&mut h, 1800);
+                            shots += save(&mut h, &out, &format!("{name}-streams-show"));
+                        }
+                    }
+                }
+            }
             if page == Page::Scenes && i == 0 {
                 // the layer panel with a layer picked, and the scene settings
                 let first = {

@@ -334,7 +334,7 @@ async fn run_work(sh: &Arc<Shared>, w: Work) {
                 transcribe::niced(nice, move || {
                     if let Ok(cfg) = index_cfg
                         && cfg.index.enabled
-                        && let Err(e) = index::ensure(&job::session_dir(&env, &s), &s, &cfg)
+                        && let Err(e) = index::ensure_with(&job::session_dir(&env, &s), &s, &cfg, &env.cfg, &env.data_dir)
                     {
                         index_hub.log("warn", TARGET, format!("show timeline for {s}: {e}; cutting from markers and events"));
                     }

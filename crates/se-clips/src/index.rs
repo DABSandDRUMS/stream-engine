@@ -1,7 +1,7 @@
 //! Offline, versioned show index. All timestamps in the output are seconds since the first
 //! recording's master-clock start; sessions without recordings use their first journal start.
 use crate::{
-    config::ClipsConfig,
+    config::{AudioConfig, ClipsConfig},
     ffmpeg, session,
     show::{self, FeaturesInfo, LaneInfo, LaneKind, Manifest, ManifestRecording, RecordingConfig, SCHEMA, ShowPaths},
     tracks, transcribe,
@@ -11,6 +11,7 @@ use se_proto::{Event, Origin, Value};
 use se_store::session::LogRec;
 use serde_json::{Value as Json, json};
 use std::{
+    collections::{HashSet, VecDeque},
     fs::{self, File, OpenOptions},
     io::{self, BufRead, BufReader, BufWriter, Read, Write},
     os::fd::AsRawFd,
@@ -85,7 +86,7 @@ fn start_time(dir: &Path) -> Result<(i64, i64, i64), String> {
                 let at = t0.saturating_add(period.saturating_mul(tick));
                 first = Some((at.min(i64::MAX as u64) as i64, wall_ns / 1_000_000));
             }
-            LogRec::Ev { event } => {
+            LogRec::Ev { event } | LogRec::In { input: se_core::Input::Event { event }, .. } => {
                 first_event.get_or_insert(event.ts as i64);
                 last = last.max(event.ts as i64);
             }
@@ -174,8 +175,45 @@ fn journal_lanes(dir: &Path, paths: &ShowPaths, t0: i64, end: i64, chat_delay_ms
     let mut song: Option<(i64, Json)> = None;
     let mut scene: Option<(i64, Json)> = None;
     let mut mode: Option<(i64, Json)> = None;
+    // Core inputs and the journal subscriber may log the same event independently.
+    // Remember a bounded window of event identifiers to avoid duplicate lane entries.
+    const RECENT: usize = 16_384;
+    let mut ids = HashSet::new();
+    let mut order = VecDeque::new();
     events(dir, |rec| {
-        let LogRec::Ev { event: e } = rec else { return Ok(()) };
+        let e = match rec {
+            LogRec::Start { restore: Some(state), .. } => {
+                if scene.is_none() && !state.program.is_empty() {
+                    scene = Some((t0, json!({"label": state.program})));
+                }
+                if mode.is_none() && !state.mode.is_empty() {
+                    mode = Some((t0, json!({"label": state.mode})));
+                }
+                return Ok(());
+            }
+            LogRec::In { input: se_core::Input::Publish { address, value }, .. } => {
+                if let Some(label) = value.as_str().filter(|s| !s.is_empty()) {
+                    if address == "show.scene.program" && scene.is_none() {
+                        scene = Some((t0, json!({"label": label})));
+                    }
+                    if address == "show.mode" && mode.is_none() {
+                        mode = Some((t0, json!({"label": label})));
+                    }
+                }
+                return Ok(());
+            }
+            LogRec::In { input: se_core::Input::Event { event }, .. } | LogRec::Ev { event } => event,
+            _ => return Ok(()),
+        };
+        if !ids.insert(e.id) {
+            return Ok(());
+        }
+        order.push_back(e.id);
+        if order.len() > RECENT
+            && let Some(expired) = order.pop_front()
+        {
+            ids.remove(&expired);
+        }
         let ts = e.ts as i64;
         let p = &e.payload;
         match e.ty.as_str() {
@@ -436,27 +474,56 @@ fn snapshot_project(root: &Path, target: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn transcript(paths: &ShowPaths, recordings: &[(session::Recording, PathBuf, f64)], t0: i64, cfg: &ClipsConfig, data_dir: &Path) -> Result<bool, String> {
+// Prefer an isolated microphone, then the band's mixed mic, then the program mix.
+// A pure music stream cannot provide useful spoken-show context.
+fn speech_stream(rec: &session::Recording, streams: usize, cfg: &AudioConfig) -> Option<(usize, bool)> {
+    let preferred = tracks::plan(streams, &rec.tracks, cfg).transcribe;
+    let mut chosen: Option<((u8, bool), usize)> = None;
+    for stream in 0..streams {
+        let roles = if let Some(track) = rec.tracks.iter().find(|t| t.index == stream) {
+            tracks::roles(track, cfg)
+        } else if let Some(name) = cfg.tracks.get(stream) {
+            tracks::roles(&session::TrackInfo { index: stream, name: name.clone(), ..Default::default() }, cfg)
+        } else {
+            Default::default()
+        };
+        let speech = roles.contains("mic") || roles.iter().any(|role| cfg.transcribe.contains(role) && role != "band");
+        let rank = if speech && !roles.contains("music") && !roles.contains("program") && !roles.contains("band") {
+            0
+        } else if speech {
+            1
+        } else if roles.contains("band") {
+            2
+        } else if roles.contains("program") {
+            3
+        } else if roles.is_empty() {
+            4
+        } else {
+            continue;
+        };
+        let key = (rank, preferred != Some(stream));
+        if chosen.as_ref().is_none_or(|(best, _)| key < *best) {
+            chosen = Some((key, stream));
+        }
+    }
+    chosen.map(|((rank, _), stream)| (stream, rank != 0))
+}
+
+fn transcript(
+    paths: &ShowPaths,
+    recordings: &[(session::Recording, PathBuf, f64)],
+    t0: i64,
+    cfg: &ClipsConfig,
+    data_dir: &Path,
+) -> Result<(bool, bool), String> {
     let mut whisper = None;
     let mut wrote = false;
+    let mut mixed = false;
     atomic(&paths.transcript(), |out| {
         for (rec, path, duration) in recordings {
             let probe = ffmpeg::probe(path)?;
-            let plan = tracks::plan(probe.audio_streams, &rec.tracks, &cfg.audio);
-            let Some(stream) = plan.transcribe else { continue };
-            // A missing OBS layout or a mixed program/music stream is not a speech track.
-            // Never transcribe the musical performance as if it were dialogue.
-            let track = rec
-                .tracks
-                .iter()
-                .find(|t| t.index == stream)
-                .cloned()
-                .or_else(|| cfg.audio.tracks.get(stream).map(|name| session::TrackInfo { index: stream, name: name.clone(), ..Default::default() }));
-            let Some(track) = track else { continue };
-            let roles = tracks::roles(&track, &cfg.audio);
-            if roles.iter().any(|r| ["music", "program", "band", "drums"].contains(&r.as_str())) || !roles.iter().any(|r| cfg.audio.transcribe.contains(r)) {
-                continue;
-            }
+            let Some((stream, risky)) = speech_stream(rec, probe.audio_streams, &cfg.audio) else { continue };
+            mixed |= risky;
             if whisper.is_none() {
                 let model = transcribe::ensure_model(data_dir, &cfg.whisper.model, |_| {})?;
                 whisper = Some(transcribe::Transcriber::load(&model, &cfg.whisper)?);
@@ -490,7 +557,7 @@ fn transcript(paths: &ShowPaths, recordings: &[(session::Recording, PathBuf, f64
         }
         Ok(())
     })?;
-    Ok(wrote)
+    Ok((wrote, mixed))
 }
 fn write_sentence(out: &mut impl Write, words: &[transcribe::Word]) -> Result<(), String> {
     line(
@@ -512,6 +579,12 @@ pub fn build(session_dir: &Path, session: &str, cfg: &RecordingConfig) -> Result
 pub fn ensure(session_dir: &Path, session: &str, cfg: &RecordingConfig) -> Result<Manifest, String> {
     let project = project_for(session_dir);
     serialized_build(session_dir, session, cfg, &clips_for(&project), &project, &se_store::data_dir(), 0, true)
+}
+
+/// Index using the caller's live clip settings and model cache (for custom `--data-dir`).
+pub fn ensure_with(session_dir: &Path, session: &str, cfg: &RecordingConfig, clips: &ClipsConfig, data_dir: &Path) -> Result<Manifest, String> {
+    let project = project_for(session_dir);
+    serialized_build(session_dir, session, cfg, clips, &project, data_dir, 0, true)
 }
 
 fn project_for(session_dir: &Path) -> PathBuf {
@@ -687,11 +760,17 @@ fn build_with(
     }
     if cfg.index.transcript && !cfg.index.skip.iter().any(|s| s == "transcript") && !recorded.is_empty() {
         match transcript(&paths, &recorded, t0, clips, data_dir) {
-            Ok(true) => {
-                manifest.transcript = Some("transcript.jsonl".into());
-                manifest.analyzers.insert("transcript".into(), VERSION);
+            Ok((wrote, mixed)) => {
+                if wrote {
+                    manifest.transcript = Some("transcript.jsonl".into());
+                    manifest.analyzers.insert("transcript".into(), VERSION);
+                } else {
+                    manifest.notes.push("No spoken audio was found on the speech track".into());
+                }
+                if mixed {
+                    manifest.notes.push("Speech transcript may include music/lyrics (band or mixed audio track)".into());
+                }
             }
-            Ok(false) => manifest.notes.push("No spoken audio was found on the speech track".into()),
             Err(e) => manifest.notes.push(e),
         }
     }
@@ -970,7 +1049,14 @@ mod tests {
         let mut event = |ty: &str, t: u64, payload: Value| {
             let mut e = Event::new(ty, Origin::System, payload);
             e.ts = t;
-            writer.write(&LogRec::Ev { event: e }).unwrap();
+            match ty {
+                "queue.song_started" | "twitch.chat" => {
+                    writer.write(&LogRec::In { tick: 0, input: se_core::Input::Event { event: e.clone() } }).unwrap();
+                    writer.write(&LogRec::Ev { event: e }).unwrap();
+                }
+                "queue.song_ended" => writer.write(&LogRec::In { tick: 0, input: se_core::Input::Event { event: e } }).unwrap(),
+                _ => writer.write(&LogRec::Ev { event: e }).unwrap(),
+            }
         };
         event("mode.changed", 2_000_000_000, Value::map().with("to", "live"));
         event(
@@ -991,6 +1077,7 @@ mod tests {
         assert_eq!(m.duration, 7.0);
         let paths = show::paths_for(&dir);
         let songs = bounded_jsonl(&paths.lane("songs"), 0.0, 10.0, 30);
+        assert_eq!(songs.len(), 1, "input event and bus event must not double the song");
         assert_eq!(songs[0]["t0"], 2.0);
         assert_eq!(songs[0]["t1"], 7.0);
         assert_eq!(songs[0]["user"], "viewer");
@@ -999,6 +1086,7 @@ mod tests {
         assert_eq!(bounded_jsonl(&paths.lane("songs"), 3.0, 4.0, 30).len(), 1);
         assert!(bounded_jsonl(&paths.lane("songs"), 7.0, 8.0, 30).is_empty());
         let chat = bounded_jsonl(&paths.lane("chat"), 0.0, 10.0, 30);
+        assert_eq!(chat.len(), 1, "chat duplicated across canonical input and bus event");
         assert_eq!(chat[0]["t"], 2.5); // received at t=4, 1.5-second Twitch delay
         let csv = fs::read_to_string(paths.features()).unwrap();
         assert!(csv.lines().any(|row| row.starts_with("3,0.70000,0.30000,")), "{csv}");
@@ -1120,6 +1208,71 @@ mod tests {
         let songs = bounded_jsonl(&show::paths_for(&dir).lane("songs"), 0.0, 3.0, 10);
         assert_eq!(songs[0]["t0"], 0.0);
         assert_eq!(songs[0]["t1"], 2.0);
+    }
+
+    #[test]
+    fn initial_scene_and_mode_cover_time_before_first_switch() {
+        let root = tempfile::tempdir().unwrap();
+        let mut writer = SessionWriter::open(root.path(), "restored").unwrap();
+        let state = se_core::RuntimeState { program: "intro".into(), mode: "preshow".into(), ..Default::default() };
+        writer.write(&LogRec::Start { t0: 1_000_000_000, period: 4_166_666, tick: 0, wall_ns: 1_700_000_000_000_000_000, restore: Some(state) }).unwrap();
+        for (ty, ts, payload) in [
+            ("scene.changed", 3_000_000_000, Value::map().with("scene", "wide")),
+            ("mode.changed", 4_000_000_000, Value::map().with("to", "live")),
+            ("session.marker", 5_000_000_000, Value::map().with("label", "solo")),
+        ] {
+            let mut e = Event::new(ty, Origin::System, payload);
+            e.ts = ts;
+            writer.write(&LogRec::Ev { event: e }).unwrap();
+        }
+        writer.close().unwrap();
+        let dir = root.path().join("restored");
+        build(&dir, "restored", &RecordingConfig::default()).unwrap();
+        let paths = show::paths_for(&dir);
+        let scenes = bounded_jsonl(&paths.lane("scenes"), 0.0, 4.0, 10);
+        let modes = bounded_jsonl(&paths.lane("modes"), 0.0, 4.0, 10);
+        assert_eq!((scenes[0]["label"].as_str(), scenes[0]["t0"].as_f64(), scenes[0]["t1"].as_f64()), (Some("intro"), Some(0.0), Some(2.0)));
+        assert_eq!((modes[0]["label"].as_str(), modes[0]["t0"].as_f64(), modes[0]["t1"].as_f64()), (Some("preshow"), Some(0.0), Some(3.0)));
+        assert_eq!(scenes[1]["label"], "wide");
+        assert_eq!(modes[1]["label"], "live");
+
+        // Older starts without a restore can still learn state from the first state publish.
+        let mut writer = SessionWriter::open(root.path(), "published").unwrap();
+        writer.write(&LogRec::Start { t0: 1_000_000_000, period: 4_166_666, tick: 0, wall_ns: 1_700_000_000_000_000_000, restore: None }).unwrap();
+        for (address, value) in [("show.scene.program", "stage"), ("show.mode", "live")] {
+            writer.write(&LogRec::In { tick: 0, input: se_core::Input::Publish { address: address.into(), value: Value::from(value) } }).unwrap();
+        }
+        let mut end = Event::new("session.marker", Origin::System, Value::map());
+        end.ts = 4_000_000_000;
+        writer.write(&LogRec::Ev { event: end }).unwrap();
+        writer.close().unwrap();
+        let dir = root.path().join("published");
+        build(&dir, "published", &RecordingConfig::default()).unwrap();
+        let paths = show::paths_for(&dir);
+        assert_eq!(bounded_jsonl(&paths.lane("scenes"), 0.0, 3.0, 10)[0]["label"], "stage");
+        assert_eq!(bounded_jsonl(&paths.lane("modes"), 0.0, 3.0, 10)[0]["label"], "live");
+    }
+
+    #[test]
+    fn speech_track_prefers_clean_mic_then_band_over_program_or_music() {
+        let tracks = |names: &[&str]| {
+            names.iter().enumerate().map(|(index, name)| session::TrackInfo { index, name: (*name).into(), ..Default::default() }).collect::<Vec<_>>()
+        };
+        let mut rec = session::Recording {
+            canvas: "wide".into(),
+            path: PathBuf::new(),
+            start_ns: None,
+            end_ns: None,
+            tracks: tracks(&["se-program", "se-band", "se-music"]),
+        };
+        let cfg = ClipsConfig::default();
+        assert_eq!(speech_stream(&rec, 3, &cfg.audio), Some((1, true)));
+        rec.tracks.push(session::TrackInfo { index: 3, name: "se-mic".into(), ..Default::default() });
+        assert_eq!(speech_stream(&rec, 4, &cfg.audio), Some((3, false)));
+        rec.tracks = tracks(&["se-program"]);
+        assert_eq!(speech_stream(&rec, 1, &cfg.audio), Some((0, true)));
+        rec.tracks = tracks(&["se-music"]);
+        assert_eq!(speech_stream(&rec, 1, &cfg.audio), None);
     }
 
     #[test]

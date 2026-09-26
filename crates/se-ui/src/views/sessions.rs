@@ -506,7 +506,7 @@ fn recording(app: &mut App, ui: &mut Ui, t: &Theme, st: &mut State) {
                 if active { Kind::Secondary } else { Kind::Primary },
                 Size::Medium,
                 0.0,
-                app.m.connected,
+                app.m.connected && (active || app.m.b("obs.link")),
             )
             .clicked()
             {

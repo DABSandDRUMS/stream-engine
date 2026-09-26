@@ -15,8 +15,10 @@ recording remains available manually. A changed destination applies to the next 
 The screen also shows whether OBS is recording, the real file and track layout, and free space.
 
 Each recorded show has video files and `data/` beside them. The session journal is copied into
-`data/session/` and a snapshot of the project's text settings into `data/project/` (no secrets or
-assets). `data/show.json` is the versioned time base, `data/lanes/*.jsonl` are the songs, scenes,
+`data/session/` at sign-off, and a start-time snapshot of project text settings into `data/project/`.
+Credential-named settings are excluded or redacted; keep secrets in the OS keyring, not project
+text files. Assets and the runtime DB are not copied. `data/show.json` is the versioned time
+base, `data/lanes/*.jsonl` are the songs, scenes,
 lights, chat, markers and other show context, `data/features.csv` holds sampled values, and
 `data/transcript.jsonl` holds timed speech. All `t` fields mean seconds since the first video
 file began; later recording files have offsets in `show.json`. The index can be rebuilt from
@@ -75,40 +77,46 @@ markers give their window relative to the press (`start_ago`, `peak_ago`, `end_a
 
 ## After the show: the clip job
 
-Ending the show (`mode.set offline`) closes the session; the job is queued automatically
-(`[clips] auto_process`). Run it by hand with `streamctl do "clips.process session=<id>"` (no
-session = the last closed one). One job runs at a time, niced, and resumes after a restart.
+Going off air closes the session after OBS has finished its file. Indexing the show and making
+clips run in the background (`[clips] auto_process`); long shows can take time to transcribe.
+Run the clip job again with `streamctl do "clips.process session=<id>"` (no session = latest
+closed one). One clip job runs at a time, niced, and resumes after a restart.
 
-1. **Markers → windows.** Overlapping marker windows merge (their scores add up).
-2. **Recording time.** Windows map to the OBS recording through the recording's master-clock
-   start (`recordings[].start_ns` in `sessions/<id>/meta.toml`, written by the OBS adapter;
-   fallback: the `clock.obs_record` mapping).
-3. **Transcript.** The mic track (see *Audio tracks*) around each window is transcribed with
-   Whisper (`small.en`, CPU, word timestamps). The model downloads once to
-   `~/.local/share/stream-engine/models/whisper/` and is checked by SHA-256.
-4. **In/out and ranking.** In/out snap to sentence boundaries near the window (never
-   mid-word, 8–60 s). Score = marker score + speech density at the peak + excitement ("let's
-   go", "!", laughter) − length penalty + clean-edge bonus. An optional external ranker can
-   override (below).
-5. **Cut.** Wide (1920×1080) and tall (1080×1920) MP4s with NVENC (`h264_nvenc`; libx264 when
-   NVENC can't open a session because OBS holds them), captions burned in (ASS, spoken word
-   highlighted), loudness-normalized to −14 LUFS, music dropped. Tall comes from the tall canvas
-   recording when one covers the clip, else a 9:16 crop of the wide one
-   (`tall_crop_center`).
-6. **Queue.** Files land in `sessions/<id>/clips/` (`p<peak>_wide.mp4`, `_tall.mp4`, `.jpg`
-   thumbnails, `.ass` captions) and rows in the `clips` table. Progress: `clips.progress`
-   events and `clips.job.*` state; `clips.done {timings}` / `clips.failed` at the end.
+1. **Candidates.** Existing manual/hype markers make windows. Each requested song also makes
+   a candidate, plus speech-rich windows from the indexed full-show transcript when present.
+   The job caps output at `max_clips`, so it need not render a clip for every song.
+2. **Recording time.** Each window maps through its OBS file's master-clock start in
+   `sessions/<id>/meta.toml`; a split file has its own offset. Wide and vertical recordings
+   may cover different spans.
+3. **Transcript.** The indexer transcribes the available speech track across the show with
+   Whisper (`small.en` by default, CPU, timed words); the job reuses indexed words and only
+   transcribes a candidate window when needed. A mixed band/program track can also be used as
+   a best-effort source, flagged because music or lyrics may be mistaken for speech. The model
+   is downloaded once and checked by SHA-256.
+4. **In/out and ranking.** Talk clips favor clean spoken boundaries. Requested-song clips
+   retain musical passages and may align to recorded beats/downbeats; if no reliable grid is
+   available, they use a safe time window. Deterministic hype/song/speech scores have an
+   automatic omp pass when available (or an explicit `rank_command`); model failure does not
+   discard candidates.
+5. **Cut.** Wide (1920×1080) and tall (1080×1920) MP4s with NVENC (libx264 fallback) and
+   loudness normalization. Talk cuts may drop the isolated music track and burn spoken
+   captions. Requested-song cuts keep both music and performance audio, never duplicate the
+   combined program track, and skip unreliable lyric captions. Tall uses a tall recording when
+   one covers the cut, else a 9:16 crop of wide.
+6. **Review.** Clips, thumbnails and captions land in the show's `clips/` folder (legacy shows
+   still use `sessions/<id>/clips/`); rows in the `clips` table feed the UI. Progress is exposed
+   through `clips.progress`, `clips.job.*`, `clips.done` and `clips.failed`.
 
 ### Audio tracks (owner setup)
 
-Clips can only leave music out when OBS records it on its own track. In OBS: **Settings →
-Output → Output Mode: Advanced → Recording → Audio Track** tick one track per engine bus, and
-name each OBS audio source after its engine node (`se-mic`/`se-band`, `se-music`, …); the OBS
-adapter reports each track's sources and PipeWire nodes, and `[clips.audio.roles]` globs
-classify them. Tracks carrying a role in `drop` (default `music`, `program`) stay out of the
-clip; the rest are mixed. With a single mixed track the clip keeps its audio and is flagged
-"music may be included" (`[clips.audio] mixed = "mute"` silences it instead). Without any
-track info, `[clips.audio] tracks = ["mic", "music", "band"]` names the streams by index.
+In OBS: **Settings → Output → Output Mode: Advanced → Recording → Audio Track**, tick separate
+tracks for the available engine buses. `obs.setup` routes `se-program` to track 1 and
+`se-band`, `se-music`, `se-sfx`, `se-tts`, `se-game` to tracks 2–6. The app reports the actual
+tracks it sees; it does not add a mic-only or per-drum track unless the audio system supplies
+one. `[clips.audio.roles]` identifies roles from OBS track names, source names and PipeWire
+devices. The default `drop = ["music", "program"]` applies to talk cuts; requested-song cuts
+keep music and the live performance without duplicating program. When everything is mixed
+into a single track, separate removal is impossible and the UI says so.
 
 ## Review
 
