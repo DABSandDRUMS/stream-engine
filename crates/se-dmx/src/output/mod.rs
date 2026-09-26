@@ -88,6 +88,9 @@ pub struct Shared {
     pub stop: AtomicBool,
     pub scheduling: Mutex<String>,
     pub frames: AtomicU64,
+    /// Heap allocations seen on the output thread inside a frame (counting allocator builds only;
+    /// config reloads and reconnects are excluded).
+    pub alloc_violations: AtomicU64,
     /// Cleared when the output thread exits (normally or by panic).
     pub alive: AtomicBool,
     /// sACN component identifier (persistent per installation).
@@ -567,6 +570,7 @@ pub fn spawn(
         let mut seq = 0u64;
         let mut stats = Stats::default();
         let mut held: Option<Arc<se_hub::Snapshot>> = None;
+        let started = mono_ns();
         loop {
             sleep_until(deadline);
             let woke = mono_ns();
@@ -592,6 +596,7 @@ pub fn spawn(
                 drop(cur);
             }
             exclude |= outs.connect(woke);
+            let scope = se_alloc::Scope::begin();
             let snap = hub.snapshot.load_full();
             engine.render(&snap, woke);
             // hand the previous snapshot to the control task instead of possibly freeing it here
@@ -647,6 +652,16 @@ pub fn spawn(
                 m.seq = seq;
             }
             monitor_in.publish();
+            let allocs = scope.allocs();
+            // the first second warms up (socket buffers, first status); after that, none
+            let warm = woke.saturating_sub(started) < 1_000_000_000;
+            if allocs > 0 && !exclude && !warm && se_alloc::installed() {
+                let n = shared.alloc_violations.fetch_add(allocs, Ordering::Relaxed);
+                if n == 0 && cfg!(debug_assertions) {
+                    let _p = se_alloc::Pause::new();
+                    tracing::warn!(target: "dmx", "output frame {frames} allocated {allocs} times");
+                }
+            }
             if shared.rdm_request.swap(false, Ordering::AcqRel) {
                 shared.rdm.lock().running = true;
                 let rep = outs.rdm();

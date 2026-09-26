@@ -95,7 +95,7 @@ files, so nothing needs restarting.
   is not running.
 - **Keybinds and window rules** (`--hypr`: `~/.config/hypr/stream-engine.lua`, required from
   `bindings.lua`): SUPER+CTRL+ALT + S (open UI), RETURN (Take), ESCAPE (Panic), C (Clean),
-  B (BRB; replaces Omarchy's "Show battery remaining"). Windows: `stream-engine` on DP-1,
+  B (BRB; replaces Omarchy's "Show battery remaining"), N / P (next / previous scene to Up next). Windows: `stream-engine` on DP-1,
   `stream-engine.<panel>` on DP-2, `stream-engine.program` fullscreen on the TV (DP-2 while the
   TV is absent) with `idle_inhibit = "always"`; all fully opaque. Edit the monitor names at the
   top of the file for other setups.

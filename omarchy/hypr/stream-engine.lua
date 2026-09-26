@@ -32,12 +32,14 @@ o.bind("SUPER + CTRL + ALT + RETURN", "Stream: Take", streamctl("take", "Take"))
 o.bind("SUPER + CTRL + ALT + ESCAPE", "Stream: Panic", streamctl("panic", "Panic"))
 o.bind("SUPER + CTRL + ALT + C", "Stream: Clean", streamctl("clean", "Clean"))
 o.bind("SUPER + CTRL + ALT + B", "Stream: BRB", streamctl("brb", "BRB"))
+o.bind("SUPER + CTRL + ALT + N", "Stream: Next scene to Up next", streamctl("next", "Next scene"))
+o.bind("SUPER + CTRL + ALT + P", "Stream: Previous scene to Up next", streamctl("prev", "Previous scene"))
 
 -- Every stream-engine window shows video: keep it fully opaque (like Omarchy's media windows).
 o.window("^stream-engine(\\..+)?$", { tag = "-default-opacity" })
 o.window("^stream-engine(\\..+)?$", { opacity = "1 1" })
 
--- Main window (Show mode) on DP-1.
+-- Main window on DP-1.
 o.window("^stream-engine$", { monitor = main_monitor })
 
 -- Popped-out panels and the multiview (`stream-engine.<panel>`) on DP-2. The confidence window

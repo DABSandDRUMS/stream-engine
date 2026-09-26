@@ -426,7 +426,7 @@ Chat may fire cue lists and flashes (chat priority, capped) but never the progra
 `lights.master`, `lights.blackout`, `lights.group.<g>.master`,
 `lights.cuelist.<cl>.{cue, next, playing, master}`, `lights.effect.<e>.{active, rate, size}`,
 `lights.programmer.{selection, highlight, active}`,
-`lights.output.{fps, jitter_ms, frames, limited}`, `health.dmx`.
+`lights.output.{fps, jitter_ms, frames, limited, alloc_violations}` (heap allocations on the output thread after its first second; debug builds count them, 0 is expected), `health.dmx`.
 
 ### Queries (`streamctl query <name>`)
 - `lights.rig` — fixtures, heads, groups, profiles, outputs (status `ok|warn|fail|off` + detail), patch errors.

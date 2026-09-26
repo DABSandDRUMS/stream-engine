@@ -239,7 +239,8 @@ pub async fn spawn(ctx: EngineCtx) -> anyhow::Result<RenderHandle> {
     }
     loader_tx.send(LoaderCmd::Plan(plan.clone()))?;
 
-    let opts = GpuOptions { adapter: plan.settings.adapter.clone(), debug: false };
+    // `--dev`: Vulkan validation + debug labels (the validation layer must be installed)
+    let opts = GpuOptions { adapter: plan.settings.adapter.clone(), debug: ctx.dev };
     let thread = {
         let (hub, stats, frames, loader_tx, plan) = (hub.clone(), stats.clone(), frames.clone(), loader_tx.clone(), plan.clone());
         std::thread::Builder::new().name("se-render".into()).spawn(move || {

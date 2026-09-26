@@ -812,6 +812,7 @@ impl Ctl {
         self.publish("lights.output.limited", Value::Int(limited as i64));
         if self.second.is_multiple_of(10) {
             self.publish("lights.output.frames", Value::Int(self.shared.frames.load(Ordering::Relaxed) as i64));
+            self.publish("lights.output.alloc_violations", Value::Int(self.shared.alloc_violations.load(Ordering::Relaxed) as i64));
         }
         // RDM discovery once the USB output is up (if enabled)
         if !self.rdm_started && self.show.rig.rdm_on_start && status.iter().any(|s| s.kind == "enttec_pro" && s.state == "ok") {
@@ -925,6 +926,7 @@ pub async fn run(ctx: EngineCtx) -> anyhow::Result<Lights> {
         stop: Default::default(),
         scheduling: parking_lot::Mutex::new(String::new()),
         frames: Default::default(),
+        alloc_violations: Default::default(),
         alive: std::sync::atomic::AtomicBool::new(true),
         cid: cid(&ctx.db),
         retired: parking_lot::Mutex::new(retired),

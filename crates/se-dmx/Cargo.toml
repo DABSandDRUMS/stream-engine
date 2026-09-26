@@ -24,7 +24,7 @@ libc.workspace = true
 triple_buffer.workspace = true
 rtrb.workspace = true
 serialport = { version = "4.10", default-features = false }
+se-alloc.workspace = true
 
 [dev-dependencies]
-se-alloc.workspace = true
 tempfile.workspace = true

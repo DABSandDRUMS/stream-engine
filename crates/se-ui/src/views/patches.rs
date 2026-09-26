@@ -215,12 +215,8 @@ fn new_form(app: &mut App, ui: &mut egui::Ui, form: &mut NewForm) {
             let taken = app.m.q_list("patches").iter().any(|p| p.get_path("id").and_then(Value::as_str) == Some(id.as_str()));
             ui.horizontal(|ui| {
                 if widgets::button_ex(ui, &t, Some(icon::CHECK), "Create", Kind::Primary, Size::Medium, 0.0, !id.is_empty() && !taken).clicked() {
-                    action(
-                        app,
-                        "patch.new",
-                        Value::map().with("id", id.clone()).with("kind", kind).with("template", form.template.clone()).with("open", false),
-                    );
-                    app.m.toast(format!("Making \"{}\"…", form.name.trim()), false);
+                    action(app, "patch.new", Value::map().with("id", id.clone()).with("kind", kind).with("template", form.template.clone()).with("open", true));
+                    app.m.toast(format!("Made \"{}\". Its files open in your editor.", form.name.trim()), false);
                     form.name.clear();
                     form.open = false;
                     app.m.refresh_soon();
