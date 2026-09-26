@@ -93,7 +93,7 @@ actor when they come from chat):
 
 State: `queue.{open,paused,playing,length,pending,url,lookup}`, `queue.now.{title,user,id,entry,channel,duration}`,
 `queue.next.{title,user}`, `queue.quota.{used,remaining}`, `song.{state,duration,media,player}`,
-`song.volume` (settable, 0–1). Signal: `song.position` (s, 30 Hz, extrapolated between player
+`song.volume` (settable, 0–1). Signals: `queue.position` (0 … 1 through the current request, e.g. for a progress bar) and `song.position` (s, 30 Hz, extrapolated between player
 reports, frozen while paused/buffering/ads). Events: `queue.song_requested`,
 `queue.song_started` (first real playback), `queue.song_ended {reason}`, `queue.song_error {code}`.
 Queries: `queue` (now/upcoming/pending/history/quota), `queue.policy`, `queue.library {q, limit}`,

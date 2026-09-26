@@ -1,7 +1,7 @@
 //! The song-request actor: owns the queue, policy, player controller and lookups, and talks to
 //! the hub (actions `queue.*`, `youtube.*`, `relay.*`; queries `queue`, `queue.*`,
 //! `song.player`, `youtube.status`, `relay.status`; state `queue.*`, `song.*`; signal
-//! `song.position`; events `queue.song_requested|song_started|song_ended|song_error`).
+//! `song.position`, `queue.position` (0 … 1 through the current request); events `queue.song_requested|song_started|song_ended|song_error`).
 
 use crate::lookup::{Failed, Found, Lookup};
 use crate::player::{Outcome, Player};
@@ -601,6 +601,9 @@ impl Songs {
         if pos != self.last_pos {
             self.last_pos = pos;
             self.hub.signal("song.position", pos);
+            let d = self.player.duration();
+            let dur = if d > 0.0 { d as f32 } else { self.queue.current.as_ref().map(|c| c.duration_s as f32).unwrap_or(0.0) };
+            self.hub.signal("queue.position", queue_progress(pos, dur));
         }
     }
 
@@ -1433,4 +1436,9 @@ pub fn player_error(code: i64) -> &'static str {
         101 | 150 => "embedding disabled by the owner",
         _ => "player error",
     }
+}
+
+/// `queue.position`: how far the current request has played, 0 … 1 (0 without a known length).
+fn queue_progress(pos_s: f32, dur_s: f32) -> f32 {
+    if dur_s > 0.0 && pos_s.is_finite() { (pos_s / dur_s).clamp(0.0, 1.0) } else { 0.0 }
 }
