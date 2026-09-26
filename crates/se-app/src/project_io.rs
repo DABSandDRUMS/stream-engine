@@ -272,9 +272,9 @@ pub fn write(ctx: &Ctx, args: &Value) -> Result<Option<String>> {
 }
 
 pub fn register_queries(ctx: &Ctx) {
+    sources::start(ctx);
     let root = ctx.project.root().to_path_buf();
     ctx.hub.register_query(
-    sources::start(ctx);
         "project.read",
         Arc::new(move |_, args| {
             let root = root.clone();
