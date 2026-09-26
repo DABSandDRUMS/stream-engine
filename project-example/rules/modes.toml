@@ -19,10 +19,10 @@ when = "mode.enter.ad_break"
 do = ["set patch.ad_break.return_scene {scene}", "scene.cut ad_break"]
 
 # `duration` is the ad length in seconds; a second ad during the break extends the countdown.
+# (The countdown card is only on screen in the ad break scene.)
 [[rule]]
 name = "ad break countdown"
 when = "twitch.ad_break"
-if = "mode == 'ad_break'"
 do = ["patch.ad_break.trigger seconds={duration}"]
 
 # Back to the remembered scene (`duo` until one was remembered); back to brb, the brb rule
