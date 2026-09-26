@@ -2,30 +2,21 @@
 //! one stream run: it closes when the show returns to `offline`).
 
 use crate::daemon::{Ctx, SessionMsg};
-use se_hub::Bus;
+use se_proto::Event;
 use se_proto::{Op, Value};
 use se_store::session::{LogRec, new_session_id};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-pub fn start(ctx: &Ctx) {
-    // events + rotation
+pub fn start(ctx: &Ctx, mut events: tokio::sync::mpsc::UnboundedReceiver<Event>) {
+    // Events + rotation use a dedicated lossless channel. The public broadcast bus drops
+    // messages under load; logging its lag warning into that same bus amplifies the overload.
     {
         let ctx = ctx.clone();
         tokio::spawn(async move {
-            let mut bus = ctx.hub.subscribe();
             let mode_generation = Arc::new(AtomicU64::new(0));
-            loop {
-                let b = match bus.recv().await {
-                    Ok(b) => b,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!("session log lagged {n} bus messages");
-                        continue;
-                    }
-                    Err(_) => break,
-                };
-                let Bus::Event(e) = &*b else { continue };
+            while let Some(e) = events.recv().await {
                 let _ = ctx.log_tx.send(SessionMsg::Rec(LogRec::Ev { event: e.clone() }));
                 if e.ty == "mode.changed" {
                     let generation = mode_generation.fetch_add(1, Ordering::Relaxed) + 1;

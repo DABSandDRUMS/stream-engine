@@ -91,6 +91,8 @@ pub fn run(opts: DaemonOpts) -> Result<()> {
     // session writer
     let (log_tx, log_rx) = crossbeam_channel::unbounded::<SessionMsg>();
     let start = LogRec::Start { t0, period, tick: 0, wall_ns: se_clock::wall_now_ns() as i64, restore: restore.clone() };
+    // Register before the core starts: even its first events belong in the session journal.
+    let journal_events = hub.subscribe_events();
     {
         let (root, id) = (sessions_root.clone(), session_id.clone());
         std::thread::Builder::new().name("se-session".into()).spawn(move || session_thread(root, id, start, log_rx))?;
@@ -167,7 +169,7 @@ pub fn run(opts: DaemonOpts) -> Result<()> {
         config_tx: Arc::new(config_tx),
         engine,
     };
-    let res = rt.block_on(async_main(ctx));
+    let res = rt.block_on(async_main(ctx, journal_events));
     hub.shutdown();
     let _ = log_tx.send(SessionMsg::Close);
     std::thread::sleep(Duration::from_millis(200));
@@ -251,7 +253,7 @@ fn session_thread(root: PathBuf, id: String, start: LogRec, rx: crossbeam_channe
     }
 }
 
-async fn async_main(ctx: Ctx) -> Result<()> {
+async fn async_main(ctx: Ctx, journal_events: tokio::sync::mpsc::UnboundedReceiver<Event>) -> Result<()> {
     let hub = ctx.hub.clone();
 
     // --- API --------------------------------------------------------------------------
@@ -338,7 +340,7 @@ async fn async_main(ctx: Ctx) -> Result<()> {
     }
 
     // --- session: events, signals, markers, rotation -------------------------------------
-    crate::session_tasks::start(&ctx);
+    crate::session_tasks::start(&ctx, journal_events);
 
     // --- runtime persistence + audit ------------------------------------------------------
     {

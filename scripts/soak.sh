@@ -29,7 +29,8 @@
 # Options: --duration D (8h)  --interval D (60s)  --rate N events/s (5)  --kill-at D|off (half
 #   the run)  --port N (--start http port, osc = N+1; default random)  --keep (keep the work dir)
 #   --warmup D (min(10m, duration/10))  --max-rss-slope MB/h (10)  --max-mem-factor F (1.5)
-#   --max-dropped N (0)  --max-restart S (3)  --render  --project DIR  --socket PATH
+#   --max-dropped N (0)  --max-restart S (3)  --max-log-mb N (128, private engine only)
+#   --render  --project DIR  --socket PATH
 #   Durations: 90, 90s, 15m, 8h. BIN_DIR overrides the binaries (default target/release, else
 #   target/debug; streamctl from PATH if not built there).
 #
@@ -40,11 +41,12 @@
 #   - the engine dies or restarts outside the planned kill, or a simulator command is refused
 #   - the restored state differs from the state before the kill, or the engine takes longer than
 #     --max-restart seconds from kill -9 to ready (PLAN §17.3: output back within ~3 s)
+#   - a private engine's log exceeds --max-log-mb, or a bus consumer reports missed messages
 # Exit 2 = bad usage or the engine could not be started/reached.
 set -euo pipefail
 
 duration=8h interval=60 rate=5 socket="" start=0 project="" port="" keep=0 kill_at="" warmup=""
-max_slope=10 max_factor=1.5 max_dropped=0 max_restart=3 render=0 allow_service=0
+max_slope=10 max_factor=1.5 max_dropped=0 max_restart=3 max_log_mb=128 render=0 allow_service=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --duration) duration="$2"; shift 2 ;;
@@ -61,6 +63,7 @@ while [[ $# -gt 0 ]]; do
     --max-rss-slope) max_slope="$2"; shift 2 ;;
     --max-mem-factor) max_factor="$2"; shift 2 ;;
     --max-dropped) max_dropped="$2"; shift 2 ;;
+    --max-log-mb) max_log_mb="$2"; shift 2 ;;
     --max-restart) max_restart="$2"; shift 2 ;;
     --keep) keep=1; shift ;;
     -h|--help) sed -n '2,/^set -euo pipefail/{/^set -euo/d;s/^# \{0,1\}//;p}' "$0"; exit 0 ;;
@@ -84,7 +87,7 @@ case "$kill_at" in
   *) kill_at=$(secs "$kill_at") ;;
 esac
 if [[ -n "$warmup" ]]; then warmup=$(secs "$warmup"); else warmup=$(( total / 10 < 600 ? total / 10 : 600 )); fi
-[[ $total -gt 0 && $interval -gt 0 && $rate -ge 1 ]] || { echo "--duration, --interval and --rate must be positive" >&2; exit 2; }
+[[ $total -gt 0 && $interval -gt 0 && $rate -ge 1 && $max_log_mb -ge 1 ]] || { echo "--duration, --interval, --rate and --max-log-mb must be positive" >&2; exit 2; }
 [[ $kill_at -lt $total ]] || { echo "--kill-at must be before the end of the run" >&2; exit 2; }
 [[ $start -eq 1 && -n "$socket" ]] && { echo "--start runs its own engine; drop --socket" >&2; exit 2; }
 [[ $start -eq 0 && $render -eq 1 ]] && { echo "--render only applies to --start" >&2; exit 2; }
@@ -271,11 +274,18 @@ alive() {
 }
 dead=0
 sample() {
-  local el=$1 rss vram fps d l x n e
+  local el=$1 rss vram fps d l x n e bytes
   if ! alive; then
     dead=1 failures+=("engine (pid $pid) died at ${el}s outside the planned kill")
     [[ -n "$own_pid" ]] && { echo "engine log tail:"; tail -20 "$work/engine.log"; }
     return 0
+  fi
+  if [[ $mode_kind == own && -f "$work/engine.log" ]]; then
+    bytes=$(stat -c %s "$work/engine.log")
+    if (( bytes > max_log_mb * 1048576 )); then
+      dead=1 failures+=("engine log reached $(( bytes / 1048576 )) MB (max $max_log_mb MB)")
+      return 0
+    fi
   fi
   rss=$(rss_mb "$pid")
   read -r vram fps d l x <<<"$(perf)"
@@ -417,6 +427,9 @@ el=$(( SECONDS - t0 ))
 [[ $seg_open -eq 0 ]] || close_segment "$el"
 read -r n e <<<"$(sim_counts)"
 [[ $e -eq 0 ]] || failures+=("$e simulator commands refused (first: $(head -1 "$work/sim-errors.log" 2>/dev/null))")
+if [[ $mode_kind == own && -f "$work/engine.log" ]] && grep -Eq 'lagged [0-9]+ bus messages|bus lagged by [0-9]+ messages' "$work/engine.log"; then
+  failures+=("a bus consumer missed messages (see $work/engine.log)")
+fi
 
 echo "---"
 echo "duration ${el}s  sim events fired $n ($(per_sec "$n" "$el")/s)  refused $e"

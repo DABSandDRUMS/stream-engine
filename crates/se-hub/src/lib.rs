@@ -19,8 +19,8 @@ use se_proto::wire::{Provenance, StateEntry, TraceRec};
 use se_proto::{Command, Event, Id, Meta, Op, Origin, Ts, Value, address};
 use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 /// One bus message.
@@ -131,6 +131,8 @@ pub struct HubInfo {
 pub struct Hub {
     tx: crossbeam_channel::Sender<CoreMsg>,
     bus: broadcast::Sender<Arc<Bus>>,
+    /// Session journal's lossless event path; the public bus remains bounded and lossy.
+    event_sink: OnceLock<mpsc::UnboundedSender<Event>>,
     pub snapshot: ArcSwap<Snapshot>,
     pending: Mutex<HashMap<Id, oneshot::Sender<(bool, Option<String>)>>>,
     routes: RwLock<Vec<(String, mpsc::UnboundedSender<Command>)>>,
@@ -158,6 +160,7 @@ impl Hub {
         let (tx, rx) = crossbeam_channel::unbounded();
         let (bus, _) = broadcast::channel(8192);
         let hub = Arc::new(Hub {
+            event_sink: OnceLock::new(),
             tx,
             bus,
             snapshot: ArcSwap::from_pointee(Snapshot::default()),
@@ -181,7 +184,20 @@ impl Hub {
         self.bus.subscribe()
     }
 
+    /// Register the single journal consumer before starting the core thread. Unlike the
+    /// broadcast bus, this channel cannot silently skip events during startup or load spikes.
+    pub fn subscribe_events(&self) -> mpsc::UnboundedReceiver<Event> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.event_sink.set(tx).expect("session event sink already registered");
+        rx
+    }
+
     pub fn publish_bus(&self, b: Bus) {
+        if let Bus::Event(event) = &b
+            && let Some(sink) = self.event_sink.get()
+        {
+            let _ = sink.send(event.clone());
+        }
         let _ = self.bus.send(Arc::new(b));
     }
 
@@ -567,6 +583,20 @@ mod tests {
         assert!(hub.query("presets", Value::Null).await.unwrap().as_list().unwrap().len() == 1);
         hub.shutdown();
         t.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn journal_events_survive_broadcast_overflow() {
+        let (hub, _rx) = Hub::new(Arc::new(se_clock::Clock::new()));
+        let mut journal = hub.subscribe_events();
+        let mut bus = hub.subscribe();
+        for n in 0..10_000 {
+            hub.publish_bus(Bus::Event(Event::new(format!("show.{n}"), Origin::System, Value::Null)));
+        }
+        assert!(matches!(bus.recv().await, Err(broadcast::error::RecvError::Lagged(_))));
+        for n in 0..10_000 {
+            assert_eq!(journal.recv().await.unwrap().ty, format!("show.{n}"));
+        }
     }
 
     #[tokio::test]
