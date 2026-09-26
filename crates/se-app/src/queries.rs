@@ -6,6 +6,15 @@ use std::sync::Arc;
 
 pub fn register(ctx: &Ctx) {
     let db = ctx.db.clone();
+    // master-clock mappings (§3.2): wall, OBS stream/record, audio device, Twitch delay
+    let clock = ctx.hub.clock.clone();
+    ctx.hub.register_query(
+        "clock",
+        Arc::new(move |_, _| {
+            let maps = clock.mappings();
+            Box::pin(async move { serde_json::to_value(&maps).map(Value::from).map_err(|e| e.to_string()) })
+        }),
+    );
     ctx.hub.register_query(
         "sessions",
         Arc::new(move |_, args| {

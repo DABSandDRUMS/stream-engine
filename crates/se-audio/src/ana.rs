@@ -171,6 +171,7 @@ fn features_value(f: &Features) -> Value {
 fn thread(hub: Arc<Hub>, rx: std::sync::mpsc::Receiver<Msg>, beat: Arc<BeatShared>, latest: Latest) {
     let mut runs: Vec<Run> = Vec::new();
     let mut setup_rate = 48000u32;
+    let mut last_audio_map = Instant::now() - Duration::from_secs(1);
     let mut beat_pref = String::from("auto");
     let mut beat_src: Option<usize> = None;
     let mut beat_switch_since: Option<Instant> = None;
@@ -290,6 +291,12 @@ fn thread(hub: Arc<Hub>, rx: std::sync::mpsc::Receiver<Msg>, beat: Arc<BeatShare
                     if s.sample <= run.read {
                         run.stamp = Some(s);
                         let _ = run.clock.pop();
+                        // master ↔ audio-device clock mapping (§3.2), from the first tap, 1 Hz
+                        if ri == 0 && last_audio_map.elapsed() >= Duration::from_secs(1) {
+                            last_audio_map = Instant::now();
+                            let device_ns = (s.sample as f64 * 1e9 / setup_rate as f64) as i128;
+                            hub.clock.update(|m| m.audio.observe(s.ts, device_ns));
+                        }
                     } else {
                         break;
                     }
