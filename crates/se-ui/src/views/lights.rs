@@ -210,7 +210,7 @@ pub fn ui(app: &mut App, ui: &mut Ui) {
     }
     if let Some(preset) = open_quick {
         let ctx = ui.ctx().clone();
-        crate::views::quick_effects::open(app, &ctx, &preset);
+        crate::views::actions::open(app, &ctx, &preset);
     }
     if open_setup {
         app.open_in_editor("lights/rig.toml", None);
