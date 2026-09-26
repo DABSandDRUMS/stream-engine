@@ -588,20 +588,18 @@ fn layer_row(app: &mut App, ui: &mut egui::Ui, scene: &str, row: &LayerRow, text
     if !row.on_canvas {
         words.push(format!("not on the {} canvas", if canvas::edit_canvas(app) == "tall" { "vertical" } else { "main" }));
     }
-    let resp = ui
-        .horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = spacing::XS;
-            let tip = if row.visible { "Shown: click to hide" } else { "Hidden: click to show" };
-            if widgets::icon_button(ui, &t, if row.visible { icon::EYE } else { icon::EYE_OFF }, tip).clicked() {
-                app.m.command(Op::SetBase { address: format!("scene.{scene}.node.{}.visible", row.id), value: Value::Bool(!row.visible) });
-                base_written(app, scene);
-            }
-            let kind = sources::source_kind(app, &row.src);
-            ui.dnd_drag_source(egui::Id::new(("comp-layer-drag", scene, &row.id)), row.id.clone(), |ui| {
-                widgets::list_row(ui, &t, kind.icon(), &row.name, &row.sub, &marks.join("  "), selected)
-            })
-        })
-        .inner;
+    let resp = ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = spacing::XS;
+        let tip = if row.visible { "Shown: click to hide" } else { "Hidden: click to show" };
+        if widgets::icon_button(ui, &t, if row.visible { icon::EYE } else { icon::EYE_OFF }, tip).clicked() {
+            app.m.command(Op::SetBase { address: format!("scene.{scene}.node.{}.visible", row.id), value: Value::Bool(!row.visible) });
+            base_written(app, scene);
+        }
+        let kind = sources::source_kind(app, &row.src);
+        let inner = widgets::draggable_list_row(ui, &t, kind.icon(), &row.name, &row.sub, &marks.join("  "), selected);
+        inner.dnd_set_drag_payload(row.id.clone());
+        inner
+    });
     let (inner, resp) = (resp.inner, resp.response);
     let inner = if words.is_empty() { inner } else { inner.on_hover_text(words.join(" · ")) };
     if inner.clicked() {

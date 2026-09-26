@@ -1007,9 +1007,19 @@ pub fn nav_item(ui: &mut Ui, t: &Theme, icon: &str, label: &str, selected: bool,
 
 /// Clickable list row: icon, title, subtitle, trailing text.
 pub fn list_row(ui: &mut Ui, t: &Theme, icon: &str, title: &str, subtitle: &str, trailing: &str, selected: bool) -> Response {
+    list_row_with_sense(ui, t, icon, title, subtitle, trailing, selected, sense(ui.is_enabled()))
+}
+
+/// A selectable list row that can also start a drag on the same interaction.
+pub fn draggable_list_row(ui: &mut Ui, t: &Theme, icon: &str, title: &str, subtitle: &str, trailing: &str, selected: bool) -> Response {
+    let sense = if ui.is_enabled() { Sense::click_and_drag() } else { Sense::hover() };
+    list_row_with_sense(ui, t, icon, title, subtitle, trailing, selected, sense)
+}
+
+fn list_row_with_sense(ui: &mut Ui, t: &Theme, icon: &str, title: &str, subtitle: &str, trailing: &str, selected: bool, sense: Sense) -> Response {
     let w = ui.available_width();
     let h = if subtitle.is_empty() { 40.0 } else { 54.0 };
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), sense(ui.is_enabled()));
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), sense);
     resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), title));
     let (hover, press) = hover_press(ui, &resp, ui.is_enabled());
     let sel = motion::t(ui.ctx(), resp.id.with("selected"), selected, motion::SLOW);
