@@ -98,6 +98,8 @@ pub struct Palette {
     pub kind: String,
     /// target → attribute → value (no nested `palette:` references).
     pub set: Vec<(String, Vec<(String, Spec)>)>,
+    /// Premade knobs (`[[knob]]`, targets `set.<target>.<attr>`; see [`crate::knobs`]).
+    pub knobs: Vec<crate::knobs::Bound>,
 }
 
 #[derive(Deserialize)]
@@ -109,6 +111,8 @@ struct Raw {
     set: toml::map::Map<String, toml::Value>,
     #[serde(default)]
     notes: Option<String>,
+    #[serde(default)]
+    knob: Vec<se_core::knob::Knob>,
 }
 
 impl Palette {
@@ -135,7 +139,13 @@ impl Palette {
             }
             set.push((target, out));
         }
-        Ok(Palette { name: name.into(), label: r.label.unwrap_or_else(|| name.to_string()), kind, set })
+        let mut p = Palette { name: name.into(), label: r.label.unwrap_or_else(|| name.to_string()), kind, set, knobs: Vec::new() };
+        se_core::knob::check_all(&r.knob)?;
+        for k in r.knob {
+            let at = crate::knobs::look_at(&p, &k)?;
+            p.knobs.push(crate::knobs::Bound { knob: k, at });
+        }
+        Ok(p)
     }
 
     /// Attributes this palette defines anywhere.
@@ -171,11 +181,20 @@ impl Palette {
     /// Check targets against the rig. Attributes no patched fixture has are fine (a position
     /// palette stays valid while no movers are patched).
     pub fn validate(&self, rig: &Rig) -> Vec<String> {
-        self.set
+        let mut e: Vec<String> = self
+            .set
             .iter()
             .filter(|(t, _)| t != "all" && rig.group(t).is_none() && rig.head(t).is_none())
             .map(|(t, _)| format!("palette `{}`: unknown fixture or group `{t}`", self.name))
-            .collect()
+            .collect();
+        for b in &self.knobs {
+            if let crate::knobs::At::Look { target, attr } = &b.at
+                && let Some(err) = crate::knobs::check_attr_range(rig, &b.knob, target, attr)
+            {
+                e.push(format!("palette `{}`: {err}", self.name));
+            }
+        }
+        e
     }
 }
 

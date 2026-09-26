@@ -7,11 +7,11 @@
 //!   are deleted, always keeping the newest `sessions_keep`, the running session, and any
 //!   session containing a `.keep`/`keep` file (the clip pipeline protects sessions with
 //!   unreviewed clips this way).
-//! * **Recordings:** OBS's recording folder is held to a disk budget. Going over budget
-//!   publishes a warning (preflight + desktop notification through `notify.send`) listing the oldest recordings
-//!   that would bring usage back under `warn_ratio × budget`. They are deleted only by the
+//! * **Recordings:** `[recording] dir` is held to a disk budget. Going over budget publishes
+//!   a warning listing the oldest unprotected recordings. They are deleted only by the
 //!   operator (`retention.prune_recordings`) or, with `auto_delete = true`, after the
-//!   warning has stood for `grace_hours` — never while recording or on air.
+//!   warning has stood for `grace_hours` — never while recording or on air, nor while
+//!   their session has unreviewed/unuploaded clips or unfinished clip jobs.
 //!
 //! Config: `[retention]` (`sessions_days`, `sessions_keep`, `[retention.backups]`,
 //! `[retention.recordings]`). Actions: `retention.backup_now`, `retention.prune_sessions`,
@@ -22,7 +22,7 @@ use parking_lot::Mutex;
 use se_hub::EngineCtx;
 use se_proto::{Event, Meta, Op, Origin, Value};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
@@ -51,7 +51,7 @@ impl Default for BackupSettings {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct RecordingSettings {
-    /// Recording folder (default: OBS's current recording path, else `~/Videos`).
+    /// Recording folder (default: `[recording] dir`).
     pub dir: String,
     pub budget_gb: f64,
     /// Deletion candidates bring usage back under this fraction of the budget; usage above
@@ -100,6 +100,7 @@ fn mtime(p: &Path) -> i64 {
 fn expand_home(s: &str) -> PathBuf {
     match (s.strip_prefix("~/"), std::env::var_os("HOME")) {
         (Some(rest), Some(h)) => PathBuf::from(h).join(rest),
+        _ if s == "~" => std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(s)),
         _ => PathBuf::from(s),
     }
 }
@@ -300,9 +301,63 @@ pub fn deletion_candidates(recs: &[Recording], budget: u64, target: u64) -> Vec<
     out
 }
 
+/// Recording paths still needed by the clip pipeline. A `.keep` file also protects an
+/// interrupted job before its database row is committed.
+fn protected_recordings(ctx: &EngineCtx) -> anyhow::Result<HashSet<PathBuf>> {
+    // Retention can start before the clips subsystem migrates its tables.
+    let tables: HashSet<String> = ctx.db.with(|c| {
+        let mut st = c.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('clips', 'clip_jobs')")?;
+        st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()
+    })?;
+    let mut pending = HashSet::new();
+    let mut clip_paths = Vec::new();
+    if tables.contains("clips") {
+        let (sessions, recordings): (Vec<String>, Vec<String>) = ctx.db.with(|c| {
+            let mut st = c.prepare("SELECT DISTINCT session FROM clips WHERE status IN ('ready', 'approved')")?;
+            let sessions = st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+            let mut st = c.prepare("SELECT DISTINCT recording FROM clips WHERE status IN ('ready', 'approved')")?;
+            let recordings = st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+            Ok((sessions, recordings))
+        })?;
+        pending.extend(sessions);
+        clip_paths = recordings;
+    }
+    if tables.contains("clip_jobs") {
+        let jobs: Vec<String> = ctx.db.with(|c| {
+            let mut st = c.prepare("SELECT session FROM clip_jobs WHERE state IN ('queued', 'running')")?;
+            st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()
+        })?;
+        pending.extend(jobs);
+    }
+    let mut paths: HashSet<PathBuf> = clip_paths.into_iter().map(|p| std::fs::canonicalize(&p).unwrap_or_else(|_| PathBuf::from(p))).collect();
+    for session in list_sessions(&ctx.project_root.join("sessions")) {
+        if !session.protected && !pending.contains(&session.id) {
+            continue;
+        }
+        let Ok(meta) = std::fs::read_to_string(session.path.join("meta.toml")) else { continue };
+        let Ok(meta) = toml::from_str::<toml::Table>(&meta) else { continue };
+        if let Some(dir) = meta.get("show").and_then(|v| v.get("dir")).and_then(toml::Value::as_str) {
+            paths.insert(std::fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir)));
+        }
+        if let Some(recs) = meta.get("recordings").and_then(toml::Value::as_array) {
+            for rec in recs {
+                if let Some(path) = rec.get("path").and_then(toml::Value::as_str) {
+                    paths.insert(std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path)));
+                }
+            }
+        }
+    }
+    Ok(paths)
+}
+
+fn recording_protected(path: &Path, protected: &HashSet<PathBuf>) -> bool {
+    protected.iter().any(|p| path == p || (p.is_dir() && path.starts_with(p)))
+}
+
 pub fn free_bytes(dir: &Path) -> Option<u64> {
     use std::os::unix::ffi::OsStrExt;
-    let c = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
+    let existing = dir.ancestors().find(|p| p.exists())?;
+    let c = std::ffi::CString::new(existing.as_os_str().as_bytes()).ok()?;
     let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
     // SAFETY: `c` is a valid NUL-terminated path and `st` a properly sized out-parameter.
     let r = unsafe { libc::statvfs(c.as_ptr(), &mut st) };
@@ -447,16 +502,11 @@ fn notify(ctx: &EngineCtx, status: &Mutex<Status>, kind: &'static str, urgency: 
 struct Env {
     mode: String,
     recording: bool,
-    obs_dir: Option<String>,
 }
 
 fn env(ctx: &EngineCtx) -> Env {
     let snap = ctx.hub.snapshot.load();
-    Env {
-        mode: snap.str("show.mode").unwrap_or("offline").to_string(),
-        recording: snap.bool("obs.record.active"),
-        obs_dir: snap.str("obs.record.dir").filter(|s| !s.is_empty()).map(String::from),
-    }
+    Env { mode: snap.str("show.mode").unwrap_or("offline").to_string(), recording: snap.bool("obs.record.active") }
 }
 
 async fn run(mut ctx: EngineCtx, status: Arc<Mutex<Status>>, mut actions: tokio::sync::mpsc::UnboundedReceiver<se_proto::Command>) {
@@ -468,9 +518,8 @@ async fn run(mut ctx: EngineCtx, status: Arc<Mutex<Status>>, mut actions: tokio:
         tokio::select! {
             r = ctx.config.changed() => {
                 if r.is_err() { break; }
-                if section.reload(&ctx) {
-                    last_rec_scan = 0;
-                }
+                section.reload(&ctx);
+                last_rec_scan = 0; // [recording] dir can change without [retention] changing
             }
             _ = tick.tick() => {
                 let cfg = section.value.clone();
@@ -610,18 +659,46 @@ async fn recordings_step(ctx: &EngineCtx, status: &Mutex<Status>, cfg: &Settings
     let e = env(ctx);
     let dir = if !rc.dir.trim().is_empty() {
         expand_home(rc.dir.trim())
-    } else if let Some(d) = &e.obs_dir {
-        PathBuf::from(d)
     } else {
-        expand_home("~/Videos")
+        let recording_dir = ctx.project_section("recording").and_then(|v| v.get("dir").and_then(toml::Value::as_str).map(str::to_owned));
+        if recording_dir.as_ref().is_some_and(|d| d.trim().is_empty()) {
+            ctx.hub.publish("health.recordings", util::health("fail", "[recording] dir is empty; recordings retention paused"));
+            return;
+        }
+        recording_dir.map(|d| expand_home(&d)).unwrap_or_else(|| expand_home("~/Videos/Stream Engine"))
     };
+    if !dir.is_absolute() {
+        ctx.hub.publish("health.recordings", util::health("fail", format!("invalid recordings directory: {}", dir.display())));
+        return;
+    }
+    let dir = dir.canonicalize().unwrap_or(dir);
     let budget = (rc.budget_gb.max(0.0) * GB) as u64;
     let target = (rc.budget_gb.max(0.0) * rc.warn_ratio.clamp(0.1, 1.0) * GB) as u64;
     let exts = rc.extensions.clone();
     let d = dir.clone();
     let Ok((recs, free)) = tokio::task::spawn_blocking(move || (scan_recordings(&d, &exts, 3), free_bytes(&d))).await else { return };
     let total: u64 = recs.iter().map(|r| r.bytes).sum();
-    let cands = deletion_candidates(&recs, budget, target);
+    let protected = match protected_recordings(ctx) {
+        Ok(paths) => paths,
+        Err(err) => {
+            ctx.hub.log("error", TARGET, format!("cannot verify pending clips; not pruning recordings: {err:#}"));
+            ctx.hub.publish("health.recordings", util::health("fail", "cannot verify pending clips; recordings retention paused"));
+            return;
+        }
+    };
+    let mut left = total;
+    let mut cands = Vec::new();
+    if total > budget {
+        for rec in &recs {
+            if left <= target {
+                break;
+            }
+            if !recording_protected(&rec.path, &protected) {
+                cands.push(rec.clone());
+                left -= rec.bytes;
+            }
+        }
+    }
     let prev = status.lock().pending.clone();
     let mut pending = update_pending(&prev, &cands, now);
     let busy = e.recording || util::on_air(&e.mode);
@@ -640,6 +717,9 @@ async fn recordings_step(ctx: &EngineCtx, status: &Mutex<Status>, cfg: &Settings
     };
     let mut freed = 0u64;
     for p in &to_delete {
+        if recording_protected(&p.path, &protected) {
+            continue;
+        }
         match std::fs::remove_file(&p.path) {
             Ok(()) => {
                 freed += p.bytes;
@@ -824,5 +904,53 @@ mod tests {
         assert_eq!(update_pending(&pend2, &[rec2], 9000)[0].warned_at, 9000);
         // no longer a candidate → dropped
         assert!(update_pending(&pend2, &[], 9000).is_empty());
+    }
+
+    #[test]
+    fn pending_clip_protects_show_recording_even_from_manual_prune() {
+        let d = tempfile::tempdir().unwrap();
+        let db = se_store::Db::memory().unwrap();
+        db.with(|c| {
+            c.execute_batch(
+                "CREATE TABLE clips (session TEXT, status TEXT, recording TEXT);
+             CREATE TABLE clip_jobs (session TEXT, state TEXT);
+             INSERT INTO clips VALUES ('s1', 'ready', '/missing/example.mkv');
+             INSERT INTO clips VALUES ('s2', 'uploaded', '/missing/uploaded.mkv');",
+            )
+        })
+        .unwrap();
+        let (hub, _rx) = se_hub::Hub::new(Arc::new(se_clock::Clock::new()));
+        let (_tx, config) = tokio::sync::watch::channel(Arc::new(se_core::Config::default()));
+        let ctx = EngineCtx {
+            hub,
+            db,
+            project_root: d.path().to_path_buf(),
+            data_dir: d.path().to_path_buf(),
+            share_dir: d.path().to_path_buf(),
+            config,
+            http: "127.0.0.1:0".parse().unwrap(),
+            dev: true,
+        };
+        let show = d.path().join("shows").join("show");
+        touch(&show.join("one.mkv"), 100, 1000);
+        touch(&show.join("two.mp4"), 100, 900);
+        ctx.db.with(|c| c.execute("UPDATE clips SET recording = ?1 WHERE session = 's1'", [show.join("one.mkv").to_str().unwrap()])).unwrap();
+        std::fs::create_dir_all(d.path().join("sessions/s1")).unwrap();
+        std::fs::create_dir_all(d.path().join("sessions/s2")).unwrap();
+        std::fs::write(d.path().join("sessions/s1/meta.toml"), format!("show = {{ dir = {:?} }}\n", show.to_str().unwrap())).unwrap();
+        std::fs::write(d.path().join("sessions/s2/meta.toml"), "recordings = []\n").unwrap();
+        let protected = protected_recordings(&ctx).unwrap();
+        assert!(protected.contains(&show.join("one.mkv")));
+        assert!(recording_protected(&show.join("one.mkv"), &protected));
+        assert!(recording_protected(&show.join("two.mp4"), &protected));
+        assert!(!recording_protected(&d.path().join("shows/another.mkv"), &protected));
+        std::fs::remove_file(d.path().join("sessions/s1/meta.toml")).unwrap();
+        let direct_paths = protected_recordings(&ctx).unwrap();
+        assert!(recording_protected(&show.join("one.mkv"), &direct_paths));
+        assert!(!recording_protected(&show.join("two.mp4"), &direct_paths));
+        ctx.db.with(|c| c.execute("UPDATE clips SET status = 'uploaded' WHERE session = 's1'", [])).unwrap();
+        assert!(!recording_protected(&show.join("one.mkv"), &protected_recordings(&ctx).unwrap()));
+        ctx.db.with(|c| c.execute_batch("DROP TABLE clips; DROP TABLE clip_jobs")).unwrap();
+        assert!(protected_recordings(&ctx).unwrap().is_empty(), "fresh runtime database has no pending clips");
     }
 }

@@ -24,8 +24,11 @@ toml_edit.workspace = true
 libc.workspace = true
 wgpu = { version = "30", default-features = false, features = ["std", "wgsl", "vulkan"] }
 ash = "0.38"
-# clip thumbnails in session review
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
+# clip thumbnails in session review; picture thumbnails in Scenes → Media
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
+# Scenes → Media "Import files…": the desktop's file chooser through xdg-desktop-portal (no GTK)
+ashpd = { version = "0.13", default-features = false, features = ["tokio", "file_chooser"] }
+tokio = { workspace = true }
 # deck key previews (Controllers view)
 base64 = "0.23"
 

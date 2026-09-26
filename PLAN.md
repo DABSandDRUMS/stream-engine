@@ -926,7 +926,7 @@ One small service on the owner's domain; the only code we run off this machine.
 ## 15. UI and UX
 
 ### 15.1 Principles
-1. **One window, organised by what you want to do.** A sidebar of pages (Live, Scenes, Lights, Sound, Automation, Community, Recordings, Settings), each with a few tabs. Nothing opens extra windows unless you ask for it (§15.3). The window is always fully opaque. (Owner direction 2026-09-26: "one window, one UX … non-technical friendly, beautiful … dumbo friendly".)
+1. **One window, three master tabs.** **Overview** is the current stream and high-level controls. **Edit** contains a sidebar (Scenes, Inputs, Lights, Sound, Automation, Community, Settings) with detailed tabs. **Clipping** manages recordings, past streams and clips. No extra window opens unless asked for (§15.3); the window is fully opaque. (Owner direction 2026-09-26: "one window, one UX … non-technical friendly, beautiful … dumbo friendly".)
 2. **Plain words.** The interface speaks streamer, not engine: "quick effect", "look", "reaction", "layer", "On air / Up next". File paths, config keys, engine addresses, template placeholders and acronyms never appear in normal UI; technical detail sits behind a "Details" disclosure or on Settings → Troubleshooting / Performance. Setup instructions are "Show me how" steps with a button that opens the right page.
 3. **Nothing reaches the audience without intent.**
    - Scene clicks go to **Up next**; **Switch** (`Enter`) puts it on air, unless "direct" is on. Double-click switches right away.
@@ -934,7 +934,7 @@ One small service on the owner's domain; the only code we run off this machine.
 4. **Keyboard-first**, matching Omarchy: command palette (`Ctrl+K`), number keys for scenes, `Enter` = Switch, rebindable shortcuts shown in tooltips.
 5. **Everything is explainable** — on demand: "Why did that happen?" (cause chains) and signal links live in Settings → Troubleshooting.
 6. **Never modal during a show.** Toasts and badges, hold-to-confirm for destructive actions (Emergency stop, delete), undo.
-7. **One visual language** (`se-ui-kit`): calm surfaces, one accent, Inter for text, the Omarchy font for numbers and icons; components = cards, list rows, tiles/pads, chips, segmented controls, switches, callouts, empty states. Tally colors: **red** = on air, **amber** = up next/armed, **green** = working, **magenta** = moved by a signal. Color is never the only signal.
+7. **One visual language** (`se-ui-kit`): calm surfaces, one accent, Inter for text, the Omarchy font for numbers and icons; cards, list rows, tiles/pads, chips, segmented controls, switches, callouts, empty states. Buttons, pads, navigation and toggles give eased hover/press/selection/focus feedback; **Reduce motion** in Settings turns animated movement off and is saved in the machine's UI preferences. Tally colors: **red** = on air, **amber** = up next/armed, **green** = working, **magenta** = moved by a signal. Color is never the only signal.
 8. **The UI never costs the stream.** Previews come from the engine's shared textures (§4.5); hidden views stop requesting frames; under GPU pressure the UI slows its previews first.
 9. **Native to Omarchy.** Theme colors follow the active Omarchy theme live (§16.2).
 
@@ -949,34 +949,35 @@ One small service on the owner's domain; the only code we run off this machine.
 - **Program window on the TV** (opt-in toggle): borderless fullscreen `stream-engine.program` showing exactly what goes out; follows hotplug (TV off → DP-2).
 - **Scaling:** follows Hyprland monitor scale, plus an in-app size setting.
 
-### 15.4 Live page
+### 15.4 Overview
 ```
-┌ sidebar ┐┌ ● ON AIR 01:02:03 · Live ▾ · All good ─────── Clear chat effects · Emergency stop (hold) · [Go live] ┐
-│ Live    ││ ON AIR (big composite)            │ UP NEXT (preview)              │ Chat · Activity · Songs · Mod │
-│ Scenes  ││                                   │ Transition ▾  Speed Auto/Fast… │                               │
-│ Lights  ││                                   │ [ Switch to Duo ]              │                               │
-│ Sound   ││ Scenes: thumbnails (1–9)                                           │                               │
-│ …       ││ Quick effects (Stream Deck page)   │ Running now                    │                               │
-│         ││ Cameras & sources (live tiles)                                     │                               │
-│Settings ││ Sound: Band · Music · Game · Sound effects · Read-out voice · Everything (fader, meter, mute)         │
-└─────────┘└────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ Stream Engine · Overview | Edit | Clipping ── ● Off air/ON AIR · All good ─── Clear chat effects · Emergency stop · Go live ┐
+│ ON AIR (big composite)      │ UP NEXT (preview, transition, Switch)           │ Chat · Activity · Songs · Mod           │
+│ Scenes: thumbnails (1–9)                                                                            │                   │
+│ Lights: looks, brightness, blackout, running cue list                                                │                   │
+│ Quick effects (Stream Deck page) · Running now                                                        │                   │
+│ Cameras & sources (live tiles)                                                                        │                   │
+│ Sound: Band · Music · Game · Sound effects · Read-out voice · Everything (fader, meter, mute)                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 - **Top bar:** on-air state and time, what the show is doing (Starting soon / Live / Be right back …), one health pill ("All good" / "2 problems" / "Finish setting up") with the list and Fix buttons, Clear chat effects, Emergency stop (hold), and the one hero button (Open OBS → Go live → End stream).
-- **On air** is the big composite program output (Main / Vertical / Both); **Up next** beside it with the transition and one Switch button; on wide screens quick effects move up beside them.
+- **On air** is the big composite program output (Main / Vertical / Both); **Up next** beside it with the transition and one Switch button; on wide screens quick effects move up beside them. Below the scene picker, a compact Lights strip changes looks, cue-list step, brightness and blackout.
 - **Quick effects** mirror the current Stream Deck page (armed/active/cooldown); **Running now** lists everything active with Stop.
 - **Right rail:** Chat (with mod actions), Activity (with the "show this alert?" countdown), Songs, Mod.
 
-### 15.5 Scenes page (composition)
-- **Layout:** scene list (new, duplicate, rename, delete, number keys) · the composite view(s) with drag/resize/crop handles, snap and guides · **Layers** (show/hide, order, add a camera or overlay) · right panel: **Selected layer** (quick placements, position/size, rounded corners, opacity, crop, effects on the layer, arrange/remove) and **Scene settings** (name, transitions into this scene with More/Most weighting, speed, effects on the whole scene).
-- **Overlays & effects:** every overlay, animated background, particle effect and video/audio effect as a card: what it is, Working/Off/Has a problem, Test, on/off, Settings as real controls (color pickers, sliders, switches), New from templates; files/errors under Details.
+### 15.5 Edit → Scenes (building the stream)
+- **Scenes:** scene list (new, duplicate, rename, delete, number keys), the composite view(s) with drag/resize/crop handles, snap and guides, layers (show/hide, order, add camera/overlay), and the selected layer/scene settings with conditions, transitions and effects.
+- **Quick effects:** developer-made effects with a few named knobs; Try it, stop, see what it does and where its pad is assigned. No assembly/programmer in the UI.
+- **Overlays:** developer-made shader/particle/web/script pieces with on/off, Test and exposed settings. Place them into scenes. **Transitions:** choose defaults and per-scene/per-pair exceptions among developer-made transitions; Try it. **Media:** drag/drop or import, preview, rename with reference updates, safe delete.
 
-### 15.6 Other pages
-- **Lights:** Looks (tap a look, cue-list playback cards, effects), Edit a look (lights, brightness, color, position, save), Stage (live top-down visualizer), Setup (patch, groups, output, flash limiter, RDM).
-- **Sound:** Mix (channel strips, effects per channel, "lowered while you talk", sounds & drum pads, Advanced), Mixing desk (the 16R: faders, saved mixes, linked controls), Text to speech.
-- **Automation:** Reactions ("When … → do …" sentences with a guided editor and Test), Buttons & pedals (Stream Deck key grid, MIDI learn, pedals, voice), Chat commands (commands, timed messages, counters, quotes), Timelines.
-- **Community:** Alerts & goals, Song requests, Twitch (connection, stream, channel points, polls, moderation), Giveaways.
-- **Recordings:** clips to review, past streams with markers.
-- **Settings:** Get started (plain checklist, never a takeover), Accounts & app (Twitch, keys, web helper, phones/tablets, screens, appearance, shortcuts), Devices, Backups, Performance, Troubleshooting (test events, why did that happen, messages & errors, live signals, signal links).
+### 15.6 Edit and Clipping
+- **Inputs:** cameras and devices (including live thumbnails); Buttons & pedals (Stream Deck, MIDI learn, footswitch, voice).
+- **Lights:** tap a developer-made look to turn it on/off, adjust exposed knobs, run cue lists, set master brightness/blackout, inspect live stage visualizer. No programmer: fixtures and looks are made for the owner.
+- **Sound:** Mix (channel strips, effects, "lowered while you talk"), Mixing desk (16R faders/saved mixes), Text to speech.
+- **Automation:** Reactions ("When … → do …"), Chat commands, Timelines.
+- **Community:** Alerts & goals, Song requests, Twitch, Giveaways.
+- **Clipping:** recording folder/health, past streams with time-aligned lanes/markers and manual clip selection, review queue.
+- **Settings:** Get started, Accounts & app (accounts, screens, appearance/Reduce motion, shortcuts), Backups, History (undo/versions), Performance, Troubleshooting.
 
 ### 15.7 Default shortcuts (all rebindable)
 
@@ -1092,24 +1093,73 @@ A checklist panel (and `streamctl preflight` in the CLI) with pass/warn/fail for
 
 ---
 
-## 18. Recording, markers, clips (later milestone; foundations are day one)
+## 18. Recordings and clips: a show you can revisit
 
-- **Day-one requirements:** master clock (§3.2), sessions (§3.3), persistent event log + signal history, separate audio buses recorded as OBS tracks, OBS plugin time mapping.
-- **Hype detector patch:** combines signals into a hype score:
-  - chat rate vs baseline, emote spam
-  - bits/subs/raids
-  - mic spikes/laughter
-  - music drops
-  - a "clip that" deck key
-  - chat `!clip` votes
+The **Clipping** master tab owns recording status, past shows, and clips to review. The first
+deliverable is dependable capture and an understandable timeline, not a bespoke music classifier.
+OBS remains the video recorder/encoder. The engine owns the chosen destination and automation;
+it does not add new audio buses or invent tracks that the audio system does not provide.
 
-  Above a threshold → marker `{start, peak, end, score, reasons}` + a Twitch stream marker.
-- **Pre-roll:** shift chat-based signals back by the measured stream delay; windows start 10–30 s before the peak.
-- **Post-stream job:**
-  1. Whisper transcript of the mic track (with word timestamps).
-  2. An AI pass ranks markers and picks in/out points on sentence boundaries.
-  3. Cut with NVENC (FFmpeg libs), wide + tall, burned-in captions, music track dropped by default.
-  4. Clips go to the review queue in the UI; optional upload.
+### 18.1 Recording
+
+- `[recording] dir` is chosen in the UI and persisted in `project.toml`. Recording starts
+  automatically in the configured show modes (default `preshow`, `live`), stops on `offline`,
+  and can still be started/stopped manually. The OBS adapter must change OBS's **actual** recording
+  output directory, not just display a path. A directory change takes effect on the next file;
+  never interrupt an active recording to move it. One show folder per session under `dir`.
+- Show recording status, destination, free space, track layout, and actionable failures in the UI
+  and preflight. OBS tracks and tall-canvas recording are reported, not assumed. Preserve OBS's
+  per-file path and master-clock mapping (including split recordings) in `meta.toml`.
+- The existing session journal (`events.jsonl.zst`, `signals.bin`, `markers.json`, `meta.toml`)
+  remains the authoritative raw record. Copy the journal and a snapshot of the project's text
+  configuration into the show's `data/` at close. Do not copy secrets, assets or runtime DB.
+  The recording retention policy must never delete a file required by a queued job or an
+  unreviewed / approved-but-not-uploaded clip. No automatic deletion while on air.
+
+### 18.2 A time-aligned show timeline
+
+Build a versioned, re-runnable index after each show: `data/show.json` (time base and recorded
+files), `data/lanes/*.jsonl` (spans and point events), `data/features.csv` (sampled values), and
+`data/transcript.jsonl` (spoken segments with timestamps). Time `t` is seconds from the first
+recording's master-clock start; each other file carries its offset. Chat timestamps are shifted
+back by the measured Twitch delay, but the original event timestamps remain in the journal.
+Basic lanes: songs (including requester), talking, scenes, modes, light cues/looks, quick effects,
+chat, community moments and markers; waveform/hype where recorded. The full spoken transcript is
+made after the show using an available speech track, not just around proposed clips.
+
+Indexing is off the live threads, bounded for multi-hour sessions and safe to rerun. Version each
+analyzer's output so later metrics can be added without changing the raw recording. The first
+release does **not** compute drum tightness, popularity, song sentiment, key, or train a model.
+Some state is only derivable from the existing event/command log: keep the best-known
+state with clear gaps rather than claiming every lighting frame was captured.
+
+### 18.3 Basic AI-assisted clipping
+
+Keep the existing hype/manual marker detector and post-show job. Add song intervals as candidate
+sources so performances appear even without chat hype. Talk clips may use sentence boundaries and
+omit the music track. A clip overlapping a requested song keeps the song and performance audio,
+uses musical boundaries when reliable beat/downbeat data is present (else a safe time window),
+and does not burn unreliable lyric captions. Never remove the backing track from a performance
+clip. The `Risk of DMCA` flag on such a clip is informational: it must not block production,
+approval, upload, or ranking.
+
+The existing `rank_command` argv/JSON hook is the model boundary. A non-interactive read-only
+`omp` wrapper may be selected there; it receives timestamped context (song, scene, lights, chat,
+transcript, markers and candidate bounds) and returns keys, scores, titles and in/out. A model
+failure retains deterministic candidates. Human Keep / Skip / Trim decisions and manual ranges
+are recorded with context as future feedback; no model training now.
+
+### 18.4 Clipping UX
+
+- **Recording:** choose destination, see capture health and tracks, start/stop manually.
+- **Past streams:** open a show, scrub the recording against the song/talk/scene/light/chat/hype/
+  marker/clip lanes, select a range and make a clip. Keep the existing process/retry controls.
+- **Clips:** review wide and tall cuts, reasons, song/requester, informational DMCA badge,
+  Keep / Skip / Trim / Upload. Empty, indexing and failure states must say what to do.
+
+The other developer owns the main UI shell (`Overview / Edit / Clipping`) and the scene/light
+editors; this work owns the Clipping content and its recording/clip APIs. Shared shell changes
+are deliberately small. Capture and indexing must not delay the on-air render or audio paths.
 
 ---
 

@@ -1,3 +1,16 @@
+# Pre-show: the win31 terminal "starting soon" scene (scenes/starting_soon.toml). Going live
+# (or rehearsing) from it cuts to the main scene.
+[[rule]]
+name = "starting soon scene"
+when = "mode.enter.preshow"
+do = ["scene.cut starting_soon"]
+
+[[rule]]
+name = "after the pre-show"
+when = "mode.exit.preshow"
+if = "(mode == 'live' || mode == 'rehearsal') && scene == 'starting_soon'"
+do = ["scene.cut duo"]
+
 [[rule]]
 name = "brb scene"
 when = "mode.enter.brb"

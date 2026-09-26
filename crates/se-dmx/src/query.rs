@@ -115,6 +115,7 @@ pub fn rig(show: &Show, plan_errors: &[String], shared: &Shared) -> Value {
         .collect();
     let mut errors: Vec<String> = show.errors.clone();
     errors.extend(plan_errors.iter().cloned());
+    let safety = &r.safety;
     Value::map()
         .with("fixtures", Value::List(fixtures))
         .with("heads", Value::List(heads))
@@ -124,6 +125,18 @@ pub fn rig(show: &Show, plan_errors: &[String], shared: &Shared) -> Value {
         .with("universes", Value::List(r.universes.iter().map(|u| Value::Int(*u as i64)).collect()))
         .with("errors", strs(errors))
         .with("has_rig", show.has_rig)
+        .with(
+            "safety",
+            Value::map()
+                .with("max_flash_hz", safety.max_flash_hz as f64)
+                .with("max_intensity", safety.max_intensity as f64)
+                .with("strobe", if matches!(safety.strobe, crate::rig::StrobePolicy::Block) { "block" } else { "limit" }),
+        )
+}
+
+/// A look's / cue list's knobs as `[Knob::to_value() + value]`.
+fn knobs(list: &[crate::knobs::Bound], value: impl Fn(&crate::knobs::At) -> Value) -> Value {
+    Value::List(list.iter().map(|b| b.knob.to_value().with("value", value(&b.at))).collect())
 }
 
 pub fn cuelists(v: &View) -> Value {
@@ -181,12 +194,14 @@ pub fn cuelists(v: &View) -> Value {
                     .with("elapsed_ms", elapsed as i64)
                     .with("total_ms", total as i64)
                     .with("cues", Value::List(cues))
+                    .with("knobs", knobs(&l.knobs, |at| crate::knobs::cue_value(l, at, &v.show.effects)))
             })
             .collect(),
     )
 }
 
-pub fn palettes(show: &Show) -> Value {
+pub fn palettes(v: &View) -> Value {
+    let show = &v.show;
     Value::List(
         show.palettes
             .values()
@@ -199,6 +214,8 @@ pub fn palettes(show: &Show) -> Value {
                     .with("kind", p.kind.clone())
                     .with("set", Value::Map(set))
                     .with("used_by", strs(show.palette_users(&p.name)))
+                    .with("look_active", v.looks.contains_key(&p.name))
+                    .with("knobs", knobs(&p.knobs, |at| crate::knobs::look_value(p, at)))
             })
             .collect(),
     )
@@ -357,7 +374,7 @@ pub fn register(hub: &Arc<Hub>, view: Arc<RwLock<View>>, shared: Arc<Shared>) {
                 Ok(match name.as_str() {
                     "lights.rig" => rig(&v.show, &v.plan_errors, &shared),
                     "lights.cuelists" => cuelists(&v),
-                    "lights.palettes" => palettes(&v.show),
+                    "lights.palettes" => palettes(&v),
                     "lights.effects" => effects(&v.show, &hub),
                     "lights.programmer" => programmer(&v),
                     "lights.output" => output(&v, &shared),

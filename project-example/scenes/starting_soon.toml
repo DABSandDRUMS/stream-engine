@@ -1,0 +1,27 @@
+# Starting soon (mode `preshow`, rules/modes.toml): the owner's win31 DOS terminal, ported from
+# a browser-source page into three overlay pieces (docs/patches.md, "Bringing your own overlay
+# pages"). Coming on, it plays the BIOS/DOS boot (terminal_boot, full screen), then shows the
+# title box with the countdown across the top and the chat typed out below it.
+label = "Starting soon"
+on_enter = ["patch.terminal_boot.trigger", "patch.terminal_title.trigger"]
+
+# 80 columns across the full width: at 1920 px the title box is 288 px tall (6 text rows).
+[canvas.wide]
+background = "#000000"
+nodes = [
+  { src = "patch.terminal_title", rect = [0.0, 0.0, 1.0, 0.266667], when = "!patch.terminal_boot.active" },
+  { src = "patch.terminal_chat",  rect = [0.0, 0.266667, 1.0, 0.733333], when = "!patch.terminal_boot.active" },
+  { src = "patch.terminal_boot",  rect = [0.0, 0.0, 1.0, 1.0], when = "patch.terminal_boot.active" },
+]
+
+# Each page renders at its wide size, so the tall layout keeps the same shapes.
+[canvas.tall]
+background = "#000000"
+nodes = [
+  { src = "patch.terminal_title", rect = [0.0, 0.3, 1.0, 0.084375], when = "!patch.terminal_boot.active" },
+  { src = "patch.terminal_chat",  rect = [0.0, 0.384375, 1.0, 0.232031], when = "!patch.terminal_boot.active" },
+  { src = "patch.terminal_boot",  rect = [0.0, 0.341797, 1.0, 0.316406], when = "patch.terminal_boot.active" },
+]
+
+[transitions]
+name = "cut"

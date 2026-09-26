@@ -1,10 +1,12 @@
 //! Runtime DB tables: `clips` (the review queue) and `clip_jobs` (post-stream job state, so a
 //! job interrupted by an engine restart is resumed).
 
+use crate::show;
 use anyhow::Result;
 use rusqlite::{OptionalExtension, params};
 use se_proto::Value;
 use se_store::Db;
+use std::path::Path;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS clips (
@@ -59,8 +61,26 @@ CREATE TABLE IF NOT EXISTS clip_jobs (
 );
 "#;
 
+const CONTEXT_SCHEMA: &str = r#"
+ALTER TABLE clips ADD COLUMN kind TEXT NOT NULL DEFAULT 'talk';
+ALTER TABLE clips ADD COLUMN song TEXT;
+ALTER TABLE clips ADD COLUMN requester TEXT;
+ALTER TABLE clips ADD COLUMN dmca_risk INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE clips ADD COLUMN context TEXT NOT NULL DEFAULT '{}';
+CREATE TABLE clip_feedback (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  clip_id INTEGER NOT NULL,
+  session TEXT NOT NULL,
+  action TEXT NOT NULL,
+  at INTEGER NOT NULL,
+  context TEXT NOT NULL
+);
+CREATE INDEX clip_feedback_session ON clip_feedback(session, id);
+"#;
+
 pub fn migrate(db: &Db) -> Result<()> {
-    db.migrate("clips/1", SCHEMA)
+    db.migrate("clips/1", SCHEMA)?;
+    db.migrate("clips/2", CONTEXT_SCHEMA)
 }
 
 fn now() -> i64 {
@@ -81,6 +101,12 @@ pub struct ClipRow {
     pub reasons: Vec<String>,
     pub labels: Vec<String>,
     pub title: Option<String>,
+    pub kind: String,
+    pub song: Option<String>,
+    pub requester: Option<String>,
+    pub dmca_risk: bool,
+    /// Additional song/video/channel context as JSON.
+    pub context: String,
     pub start_ns: i64,
     pub peak_ns: i64,
     pub end_ns: i64,
@@ -111,7 +137,7 @@ pub struct ClipRow {
 
 const COLS: &str = "id, session, key, rank, score, marker_score, reasons, labels, title, start_ns, peak_ns, end_ns, recording, rec_start_ns, \
     in_s, out_s, peak_s, wide_path, tall_path, wide_thumb, tall_thumb, captions, words, transcript_from, transcript_to, audio_note, music_dropped, \
-    encoder, version, status, error, upload_url, created_at, updated_at";
+    encoder, version, status, error, upload_url, created_at, updated_at, kind, song, requester, dmca_risk, context";
 
 fn json_list(s: String) -> Vec<String> {
     serde_json::from_str(&s).unwrap_or_default()
@@ -152,6 +178,11 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<ClipRow> {
         error: r.get(30)?,
         upload_url: r.get(31)?,
         created_at: r.get(32)?,
+        kind: r.get(34)?,
+        song: r.get(35)?,
+        requester: r.get(36)?,
+        dmca_risk: r.get::<_, i64>(37)? != 0,
+        context: r.get(38)?,
         updated_at: r.get(33)?,
     })
 }
@@ -170,6 +201,11 @@ impl ClipRow {
             .with("reasons", self.reasons.clone())
             .with("labels", self.labels.clone())
             .with("title", opt(&self.title))
+            .with("kind", self.kind.clone())
+            .with("song", opt(&self.song))
+            .with("requester", opt(&self.requester))
+            .with("dmca_risk", self.dmca_risk)
+            .with("context", serde_json::from_str::<Value>(&self.context).unwrap_or_default())
             .with("start_ns", self.start_ns)
             .with("peak_ns", self.peak_ns)
             .with("end_ns", self.end_ns)
@@ -203,8 +239,8 @@ pub fn upsert(db: &Db, c: &ClipRow) -> Result<i64> {
         conn.execute(
             "INSERT INTO clips (session, key, rank, score, marker_score, reasons, labels, title, start_ns, peak_ns, end_ns, recording, rec_start_ns,
                in_s, out_s, peak_s, wide_path, tall_path, wide_thumb, tall_thumb, captions, words, transcript_from, transcript_to, audio_note,
-               music_dropped, encoder, version, status, error, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, 1, ?28, ?29, ?30, ?30)
+               music_dropped, encoder, version, status, error, created_at, updated_at, kind, song, requester, dmca_risk, context)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, 1, ?28, ?29, ?30, ?30, ?31, ?32, ?33, ?34, ?35)
              ON CONFLICT (session, key) DO UPDATE SET
                rank = excluded.rank, score = excluded.score, marker_score = excluded.marker_score, reasons = excluded.reasons,
                labels = excluded.labels, title = COALESCE(excluded.title, clips.title), start_ns = excluded.start_ns, peak_ns = excluded.peak_ns,
@@ -213,6 +249,7 @@ pub fn upsert(db: &Db, c: &ClipRow) -> Result<i64> {
                wide_thumb = excluded.wide_thumb, tall_thumb = excluded.tall_thumb, captions = excluded.captions, words = excluded.words,
                transcript_from = excluded.transcript_from, transcript_to = excluded.transcript_to, audio_note = excluded.audio_note,
                music_dropped = excluded.music_dropped, encoder = excluded.encoder, version = clips.version + 1,
+               kind = excluded.kind, song = excluded.song, requester = excluded.requester, dmca_risk = excluded.dmca_risk, context = excluded.context,
                status = CASE WHEN clips.status IN ('approved', 'rejected') AND excluded.status = 'ready' THEN clips.status ELSE excluded.status END,
                error = excluded.error, updated_at = excluded.updated_at",
             params![
@@ -246,6 +283,11 @@ pub fn upsert(db: &Db, c: &ClipRow) -> Result<i64> {
                 c.status,
                 c.error,
                 t,
+                if c.kind.is_empty() { "talk" } else { &c.kind },
+                c.song,
+                c.requester,
+                c.dmca_risk as i64,
+                if c.context.is_empty() { "{}" } else { &c.context },
             ],
         )?;
         conn.query_row("SELECT id FROM clips WHERE session = ?1 AND key = ?2", params![c.session, c.key], |r| r.get(0))
@@ -269,19 +311,33 @@ pub fn list(db: &Db, session: Option<&str>, status: Option<&str>, limit: usize) 
 }
 
 pub fn set_status(db: &Db, id: i64, status: &str, url: Option<&str>) -> Result<bool> {
+    let before = get(db, id)?;
     let n = db.with(|c| {
         c.execute("UPDATE clips SET status = ?2, upload_url = COALESCE(?3, upload_url), updated_at = ?4 WHERE id = ?1", params![id, status, url, now()])
     })?;
+    if let Some(before) = before
+        && before.status != status
+        && matches!(status, "approved" | "rejected")
+    {
+        record_feedback(
+            db,
+            id,
+            if status == "approved" { "keep" } else { "skip" },
+            serde_json::json!({"previous_status": before.status, "previous_in": before.in_s, "previous_out": before.out_s}),
+        )?;
+    }
     Ok(n > 0)
 }
 
 /// After a retrim/re-cut.
 pub fn update_cut(db: &Db, c: &ClipRow) -> Result<()> {
+    let previous = get(db, c.id)?;
     db.with(|conn| {
         conn.execute(
             "UPDATE clips SET in_s = ?2, out_s = ?3, wide_path = ?4, tall_path = ?5, wide_thumb = ?6, tall_thumb = ?7, captions = ?8,
                words = ?9, transcript_from = ?10, transcript_to = ?11, encoder = ?12, version = version + 1, status = ?13, error = ?14,
-               updated_at = ?15 WHERE id = ?1",
+               updated_at = ?15, kind = ?16, song = ?17, requester = ?18, dmca_risk = ?19, context = ?20,
+               audio_note = ?21, music_dropped = ?22 WHERE id = ?1",
             params![
                 c.id,
                 c.in_s,
@@ -297,10 +353,82 @@ pub fn update_cut(db: &Db, c: &ClipRow) -> Result<()> {
                 c.encoder,
                 c.status,
                 c.error,
-                now()
+                now(),
+                c.kind,
+                c.song,
+                c.requester,
+                c.dmca_risk as i64,
+                c.context,
+                c.audio_note,
+                c.music_dropped as i64,
             ],
         )
     })?;
+    if let Some(before) = previous {
+        record_feedback(
+            db,
+            c.id,
+            "retrim",
+            serde_json::json!({
+                "previous_in": before.in_s, "previous_out": before.out_s, "in": c.in_s, "out": c.out_s
+            }),
+        )?;
+    }
+    Ok(())
+}
+
+/// Immutable review history; `details` records the previous decision/window where applicable.
+/// Called automatically for keep/skip/retrim; manual cuts call it after insertion.
+pub fn record_feedback(db: &Db, id: i64, action: &str, details: serde_json::Value) -> Result<()> {
+    let Some(clip) = get(db, id)? else { anyhow::bail!("no clip {id}") };
+    let context = serde_json::json!({"clip": clip.to_value(), "details": details});
+    db.with(|c| {
+        c.execute(
+            "INSERT INTO clip_feedback (clip_id, session, action, at, context) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, clip.session, action, now(), context.to_string()],
+        )
+    })?;
+    let session_dir: Option<String> = db.with(|c| c.query_row("SELECT dir FROM sessions WHERE id = ?1", [&clip.session], |r| r.get(0)).optional())?;
+    if let Some(dir) = session_dir
+        && let Err(e) = export_feedback(db, &clip.session, Path::new(&dir))
+    {
+        tracing::warn!("could not export clip feedback for {}: {e:#}", clip.session);
+    }
+    Ok(())
+}
+
+/// Full ordered history for the review UI.
+pub fn feedback(db: &Db, session: &str) -> Result<Vec<Value>> {
+    db.with(|c| {
+        let mut st = c.prepare("SELECT id, clip_id, action, at, context FROM clip_feedback WHERE session = ?1 ORDER BY id")?;
+        st.query_map([session], |r| {
+            let context: String = r.get(4)?;
+            Ok(Value::map()
+                .with("id", r.get::<_, i64>(0)?)
+                .with("clip_id", r.get::<_, i64>(1)?)
+                .with("action", r.get::<_, String>(2)?)
+                .with("at", r.get::<_, i64>(3)?)
+                .with("context", serde_json::from_str::<Value>(&context).unwrap_or_default()))
+        })?
+        .collect()
+    })
+}
+
+/// Export the history in show time order, including reviews made after indexing closed.
+pub fn export_feedback(db: &Db, session: &str, session_dir: &Path) -> Result<()> {
+    let events = feedback(db, session)?;
+    let path = show::paths_for(session_dir).feedback();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temp = path.with_extension("jsonl.tmp");
+    let mut body = String::new();
+    for item in events {
+        body.push_str(&serde_json::to_string(&item)?);
+        body.push('\n');
+    }
+    std::fs::write(&temp, body)?;
+    std::fs::rename(temp, path)?;
     Ok(())
 }
 
@@ -445,6 +573,39 @@ mod tests {
         assert_eq!(get(&db, a).unwrap().unwrap().upload_url.as_deref(), Some("https://x/1"));
         assert!(!set_status(&db, 999, "approved", None).unwrap());
         assert_eq!(list(&db, None, Some("rejected"), 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn review_history_keeps_actions_and_song_context_after_retrim() {
+        let db = Db::memory().unwrap();
+        migrate(&db).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let session_dir = root.path().join("session");
+        let show_dir = root.path().join("show");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::write(session_dir.join("meta.toml"), format!("show = {{ dir = {:?}, name = \"show\" }}\n", show_dir.to_string_lossy())).unwrap();
+        db.with(|c| c.execute("INSERT INTO sessions (id, started_at, dir) VALUES (?1, 0, ?2)", params!["s1", session_dir.to_string_lossy()])).unwrap();
+        let song = ClipRow {
+            kind: "song".into(),
+            song: Some("Drum Solo".into()),
+            requester: Some("dj".into()),
+            dmca_risk: true,
+            context: r#"{"video":"clip-1","channel":"artist"}"#.into(),
+            ..clip("s1", "song-1", 2.0)
+        };
+        let id = upsert(&db, &song).unwrap();
+        assert!(set_status(&db, id, "approved", None).unwrap());
+        let mut cut = get(&db, id).unwrap().unwrap();
+        cut.in_s = 3.0;
+        cut.out_s = 23.0;
+        update_cut(&db, &cut).unwrap();
+        set_status(&db, id, "rejected", None).unwrap();
+        let events = feedback(&db, "s1").unwrap();
+        assert_eq!(events.iter().map(|v| v.get_path("action").and_then(Value::as_str)).collect::<Vec<_>>(), vec![Some("keep"), Some("retrim"), Some("skip")]);
+        assert_eq!(events[1].get_path("context.details.previous_in").and_then(Value::as_f64), Some(1.0));
+        assert_eq!(events[2].get_path("context.clip.song").and_then(Value::as_str), Some("Drum Solo"));
+        assert_eq!(events[2].get_path("context.clip.context.video").and_then(Value::as_str), Some("clip-1"));
+        assert_eq!(std::fs::read_to_string(show_dir.join("data/feedback.jsonl")).unwrap().lines().count(), 3);
     }
 
     #[test]

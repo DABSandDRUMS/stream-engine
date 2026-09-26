@@ -1,7 +1,8 @@
-//! Scenes → Overlays & effects (§6, §15.5): every overlay, animated background, particle effect
-//! and video/audio effect as a card: what it is, whether it's working, a Test button, on/off,
-//! and its settings as real controls (colors, sliders, switches). "New" makes one from the
-//! shipped templates. File locations, script CPU and errors with line numbers live under Details.
+//! Scenes → Overlays (§6, §15.5): every overlay, animated background, particle effect
+//! and video/audio effect as a card: what it is, whether it's working, a Try it button (asks
+//! first when on air), on/off, and its settings as real controls (colors, sliders, switches).
+//! "New" makes one from the shipped templates. File locations, script CPU and errors with line
+//! numbers live under Details.
 
 use crate::app::App;
 use crate::views::composition::source_label;
@@ -330,21 +331,50 @@ fn patch_card(app: &mut App, ui: &mut egui::Ui, p: &Value, min_h: f32) -> f32 {
                 );
             }
             ui.add_space(spacing::S);
+            let confirm_id = egui::Id::new(("patch-try-confirm", &id));
+            let on_air = crate::views::status::on_air(app);
+            let mut confirm = on_air && ui.data(|d| d.get_temp::<bool>(confirm_id)).unwrap_or(false);
             ui.horizontal(|ui| {
                 widgets::badge(ui, &t, status, color);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if st == "suspended" && widgets::button_ex(ui, &t, Some(icon::PLAY), "Resume", Kind::Secondary, Size::Small, 0.0, true).clicked() {
                         action(app, "patch.enable", Value::map().with("id", id.clone()));
                     }
-                    if p.get_path("trigger").is_some_and(Value::truthy)
-                        && widgets::button_ex(ui, &t, Some(icon::BOLT), "Test", Kind::Secondary, Size::Small, 0.0, enabled)
-                            .on_hover_text("Play it once now")
-                            .clicked()
-                    {
-                        app.m.command(Op::Trigger { address: format!("patch.{id}"), payload: Value::Null });
+                    if p.get_path("trigger").is_some_and(Value::truthy) {
+                        let (label, kind, tip) = if on_air {
+                            ("Try it on air", Kind::Live, "You're on air: your viewers will see it.")
+                        } else {
+                            ("Try it", Kind::Secondary, "Plays it once now. You're off air: only you see it.")
+                        };
+                        if widgets::button_ex(ui, &t, Some(icon::PLAY), label, kind, Size::Small, 0.0, enabled).on_hover_text(tip).clicked() {
+                            if on_air {
+                                confirm = !confirm;
+                            } else {
+                                try_overlay(app, &id);
+                            }
+                        }
                     }
                 });
             });
+            if confirm {
+                ui.add_space(spacing::S);
+                let go = widgets::callout(
+                    ui,
+                    &t,
+                    Tone::Danger,
+                    icon::LIVE,
+                    "Your viewers will see this",
+                    "You're on air, so it plays on stream right now.",
+                    Some("Try it on air"),
+                );
+                if go {
+                    try_overlay(app, &id);
+                    confirm = false;
+                } else if widgets::button_ex(ui, &t, None, "Cancel", Kind::Ghost, Size::Small, 0.0, true).clicked() {
+                    confirm = false;
+                }
+            }
+            ui.data_mut(|d| d.insert_temp(confirm_id, confirm));
             if st == "error" && !err.is_empty() {
                 ui.add_space(spacing::S);
                 let still = p.get_path("live").is_some_and(Value::truthy);
@@ -358,14 +388,9 @@ fn patch_card(app: &mut App, ui: &mut egui::Ui, p: &Value, min_h: f32) -> f32 {
                     },
                 );
             }
-            let params = p.get_path("params").and_then(Value::as_list).unwrap_or(&[]).to_vec();
-            if !params.is_empty() {
+            if p.get_path("params").and_then(Value::as_list).is_some_and(|l| !l.is_empty()) {
                 ui.add_space(spacing::S);
-                widgets::details(ui, &t, ("patch-settings", &id), "Settings", |ui| {
-                    for q in &params {
-                        param_row(app, ui, q);
-                    }
-                });
+                widgets::details(ui, &t, ("patch-settings", &id), "Settings", |ui| params_ui(app, ui, p));
             }
             widgets::details(ui, &t, ("patch-details", &id), "Details", |ui| {
                 widgets::fact(ui, &t, "Folder", &format!("patches/{id}/"));
@@ -395,6 +420,20 @@ fn patch_card(app: &mut App, ui: &mut egui::Ui, p: &Value, min_h: f32) -> f32 {
             ui.cursor().top() - top + 2.0 * spacing::L + 2.0
         })
         .inner
+}
+
+/// Play an overlay once (its trigger).
+fn try_overlay(app: &mut App, id: &str) {
+    app.m.command(Op::Trigger { address: format!("patch.{id}"), payload: Value::Null });
+}
+
+/// An overlay's settings as real controls (colors, sliders, switches, text), saved as they
+/// change. `p` is the overlay's entry in the `patches` query. Shared by the Overlays cards and
+/// the Scenes page's layer panel.
+pub fn params_ui(app: &mut App, ui: &mut egui::Ui, p: &Value) {
+    for q in p.get_path("params").and_then(Value::as_list).unwrap_or(&[]) {
+        param_row(app, ui, q);
+    }
 }
 
 fn rgba(v: &Value) -> Option<Color32> {
@@ -436,7 +475,12 @@ fn param_row(app: &mut App, ui: &mut egui::Ui, q: &Value) {
     let label = if s("description").is_empty() { nice(&s("name")) } else { s("description") };
     let mut set = None;
     ui.horizontal(|ui| {
-        ui.add_sized([150.0, 24.0], egui::Label::new(RichText::new(&label).color(t.text_dim)).truncate());
+        // a third of the row (less in the Scenes page's side panel), text on the left
+        let lw = (ui.available_width() * 0.34).clamp(90.0, 150.0);
+        ui.allocate_ui_with_layout(Vec2::new(lw, 24.0), Layout::left_to_right(Align::Center), |ui| {
+            ui.set_min_width(lw);
+            ui.add(egui::Label::new(RichText::new(&label).color(t.text_dim)).truncate()).on_hover_text(&label);
+        });
         match ty.as_str() {
             "color" => {
                 let mut c = rgba(&cur).unwrap_or(Color32::WHITE);
@@ -496,7 +540,7 @@ fn param_row(app: &mut App, ui: &mut egui::Ui, q: &Value) {
             _ => {
                 let key = egui::Id::new(("param-text", &addr));
                 let mut buf: String = ui.data_mut(|d| d.get_temp(key)).unwrap_or_else(|| cur.as_str().map(String::from).unwrap_or_else(|| cur.to_string()));
-                let r = ui.add(se_ui_kit::widgets::field(&mut buf).desired_width(ui.available_width()));
+                let r = ui.add(se_ui_kit::widgets::field(&mut buf).desired_width((ui.available_width() - 8.0).max(80.0)));
                 if r.lost_focus() && buf != cur.as_str().unwrap_or("") {
                     set = Some(Value::Str(buf.clone()));
                 }

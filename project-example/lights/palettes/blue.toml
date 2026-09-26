@@ -1,5 +1,21 @@
-kind = "color"
+kind = "any"
 label = "Blue"
 
 [set]
-all = { color = "#0030ff" }
+all = { color = "#0030ff", intensity = 0.8 }
+
+# Knobs: what the Lights page lets you adjust (docs/lights.md §2.7).
+[[knob]]
+label = "Color"
+target = "set.all.color"
+kind = "color"
+default = "#0030ff"
+
+[[knob]]
+label = "Brightness"
+target = "set.all.intensity"
+min = 0.0
+max = 1.0
+step = 0.05
+unit = "%"
+default = 0.8

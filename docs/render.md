@@ -97,6 +97,7 @@ pass.
 | `grade` | warmth, tint, contrast, saturation, lift, exposure (on at identity = no pass) | canvas |
 | `lut` | `fx.lut.file` (.cube) | canvas |
 | `chroma_key` | key_r/g/b, similarity, smoothness, spill | attach only (source/node) |
+| `shake` | strength (fraction of the shorter side; zooms in just enough to hide the edges), speed (shakes/s) | canvas |
 | `vignette` | radius, softness | canvas |
 | `fade_to_black` | color_r/g/b | output (covers overlays) |
 
@@ -116,21 +117,29 @@ pass no longer has). `perf.fx_passes` counts effect passes in the last frame and
 
 ## Transitions
 
-Driven by the core's `show.transition.*` state, interpolated by master-clock time every frame:
+Driven by the core's `show.transition.*` state, interpolated by master-clock time every frame.
+`ease` shapes the progress of every kind (a shader gets the eased value, clamped to 0–1, in
+`se.progress`); `label` is the name editors show.
 
 - `kind = "morph"`: nodes showing the same source animate rect/crop/radius/opacity/rotation with
   `ease`; others enter/exit with `enter`/`exit` (`fade`, `scale`, `slide_left|right|up|down`,
   `none`, or a custom shader style; per node overrides).
-- `kind = "shader"`: both scenes render to textures and `shader` blends them. The file gets the
-  generated patch header: `se.progress` (0→1), `se_input` (outgoing), `se_input_b` (incoming),
-  `se_sampler`, extra TOML keys as params `p_<name>()`; entry point `fs`. `shader = "patch.<id>"`
-  uses a transition-layer patch.
+- `kind = "shader"`: both scenes render to textures and `shader` blends them. `shader` is a
+  built-in shader name (below), a `.wgsl` file in the project, or `"patch.<id>"` (a
+  transition-layer patch). Files get the generated patch header: `se.progress` (0→1), `se_input`
+  (outgoing), `se_input_b` (incoming), `se_sampler`, extra TOML keys as params `p_<name>()`;
+  entry point `fs`.
 - `kind = "combined"`: morph geometry with the shader applied over it (A = B = the morph frame).
 
-Shipped: `morph`, `fade`, `zoomblur` (gl-transitions CrossZoom, MIT), `glitch` (after
-gl-transitions GlitchMemories, MIT), `morph_glitch` (combined). Ported shaders keep their license
-header. A shader that fails to compile keeps its last good version (else a crossfade) and the
-error is published at `render.transition.<name>.error`.
+Built-in shaders (`se_core::transitions::SHADERS`, sources in `se-render/src/shaders/`): `fade`
+(crossfade), `glitch` (after gl-transitions GlitchMemories, MIT; settings `strength` 0–3,
+default 1, and `block` in pixels 4–64, default 16), `zoomblur` (gl-transitions CrossZoom, MIT;
+`strength` 0.05–1, default 0.4). They compile with the transition file's settings; a missing
+setting takes its default, and whole numbers count as decimals. Ported shaders keep their
+license header. The example project ships `morph`, `fade`, `zoomblur`, `glitch` and
+`morph_glitch` (combined) files using them; `se_core::transitions::STYLES` lists the starting
+points editors offer. A shader that fails to compile keeps its last good version (else a
+crossfade) and the error is published at `render.transition.<name>.error`.
 
 ### Custom enter/exit styles
 
@@ -162,14 +171,20 @@ fn fs(in: SeVsOut) -> @location(0) vec4<f32> {
 ### Choosing the transition
 
 A take that doesn't name its transition (`scene.cut wide`, deck keys, `scene.take`) picks one in
-this order; the `scene.take` event says which (`by`: `command | fixed | vote | pool | default`):
+this order; the `scene.take` event says which (`by`: `command | fixed | vote | pool | project |
+default`):
 
 1. the transition named by the command (`scene.cut wide zoomblur`, `scene.take fade 400ms`);
 2. a fixed `name` for the scene pair, else the target scene's `name`;
 3. the chat vote winner (below);
 4. a weighted pick from the scene pair's pool, else the target scene's pool (skipping the last
    `avoid_repeat` transitions);
-5. `fade`.
+5. the project-wide default, `[transitions]` in `project.toml` (same keys, pairs included): its
+   pair's or its own fixed `name`, else a pick from its pool (`by = "project"`);
+6. `fade`.
+
+A cut stays instant unless the command gives a duration. Otherwise the duration is the pair's,
+else the scene's, else the project default's `ms`, else the transition's own.
 
 ```toml
 # scenes/wide.toml
@@ -190,6 +205,19 @@ A pair table overrides the target scene's settings key by key (`pool` with its o
 `avoid_repeat`, `ms`, `lights`, `name`); a pair with its own `pool` ignores the scene's fixed
 `name`. Unknown scenes or transitions in a pair show as project errors.
 
+```toml
+# project.toml: every scene without a pool or name of its own
+[transitions]
+pool = [{ name = "morph" }, { name = "fade" }, { name = "zoomblur" }]
+avoid_repeat = 1
+
+[transitions.from.brb]           # leaving `brb`, whatever the target
+name = "cut"
+```
+
+The Transitions tab (Scenes → Transitions) edits these: "How scenes switch" is the project
+default; "Exceptions" are the scenes' `[transitions]` and `[transitions.from.<scene>]` tables.
+
 **Chat vote.** With `[transition_vote]` in `project.toml`, viewers vote for the next take's
 transition with `transition.vote {name}` — the starter project maps `!transition <name>` to it
 (`commands/show.toml`, a per-viewer cooldown and role gate like any bot command):
@@ -203,8 +231,9 @@ choices = ["fade", "morph", "zoomblur", "glitch"]   # default: every transition
 
 Each viewer has one vote (a new one replaces theirs); names match without regard to case. The
 next take without a named transition uses the most-voted one (a tie goes to the transition voted
-for first) and spends the votes; a transition named by the operator or a fixed `name` wins over
-the vote, which then waits for the following take. Votes count only in the policy's effect modes
+for first) and spends the votes; a transition named by the operator or a scene's (or pair's)
+fixed `name` wins over the vote, which then waits for the following take. The vote wins over the
+project default, even its fixed `name`. Votes count only in the policy's effect modes
 (`live`, `rehearsal`), like every chat effect. Live tally: `show.transition.votes`
 (`{transition: votes}`); each vote emits `transition.vote {user, name, votes}`.
 

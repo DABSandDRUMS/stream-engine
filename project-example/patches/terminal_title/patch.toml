@@ -1,0 +1,16 @@
+# Title box of the win31 "starting soon" terminal (scenes/starting_soon.toml): a double-line
+# box with the big title and a countdown bar. The scene fires `patch.terminal_title.trigger`
+# when it comes on; the page keeps that moment in `patch.terminal_title.started`, so a reload
+# continues the same countdown. Shared look: patches/_lib/win31/ (docs/patches.md, "Bringing
+# your own overlay pages"). Best at a 960:144 node (1920x288 on a 1080p canvas).
+kind        = "web"
+entry       = "index.html"
+layer       = "source"
+label       = "Terminal title"
+description = "DOS-style title box with a countdown bar"
+fps         = 30
+params.title      = { type = "string", default = "THE STREAM IS ABOUT TO START", description = "Title" }
+params.count_to   = { type = "enum",   default = "minutes", options = ["minutes", "clock_time"], description = "Countdown" }
+params.minutes    = { type = "float",  default = 5.0, range = [1.0, 120.0], description = "Minutes" }
+params.clock_time = { type = "string", default = "20:00", description = "Clock time (20:00)" }
+trigger = { attack = "0ms", hold = "100ms", release = "0ms", retrigger = "replace" }

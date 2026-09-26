@@ -24,7 +24,6 @@ pub fn nav_badge(app: &App, p: Page) -> Option<(String, Color32)> {
     let t = &app.t;
     let n = match p {
         Page::Community => rail::badge_count(app, RailTab::Mod) + rail::badge_count(app, RailTab::Queue),
-        Page::Recordings => app.m.f("clips.pending").max(0.0) as usize,
         _ => 0,
     };
     (n > 0).then(|| (n.to_string(), t.accent))
@@ -60,6 +59,8 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
             });
             ui.add_space(spacing::L);
             scenes(app, ui);
+            ui.add_space(spacing::L);
+            crate::views::lights::overview_strip(app, ui);
             if geo.fx_w <= 0.0 {
                 // narrower windows: the show controls come before the camera strip
                 ui.add_space(spacing::L);

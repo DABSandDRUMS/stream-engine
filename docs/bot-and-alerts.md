@@ -253,6 +253,12 @@ placed as scene nodes):
 |---|---|---|
 | `nowplaying` | the current song request beside the YouTube player (`queue.now.*`, `queue.position`) — docs/song-requests.md | `label`, `show_requester`, `align` |
 | `ad_break` | the ad break card: "Back in a moment", a countdown of the Twitch ad, now playing | `title`, `subtitle`, `done_text`, `show_song` |
+| `terminal_title` | win31 DOS title box with a countdown bar (scene `starting_soon`, mode `preshow`) | `title`, `count_to` (minutes / clock time), `minutes`, `clock_time` |
+| `terminal_chat` | chat typed out as `C:\CHAT\NAME>` commands, alert lines (`alert.show`), deletion-synced | `prompt`, `lines`, `show_alerts` |
+| `terminal_boot` | BIOS/DOS boot typed out when `starting_soon` comes on | `brand` |
+
+The three `terminal_*` pieces are the worked example of porting a browser-source page:
+docs/patches.md, "Bringing your own overlay pages".
 
 ### Ad breaks in the example project
 

@@ -1,4 +1,5 @@
 # Animate matching nodes between scenes; entering/leaving nodes fade.
+label = "Glide"
 kind = "morph"
 ms = 700
 ease = "in_out_cubic"

@@ -2,7 +2,7 @@
 //! confirm and cooldown), the "running now" list, and the right-rail tabs. The page itself is
 //! laid out in `views::live`.
 
-use crate::app::App;
+use crate::app::{App, ViewId};
 use crate::views::rail;
 use egui::{Color32, Rect, RichText, Stroke, Vec2};
 use se_proto::{Op, Value};
@@ -210,7 +210,16 @@ pub fn pads(app: &mut App, ui: &mut egui::Ui) {
     let t = app.t.clone();
     let (_, items) = pad_items(app);
     if items.is_empty() {
-        widgets::empty_state(ui, &t, icon::BOLT, "No quick effects yet", "Make one in Scenes → Overlays & effects.", None);
+        if widgets::empty_state(
+            ui,
+            &t,
+            icon::BOLT,
+            "No quick effects yet",
+            "One tap that makes something happen on stream: a shake, a flash, lights, a sound.",
+            Some("Make a quick effect"),
+        ) {
+            app.open_view(ViewId::QuickEffects);
+        }
         return;
     }
     let gap = 10.0;

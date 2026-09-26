@@ -19,6 +19,7 @@ zstd.workspace = true
 tracing.workspace = true
 parking_lot.workspace = true
 crossbeam-channel.workspace = true
+blake3 = "1"
 keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
 
 [dev-dependencies]

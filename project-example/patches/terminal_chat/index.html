@@ -1,0 +1,184 @@
+<!doctype html>
+<!-- Chat of the win31 "starting soon" terminal. Browser test:
+     /patches/terminal_chat/index.html?token=<token>, then `streamctl sim chat message='hi chat'`,
+     `streamctl sim sub`, `streamctl sim raid viewers=42`. -->
+<html>
+<head>
+<meta charset="utf-8">
+<title>terminal_chat</title>
+<link rel="stylesheet" href="/patches/_lib/win31/dos.css">
+</head>
+<body>
+<div class="dos" id="screen"><div class="term" id="log"><div id="typing"><span id="typed"></span><span class="dos-caret"></span></div></div></div>
+<script src="/engine.js"></script>
+<script src="/web/overlay.js"></script>
+<script src="/patches/_lib/win31/dos.js"></script>
+<script>
+  "use strict";
+  const O = Overlay;
+  const se = Engine.connect();
+  const $ = id => document.getElementById(id);
+  const log = $("log"), typing = $("typing"), typed = $("typed");
+  const P = O.params(se, { prompt: "C:\\CHAT", lines: 40, show_alerts: true }, () => { trim(); if (!busy) idle(); });
+
+  Dos.fit($("screen"));
+
+  let queue = [];        // {kind: "msg", m} | {kind: "alert", a}, typed out one at a time
+  let busy = false;      // typing
+  let booting = false;   // terminal_boot is playing: hold everything until it is done
+  let current = null;    // the message being typed: {id, user, name, cancel}
+
+  const esc = s => CSS.escape(String(s || ""));
+  const max = () => Math.max(1, Number(P.lines) || 40);
+
+  function trim() {
+    const lines = log.querySelectorAll(".line");
+    for (let i = 0; i < lines.length - max(); i++) lines[i].remove();
+  }
+
+  function addLine(el) {
+    log.insertBefore(el, typing);
+    trim();
+  }
+
+  function idle() {
+    typed.textContent = "";
+    typed.append(O.h("span", "p", `${P.prompt}>`));
+  }
+
+  // `C:\CHAT\NAME>`, the name in the viewer's colour
+  function prompt(m) {
+    const p = O.h("span", "p");
+    const name = O.h("span", null, String(m.user || m.login || "?").toUpperCase());
+    name.style.color = Dos.colorFor(String(m.login || m.user || "").toLowerCase());
+    p.append(`${P.prompt}\\`, name, ">");
+    return p;
+  }
+
+  function chatLine(m) {
+    const line = O.h("div", "line");
+    line.dataset.id = String(m.id || "");
+    line.dataset.user = String(m.user_id || "");
+    line.dataset.name = String(m.user || m.login || "").toLowerCase();
+    return line;
+  }
+
+  const textOf = m => String(m.text || (m.fragments || []).map(f => f.text || "").join(""));
+  const shown = id => !!id && !!log.querySelector(`.line[data-id="${esc(id)}"]`);
+
+  // A message from `chat.recent`: straight in, no typing
+  function addNow(m) {
+    if (!m || shown(m.id)) return;
+    const line = chatLine(m);
+    line.append(prompt(m), O.h("span", "w", textOf(m)));
+    addLine(line);
+  }
+
+  async function type(m) {
+    if (shown(m.id)) return;
+    const me = (current = { id: String(m.id || ""), user: String(m.user_id || ""), name: String(m.user || m.login || "").toLowerCase(), cancel: false });
+    typed.textContent = "";
+    const cmd = O.h("span", "w");
+    typed.append(prompt(m), cmd);
+    const fast = queue.length > 2; // catch up when chat is busy
+    for (const ch of Array.from(textOf(m))) {
+      if (me.cancel) break;
+      cmd.textContent += ch;
+      if (!fast) await Dos.sleep(14 + Math.random() * 30);
+    }
+    if (!fast && !me.cancel) await Dos.sleep(120);
+    if (!me.cancel) {
+      const line = chatLine(m);
+      line.append(...typed.childNodes);
+      addLine(line);
+    }
+    typed.textContent = "";
+    current = null;
+  }
+
+  const num = x => Number(x || 0).toLocaleString("en-US");
+  function alertText(a) {
+    const ev = String(a.event || ""), user = String(a.user || "");
+    switch (ev) {
+      case "twitch.sub": return a.variation === "gifted" ? `GIFT SUB FOR ${user}` : `NEW SUBSCRIBER: ${user}`;
+      case "twitch.resub": return `RESUB: ${user} (${num(a.amount)} months)`;
+      case "twitch.gift": return Number(a.amount) > 1 ? `${user} IS GIFTING ${num(a.amount)} SUBS` : `GIFT SUB FROM ${user}`;
+      case "twitch.raid": return `INCOMING RAID: ${user} WITH ${num(a.amount)} VIEWERS`;
+      case "twitch.cheer": return `${user} CHEERED ${num(a.amount)} BITS`;
+      case "twitch.follow": return `NEW FOLLOWER: ${user}`;
+    }
+    if (/(^|\.)tip$/.test(ev)) return `${user || "Anonymous"} TIPPED ${O.fmtMoney(a.amount, a.currency)}`;
+    return String(a.title || "");
+  }
+
+  async function pump() {
+    if (busy || booting) return;
+    busy = true;
+    while (queue.length && !booting) {
+      const item = queue.shift();
+      if (item.kind === "alert") {
+        const t = alertText(item.a);
+        if (!t) continue;
+        const line = O.h("div", "line y", `*** ${t} ***`);
+        line.dataset.alert = String(item.a.id);
+        addLine(line);
+        continue;
+      }
+      await type(item.m);
+    }
+    idle();
+    busy = false;
+  }
+
+  // ---- removals: deleted messages, banned/timed-out viewers, cleared chat, killed alerts ----
+  function drop(match) {
+    log.querySelectorAll(".line[data-id]").forEach(el => { if (match(el.dataset)) el.remove(); });
+    queue = queue.filter(i => i.kind !== "msg" || !match({ id: String(i.m.id || ""), user: String(i.m.user_id || ""), name: String(i.m.user || i.m.login || "").toLowerCase() }));
+    if (current && match(current)) current.cancel = true;
+  }
+  se.on("chat.delete", e => {
+    const id = String((e.payload || {}).message_id || "");
+    if (id) drop(d => d.id === id);
+  });
+  se.on("chat.purge", e => {
+    const id = String((e.payload || {}).user_id || ""), name = String((e.payload || {}).user || "").toLowerCase();
+    drop(d => (id && d.user === id) || (name && d.name === name));
+  });
+  se.on("chat.clear", () => drop(() => true));
+  se.on("alert.hide", e => {
+    const a = e.payload || {};
+    if (a.reason !== "vetoed" && a.reason !== "purged") return;
+    log.querySelectorAll(`.line[data-alert="${esc(a.id)}"]`).forEach(el => el.remove());
+    queue = queue.filter(i => i.kind !== "alert" || String(i.a.id) !== String(a.id));
+  });
+
+  // ---- new lines ----
+  se.on("chat.message", e => {
+    if (!e.payload) return;
+    queue.push({ kind: "msg", m: e.payload });
+    pump();
+  });
+  se.on("alert.show", e => {
+    if (!P.show_alerts || !e.payload) return;
+    queue.push({ kind: "alert", a: e.payload });
+    pump();
+  });
+  se.state("patch.terminal_boot.active", (_, v) => {
+    booting = !!v;
+    pump();
+  });
+
+  // start filled with the last messages (again after a reconnect: the engine drops deleted ones)
+  se.onconnect = async () => {
+    try {
+      const recent = await se.query("chat.recent");
+      log.querySelectorAll(".line").forEach(el => el.remove());
+      for (const m of recent || []) addNow(m);
+    } catch (e) {
+      console.warn("chat.recent:", e);
+    }
+  };
+  idle();
+</script>
+</body>
+</html>

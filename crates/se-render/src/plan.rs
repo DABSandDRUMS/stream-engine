@@ -795,7 +795,19 @@ fn transition_plan(b: &mut Builder, t: &TransitionDef) -> TransitionPlan {
     };
     let shader = match (&t.shader, kind) {
         (Some(s), _) if s.starts_with("patch.") => Some(ShaderSource::Patch(s["patch.".len()..].to_string())),
-        (Some(s), _) => Some(ShaderSource::File(PathBuf::from(s))),
+        (Some(s), _) if s.ends_with(".wgsl") => Some(ShaderSource::File(PathBuf::from(s))),
+        (Some(s), _) => match se_core::transitions::shader(s) {
+            Some(sh) => Some(ShaderSource::Builtin(sh.name)),
+            None => {
+                let known: Vec<&str> = se_core::transitions::SHADERS.iter().map(|s| s.name).collect();
+                errors.push(format!(
+                    "transitions/{}.toml: unknown shader `{s}` (built in: {}; or patch.<id>, or a .wgsl file); using a crossfade",
+                    t.name,
+                    known.join(", ")
+                ));
+                Some(ShaderSource::Builtin("fade"))
+            }
+        },
         (None, TrKind::Shader | TrKind::Combined) => {
             if t.name != "fade" {
                 errors.push(format!("transitions/{}.toml: kind `{}` needs `shader`; using a crossfade", t.name, t.kind));
@@ -804,8 +816,17 @@ fn transition_plan(b: &mut Builder, t: &TransitionDef) -> TransitionPlan {
         }
         (None, _) => None,
     };
+    // a built-in shader's settings are floats; missing ones take the shader's defaults
+    let builtin = match &shader {
+        Some(ShaderSource::Builtin(n)) => se_core::transitions::shader(n).map(|s| s.params).unwrap_or(&[]),
+        _ => &[],
+    };
     let mut params = Vec::new();
     for (k, v) in &t.params {
+        let v = match v {
+            Value::Int(i) if builtin.iter().any(|p| p.name == k.as_str()) => &Value::Float(*i as f64),
+            v => v,
+        };
         let ty = match v {
             Value::Bool(_) => "bool",
             Value::Int(_) => "int",
@@ -828,6 +849,10 @@ fn transition_plan(b: &mut Builder, t: &TransitionDef) -> TransitionPlan {
             continue;
         }
         params.push((k.clone(), se_patch::ParamSpec { ty: ty.into(), default, range: None, options: Vec::new(), unit: None, description: None }));
+    }
+    for p in builtin.iter().filter(|p| !t.params.contains_key(p.name)) {
+        let default = Some(toml::Value::Float(p.default));
+        params.push((p.name.to_string(), se_patch::ParamSpec { ty: "float".into(), default, range: None, options: Vec::new(), unit: None, description: None }));
     }
     let ctx = format!("transitions/{}.toml", t.name);
     let enter = b.style(&t.enter, &format!("{ctx} enter")).unwrap_or(Style::Fade);

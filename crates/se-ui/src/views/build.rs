@@ -24,6 +24,7 @@ pub struct BuildState {
     pub rules: rules::RulesEditor,
     pub tools: tools::ToolsState,
     pub comp: crate::views::composition::CompositionState,
+    pub transitions: crate::views::transitions::TransitionsState,
 }
 
 impl BuildState {

@@ -115,6 +115,23 @@ pub fn trim(words: &[Word], start: f64, peak: f64, end: f64, lo: f64, hi: f64, c
     Trim { t_in, t_out, clean_in, clean_out }
 }
 
+/// Musical clips use time and (when present) nearby downbeats/beat points, not
+/// Whisper's unreliable song lyrics or spoken-sentence boundaries.
+pub fn trim_music(start: f64, peak: f64, end: f64, lo: f64, hi: f64, beats: &[f64], cfg: &ClipsConfig) -> Trim {
+    let min = cfg.min_len.0 as f64 / 1000.0;
+    let max = cfg.max_len.0 as f64 / 1000.0;
+    let lo = lo.max(0.0);
+    let hi = hi.max(lo);
+    let target = (end - start).clamp(min, max).min(45.0_f64.max(min)).min(hi - lo);
+    let t_in = (peak - target / 2.0).max(start).clamp(lo, (hi - target).max(lo));
+    let t_out = (t_in + target).min(hi);
+    let snap =
+        |t: f64| beats.iter().copied().filter(|b| b.is_finite() && (*b - t).abs() <= 0.4).min_by(|a, b| (a - t).abs().total_cmp(&(b - t).abs())).unwrap_or(t);
+    let (a, b) = (snap(t_in), snap(t_out));
+    let (t_in, t_out) = if a >= lo && b <= hi && b - a >= min && b - a <= max && a <= peak && b >= peak { (a, b) } else { (t_in, t_out) };
+    Trim { t_in, t_out, clean_in: false, clean_out: false }
+}
+
 const EXCITED: &[&str] =
     &["let's go", "lets go", "no way", "oh my god", "oh my gosh", "holy", "what", "insane", "crazy", "wow", "yes", "haha", "lol", "hahaha"];
 
@@ -147,6 +164,11 @@ pub struct RankIn {
     pub marker_score: f64,
     pub reasons: Vec<String>,
     pub labels: Vec<String>,
+    pub kind: String,
+    pub song: Option<String>,
+    pub requester: Option<String>,
+    pub dmca_risk: bool,
+    pub context: serde_json::Value,
     #[serde(rename = "in")]
     pub t_in: f64,
     pub out: f64,
@@ -300,6 +322,17 @@ mod tests {
     }
 
     #[test]
+    fn music_trim_keeps_drop_and_snaps_only_when_safe() {
+        let cfg = ClipsConfig::default();
+        let plain = trim_music(10.0, 30.0, 50.0, 0.0, 120.0, &[], &cfg);
+        assert_eq!((plain.t_in, plain.t_out), (10.0, 50.0));
+        let snapped = trim_music(10.0, 30.0, 50.0, 0.0, 120.0, &[9.9, 50.2], &cfg);
+        assert_eq!((snapped.t_in, snapped.t_out), (9.9, 50.2));
+        let unsafe_snap = trim_music(10.0, 30.0, 50.0, 10.0, 50.0, &[9.9, 50.2], &cfg);
+        assert_eq!((unsafe_snap.t_in, unsafe_snap.t_out), (10.0, 50.0));
+    }
+
+    #[test]
     fn sentences_split_on_punctuation_and_pauses() {
         let words = vec![w(0.0, 0.3, "Hey"), w(0.4, 0.8, "there."), w(1.0, 1.3, "so"), w(1.3, 1.6, "um"), w(3.0, 3.5, "anyway")];
         let s = sentences(&words);
@@ -374,6 +407,11 @@ mod tests {
             score: 1.0,
             marker_score: 1.0,
             reasons: vec!["chat".into()],
+            kind: "talk".into(),
+            song: None,
+            requester: None,
+            dmca_risk: false,
+            context: serde_json::Value::Null,
             labels: vec![],
             t_in: 10.0,
             out: 31.0,

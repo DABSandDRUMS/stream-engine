@@ -56,3 +56,22 @@ label = "Pulse"
 fade = "0.5s"
 wait = "4s"
 effects = { pulse = { size = 0.6 } }
+
+# Knobs: what the Lights page lets you adjust (docs/lights.md §2.7).
+[[knob]]
+label = "Front light"
+target = "cue.4.set.front.intensity"
+min = 0.0
+max = 1.0
+step = 0.05
+unit = "%"
+default = 1.0
+
+[[knob]]
+label = "Pulse strength"
+target = "cue.5.effects.pulse.size"
+min = 0.0
+max = 1.0
+step = 0.05
+unit = "%"
+default = 0.6

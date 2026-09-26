@@ -6,15 +6,18 @@
 //! * `stream-engine new` — create a project from the starter template
 
 mod api_admin;
+mod assets;
 mod daemon;
 mod http_extra;
 mod logging;
 mod omarchy;
+mod presets_catalog;
 mod project_io;
 mod queries;
 mod replay;
 mod session_tasks;
 mod subsystems;
+mod versions;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};

@@ -1290,7 +1290,8 @@ impl Renderer {
                 &cv.t[a_idx],
                 &cv.t[b_idx],
                 &cv.t[out],
-                tr.progress,
+                // shaders follow the transition's `ease` too (an overshooting ease stops at B)
+                tr.eased(&plan).clamp(0.0, 1.0),
                 snap,
                 res,
                 fi,
@@ -1845,8 +1846,13 @@ fn transition_pass(
             return;
         }
     }
-    let (pipeline, off) = match (tp.shader.as_ref(), transitions.get_mut(&tp.name)) {
-        (Some(ShaderSource::File(_)), Some(t)) => match t.pipes.as_ref() {
+    let compiled = match &tp.shader {
+        Some(ShaderSource::File(_)) => true,
+        Some(ShaderSource::Builtin(n)) => *n != "fade",
+        _ => false,
+    };
+    let (pipeline, off) = match (compiled, transitions.get_mut(&tp.name)) {
+        (true, Some(t)) => match t.pipes.as_ref() {
             UserPipes::Fullscreen(p) => {
                 let values = &t.values;
                 t.layout.write(&mut t.buf, &transition_fixed(fi, size, progress), |i, _| values.get(i).copied().unwrap_or([0.0; 4]), sig);

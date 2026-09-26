@@ -247,6 +247,21 @@ pub static LIBRARY: &[EffectDef] = &[
         wgsl: include_str!("shaders/fx/chroma_key.wgsl"),
     },
     EffectDef {
+        name: "shake",
+        description: "Screen shake: the image jolts around smoothly, zoomed so no edge shows",
+        params: &[
+            p("strength", 0.03, 0.0, 0.15, "Movement at full strength (fraction of the frame's shorter side)"),
+            pu("speed", 12.0, 1.0, 40.0, "Hz", "Shakes per second"),
+        ],
+        amount_default: 0.0,
+        level_default: 1.0,
+        point: Point::Canvas,
+        exec: Exec::Simple,
+        flashy: true,
+        identity: None,
+        wgsl: include_str!("shaders/fx/shake.wgsl"),
+    },
+    EffectDef {
         name: "vignette",
         description: "Darkened edges",
         params: &[p("radius", 0.75, 0.1, 1.5, "Distance where darkening starts"), p("softness", 0.45, 0.01, 1.0, "Falloff width")],

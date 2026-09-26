@@ -24,23 +24,180 @@ The top bar is on every page:
 | **Emergency stop** | Press and hold. Stops all effects and puts the lights and sound somewhere safe. |
 | Big button | **Open OBS**, then **Go live**, then **End stream**. |
 
-The **sidebar** has eight pages:
+The three **master tabs** keep the jobs separate. **Overview** shows what is on air and what's
+next, with scene, light and sound controls. **Edit** is where you set everything up before a
+stream; its sidebar contains the detailed pages below. **Clipping** is for recording, past
+streams and clips. The sidebar only appears under **Edit**.
 
-| Page | What it's for | Tabs |
+| Edit page | What it's for | Tabs |
 |---|---|---|
-| **Live** | Running the show: what's on air, what's up next, your scenes, quick effects, chat. | none |
-| **Scenes** | Arranging cameras and overlays, transitions and effects. | **Layout**, **Overlays & effects** |
-| **Lights** | Picking a look, running cue lists, editing your lighting. | **Looks**, **Edit a look**, **Stage**, **Setup** (switch at the top of the page) |
+| **Scenes** | Arrange your stream and choose what happens between scenes. | **Scenes**, **Quick effects**, **Overlays**, **Transitions**, **Media** |
+| **Inputs** | Check cameras and set up buttons and pedals. | **Cameras & devices**, **Buttons & pedals** |
+| **Lights** | Pick a look, run cue lists, set brightness and blackout. | One console |
 | **Sound** | Levels for everything your viewers hear. | **Mix**, **Mixing desk**, **Text to speech** |
-| **Automation** | Things that happen on their own, and your buttons and pedals. | **Reactions**, **Buttons & pedals**, **Chat commands**, **Timelines** |
+| **Automation** | Things that happen on their own. | **Reactions**, **Chat commands**, **Timelines** |
 | **Community** | Alerts, goals, song requests, Twitch, giveaways. | **Alerts & goals**, **Song requests**, **Twitch**, **Giveaways** |
-| **Recordings** | Past streams, markers, and clips to review. | **Recordings & clips** |
-| **Settings** | Accounts, devices, backups, and help when something's off. | **Get started**, **Accounts & app**, **Devices**, **Backups**, **Performance**, **Troubleshooting** |
+| **Settings** | Accounts, backups, history and troubleshooting. | **Get started**, **Accounts & app**, **Backups**, **History**, **Performance**, **Troubleshooting** |
 
-A number next to **Community** or **Recordings** means something is waiting for you there.
+A number next to **Edit** means setup still needs attention. A number next to **Clipping**
+means clips are waiting for review. Under **Edit**, **Community** also shows items waiting there.
 
 Press `Ctrl+K` anywhere to open the command palette. Type a few letters of what you want (a
 scene, an effect, "panic", "skip song") and press `Enter`.
+
+To turn off animated movement, open **Edit → Settings → Accounts & app → Appearance** and
+switch on **Reduce motion**. The choice is saved for this computer, not in the stream project.
+
+## Building your stream
+
+You set up scenes, transitions and the rest ahead of time, in the app. Everything you change
+saves by itself.
+
+### Scenes
+
+Open **Scenes → Scenes**. Your scenes are on the left; the one on air has a red dot.
+
+- **Make a scene**: click **New scene**, type a name, and pick what to **Start from**: **One
+  camera**, **Side by side**, **Picture in picture**, **Three across**, **2×2 grid**, **Big + two
+  small**, or **Blank**. Click **Create**. The boxes show your first cameras (cameras with a
+  picture first); with fewer cameras than boxes, cameras repeat. The main and vertical videos
+  each get the layout, with the cameras cropped so they aren't squashed.
+- **Swap a camera**: click its layer, then pick another one under **Camera**. The box keeps its
+  place, size and effects.
+- **Move and resize** layers on the picture, or use **Place it** (**Full screen**, **Left half**,
+  …). **Add layer** puts in another camera or an overlay.
+- **An overlay's own settings**: click an overlay layer (the starting-soon title, for example).
+  Its settings are right there under **Overlay settings**: the title text, the countdown, its
+  colors. They're the same settings as on the **Overlays** tab, show on the video straight away,
+  and count everywhere that overlay is shown.
+- **When a layer shows**: under **Show this layer**, pick **Always** or **Only when…** and say
+  when: **The show mode** is (or isn't) a mode, **A song request** is (or isn't) playing, or **An
+  overlay** is (or isn't) playing. The starting-soon scene uses that last one: the title and chat
+  wait while the boot overlay plays. **Add another check** adds more; all of them must be true.
+  A layer that's waiting says **hidden right now** in the Layers list, and when you click it,
+  **Hidden right now** says which check isn't true yet. **Details** shows the rule the way
+  Stream Engine reads it; you can change it there and click **Use this**. A rule the simple
+  choices can't show (**It has its own rule**) stays editable there, and one with a mistake
+  says so, because the layer then never shows.
+- **Scene settings** (top right): rename it, pick the transitions into this scene and their
+  speed, add effects to the whole scene, **Duplicate** it, or hold **Delete scene**.
+- **When this scene comes on** and **When it goes off** (in **Scene settings**): steps Stream
+  Engine does every time you switch to (or away from) the scene, top to bottom: **Play an
+  overlay**, **Fire a quick effect**, **Turn on a light look**, **Run a light cue**, **Play a
+  sound**, **Change the show mode**, **Wait a moment** and more. **Add a step**, pick what it
+  does, and it's saved; a step you haven't finished (nothing picked yet) says **isn't saved
+  yet**. The same steps are in **Automation → Reactions**.
+- **Background** (in **Scene settings**): the color wherever no layer covers the video, on both
+  videos. **Use black** goes back to the default.
+
+### Overlays
+
+Open **Scenes → Overlays**: every overlay and effect as a card, with an on/off switch, whether
+it's working, and its **Settings**. Overlays that play once (the ad break card, the countdown,
+confetti) have **Try it**; on air it says **Try it on air** and asks first, because your
+viewers will see it.
+
+### Quick effects
+
+Open **Scenes → Quick effects**. A quick effect is one tap that makes something happen: a screen
+shake, a flash, confetti, a light look, a sound — or all of them at once. Quick effects are made
+for you; here you try them, tune them and see where they're used. Want a new one? Ask for the
+look you want.
+
+Your quick effects are on the left with their pad color, what they do in one line and how many
+places fire them (a search box appears when there are more than eight). Click one to open it:
+
+- **Try it** runs it. Ones that stay on for a while (or until pressed again) show **Stop** while
+  they run. On air the button says **Try it on air** and asks first, because your viewers see it.
+- **Knobs** are the few things you can tune on that effect, in plain words: **Strobe speed**
+  (flashes a second), **Intensity**, **How much confetti**, **How far it shakes**, **Warmth**…
+  Move a knob and it's saved by itself; from then on the effect fires that way from every pad,
+  pedal, reaction and chat command. While it's running you see (and hear) the change right away,
+  so fire it and tune it live. **Reset knobs** puts every knob back where it started.
+- **What it does** says, in words, what happens on screen, with the lights and with the sound,
+  and how long it lasts (one burst, a few seconds, or until you press it again).
+- **Where you can fire it** lists its pad on **Overview**, Stream Deck keys, pedals, reactions,
+  chat commands, timelines and rewards. Set up physical controls in **Inputs → Buttons &
+  pedals** (the button next to the list takes you there).
+- If a quick effect's file has a mistake (for example a knob whose lowest setting is above its
+  highest), it says **Needs a fix** in the list and explains what's wrong. Ask for it to be
+  fixed, or go back to an earlier version in **Settings → History**.
+
+### Transitions
+
+Open **Scenes → Transitions** to choose which transitions get used where. The transitions
+themselves are made for you (**Glide**, **Crossfade** and **Cut** are built in); if you want a
+new look, ask for it.
+
+- **Your transitions**: every way of switching scenes, each with a little moving sketch, one
+  sentence about what it does, and where it's used.
+- **Try it** (off air): pick the two scenes under **Try it** (it starts with the one on air and
+  another), then click **Try it** on a transition. The picture below shows what your viewers
+  would see; click again to play it back the other way. While you're on air the buttons are
+  off, because they would switch scenes for your viewers.
+- **How scenes switch**: the way every scene switches unless it has an exception. **Pick at
+  random** from the transitions you tick (turn on **Don't repeat the last one** so the same one
+  doesn't come twice in a row), or **Always use one**. With nothing picked, every switch is a
+  **Crossfade**.
+- **Exceptions**: click **Add an exception** for a scene (**Switching to Duo**) or for a move
+  between two scenes (**From Kit to Drums**), then pick **Random** from some transitions or
+  **Always** one. A scene's exception can also go back to **Use the default**. The bin icon
+  removes an exception. A move between two scenes wins over the scene's own choice.
+- A transition chosen on Overview for the next switch, a scene's **Always**, and a move's
+  **Always** win over chat's `!transition` vote; the vote wins over random picks and over the
+  default.
+
+**Scenes → Scenes → Scene settings** shows the same choice for the scene you're editing, under
+**Switching to this scene**.
+
+### Your media: pictures, videos, sounds, color looks and fonts
+
+**Scenes → Media** holds the files your scenes, overlays and quick effects use: pictures (logos,
+backgrounds), videos (clips and loops), sounds (for quick effects, alerts and buttons), color
+looks (`.cube` files that change how a camera's colors look) and fonts.
+
+- **Add files**: drag them from your file manager onto the window while **Media** is open, or
+  click **Import files…** and pick them. A card says **Adding 2 files…** while they're copied
+  and **Added 2 files** when they're ready. Stream Engine keeps its own copy, so you can move or
+  delete the originals. A file with a name you already have gets a number (`horn`, `horn-2`).
+  Files it can't use (a `.txt`, a folder, anything over 2 GB) are refused with a note saying why.
+- **See what you have**: the chips at the top (**All**, **Images**, **Videos**, **Sounds**,
+  **Color looks**, **Fonts**) filter the grid; **Search your media** appears once you have more
+  than eight files. Each file shows a picture (videos show a frame, sounds a waveform), its size
+  and length, and what uses it ("Used by scene “Duo”" or "Not used yet").
+- **Listen**: the ▶ button on a sound plays it through Stream Engine; press it again to stop.
+  On air it first asks **Play it on air?**, because your viewers will hear it too.
+- **Rename**: click a file, type a new name under **Name** and click **Rename**. Every scene,
+  quick effect, overlay, alert or button that uses the file is updated to the new name, so
+  nothing breaks.
+- **Delete**: click a file, then **Delete…**. If something still uses it, the app says what
+  (for example **Scene “Duo” uses it**) and offers **Delete anyway** or **Keep it**; deleting
+  anyway leaves that spot empty until you pick another file.
+
+Other editors choose files with the same small picker: the current file with its picture (or ▶
+for a sound), and **Choose…**, which lists your media of the right kind with a search box and
+**Import a sound…** (or picture, video…); the new file is picked for you once it's added.
+
+### Undo a change, or go back to an earlier version
+
+Stream Engine keeps a version of your project a few seconds after every change, whether you
+made it in the app or by editing a file. Recordings and stream history aren't part of it and
+never change.
+
+- **Undo last change** (top right of the **Scenes** and **Lights** pages, or "undo last
+  change" in the command palette) takes back the latest change. Press it again to step further
+  back. Point at it to see what it will undo. Right after an undo, **Redo** next to it brings
+  the change back.
+- **Settings → History** lists every version, newest first, in plain words ("Changed 2
+  things: Hype (quick effect) and Duo (scene)"). Click one to see everything that changed, then
+  **Go back to this**. How things are right then is saved first, so going back can be undone
+  too.
+- **Save a version** gives the way things are now a name, like "Before Friday's show".
+
+Versions from the last week are all kept, then one a day for 90 days. Named versions are kept
+forever. Big media files are stored once, however many versions use them.
+
+Details: [project versions](api.md#project-versions).
 
 ## 1. Before the stream
 
@@ -50,7 +207,7 @@ scene, an effect, "panic", "skip song") and press `Enter`.
    the Stream Engine widget in the top bar of your desktop.
 2. If the window says **Stream Engine isn't running**, click **Start Stream Engine**. Wait a few
    seconds. From then on it starts by itself when you log in.
-3. If the Live page shows **Finish setting up**, click **Continue setup**. It opens
+3. If Overview shows **Finish setting up**, click **Continue setup**. It opens
    **Settings → Get started**, a short checklist: **Cameras**, **Twitch**, **OBS**, **Song
    requests**, **Text-to-speech voice**, and **Tips and public song queue**. When you're done,
    click **I'm done setting up**.
@@ -73,9 +230,9 @@ starts with `✓` (fine), `!` (check it) or `✗` (broken).
 
 ### Cameras
 
-1. On the **Live** page, look at **Cameras & sources** at the bottom. Every camera should show a
+1. On **Overview**, look at **Cameras & sources** at the bottom. Every camera should show a
    moving picture.
-2. If one is black or frozen, open **Settings → Devices**. Each camera has a badge:
+2. If one is black or frozen, open **Edit → Inputs → Cameras & devices**. Each camera has a badge:
    **Working**, **Needs a look**, **Not connected** or **Off** (off just means no scene on screen
    uses it right now).
 3. Just plugged something in? Click **Look again**. A camera that won't start? Click
@@ -83,7 +240,7 @@ starts with `✓` (fine), `!` (check it) or `✗` (broken).
 
 ### Sound
 
-1. At the bottom of the **Live** page, the **Sound** bar has one strip per channel (**Mic**,
+1. At the bottom of **Overview**, the **Sound** bar has one strip per channel (**Mic**,
    **Band**, **Music**, **Sound effects**, **Read-out voice**, **Everything**, …). Each has a
    slider, a level meter and a mute button.
 2. Play a few hits and talk. The meters for **Band** and **Mic** should move.
@@ -94,10 +251,11 @@ starts with `✓` (fine), `!` (check it) or `✗` (broken).
 
 ### Lights
 
-1. Open **Lights**. The pill at the top right should say **Lights working**. **Lights not
-   connected** means the lights box is unplugged or off.
-2. Tap a look under **Looks** and check the rig. The **Stage** view shows what each light is
-   doing, even if you can't see the rig from your seat.
+1. Open **Lights**. The pill in the **Master** card should say **Lights working**. **Lights not
+   connected** means the lights box is unplugged or off. If the page says **Your lights aren't
+   set up yet**, send us your fixture list and we'll set them up.
+2. Tap a look under **Looks** and check the rig; tap it again to turn it off. The **Stage**
+   picture shows what each light is doing, even if you can't see the rig from your seat.
 
 ### Practise off air
 
@@ -113,7 +271,7 @@ starts with `✓` (fine), `!` (check it) or `✗` (broken).
 When you start with the starting-soon screen (next section), a **Countdown** card with
 "Starting soon" and the song that's playing covers the main and vertical pictures. It runs for 5
 minutes unless you change it. To change the length, or count to a clock time instead, open
-**Scenes → Overlays & effects**, find the **Countdown** card, and open **Settings**. When it
+**Scenes → Overlays**, find the **Countdown** card, and open **Settings**. When it
 reaches zero it says "Here we go!" and waits for you.
 
 Details: [devices and sources](devices-and-sources.md), [OBS](obs.md), [sound](audio.md),
@@ -159,7 +317,7 @@ Details: [OBS](obs.md), [Twitch](twitch.md), [alerts and the chat bot](bot-and-a
 
 ### Switching scenes
 
-The Live page has two pictures side by side:
+**Overview** has two pictures side by side:
 
 - **On air** (big, red outline): what your viewers see. **Main**, **Vertical** and **Both** above
   it pick which picture to show.
@@ -188,17 +346,18 @@ air, a red **This scene is on air** banner warns you that viewers see every chan
 
 Under **Up next**:
 
-- **Transition**: **Random (from the scene)** picks one of the transitions the scene likes. You
-  can also pick one for the next switch.
+- **Transition**: **Random (from the scene)** uses what you chose on **Scenes → Transitions**
+  (the default, or the scene's or the move's exception). You can also pick one for the next
+  switch.
 - **Speed**: **Auto**, **Fast**, **Normal** or **Slow**.
 
-To set which transitions a scene uses, open **Scenes → Layout**, pick the scene, and open
-**Scene settings**.
+To choose which transitions get used where, open **Scenes → Transitions** (see
+[Transitions](#transitions) under "Building your stream").
 
 ### Quick effects and the Stream Deck
 
-**Quick effects** on the Live page mirror the page your Stream Deck is showing, so screen and
-deck always match.
+**Quick effects** on **Overview** mirror the page your Stream Deck is showing, so screen and
+deck always match. Scroll below the lights bar if the effect pads are below the visible area.
 
 - Click a pad (or press `F1` to `F12`) to start it. Right-click to stop it.
 - Some pads need two taps to confirm, like strobe. The deck shows **CONFIRM?** after the first
@@ -210,27 +369,40 @@ In the starter setup, the deck's **SHOW** page has your scenes on the top row, e
 **CONFETTI**, **CHILL**, **CHORUS**) and **TAKE** on the middle row, and on the bottom row: page
 keys (**MIX**, **FX**), the microphone key (hold it and speak a voice command), **CLEAN** and
 **PANIC** (hold for one second). Your X-TOUCH and FBV footswitch can fire the same effects;
-set that up in **Automation → Buttons & pedals**.
+set that up in **Inputs → Buttons & pedals**.
 
 ### Lights
 
-On the **Lights** page, under **Looks**:
+Your looks and cue lists are made for you together with your lights. The **Lights** page is
+where you use them:
 
-- Tap a look to put it on your lights.
+- **Looks**: tap a look to turn it on, tap it again to turn it off. **Turn all off** takes every
+  look off. On air, tapping a look asks first: **Your viewers will see this** → **Turn it on**.
+- Under the looks, the look you tapped shows its knobs, for example **Color** and
+  **Brightness**. Changes show on your lights right away and are kept for next time; **Reset
+  knobs** goes back to how the look was made. To adjust a look without turning it on, click the
+  small sliders button on its tile.
+- **Make a quick effect** puts that look on a pad: the new quick effect opens in **Scenes →
+  Quick effects**, where you can put it on a Stream Deck key.
 - **Cue lists** step through a row of looks: **Go** for the next step, **Back** for the previous
-  one, **Stop** to end it. **Level** sets how strong it is.
-- **Effects** start and stop light effects.
-- **Brightness** at the top sets how bright all your lights are.
+  one, **Stop** to end it. Each shows which step is on and what's next, with its knobs (for
+  example a chase's **Speed**) underneath. On air, starting a cue list asks first.
+- **Master**: **Brightness** sets how bright all your lights are; **Blackout** turns them all off.
+- The **Overview** has a small **Lights** bar with the same brightness, blackout, looks, and the
+  running cue list's **Go** and **Stop**.
 
-A yellow **Flash limiter on** badge means some fast flashes are being softened to keep them safe
-for viewers. That's normal during strobe effects.
+Want another look, cue list or knob? Ask us and we'll add it.
+
+Flash safety is always on: never more than 3 flashes a second. A yellow **Softening flashes
+now** badge means some fast flashes are being softened to keep them safe for viewers. That's
+normal during strobe effects.
 
 From the deck, the **MIX** page has **LX GO** (next step of the main cue list), **CHASE**,
 **WARM** and **SAFE LX**.
 
 ### Sound
 
-- Use the sliders in the **Sound** bar at the bottom of the Live page. Double-click a slider to
+- Use the sliders in the **Sound** bar at the bottom of Overview. Double-click a slider to
   reset it. Click **Mixer** for the full **Sound → Mix** page.
 - While you talk, the music gets lowered automatically. The channel shows **· lowered** while
   that happens. **Sound → Mix → Lowered while you talk** shows which channels it lowers.
@@ -244,7 +416,7 @@ From the deck, the **MIX** page has **LX GO** (next step of the main cue list), 
 Viewers ask for songs by typing `!sr` and a song name in chat. The requested video plays in the
 YouTube player on the duo scene, with a now-playing card beside it.
 
-In the Live page's right-hand column, open **Songs**:
+In Overview's right-hand column, open **Songs**:
 
 - The switch at the top turns requests on (**Taking requests**) or off (**Requests closed**).
 - **Now playing** shows the song and who asked for it, with pause and skip buttons.
@@ -263,7 +435,7 @@ too (see the song request notes below).
 Follows, subs, cheers, raids and tips pop up on stream one at a time.
 
 When a viewer's alert includes a message, it waits a few seconds (3 by default) so you or a mod
-can stop it. In the Live page's right-hand column, **Activity** shows a **Show this alert?**
+can stop it. In Overview's right-hand column, **Activity** shows a **Show this alert?**
 card with a countdown:
 
 - **Skip**: it never shows on stream.
@@ -279,7 +451,7 @@ any line in **Activity** to see what it set off.
 
 ### Chat moderation
 
-Open **Chat** in the Live page's right-hand column.
+Open **Chat** in Overview's right-hand column.
 
 - Hover a message for two quick buttons: time the viewer out for 10 minutes, or delete the
   message.
@@ -372,10 +544,10 @@ from chat. Your own effects keep running. Use it when chat gets out of hand.
 
 ### Blackout and the safe look
 
-On the **Lights** page, at the top:
+On the **Lights** page, in the **Master** card (also in the **Lights** bar on the Overview):
 
-- **Blackout** turns every light off at once. It changes to **Blackout is on**; click it again to
-  bring the lights back.
+- The **Blackout** switch turns every light off at once (**All lights off** shows next to it).
+  Switch it off to bring the lights back.
 - Hold **Go to safe look** to put the lights on the safe look. It stops light effects and cue
   lists, and nothing else.
 
@@ -405,7 +577,7 @@ The pill says, for example, "Camera 3 has no picture. Is the camera on?".
 
 A crashed overlay page reloads by itself, and it keeps its last picture while it does. If the
 pill says an overlay has a problem, click **Fix**. On the overlay's card in
-**Scenes → Overlays & effects**, open **Details** and click **Reload**.
+**Scenes → Overlays**, open **Details** and click **Reload**.
 
 ### OBS drops
 
@@ -474,24 +646,30 @@ Details: [desktop integration](desktop-integration.md), [OBS fallback scene](obs
 2. If you played the ending, click **End stream** again when the credits are done, then
    **Stop now**.
 
-When you go off air, Stream Engine closes the stream's history and starts making clips by
-itself.
+When you go off air, Stream Engine stops recording, closes this stream's history, and builds
+the show timeline and clips in the background. This can take a while after a long show.
 
 ### Review clips
 
-Open **Recordings** (a number on it means clips are waiting). There are two views:
+Open **Clipping** (a number on it means clips are waiting). Choose **Recording**, **Past streams**
+or **Clips**:
 
-- **Clips to review**: each clip has a video, why it was picked, what was said, and whether the
-  music was removed (**Music removed** or **May include music**).
+- **Recording**: choose the folder where OBS saves each stream's video. Recording starts in
+  Starting soon or Live and stops when you go off air. Check recording health, free space and
+  sound tracks before going live; Start/Stop recording is there if you need it manually.
+- **Clips**: each clip shows why it was picked, the song and requester where known, and an
+  informational **Risk of DMCA** badge for requested-song clips. The badge does not block clips.
   - **Keep** approves it. **Skip** rejects it.
   - **Upload** sends a kept clip with your upload command.
-  - **Trim** lets you change where it starts and ends. Click **Cut it again** to re-cut it.
-- **Past streams**: every stream with its length, markers, recordings and clips. **Make clips**
-  (or **Make clips again**) runs the clip maker for that stream.
+  - **Trim** changes where it starts and ends. Click **Cut it again** to re-cut it.
+- **Past streams**: each stream has its recordings, clips, and a timeline of songs, talk, scenes,
+  lights, effects, chat, hype and markers. Pick a time window, click twice for a start/end,
+  adjust the times, then press **Make clip** (the selected range must fit in one recording and
+  meet the shown length limits). **Make clips** finds moments automatically instead.
 
-Clips need an OBS recording of the stream. The **Recording** badge in the top bar shows when OBS
-is recording. To start or stop it, press `Ctrl+K` and pick "start recording (OBS)" or "stop
-recording (OBS)".
+The **Recording** badge in the top bar confirms OBS is recording; Clipping → Recording also
+shows the real destination and lets you start/stop manually. If the badge is off unexpectedly,
+check the recording health message and OBS before continuing.
 
 ### Backups and disk space
 
@@ -515,7 +693,7 @@ Change any of these in **Settings → Accounts & app → Keyboard shortcuts**.
 | Key | Does |
 |---|---|
 | `Ctrl+K` | Command palette |
-| `Tab` | Jump between **Live** and **Scenes** |
+| `Tab` | Jump between **Overview** and **Edit** |
 | `1` to `9` | Scene to **Up next** |
 | `Enter` | Switch (**Up next** goes on air) |
 | `Shift+1` to `Shift+9` | Scene straight on air |

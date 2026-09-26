@@ -72,6 +72,7 @@ fn check_info(check: &str) -> (&'static str, Option<Panel>) {
         "timecode" => ("Timelines", Some(Panel::View(ViewId::Timeline))),
         "clips" | "recordings" => ("Recordings", Some(Panel::View(ViewId::Sessions))),
         "backup" => ("Backups", Some(Panel::View(ViewId::Maintenance))),
+        "versions" => ("Project history", Some(Panel::View(ViewId::History))),
         "alerts" | "bot" | "player" => ("Community", Some(Panel::View(ViewId::Alerts))),
         "disk" => ("Disk space", Some(Panel::View(ViewId::Maintenance))),
         "idle_inhibitor" => ("Screen saver", None),
@@ -103,6 +104,7 @@ fn friendly(app: &App, check: &str, status: &str, detail: &str) -> Option<String
         "twitch" => "Twitch needs a look: see Community → Twitch.".into(),
         "night_light" => "Night light is on, so your screens look warmer than your stream. Turn it off while you adjust colours.".into(),
         "idle_inhibitor" => "Your screen may lock during the show. It normally stays awake by itself once you start.".into(),
+        "versions" => "New versions of your project can't be saved. See Settings → History.".into(),
         "gpu" => "The graphics card is running hot or nearly full.".into(),
         "mixer" => {
             if fail {
@@ -343,6 +345,7 @@ fn ready_text(check: &str, detail: &str) -> String {
         "gpu" => "The graphics card has room to spare.",
         "night_light" => "Night light is off.",
         "backup" => "Backups are up to date.",
+        "versions" => "Every change to your project is saved.",
         "recordings" => "Recordings fit in the space you allowed.",
         _ => return format!("{}: ready.", check_info(check).0),
     }
@@ -511,6 +514,11 @@ fn streaming(app: &App) -> bool {
     app.m.b("obs.stream.active") || app.m.under("obs.output").any(|(a, v)| a.ends_with(".active") && v.truthy())
 }
 
+/// Viewers can see the output: OBS is streaming, or the show's on-air clock is running.
+pub fn on_air(app: &App) -> bool {
+    streaming(app) || app.m.get("show.live_since").and_then(Value::as_i64).unwrap_or(0) > 0
+}
+
 fn set_mode(app: &mut App, mode: &str) {
     app.m.command(Op::ModeSet { mode: mode.into() });
 }
@@ -525,6 +533,28 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     let since = app.m.get("show.live_since").and_then(Value::as_i64).unwrap_or(0);
     let on_air = streaming(app) || since > 0;
     ui.horizontal_centered(|ui| {
+        // ---- brand + master tabs ------------------------------------------------------------
+        ui.label(RichText::new(icon::LIVE).size(18.0).color(t.accent));
+        ui.label(RichText::new("Stream Engine").font(font_bold(17.0)).color(t.fg));
+        ui.add_space(18.0);
+        let setup_left = crate::views::setup::steps_left(app);
+        let clips = app.m.f("clips.pending").max(0.0) as usize;
+        let tabs: Vec<(&str, &str, Option<(String, egui::Color32)>)> = crate::app::Master::ALL
+            .iter()
+            .map(|m| {
+                let badge = match m {
+                    crate::app::Master::Edit if setup_left > 0 => Some((setup_left.to_string(), t.accent)),
+                    crate::app::Master::Clipping if clips > 0 => Some((clips.to_string(), t.accent)),
+                    _ => None,
+                };
+                (m.icon(), m.label(), badge)
+            })
+            .collect();
+        let cur = crate::app::Master::ALL.iter().position(|m| *m == app.page.master()).unwrap_or(0);
+        if let Some(i) = widgets::master_tabs(ui, &t, cur, &tabs) {
+            app.open_master(crate::app::Master::ALL[i]);
+        }
+        ui.add_space(18.0);
         // ---- on-air state -------------------------------------------------------------------
         let (txt, color) = if !app.m.connected {
             ("Engine offline".to_string(), t.bright_red)

@@ -203,6 +203,11 @@ mod tests {
         let par = show.rig.head("par1").expect("placeholder RGB par");
         assert_eq!(show.rig.fixtures[show.rig.heads[par].fixture].address, 1);
         assert!(!show.palette_users("warm").is_empty());
+        // the example looks and cue lists ship their knobs
+        let knobs = |k: &[crate::knobs::Bound]| k.iter().map(|b| b.knob.label.clone()).collect::<Vec<_>>();
+        assert_eq!(knobs(&show.palettes["warm"].knobs), ["Color", "Brightness"]);
+        assert_eq!(knobs(&show.lists["chase_fast"].knobs), ["Speed", "Brightness"]);
+        assert_eq!(knobs(&show.lists["main"].knobs), ["Front light", "Pulse strength"]);
         let decl = show.declarations();
         assert!(decl.iter().any(|(a, m)| a == "lights.par1.intensity" && m.merge == se_proto::Merge::Htp));
         assert!(decl.iter().any(|(a, _)| a == "lights.group.front.color"));

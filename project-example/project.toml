@@ -95,7 +95,7 @@ z = 20
 [overlays.goals]
 canvases = ["wide"]
 rect.wide = [0.01, 0.015, 0.3, 0.1]
-when = "mode != 'offline'"
+when = "mode != 'offline' && scene != 'starting_soon'"
 z = 10
 
 [overlays.labels]
@@ -110,9 +110,10 @@ rect.wide = [0.01, 0.4, 0.2, 0.45]
 when = "mode == 'brb' || mode == 'ad_break'"
 z = 10
 
+# The starting_soon scene (preshow) has its own countdown in its title box.
 [overlays.countdown]
 canvases = ["wide", "tall"]
-when = "mode == 'preshow'"
+when = "mode == 'preshow' && scene != 'starting_soon'"
 z = 40
 
 [overlays.credits]
@@ -134,14 +135,25 @@ rect.wide = [0.015, 0.13, 0.3, 0.3407]
 when = "twitch.prediction.active || patch.prediction.showing"
 z = 15
 
+# Recording (§18): the Clipping tab edits this destination; OBS records into a folder per show.
+[recording]
+dir = "~/Videos/Stream Engine"
+auto = true
+modes = ["preshow", "live"]
+snapshot_project = true
+
+[recording.index]
+enabled = true
+transcript = true
+
 # Clips (§18): hype markers during the show, clip job after it (docs/clips.md).
 [clips]
 auto_process = true        # queue the clip job when the session closes
+auto_rank = true           # use omp when available; deterministic ranking otherwise
 encoder = "auto"           # NVENC, libx264 when OBS holds every NVENC session
 tall_source = "auto"       # tall canvas recording when present, else a 9:16 crop of the wide one
 tall_crop_center = 0.5
-# Optional hooks (argv; JSON on stdin → JSON on stdout), off by default:
-# rank_command = ["/usr/share/stream-engine/scripts/rank-clips-llm.py"]  # AI ranking via SE_RANK_URL/SE_RANK_MODEL (docs/clips.md)
+# rank_command = ["/usr/share/stream-engine/scripts/rank-clips-llm.py"]  # override omp with another ranker
 # upload_command = ["~/bin/upload-clip"]  # {id, wide, tall, captions, title, …} → {url}
 
 [clips.hype]
@@ -151,7 +163,7 @@ preroll_max = "30s"
 clip_votes = 3             # unique `!clip` voters that force a marker
 
 [clips.audio]
-drop = ["music", "program"]   # tracks carrying these roles stay out of clips
+drop = ["music", "program"]   # talk clips omit these; requested-song clips keep music + performance
 transcribe = ["mic", "band"]  # first role with a track is transcribed for captions
 
 # Voice push-to-talk (§10.1, docs/controllers.md): hold a `ptt` deck key / MIDI button or bind

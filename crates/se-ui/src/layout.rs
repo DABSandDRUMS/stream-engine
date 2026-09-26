@@ -26,7 +26,7 @@ pub const MAIN_APP_ID: &str = "stream-engine";
 /// App-id of the confidence (program) window.
 pub const CONFIDENCE_APP_ID: &str = "stream-engine.program";
 /// Page ids a layout can open on (see `app::Page`).
-pub const PAGES: [&str; 8] = ["live", "scenes", "lights", "sound", "automation", "community", "recordings", "settings"];
+pub const PAGES: [&str; 9] = ["live", "scenes", "inputs", "lights", "sound", "automation", "community", "recordings", "settings"];
 /// Live-page right-rail tabs.
 pub const RAIL_TABS: [&str; 4] = ["events", "chat", "queue", "mod"];
 
@@ -489,7 +489,7 @@ const FILE_COMMENTS: &[(&str, &str, &str)] = &[
     ("confidence", "monitors", "# first present and enabled match wins"),
     ("confidence", "fallback", "# used while none of `monitors` is present"),
     ("confidence", "canvases", "# wide | tall | both"),
-    ("show", "", "# Live page"),
+    ("show", "", "# Overview page"),
     ("show", "rail_tab", "# events | chat | queue | mod"),
 ];
 

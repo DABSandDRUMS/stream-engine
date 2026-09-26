@@ -20,6 +20,7 @@ use std::time::Instant;
 pub enum Page {
     Live,
     Scenes,
+    Inputs,
     Lights,
     Sound,
     Automation,
@@ -29,12 +30,23 @@ pub enum Page {
 }
 
 impl Page {
-    pub const ALL: [Page; 8] = [Page::Live, Page::Scenes, Page::Lights, Page::Sound, Page::Automation, Page::Community, Page::Recordings, Page::Settings];
+    pub const ALL: [Page; 9] =
+        [Page::Live, Page::Scenes, Page::Inputs, Page::Lights, Page::Sound, Page::Automation, Page::Community, Page::Recordings, Page::Settings];
+
+    /// Which master tab the page lives under.
+    pub fn master(self) -> Master {
+        match self {
+            Page::Live => Master::Overview,
+            Page::Recordings => Master::Clipping,
+            _ => Master::Edit,
+        }
+    }
 
     pub fn id(self) -> &'static str {
         match self {
             Page::Live => "live",
             Page::Scenes => "scenes",
+            Page::Inputs => "inputs",
             Page::Lights => "lights",
             Page::Sound => "sound",
             Page::Automation => "automation",
@@ -50,13 +62,14 @@ impl Page {
 
     pub fn label(self) -> &'static str {
         match self {
-            Page::Live => "Live",
+            Page::Live => "Overview",
             Page::Scenes => "Scenes",
+            Page::Inputs => "Inputs",
             Page::Lights => "Lights",
             Page::Sound => "Sound",
             Page::Automation => "Automation",
             Page::Community => "Community",
-            Page::Recordings => "Recordings",
+            Page::Recordings => "Clipping",
             Page::Settings => "Settings",
         }
     }
@@ -65,6 +78,7 @@ impl Page {
         match self {
             Page::Live => icon::LIVE,
             Page::Scenes => icon::LAYERS,
+            Page::Inputs => icon::CAMERA,
             Page::Lights => icon::LIGHT,
             Page::Sound => icon::VOLUME,
             Page::Automation => icon::BOLT,
@@ -78,13 +92,14 @@ impl Page {
     pub fn blurb(self) -> &'static str {
         match self {
             Page::Live => "",
-            Page::Scenes => "Arrange cameras and overlays, pick transitions and effects.",
-            Page::Lights => "Pick a look, run cue lists, and edit your lighting.",
+            Page::Scenes => "Build your stream: scenes, quick effects, overlays, transitions, and your media.",
+            Page::Inputs => "Cameras, controllers, and everything else plugged in.",
+            Page::Lights => "Turn looks on and off, run cue lists, and set the overall brightness.",
             Page::Sound => "Levels for everything your viewers hear.",
             Page::Automation => "Make things happen on their own: when something happens, do something.",
             Page::Community => "Alerts, goals, song requests, the chat bot, and giveaways.",
             Page::Recordings => "Past streams, markers, and clips ready to review.",
-            Page::Settings => "Accounts, devices, backups, and help when something's off.",
+            Page::Settings => "Accounts, backups, history, and help when something's off.",
         }
     }
 
@@ -92,15 +107,17 @@ impl Page {
     pub fn tabs(self) -> &'static [(ViewId, &'static str)] {
         match self {
             Page::Live => &[],
-            Page::Scenes => &[(ViewId::Composition, "Layout"), (ViewId::Patches, "Overlays & effects")],
+            Page::Scenes => &[
+                (ViewId::Composition, "Scenes"),
+                (ViewId::QuickEffects, "Quick effects"),
+                (ViewId::Patches, "Overlays"),
+                (ViewId::Transitions, "Transitions"),
+                (ViewId::Media, "Media"),
+            ],
+            Page::Inputs => &[(ViewId::Devices, "Cameras & devices"), (ViewId::Controllers, "Buttons & pedals")],
             Page::Lights => &[(ViewId::Lights, "Lights")],
             Page::Sound => &[(ViewId::Audio, "Mix"), (ViewId::Mixer, "Mixing desk"), (ViewId::Tts, "Text to speech")],
-            Page::Automation => &[
-                (ViewId::Reactions, "Reactions"),
-                (ViewId::Controllers, "Buttons & pedals"),
-                (ViewId::Chatbot, "Chat commands"),
-                (ViewId::Timeline, "Timelines"),
-            ],
+            Page::Automation => &[(ViewId::Reactions, "Reactions"), (ViewId::Chatbot, "Chat commands"), (ViewId::Timeline, "Timelines")],
             Page::Community => {
                 &[(ViewId::Alerts, "Alerts & goals"), (ViewId::Songs, "Song requests"), (ViewId::Twitch, "Twitch"), (ViewId::Giveaway, "Giveaways")]
             }
@@ -108,8 +125,8 @@ impl Page {
             Page::Settings => &[
                 (ViewId::Setup, "Get started"),
                 (ViewId::Settings, "Accounts & app"),
-                (ViewId::Devices, "Devices"),
                 (ViewId::Maintenance, "Backups"),
+                (ViewId::History, "History"),
                 (ViewId::Performance, "Performance"),
                 (ViewId::Troubleshoot, "Troubleshooting"),
             ],
@@ -124,6 +141,35 @@ impl Page {
             }
         }
         (Page::Settings, 0)
+    }
+}
+
+/// The three master tabs (owner's layout, 2026-09-26): Overview (the stream right now and
+/// high-level controls), Edit (every concern in detail), Clipping (recordings and clips).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Master {
+    Overview,
+    Edit,
+    Clipping,
+}
+
+impl Master {
+    pub const ALL: [Master; 3] = [Master::Overview, Master::Edit, Master::Clipping];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Master::Overview => "Overview",
+            Master::Edit => "Edit",
+            Master::Clipping => "Clipping",
+        }
+    }
+
+    pub fn icon(self) -> &'static str {
+        match self {
+            Master::Overview => icon::LIVE,
+            Master::Edit => icon::EDIT,
+            Master::Clipping => icon::FILM,
+        }
     }
 }
 
@@ -153,6 +199,10 @@ pub enum ViewId {
     Mixer,
     Twitch,
     Controllers,
+    Media,
+    History,
+    Transitions,
+    QuickEffects,
 }
 
 impl ViewId {
@@ -168,7 +218,7 @@ impl ViewId {
         (ViewId::Maintenance, icon::SAVE, "Backups"),
         (ViewId::Tts, icon::MIC, "Text to speech"),
         (ViewId::Lights, icon::LIGHT, "Lights"),
-        (ViewId::Patches, icon::SPARKLE, "Overlays & effects"),
+        (ViewId::Patches, icon::SPARKLE, "Overlays"),
         (ViewId::Devices, icon::DEVICE, "Devices"),
         (ViewId::Performance, icon::PERF, "Performance"),
         (ViewId::Settings, icon::SETTINGS, "Accounts & app"),
@@ -178,6 +228,10 @@ impl ViewId {
         (ViewId::Mixer, icon::SLIDERS, "Mixing desk"),
         (ViewId::Twitch, icon::TWITCH, "Twitch"),
         (ViewId::Controllers, icon::CONTROLLER, "Buttons & pedals"),
+        (ViewId::Media, icon::IMAGE, "Media"),
+        (ViewId::History, icon::CLOCK, "History"),
+        (ViewId::Transitions, icon::SHUFFLE, "Transitions"),
+        (ViewId::QuickEffects, icon::BOLT, "Quick effects"),
     ];
 }
 
@@ -187,9 +241,12 @@ pub struct App {
     watcher: ThemeWatcher,
     font: Option<String>,
     pub zoom: f32,
+    pub preferences: crate::preferences::Preferences,
     pub page: Page,
     /// Selected tab per page (index into [`Page::tabs`]).
-    pub tab: [usize; 8],
+    pub tab: [usize; 9],
+    /// The Edit page to come back to from Overview/Clipping.
+    pub last_edit: Page,
     /// Selected address prefix (inspector).
     pub selected: Option<String>,
     pub show: views::show::ShowState,
@@ -220,6 +277,8 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, opts: crate::UiOpts) -> App {
         let t = Theme::load();
         let font = se_ui_kit::install_font(&cc.egui_ctx, None);
+        let preferences = crate::preferences::Preferences::load();
+        se_ui_kit::motion::set_reduced(&cc.egui_ctx, preferences.reduce_motion);
         t.apply(&cc.egui_ctx, 1.0);
         let watcher = ThemeWatcher::start(cc.egui_ctx.clone());
         let layout = if opts.program_only { opts.layout.clone().or(Some("show-3disp".into())) } else { opts.layout.clone() };
@@ -230,8 +289,10 @@ impl App {
             watcher,
             font,
             zoom: 1.0,
+            preferences,
             page: Page::Live,
-            tab: [0; 8],
+            tab: [0; 9],
+            last_edit: Page::Scenes,
             selected: None,
             show: Default::default(),
             build: Default::default(),
@@ -277,6 +338,10 @@ impl App {
             ViewId::Mixer => views::mixer::ui(self, ui),
             ViewId::Twitch => views::twitch::ui(self, ui),
             ViewId::Controllers => views::controllers::ui(self, ui),
+            ViewId::Media => views::media::ui(self, ui),
+            ViewId::History => views::history::ui(self, ui),
+            ViewId::Transitions => views::transitions::ui(self, ui),
+            ViewId::QuickEffects => views::quick_effects::ui(self, ui),
         }
     }
 
@@ -287,7 +352,7 @@ impl App {
         self.tab[p as usize] = i;
     }
 
-    /// The view currently on screen (`None` on the Live page).
+    /// The view currently on screen (`None` on Overview and Clipping).
     pub fn current_view(&self) -> Option<ViewId> {
         self.page.tabs().get(self.tab[self.page as usize]).map(|(v, _)| *v)
     }
@@ -325,9 +390,18 @@ impl App {
         self.selected = Some(address);
     }
 
-    /// `Tab`: jump between the Live page and scene editing.
+    /// `Tab`: jump between Overview and the last Edit page.
     pub fn toggle_page(&mut self) {
-        self.page = if self.page == Page::Live { Page::Scenes } else { Page::Live };
+        self.page = if self.page == Page::Live { self.last_edit } else { Page::Live };
+    }
+
+    /// Switch master tab (Edit returns to the last Edit page).
+    pub fn open_master(&mut self, m: Master) {
+        self.page = match m {
+            Master::Overview => Page::Live,
+            Master::Edit => self.last_edit,
+            Master::Clipping => Page::Recordings,
+        };
     }
 
     pub fn take(&mut self) {
@@ -341,6 +415,16 @@ impl App {
     pub fn set_zoom(&mut self, ctx: &egui::Context, z: f32) {
         self.zoom = z;
         self.t.apply(ctx, z);
+    }
+
+    pub fn set_reduced_motion(&mut self, ctx: &egui::Context, reduced: bool) {
+        let next = crate::preferences::Preferences { reduce_motion: reduced };
+        if let Err(e) = next.save() {
+            self.m.toast(format!("Couldn't save appearance preference: {e}"), true);
+            return;
+        }
+        self.preferences = next;
+        se_ui_kit::motion::set_reduced(ctx, reduced);
     }
 
     pub fn font_name(&self) -> Option<&str> {
@@ -507,8 +591,9 @@ impl App {
                 }
                 "ui.mode" | "ui.page" => {
                     if let Some(p) = s("page").or_else(|| s("mode")).or_else(first).as_deref().and_then(|m| match m {
-                        "show" => Some(Page::Live),
-                        "build" => Some(Page::Scenes),
+                        "show" | "overview" => Some(Page::Live),
+                        "build" | "edit" => Some(self.last_edit),
+                        "clipping" => Some(Page::Recordings),
                         other => Page::parse(other),
                     }) {
                         self.page = p;
@@ -589,7 +674,7 @@ impl App {
         });
     }
 
-    /// Left sidebar: brand, pages, connection state.
+    /// Left sidebar (Edit only): the concerns, Settings, connection state.
     fn sidebar(&mut self, ui: &mut egui::Ui) {
         let t = self.t.clone();
         egui::Panel::left("nav")
@@ -597,16 +682,10 @@ impl App {
             .resizable(false)
             .frame(egui::Frame::new().fill(t.chrome).inner_margin(egui::Margin { left: 12, right: 12, top: 18, bottom: 14 }))
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.add_space(6.0);
-                    ui.label(egui::RichText::new(icon::LIVE).size(18.0).color(t.accent));
-                    ui.add_space(2.0);
-                    ui.label(egui::RichText::new("Stream Engine").font(se_ui_kit::theme::font_bold(17.0)).color(t.fg));
-                });
-                ui.add_space(22.0);
+                ui.add_space(4.0);
                 let setup_left = views::setup::steps_left(self);
                 for p in Page::ALL {
-                    if p == Page::Settings {
+                    if p == Page::Settings || p.master() != Master::Edit {
                         continue;
                     }
                     let badge = views::live::nav_badge(self, p);
@@ -632,7 +711,7 @@ impl App {
             });
     }
 
-    /// A non-Live page: title, one-line blurb, tabs, then the selected tab's view.
+    /// An Edit page: title, one-line blurb, tabs, then the selected tab's view.
     fn page_ui(&mut self, ui: &mut egui::Ui) {
         let t = self.t.clone();
         let page = self.page;
@@ -640,7 +719,11 @@ impl App {
         egui::CentralPanel::default().frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin { left: 32, right: 32, top: 26, bottom: 20 })).show(
             ui,
             |ui| {
-                se_ui_kit::widgets::page_header(ui, &t, page.label(), page.blurb(), |_| {});
+                se_ui_kit::widgets::page_header(ui, &t, page.label(), page.blurb(), |ui| {
+                    if matches!(page, Page::Scenes | Page::Lights) {
+                        views::history::undo_button(self, ui);
+                    }
+                });
                 let idx = &mut self.tab[page as usize];
                 *idx = (*idx).min(tabs.len().saturating_sub(1));
                 if tabs.len() > 1 {
@@ -669,11 +752,22 @@ impl App {
 
     fn main_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         crate::shortcuts_ui::handle(self, ctx);
-        self.sidebar(ui);
+        if self.page.master() == Master::Edit {
+            self.last_edit = self.page;
+        }
+        // full-width top bar: brand, master tabs, stream state and controls
         egui::Panel::top("topbar")
             .exact_size(64.0)
-            .frame(egui::Frame::new().fill(self.t.bg).inner_margin(egui::Margin { left: 28, right: 20, top: 0, bottom: 0 }).stroke(egui::Stroke::NONE))
+            .frame(
+                egui::Frame::new()
+                    .fill(self.t.chrome)
+                    .inner_margin(egui::Margin { left: 18, right: 20, top: 0, bottom: 0 })
+                    .stroke(egui::Stroke::new(1.0, self.t.border)),
+            )
             .show(ui, |ui| views::status::ui(self, ui));
+        if self.page.master() == Master::Edit {
+            self.sidebar(ui);
+        }
         if views::status::engine_down(self) {
             views::status::engine_down_ui(self, ui);
         } else if self.page == Page::Live {

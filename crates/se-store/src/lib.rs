@@ -5,6 +5,7 @@ pub mod db;
 pub mod project;
 pub mod secrets;
 pub mod session;
+pub mod versions;
 
 pub use db::Db;
 pub use project::{Loaded, Project};

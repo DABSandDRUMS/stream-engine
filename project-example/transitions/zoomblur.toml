@@ -1,5 +1,6 @@
 # Radial zoom blur (ported from gl-transitions "CrossZoom", MIT, by rectalogic).
+label = "Zoom blur"
 kind = "shader"
-shader = "transitions/zoomblur.wgsl"
+shader = "zoomblur"
 ms = 800
 strength = 0.4

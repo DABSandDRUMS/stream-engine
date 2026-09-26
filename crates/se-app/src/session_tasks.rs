@@ -5,6 +5,8 @@ use crate::daemon::{Ctx, SessionMsg};
 use se_hub::Bus;
 use se_proto::{Op, Value};
 use se_store::session::{LogRec, new_session_id};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 pub fn start(ctx: &Ctx) {
@@ -13,6 +15,7 @@ pub fn start(ctx: &Ctx) {
         let ctx = ctx.clone();
         tokio::spawn(async move {
             let mut bus = ctx.hub.subscribe();
+            let mode_generation = Arc::new(AtomicU64::new(0));
             loop {
                 let b = match bus.recv().await {
                     Ok(b) => b,
@@ -25,10 +28,30 @@ pub fn start(ctx: &Ctx) {
                 let Bus::Event(e) = &*b else { continue };
                 let _ = ctx.log_tx.send(SessionMsg::Rec(LogRec::Ev { event: e.clone() }));
                 if e.ty == "mode.changed" {
+                    let generation = mode_generation.fetch_add(1, Ordering::Relaxed) + 1;
                     let from = e.payload.get_path("from").and_then(Value::as_str).unwrap_or("");
                     let to = e.payload.get_path("to").and_then(Value::as_str).unwrap_or("");
                     if to == "offline" && from != "offline" {
-                        rotate(&ctx).await;
+                        let ctx = ctx.clone();
+                        let mode_generation = mode_generation.clone();
+                        tokio::spawn(async move {
+                            // OBS closes the file and reports its final path/track layout after
+                            // the mode transition. Keep this session open until that metadata
+                            // arrives; never block the event logger while waiting for an encoder.
+                            for _ in 0..60 {
+                                if mode_generation.load(Ordering::Relaxed) != generation {
+                                    return;
+                                }
+                                if !ctx.hub.snapshot.load().bool("obs.record.active") {
+                                    break;
+                                }
+                                tokio::time::sleep(Duration::from_millis(500)).await;
+                            }
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                            if mode_generation.load(Ordering::Relaxed) == generation && ctx.hub.snapshot.load().str("show.mode") == Some("offline") {
+                                rotate(&ctx).await;
+                            }
+                        });
                     }
                 }
             }

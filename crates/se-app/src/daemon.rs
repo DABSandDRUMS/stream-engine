@@ -325,6 +325,12 @@ async fn async_main(ctx: Ctx) -> Result<()> {
                         Ok(None) => {}
                         Err(e) => ctx.hub.log("error", "project", format!("project.write: {e:#}")),
                     },
+                    "project.import" | "project.asset.rename" | "project.asset.delete" => {
+                        let changed = crate::assets::action(&ctx, name, args);
+                        if !changed.is_empty() {
+                            reload(&ctx, &changed);
+                        }
+                    }
                     other => ctx.hub.log("warn", "project", format!("unknown action {other}")),
                 }
             }
@@ -347,7 +353,10 @@ async fn async_main(ctx: Ctx) -> Result<()> {
     crate::queries::register(&ctx);
     crate::queries::register_preflight(&ctx);
     crate::project_io::register_queries(&ctx);
+    crate::assets::register_queries(&ctx);
+    crate::presets_catalog::register(&ctx);
     crate::project_io::start_uptime(&ctx);
+    crate::versions::start(&ctx);
     crate::api_admin::start(&ctx, auth.clone());
 
     // --- systemd readiness + watchdog -------------------------------------------------------

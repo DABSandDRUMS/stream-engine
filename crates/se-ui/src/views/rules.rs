@@ -548,9 +548,11 @@ fn when_phrase(when: &str, cond: &str) -> String {
 enum Step {
     Preset,
     Release,
+    Overlay,
     Scene,
     Preview,
     Lights,
+    Look,
     Say,
     Sound,
     Mix,
@@ -563,12 +565,15 @@ enum Step {
 }
 
 impl Step {
-    const ALL: [Step; 14] = [
+    const ALL: [Step; 16] = [
         Step::Preset,
         Step::Release,
+        Step::Overlay,
         Step::Scene,
         Step::Preview,
+        // before Look: a bare `lights.cue` is a cue list
         Step::Lights,
+        Step::Look,
         Step::Say,
         Step::Sound,
         Step::Mix,
@@ -584,9 +589,10 @@ impl Step {
         match self {
             Step::Preset => "preset.fire",
             Step::Release => "preset.release",
+            Step::Overlay => "trigger",
             Step::Scene => "scene.cut",
             Step::Preview => "scene.go",
-            Step::Lights => "lights.cue",
+            Step::Lights | Step::Look => "lights.cue",
             Step::Say => "bot.say",
             Step::Sound => "audio.play",
             Step::Mix => "mixer.snapshot.recall",
@@ -603,9 +609,11 @@ impl Step {
         match self {
             Step::Preset => "Fire a quick effect",
             Step::Release => "Stop a quick effect",
+            Step::Overlay => "Play an overlay",
             Step::Scene => "Switch to a scene",
             Step::Preview => "Put a scene up next",
             Step::Lights => "Run a light cue",
+            Step::Look => "Turn on a light look",
             Step::Say => "Say something in chat",
             Step::Sound => "Play a sound",
             Step::Mix => "Recall a sound mix",
@@ -621,8 +629,9 @@ impl Step {
     fn icon(self) -> &'static str {
         match self {
             Step::Preset | Step::Release => icon::BOLT,
+            Step::Overlay => icon::SPARKLE,
             Step::Scene | Step::Preview => icon::LAYERS,
-            Step::Lights => icon::LIGHT,
+            Step::Lights | Step::Look => icon::LIGHT,
             Step::Say => icon::CHAT,
             Step::Sound => icon::VOLUME,
             Step::Mix => icon::SLIDERS,
@@ -647,8 +656,10 @@ impl Step {
     fn missing(self) -> Option<&'static str> {
         Some(match self {
             Step::Preset | Step::Release => "pick a quick effect",
+            Step::Overlay => "pick an overlay",
             Step::Scene | Step::Preview => "pick a scene",
             Step::Lights => "pick a light cue list",
+            Step::Look => "pick a light look",
             Step::Say => "type what to say",
             Step::Sound => "pick a sound",
             Step::Mix => "pick a sound mix",
@@ -658,12 +669,38 @@ impl Step {
             Step::Marker | Step::Custom => return None,
         })
     }
+
+    /// The command a fresh step of this kind starts as.
+    fn blank(self) -> String {
+        match self {
+            Step::Look => "lights.cue look=".into(),
+            Step::Wait => "wait 2s".into(),
+            k => k.verb().into(),
+        }
+    }
 }
 
 /// The friendly shape of a command (`Custom` when the guided editor can't show it).
 fn parse_step(cmd: &str) -> (Step, Vec<String>) {
     let Ok(toks) = tokenize(cmd) else { return (Step::Custom, Vec::new()) };
     let Some((verb, rest)) = toks.split_first() else { return (Step::Custom, Vec::new()) };
+    // `lights.cue look=<name>`, `patch.<id>.trigger` / `trigger patch.<id>`
+    if verb == "lights.cue"
+        && let [one] = rest
+        && let Some(look) = one.strip_prefix("look=")
+    {
+        return (Step::Look, vec![look.to_string()]);
+    }
+    if let Some(id) = verb.strip_prefix("patch.").and_then(|v| v.strip_suffix(".trigger")) {
+        return if rest.is_empty() && !id.is_empty() { (Step::Overlay, vec![id.to_string()]) } else { (Step::Custom, Vec::new()) };
+    }
+    if verb == "trigger" {
+        return match rest {
+            [] => (Step::Overlay, Vec::new()),
+            [a] if a.starts_with("patch.") && !a.contains('=') => (Step::Overlay, vec![a["patch.".len()..].to_string()]),
+            _ => (Step::Custom, Vec::new()),
+        };
+    }
     let Some(&kind) = Step::ALL.iter().find(|s| s.verb() == verb.as_str()) else { return (Step::Custom, Vec::new()) };
     if kind == Step::Say {
         return match rest {
@@ -693,8 +730,15 @@ fn quote_arg(a: &str) -> String {
 }
 
 fn build_step(kind: Step, args: &[&str]) -> String {
+    let a0 = args.first().map(|a| a.trim()).unwrap_or("");
+    match kind {
+        Step::Overlay if a0.is_empty() => return "trigger".into(),
+        Step::Overlay => return format!("patch.{a0}.trigger"),
+        Step::Look => return format!("lights.cue look={}", if a0.is_empty() { String::new() } else { quote_arg(a0) }),
+        _ => {}
+    }
     let mut out = kind.verb().to_string();
-    if kind == Step::Lights && args.first().is_none_or(|a| a.trim().is_empty()) {
+    if kind == Step::Lights && a0.is_empty() {
         return out;
     }
     for a in args.iter().filter(|a| !a.trim().is_empty()) {
@@ -717,6 +761,9 @@ struct Names {
     sounds: Vec<(String, String)>,
     mixes: Vec<(String, String)>,
     timelines: Vec<(String, String)>,
+    /// Overlays that can be played (triggered).
+    overlays: Vec<(String, String)>,
+    looks: Vec<(String, String)>,
 }
 
 fn pairs(l: &[Value]) -> Vec<(String, String)> {
@@ -744,6 +791,18 @@ impl Names {
             sounds: plain(list("audio.mix", "sounds"), nice_name),
             mixes: pairs(list("mixer.snapshots", "snapshots")),
             timelines: pairs(app.m.q_list("timelines")),
+            overlays: app
+                .m
+                .q_list("patches")
+                .iter()
+                .filter(|p| p.get_path("trigger").is_some_and(Value::truthy))
+                .filter_map(|p| {
+                    let id = p.get_path("id").and_then(Value::as_str)?.to_string();
+                    let label = p.get_path("label").and_then(Value::as_str).filter(|l| !l.is_empty() && *l != id).map_or_else(|| nice_name(&id), nice_name);
+                    Some((id, label))
+                })
+                .collect(),
+            looks: pairs(app.m.q_list("lights.palettes")),
         }
     }
 
@@ -799,12 +858,14 @@ fn step_phrase(cmd: &str, n: &Names) -> String {
     match kind {
         Step::Preset => format!("fire {}", Names::label(&n.presets, a0)),
         Step::Release => format!("stop {}", Names::label(&n.presets, a0)),
+        Step::Overlay => format!("play the {} overlay", Names::label(&n.overlays, a0)),
         Step::Scene => format!("switch to {}", Names::label(&n.scenes, a0)),
         Step::Preview => format!("put {} up next", Names::label(&n.scenes, a0)),
         Step::Lights => match args.get(1) {
             Some(c) => format!("run light cue {c} of {}", Names::label(&n.cuelists, a0)),
             None => format!("run the {} lights", Names::label(&n.cuelists, a0)),
         },
+        Step::Look => format!("turn on the {} light look", Names::label(&n.looks, a0)),
         Step::Say if a0.is_empty() => "say …".into(),
         Step::Say => format!("say “{}”", clip(&friendly_text(a0), 56)),
         Step::Sound => format!("play {}", Names::label(&n.sounds, a0)),
@@ -1154,8 +1215,9 @@ pub fn suggest(field: &str, text: &str, app: &App) -> Vec<String> {
                     .map(String::from),
             );
         }
-        "if" => {
-            let when = app.build.rules.edit.as_ref().map(|d| d.when.clone()).unwrap_or_default();
+        "if" | "cond" => {
+            // `cond`: a condition outside a reaction (no event to read fields from)
+            let when = if field == "if" { app.build.rules.edit.as_ref().map(|d| d.when.clone()).unwrap_or_default() } else { String::new() };
             for (ty, fields) in FIELDS {
                 if se_proto::address::matches(&when, ty) {
                     pool.extend(fields.iter().map(|f| format!("event.{f}")));
@@ -1208,27 +1270,39 @@ fn complete(text: &mut String, choice: &str) {
 
 /// Raw text field with autocomplete. `key` is `when` / `if` / `do:<i>`, optionally `raw-` prefixed.
 fn field(app: &mut App, ui: &mut egui::Ui, key: &str, hint: &str, get: impl Fn(&mut RuleDraft) -> &mut String) {
+    let Some(mut text) = app.build.rules.edit.as_mut().map(|d| get(d).clone()) else { return };
+    if text_field(app, ui, key, hint, &mut text)
+        && let Some(d) = app.build.rules.edit.as_mut()
+    {
+        *get(d) = text;
+    }
+}
+
+/// A monospace text field with suggestion buttons for the token being typed. `key` names the
+/// field (its kind before the first `:`: `when`, `if`, `cond` for any condition, anything else
+/// for commands) and keeps its focus apart from other fields. Returns true when `text` changed.
+pub fn text_field(app: &mut App, ui: &mut egui::Ui, key: &str, hint: &str, text: &mut String) -> bool {
     let t = app.t.clone();
     let kind = key.trim_start_matches("raw-").split(':').next().unwrap_or(key);
     let focused = app.build.rules.focus.as_deref() == Some(key);
-    let sugg = if focused { app.build.rules.edit.as_mut().map(|d| get(d).clone()).map(|txt| suggest(kind, &txt, app)).unwrap_or_default() } else { Vec::new() };
-    let Some(d) = app.build.rules.edit.as_mut() else { return };
-    let r = ui.add(se_ui_kit::widgets::field(get(d)).hint_text(hint).desired_width(f32::INFINITY).font(font_mono(type_scale::BODY - 1.0)));
+    let sugg = if focused { suggest(kind, text, app) } else { Vec::new() };
+    let r = ui.add(se_ui_kit::widgets::field(text).hint_text(hint).desired_width(f32::INFINITY).font(font_mono(type_scale::BODY - 1.0)));
+    let mut changed = r.changed();
     if r.has_focus() {
         app.build.rules.focus = Some(key.to_string());
     }
     if !sugg.is_empty() && (r.has_focus() || focused) {
         ui.horizontal_wrapped(|ui| {
             for s in sugg {
-                if widgets::button_ex(ui, &t, None, &s, Kind::Secondary, Size::Small, 0.0, true).clicked()
-                    && let Some(d) = app.build.rules.edit.as_mut()
-                {
-                    complete(get(d), &s);
+                if widgets::button_ex(ui, &t, None, &s, Kind::Secondary, Size::Small, 0.0, true).clicked() {
+                    complete(text, &s);
+                    changed = true;
                     r.request_focus();
                 }
             }
         });
     }
+    changed
 }
 
 // ---- view ----------------------------------------------------------------------------------------
@@ -1451,13 +1525,14 @@ fn fill(app: &mut App) {
     }
 }
 
-/// Lists behind the step pickers (cue lists, sounds, mixes, timelines), refreshed slowly.
+/// Lists behind the step pickers (quick effects, modes, cue lists, looks, overlays, sounds,
+/// mixes, timelines), refreshed slowly.
 fn fetch_lists(app: &mut App, now: f64) {
     if !app.m.connected || now - app.build.rules.lists_at < 5.0 {
         return;
     }
     app.build.rules.lists_at = now;
-    for q in ["lights.cuelists", "audio.mix", "mixer.snapshots", "timelines"] {
+    for q in ["presets", "modes", "lights.cuelists", "lights.palettes", "patches", "audio.mix", "mixer.snapshots", "timelines"] {
         app.m.query(q, Value::Null);
     }
 }
@@ -1526,7 +1601,7 @@ fn editor(app: &mut App, ui: &mut egui::Ui, t: &Theme) {
                 });
                 ui.add_space(spacing::L - ui.spacing().item_spacing.x);
                 ui.allocate_ui_with_layout(Vec2::new(col, 0.0), Layout::top_down(Align::Min), |ui| {
-                    do_card(app, ui, t, &names);
+                    do_card(app, ui, t);
                     ui.add_space(spacing::L);
                     limits_card(app, ui, t, &names);
                     ui.add_space(spacing::M);
@@ -1538,7 +1613,7 @@ fn editor(app: &mut App, ui: &mut egui::Ui, t: &Theme) {
             ui.add_space(spacing::L);
             if_card(app, ui, t, &names);
             ui.add_space(spacing::L);
-            do_card(app, ui, t, &names);
+            do_card(app, ui, t);
             ui.add_space(spacing::L);
             limits_card(app, ui, t, &names);
             ui.add_space(spacing::M);
@@ -1782,12 +1857,9 @@ fn cond_row(ui: &mut egui::Ui, i: usize, c: &mut Cond, fields: &[&str], names: &
     changed
 }
 
-fn do_card(app: &mut App, ui: &mut egui::Ui, t: &Theme, names: &Names) {
-    let cmds = app.build.rules.edit.as_ref().map(|d| d.commands.clone()).unwrap_or_default();
-    let mut edit: Option<(usize, String)> = None;
-    let mut remove = None;
-    let mut up = None;
-    let mut add = false;
+fn do_card(app: &mut App, ui: &mut egui::Ui, t: &Theme) {
+    let Some((mut cmds, when)) = app.build.rules.edit.as_ref().map(|d| (d.commands.clone(), d.when.clone())) else { return };
+    let mut changed = false;
     widgets::titled(
         ui,
         t,
@@ -1800,38 +1872,73 @@ fn do_card(app: &mut App, ui: &mut egui::Ui, t: &Theme, names: &Names) {
                 widgets::hint(ui, t, "Nothing yet. Add the first thing it should do.");
                 ui.add_space(spacing::S);
             }
-            for (i, cmd) in cmds.iter().enumerate() {
-                step_row(app, ui, t, names, i, cmd, &mut edit, &mut remove, &mut up);
-                ui.add_space(spacing::XS);
-            }
-            ui.add_space(spacing::XS);
-            add = widgets::button_ex(ui, t, Some(icon::PLUS), "Add a step", Kind::Secondary, Size::Small, 0.0, true).clicked();
+            changed = steps_editor(app, ui, "", &mut cmds, &when);
         },
     );
-    let Some(d) = app.build.rules.edit.as_mut() else { return };
-    if let Some((i, c)) = edit
-        && let Some(slot) = d.commands.get_mut(i)
-    {
-        *slot = c;
-    }
-    if let Some(i) = up
-        && i > 0
-        && i < d.commands.len()
-    {
-        d.commands.swap(i - 1, i);
-    }
-    if let Some(i) = remove
-        && i < d.commands.len()
-    {
-        d.commands.remove(i);
-    }
-    if add {
-        d.commands.push(Step::Preset.verb().into());
+    if changed && let Some(d) = app.build.rules.edit.as_mut() {
+        d.commands = cmds;
     }
 }
 
+/// The guided step rows plus "Add a step", editing command lines in place: a reaction's "Do
+/// this", a scene's "When this scene comes on". `salt` keeps the widgets of different lists
+/// apart; `when` is the event the steps answer (for the chat message "Insert" chips; empty =
+/// none). Returns true when `cmds` changed.
+pub fn steps_editor(app: &mut App, ui: &mut egui::Ui, salt: &str, cmds: &mut Vec<String>, when: &str) -> bool {
+    let t = app.t.clone();
+    fetch_lists(app, ui.input(|i| i.time));
+    let names = Names::read(app);
+    let (mut edit, mut remove, mut up) = (None, None, None);
+    for (i, cmd) in cmds.iter().enumerate() {
+        step_row(app, ui, &t, &names, salt, i, cmd, when, &mut edit, &mut remove, &mut up);
+        ui.add_space(spacing::XS);
+    }
+    ui.add_space(spacing::XS);
+    let add = widgets::button_ex(ui, &t, Some(icon::PLUS), "Add a step", Kind::Secondary, Size::Small, 0.0, true).clicked();
+    let mut changed = false;
+    if let Some((i, c)) = edit
+        && let Some(slot) = cmds.get_mut(i)
+        && *slot != c
+    {
+        *slot = c;
+        changed = true;
+    }
+    if let Some(i) = up
+        && i > 0
+        && i < cmds.len()
+    {
+        cmds.swap(i - 1, i);
+        changed = true;
+    }
+    if let Some(i) = remove
+        && i < cmds.len()
+    {
+        cmds.remove(i);
+        changed = true;
+    }
+    if add {
+        cmds.push(Step::Preset.blank());
+        changed = true;
+    }
+    changed
+}
+
+/// What a step still needs before it can run, in words ("pick a quick effect"); `None` = ready.
+pub fn step_missing(cmd: &str) -> Option<String> {
+    if cmd.trim().is_empty() {
+        return Some("say what it should do".into());
+    }
+    let (kind, args) = parse_step(cmd);
+    if let Some(what) = kind.missing()
+        && args.iter().all(|a| a.trim().is_empty())
+    {
+        return Some(what.into());
+    }
+    Op::parse(cmd).err().map(|e| format!("fix a mistake: {e}"))
+}
+
 /// A name picker over `opts`; a text box when the engine hasn't listed any. Returns a new pick.
-fn pick_name(
+pub fn pick_name(
     ui: &mut egui::Ui,
     id: impl std::hash::Hash + std::fmt::Debug,
     cur: &str,
@@ -1861,8 +1968,10 @@ fn step_row(
     ui: &mut egui::Ui,
     t: &Theme,
     names: &Names,
+    salt: &str,
     i: usize,
     cmd: &str,
+    when: &str,
     edit: &mut Option<(usize, String)>,
     remove: &mut Option<usize>,
     up: &mut Option<usize>,
@@ -1871,60 +1980,25 @@ fn step_row(
     let a0 = args.first().cloned().unwrap_or_default();
     egui::Frame::new().fill(t.surface_hi).corner_radius(CornerRadius::same(radius::CONTROL)).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
         ui.set_width(ui.available_width());
+        // narrow places (a side panel): what to pick goes on its own line
+        let narrow = ui.available_width() < 560.0;
+        let mut new_cmd = None;
         ui.horizontal(|ui| {
             ui.label(RichText::new(format!("{}", i + 1)).font(font_semibold(type_scale::BODY)).color(t.text_dim));
             ui.label(RichText::new(kind.icon()).color(t.accent));
             let mut k = kind;
-            egui::ComboBox::from_id_salt(("rule-step-kind", i)).width(210.0).selected_text(kind.label()).show_ui(ui, |ui| {
+            let kind_w = if narrow { (ui.available_width() - 70.0).max(120.0) } else { 210.0 };
+            egui::ComboBox::from_id_salt((salt, "rule-step-kind", i)).width(kind_w).selected_text(kind.label()).show_ui(ui, |ui| {
                 for s in Step::ALL {
                     ui.selectable_value(&mut k, s, s.label());
                 }
             });
             if k != kind {
-                let next = match k {
-                    Step::Custom => cmd.to_string(),
-                    Step::Wait => "wait 2s".into(),
-                    k => k.verb().to_string(),
-                };
-                *edit = Some((i, next));
+                *edit = Some((i, if k == Step::Custom { cmd.to_string() } else { k.blank() }));
             }
-            let w = (ui.available_width() - 90.0).clamp(140.0, 360.0);
-            let new_arg = match kind {
-                Step::Preset | Step::Release => pick_name(ui, ("rule-step-arg", i), &a0, &names.presets, "Pick an effect", w),
-                Step::Scene | Step::Preview => pick_name(ui, ("rule-step-arg", i), &a0, &names.scenes, "Pick a scene", w),
-                Step::Sound => pick_name(ui, ("rule-step-arg", i), &a0, &names.sounds, "Pick a sound", w),
-                Step::Mix => pick_name(ui, ("rule-step-arg", i), &a0, &names.mixes, "Pick a mix", w),
-                Step::Mode => pick_name(ui, ("rule-step-arg", i), &a0, &names.modes, "Pick a mode", w),
-                Step::TimelinePlay | Step::TimelineStop => pick_name(ui, ("rule-step-arg", i), &a0, &names.timelines, "Pick a timeline", w),
-                Step::Lights => {
-                    let cue = args.get(1).cloned().unwrap_or_default();
-                    if let Some(l) = pick_name(ui, ("rule-step-arg", i), &a0, &names.cuelists, "Pick a cue list", w * 0.65) {
-                        *edit = Some((i, build_step(kind, &[&l, &cue])));
-                    }
-                    let mut c = cue.clone();
-                    if ui.add(se_ui_kit::widgets::field(&mut c).hint_text("cue (optional)").desired_width(90.0)).changed() {
-                        *edit = Some((i, build_step(kind, &[&a0, &c])));
-                    }
-                    None
-                }
-                Step::Say => {
-                    let mut s = a0.clone();
-                    ui.add(se_ui_kit::widgets::field(&mut s).hint_text("Thanks for the support!").desired_width(w)).changed().then_some(s)
-                }
-                Step::Wait => {
-                    let mut s = a0.clone();
-                    let r = ui.add(se_ui_kit::widgets::field(&mut s).hint_text("2s").desired_width(70.0)).changed().then_some(s);
-                    widgets::hint(ui, t, "like 2s or 1m");
-                    r
-                }
-                Step::Marker => {
-                    let mut s = a0.clone();
-                    ui.add(se_ui_kit::widgets::field(&mut s).hint_text("What happened (optional)").desired_width(w)).changed().then_some(s)
-                }
-                Step::Custom => None,
-            };
-            if let Some(v) = new_arg {
-                *edit = Some((i, build_step(kind, &[&v])));
+            if !narrow {
+                let w = (ui.available_width() - 90.0).clamp(140.0, 360.0);
+                new_cmd = step_args(ui, t, names, (salt, i), kind, &args, w);
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if widgets::icon_button(ui, t, icon::CROSS, "Remove this step").clicked() {
@@ -1935,18 +2009,31 @@ fn step_row(
                 }
             });
         });
+        if narrow && !matches!(kind, Step::Custom) {
+            ui.horizontal(|ui| {
+                let w = ui.available_width();
+                new_cmd = step_args(ui, t, names, (salt, i), kind, &args, w);
+            });
+        }
+        if let Some(c) = new_cmd {
+            *edit = Some((i, c));
+        }
         if kind == Step::Custom {
-            field(app, ui, &format!("do:{i}"), "e.g. preset.fire hype · bot.say 'thanks {user}!'", move |d| &mut d.commands[i]);
+            let mut s = cmd.to_string();
+            if text_field(app, ui, &format!("{salt}do:{i}"), "e.g. preset.fire hype · bot.say 'thanks {user}!'", &mut s) {
+                *edit = Some((i, s));
+            }
             if !cmd.trim().is_empty() {
                 widgets::hint(ui, t, &format!("Does: {}", custom_phrase(cmd)));
             }
         } else if kind == Step::Say {
-            let when = app.build.rules.edit.as_ref().map(|d| d.when.clone()).unwrap_or_default();
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("Insert").color(t.text_dim));
                 let extra =
-                    fields_for(&when).into_iter().filter(|f| !matches!(*f, "user" | "message" | "input" | "is_gift" | "automatic" | "down" | "key" | "page"));
-                for f in std::iter::once("user").chain(extra) {
+                    fields_for(when).into_iter().filter(|f| !matches!(*f, "user" | "message" | "input" | "is_gift" | "automatic" | "down" | "key" | "page"));
+                // "their name" only means something when a viewer did something
+                let user = (!when.trim().is_empty()).then_some("user");
+                for f in user.into_iter().chain(extra) {
                     let code = format!("{{{f}}}");
                     let label = if f == "user" { "Their name".to_string() } else { field_info(f).0 };
                     if widgets::chip(ui, t, "", &label, false).on_hover_text(format!("Becomes {} when it happens", placeholder_words(f))).clicked() {
@@ -1957,6 +2044,50 @@ fn step_row(
             });
         }
     });
+}
+
+/// The pickers of one step (what to fire, which scene, …). Returns the new command line.
+fn step_args(ui: &mut egui::Ui, t: &Theme, names: &Names, id: (&str, usize), kind: Step, args: &[String], w: f32) -> Option<String> {
+    let a0 = args.first().cloned().unwrap_or_default();
+    let pid = (id.0, "rule-step-arg", id.1);
+    let new_arg = match kind {
+        Step::Preset | Step::Release => pick_name(ui, pid, &a0, &names.presets, "Pick an effect", w),
+        Step::Overlay => pick_name(ui, pid, &a0, &names.overlays, "Pick an overlay", w),
+        Step::Scene | Step::Preview => pick_name(ui, pid, &a0, &names.scenes, "Pick a scene", w),
+        Step::Look => pick_name(ui, pid, &a0, &names.looks, "Pick a look", w),
+        Step::Sound => pick_name(ui, pid, &a0, &names.sounds, "Pick a sound", w),
+        Step::Mix => pick_name(ui, pid, &a0, &names.mixes, "Pick a mix", w),
+        Step::Mode => pick_name(ui, pid, &a0, &names.modes, "Pick a mode", w),
+        Step::TimelinePlay | Step::TimelineStop => pick_name(ui, pid, &a0, &names.timelines, "Pick a timeline", w),
+        Step::Lights => {
+            let cue = args.get(1).cloned().unwrap_or_default();
+            let mut out = None;
+            if let Some(l) = pick_name(ui, pid, &a0, &names.cuelists, "Pick a cue list", (w - 100.0).max(100.0)) {
+                out = Some(build_step(kind, &[&l, &cue]));
+            }
+            let mut c = cue.clone();
+            if ui.add(se_ui_kit::widgets::field(&mut c).hint_text("cue (optional)").desired_width(90.0)).changed() {
+                out = Some(build_step(kind, &[&a0, &c]));
+            }
+            return out;
+        }
+        Step::Say => {
+            let mut s = a0.clone();
+            ui.add(se_ui_kit::widgets::field(&mut s).hint_text("Thanks for the support!").desired_width(w)).changed().then_some(s)
+        }
+        Step::Wait => {
+            let mut s = a0.clone();
+            let r = ui.add(se_ui_kit::widgets::field(&mut s).hint_text("2s").desired_width(70.0)).changed().then_some(s);
+            widgets::hint(ui, t, "like 2s or 1m");
+            r
+        }
+        Step::Marker => {
+            let mut s = a0.clone();
+            ui.add(se_ui_kit::widgets::field(&mut s).hint_text("What happened (optional)").desired_width(w)).changed().then_some(s)
+        }
+        Step::Custom => None,
+    };
+    new_arg.map(|v| build_step(kind, &[&v]))
 }
 
 /// Toggle `item` in a comma-separated list.
@@ -2239,7 +2370,15 @@ mod tests {
 
     #[test]
     fn steps_round_trip_through_the_guided_editor() {
-        for cmd in ["preset.fire hype", "scene.cut brb", "lights.cue main 2", "wait 2s", "bot.say 'HYPE! Thanks {user} for {bits} bits'"] {
+        for cmd in [
+            "preset.fire hype",
+            "scene.cut brb",
+            "lights.cue main 2",
+            "lights.cue look=warm",
+            "patch.terminal_boot.trigger",
+            "wait 2s",
+            "bot.say 'HYPE! Thanks {user} for {bits} bits'",
+        ] {
             let (k, args) = parse_step(cmd);
             assert_ne!(k, Step::Custom, "{cmd}");
             let refs: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -2251,5 +2390,26 @@ mod tests {
         let built = build_step(Step::Say, &[tricky]);
         assert!(Op::parse(&built).is_ok(), "{built}");
         assert_eq!(parse_step(&built), (Step::Say, vec![tricky.to_string()]));
+    }
+
+    #[test]
+    fn overlay_and_look_steps_read_as_what_they_do() {
+        // both ways of playing an overlay read as one; the guided editor writes the file's way
+        assert_eq!(parse_step("trigger patch.confetti"), (Step::Overlay, vec!["confetti".to_string()]));
+        assert_eq!(build_step(Step::Overlay, &["confetti"]), "patch.confetti.trigger");
+        assert!(Op::parse(&build_step(Step::Overlay, &["confetti"])).is_ok());
+        // triggers with settings, or of something that isn't an overlay, need the raw editor
+        assert_eq!(parse_step("patch.confetti.trigger count=50").0, Step::Custom);
+        assert_eq!(parse_step("trigger fx.glitch").0, Step::Custom);
+        // a look is not a cue list
+        assert_eq!(parse_step("lights.cue main").0, Step::Lights);
+        assert_eq!(parse_step("lights.cue look=warm").0, Step::Look);
+        assert!(Op::parse(&build_step(Step::Look, &["warm"])).is_ok());
+        // fresh steps are unfinished until something is picked
+        for k in [Step::Overlay, Step::Look] {
+            assert_eq!(parse_step(&k.blank()), (k, if k == Step::Look { vec![String::new()] } else { Vec::new() }));
+            assert!(step_missing(&k.blank()).is_some(), "{k:?}");
+        }
+        assert_eq!(step_missing("patch.terminal_boot.trigger"), None);
     }
 }

@@ -104,9 +104,36 @@ fn scene_pair_pools_fall_back_to_the_target_scene() {
 }
 
 #[test]
+fn project_default_covers_scenes_without_their_own() {
+    let mut c = core("[transitions]\npool = [{ name = \"glitch\" }]\nms = 450\n[transitions.from.b]\nname = \"zoomblur\"");
+    // a → b: b's own pair pool wins over the project default (its duration too)
+    assert_eq!(take(&mut c, "b", None), ("zoomblur".into(), 300, "pool".into()));
+    // b → a: `a` has nothing; the project's pair for leaving `b` is fixed, with the project duration
+    assert_eq!(take(&mut c, "a", None), ("zoomblur".into(), 450, "project".into()));
+    // c → a: the project pool
+    cut_to(&mut c, "c");
+    assert_eq!(take(&mut c, "a", None), ("glitch".into(), 450, "project".into()));
+    // a → c: c's fixed cut beats the default and stays instant despite the project duration
+    assert_eq!(take(&mut c, "c", None), ("cut".into(), 0, "fixed".into()));
+    // c → b: b's pool (the c pair only sets a duration)
+    assert_eq!(take(&mut c, "b", None), ("morph".into(), 250, "pool".into()));
+}
+
+#[test]
+fn chat_votes_beat_the_project_default() {
+    let mut c = core("[transitions]\nname = \"zoomblur\"\n[transition_vote]\nwindow = \"30s\"");
+    live(&mut c);
+    cut_to(&mut c, "b");
+    vote(&mut c, "ann", "glitch");
+    assert_eq!(take(&mut c, "a", None), ("glitch".into(), 600, "vote".into()));
+    cut_to(&mut c, "b");
+    assert_eq!(take(&mut c, "a", None), ("zoomblur".into(), 800, "project".into()), "no votes left: the default");
+}
+
+#[test]
 fn pair_pools_are_validated() {
     let files = vec![
-        file("project", "project", "schema = 1"),
+        file("project", "project", "schema = 1\n[transitions]\nname = \"swoosh\"\n[transitions.from.gone]\npool = [{ name = \"fade\" }]"),
         file("scenes", "a", "[transitions.from.nowhere]\npool = [{ name = \"fade\" }]\n[transitions.from.b]\npool = [{ name = \"sparkles\" }]"),
         file("scenes", "b", ""),
     ];
@@ -114,6 +141,8 @@ fn pair_pools_are_validated() {
     let msgs: Vec<&str> = c.errors.iter().map(|e| e.msg.as_str()).collect();
     assert!(msgs.iter().any(|m| m.contains("unknown scene `nowhere`")), "{msgs:?}");
     assert!(msgs.iter().any(|m| m.contains("unknown transition `sparkles`")), "{msgs:?}");
+    let project: Vec<&str> = c.errors.iter().filter(|e| e.file.ends_with("project.toml")).map(|e| e.msg.as_str()).collect();
+    assert!(project.iter().any(|m| m.contains("unknown transition `swoosh`")) && project.iter().any(|m| m.contains("unknown scene `gone`")), "{project:?}");
 }
 
 #[test]

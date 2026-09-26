@@ -5,7 +5,7 @@
 //! inputs at the same tick indices reproduces the same state.
 
 use crate::bindings::{BindScope, BindingRt};
-use crate::config::{Config, Conflict, LightsRef, PresetDef, SceneDef};
+use crate::config::{Config, Conflict, KnobSlot, LightsRef, PresetDef, PresetFx, SceneDef};
 use crate::rng::Rng;
 use crate::signals::{Lfo, Signals, builtin_lfos};
 use crate::state::{Anim, Mod, Override, StateTree};
@@ -1351,13 +1351,10 @@ impl Core {
         let key = self.override_key(origin, ctx, prio);
         let now = self.now();
         let spec = self.ensure_trigger(address).spec;
-        let get = |k: &str| {
-            payload.get_path(k).and_then(|v| match v {
-                Value::Str(s) => se_proto::parse_duration_ms(s),
-                v => v.as_f64().map(|f| f.max(0.0) as u64),
-            })
-        };
-        let mut hold = get("hold").or(spec.hold_ms);
+        let get = |k: &str| payload_ms(payload, k);
+        // `hold = "latch"`: held until released (toggled presets)
+        let latch = payload.get_path("hold").and_then(Value::as_str).is_some_and(|h| h == "latch" || h == "inf");
+        let mut hold = if latch { None } else { get("hold").or(spec.hold_ms) };
         if prio <= PRIORITY_CHAT {
             // chat effects always auto-expire
             let ttl = self.chat_ttl / MS;
@@ -1485,6 +1482,9 @@ impl Core {
             if let Some(h) = fx.hold.or(def.hold) {
                 p = p.with("hold", h.ms() as i64);
                 longest = longest.max(h.ms());
+            } else if def.toggle && !chat {
+                // a toggled preset keeps its effects up until it is pressed again
+                p = p.with("hold", "latch");
             } else if let Some(s) = self.trigger_specs.get(&a) {
                 longest = longest.max(s.attack_ms + s.hold_ms.unwrap_or(0));
             } else {
@@ -1498,6 +1498,8 @@ impl Core {
             }
             if let Err(e) = self.fire_trigger(&a, &p, origin, &pctx) {
                 self.trace.add(next_id(), Some(trace), now, "error", e);
+            } else if !fx.name.contains('.') {
+                self.hold_effect_settings(&a, fx, &p, &key, priority, origin, trace, expires);
             }
             fx_addrs.push(a);
         }
@@ -1505,6 +1507,7 @@ impl Core {
             let args = Value::map()
                 .with("cue", l.cue.clone().map(Value::Str).unwrap_or_default())
                 .with("cuelist", l.cuelist.clone().map(Value::Str).unwrap_or_default())
+                .with("look", l.look.clone().map(Value::Str).unwrap_or_default())
                 .with("priority", priority as i64);
             self.exec_traced(&Op::Action { name: "lights.cue".into(), args }, origin, &pctx);
             if let Some(h) = l.hold {
@@ -1557,6 +1560,113 @@ impl Core {
         self.runtime_dirty = true;
     }
 
+    /// Settings of a built-in effect in a preset's `fx` entry (`{ name = "glitch", speed = 2.0 }`)
+    /// hold `fx.<name>.<setting>` (key `<preset key>#fx`) until that effect has faded out, so it
+    /// keeps its shape through its release tail even after the preset itself has ended.
+    #[allow(clippy::too_many_arguments)]
+    fn hold_effect_settings(&mut self, a: &str, fx: &PresetFx, p: &Value, key: &str, priority: u16, origin: Origin, trace: Id, chat_expires: Option<Ts>) {
+        let settings: Vec<(&String, &Value)> = fx.params.iter().filter(|(k, _)| !EFFECT_TIMING.contains(&k.as_str())).collect();
+        if settings.is_empty() {
+            return;
+        }
+        let now = self.now();
+        let spec = self.triggers.get(a).map(|t| t.spec).unwrap_or_default();
+        let latch = p.get_path("hold").and_then(Value::as_str).is_some_and(|h| h == "latch" || h == "inf");
+        let hold = if latch { None } else { payload_ms(p, "hold").or(spec.hold_ms) };
+        let end = hold.map(|h| now + (payload_ms(p, "attack").unwrap_or(spec.attack_ms) + h + payload_ms(p, "release").unwrap_or(spec.release_ms)) * MS);
+        let expires = match (end, chat_expires) {
+            (Some(e), Some(c)) => Some(e.min(c)),
+            (e, c) => e.or(c),
+        };
+        let chat = priority <= PRIORITY_CHAT;
+        let fkey = format!("{key}#fx");
+        for (k, v) in settings {
+            let addr = format!("{a}.{k}");
+            let v = if chat { self.chat_clamp(&addr, v.clone()) } else { v.clone() };
+            let i = self.state.ensure(&addr, &zero_of(&v));
+            self.state.put_override(i, Override { key: fkey.clone(), priority, value: v, seq: 0, expires, anim: None, origin, causal: Some(trace) });
+            self.cause.insert(i, trace);
+        }
+    }
+
+    /// A released preset's effect settings ([`Core::hold_effect_settings`]) end with the
+    /// effects' release tail instead of snapping back while the effect still fades out.
+    fn fade_effect_settings(&mut self, name: &str, key: &str, now: Ts) {
+        let fkey = format!("{key}#fx");
+        let Some(def) = self.config.presets.get(name) else {
+            self.state.remove_overrides_where(|o| o.key == fkey);
+            return;
+        };
+        let mut due: Vec<(String, Ts)> = Vec::new();
+        for (index, fx) in def.fx.iter().enumerate().filter(|(_, f)| !f.name.contains('.')) {
+            let a = format!("fx.{}", fx.name);
+            let fx_params = Value::Map(fx.params.clone());
+            let release =
+                payload_ms(&fx_params, "release").or_else(|| self.triggers.get(&a).map(|t| t.spec.release_ms)).unwrap_or(TriggerSpec::default().release_ms);
+            // the entry's own settings, and any a knob held while it ran (see `preset_knob`)
+            let knobbed = def.knobs.iter().filter_map(|k| match def.knob_slot(&k.target) {
+                Some(KnobSlot::Fx { index: i, key }) if i == index => Some(key),
+                _ => None,
+            });
+            let mut keys: Vec<String> = fx.params.keys().cloned().chain(knobbed).filter(|k| !EFFECT_TIMING.contains(&k.as_str())).collect();
+            keys.sort();
+            keys.dedup();
+            for k in keys {
+                due.push((format!("{a}.{k}"), now + release * MS));
+            }
+        }
+        for (addr, until) in due {
+            let Some(i) = self.state.id(&addr) else { continue };
+            if let Some(mut o) = self.state.param(i).overrides.iter().find(|o| o.key == fkey).cloned()
+                && o.expires.is_none_or(|e| e > until)
+            {
+                o.expires = Some(until);
+                self.state.put_override(i, o);
+            }
+        }
+    }
+
+    /// Turn a quick effect's knob (`preset.knob`): a running instance's held value follows at
+    /// once (settings in `set` and built-in effect settings; an overlay's burst size and trigger
+    /// strengths take effect on the next firing). A saved turn also goes into the definition,
+    /// so the next firing uses it right away, before the written file has reloaded; an unsaved
+    /// one (a slider still held) leaves the definition matching the file. Returns the fitted
+    /// value.
+    fn preset_knob(&mut self, name: &str, target: &str, value: &Value, save: bool) -> Result<Value, String> {
+        let (v, live) = {
+            let def = self.config.presets.get_mut(name).ok_or_else(|| format!("unknown preset `{name}`"))?;
+            let knob = def.knobs.iter().find(|k| k.target == target).ok_or_else(|| format!("quick effect `{name}` has no knob for `{target}`"))?;
+            let v = knob.fit(value).ok_or_else(|| format!("{value} doesn't fit knob “{}”", knob.label))?;
+            let live = match def.knob_slot(target) {
+                Some(KnobSlot::Set) => Some(""),
+                Some(KnobSlot::Fx { index, key }) if !def.fx[index].name.contains('.') && !EFFECT_TIMING.contains(&key.as_str()) => Some("#fx"),
+                _ => None,
+            };
+            if save {
+                def.set_knob_value(target, v.clone());
+            }
+            (v, live)
+        };
+        let Some(suffix) = live else { return Ok(v) };
+        let running: Vec<(String, u16, Option<Ts>, Id)> =
+            self.presets.iter().filter(|p| p.name == name).map(|p| (format!("{}{suffix}", p.key), p.priority, p.release_at, p.trace)).collect();
+        for (key, priority, release_at, trace) in running {
+            let held = if prio_is_chat(priority) { self.chat_clamp(target, v.clone()) } else { v.clone() };
+            let i = self.state.ensure(target, &zero_of(&v));
+            let o = match self.state.param(i).overrides.iter().find(|o| o.key == key).cloned() {
+                Some(o) => Override { value: held, ..o },
+                // an effect setting the file didn't have when it fired: held like the others
+                // (until it ends; a latched one fades with its effect on release)
+                None if suffix == "#fx" => {
+                    Override { key, priority, value: held, seq: 0, expires: release_at, anim: None, origin: Origin::Ui, causal: Some(trace) }
+                }
+                None => continue,
+            };
+            self.state.put_override(i, o);
+        }
+        Ok(v)
+    }
+
     /// Release every active instance of a preset.
     fn release_preset(&mut self, name: &str, parent: Option<Id>, run_on_release: bool) -> bool {
         let now = self.now();
@@ -1573,10 +1683,12 @@ impl Core {
                     t.release(Some(&key), now);
                 }
             }
+            self.fade_effect_settings(name, &key, now);
             if let Some(l) = &p.lights {
                 let args = Value::map()
                     .with("cue", l.cue.clone().map(Value::Str).unwrap_or_default())
-                    .with("cuelist", l.cuelist.clone().map(Value::Str).unwrap_or_default());
+                    .with("cuelist", l.cuelist.clone().map(Value::Str).unwrap_or_default())
+                    .with("look", l.look.clone().map(Value::Str).unwrap_or_default());
                 self.outbox.push(Output::Action(Command::new(Origin::Rule, Op::Action { name: "lights.release".into(), args }).caused_by(Some(p.trace))));
             }
             let id = next_id();
@@ -1629,15 +1741,18 @@ impl Core {
         }
         let def = self.config.scenes.get(&to).cloned().unwrap_or_default();
         let pool = def.transitions.for_pair(&from);
+        let base = self.config.project.transitions.for_pair(&from);
         let (name, by) = match transition {
             Some(t) => (t, "command"),
-            None => self.pick_transition(&pool, now),
+            None => self.pick_transition(&pool, &base, now),
         };
         let tdef = self.config.transitions.get(&name);
+        // a cut stays instant unless the command itself gives a duration
         let dur_ms = ms
-            .or_else(|| pool.ms_range().map(|(lo, hi)| self.rng.range(lo, hi)))
+            .or((name == "cut").then_some(0))
+            .or_else(|| pool.ms_range().or_else(|| base.ms_range()).map(|(lo, hi)| self.rng.range(lo, hi)))
             .or_else(|| tdef.and_then(|t| t.ms).map(|d| d.ms() as u32))
-            .unwrap_or(if name == "cut" { 0 } else { 700 });
+            .unwrap_or(700);
         self.transition_history.push(name.clone());
         if self.transition_history.len() > 32 {
             self.transition_history.remove(0);
@@ -1658,7 +1773,7 @@ impl Core {
         if let Some(old) = self.config.scenes.get(&from).cloned() {
             self.run_list(&old.on_exit, Origin::Rule, sctx.clone());
         }
-        if let Some(l) = def.lights.clone().or(pool.lights.clone()) {
+        if let Some(l) = def.lights.clone().or(pool.lights.clone()).or(base.lights.clone()) {
             let args = Value::map().with("cue", l.cue.map(Value::Str).unwrap_or_default()).with("cuelist", l.cuelist.map(Value::Str).unwrap_or_default());
             self.exec_traced(&Op::Action { name: "lights.cue".into(), args }, Origin::Rule, &sctx);
         }
@@ -1671,9 +1786,10 @@ impl Core {
     }
 
     /// Transition for a take without one named: the pair's/scene's fixed `name`, else the chat
-    /// vote winner, else a weighted pick from the pool (avoiding recent repeats), else `fade`.
-    /// Returns the name and what chose it.
-    fn pick_transition(&mut self, p: &crate::config::TransitionPool, now: Ts) -> (String, &'static str) {
+    /// vote winner, else a weighted pick from the pair's/scene's pool, else the project-wide
+    /// default (`base`: its fixed `name`, else its pool), else `fade`. Returns the name and what
+    /// chose it.
+    fn pick_transition(&mut self, p: &crate::config::TransitionPool, base: &crate::config::TransitionPool, now: Ts) -> (String, &'static str) {
         if let Some(n) = &p.name {
             return (n.clone(), "fixed");
         }
@@ -1682,26 +1798,35 @@ impl Core {
             self.publish_votes(now);
             return (n, "vote");
         }
-        if p.pool.is_empty() {
-            return ("fade".into(), "default");
+        if let Some(n) = self.pick_from_pool(p) {
+            return (n, "pool");
         }
+        if let Some(n) = base.name.clone().or_else(|| self.pick_from_pool(base)) {
+            return (n, "project");
+        }
+        ("fade".into(), "default")
+    }
+
+    /// A weighted pick from `p`'s pool, skipping the last `avoid_repeat` transitions when others
+    /// are left; `None` when nothing in it can be picked.
+    fn pick_from_pool(&mut self, p: &crate::config::TransitionPool) -> Option<String> {
         let recent: Vec<&String> = self.transition_history.iter().rev().take(p.avoid_repeat).collect();
         let mut cands: Vec<&crate::config::PoolEntry> = p.pool.iter().filter(|e| !recent.contains(&&e.name) && e.w > 0.0).collect();
         if cands.is_empty() {
             cands = p.pool.iter().filter(|e| e.w > 0.0).collect();
         }
         if cands.is_empty() {
-            return ("fade".into(), "default");
+            return None;
         }
         let total: f64 = cands.iter().map(|e| e.w).sum();
         let mut r = self.rng.f64() * total;
         for e in &cands {
             if r < e.w {
-                return (e.name.clone(), "pool");
+                return Some(e.name.clone());
             }
             r -= e.w;
         }
-        (cands.last().unwrap().name.clone(), "pool")
+        cands.last().map(|e| e.name.clone())
     }
 
     // ---- transition votes (§4.4) ------------------------------------------------------
@@ -2005,6 +2130,27 @@ impl Core {
                     self.fire_preset(&n, &Value::Null, origin, ctx)
                 }
             }
+            "preset.knob" => {
+                if prio <= PRIORITY_CHAT {
+                    return Err("chat cannot turn a quick effect's knobs".into());
+                }
+                let n = arg("name", 0).map(|v| v.to_string()).ok_or("needs a preset name")?;
+                let target = arg("target", 1).and_then(|v| v.as_str().map(String::from)).ok_or("needs the knob's `target`")?;
+                let value = arg("value", 2).ok_or("needs a `value`")?;
+                let save = args.get_path("save").is_none_or(Value::truthy);
+                let v = self.preset_knob(&n, &target, &value, save)?;
+                if save {
+                    // the file write-back belongs to the engine around the core
+                    let mut c =
+                        Command::new(origin, Op::Action { name: name.into(), args: Value::map().with("name", n).with("target", target).with("value", v) });
+                    c.actor = ctx.actor.clone();
+                    c.causal = ctx.parent;
+                    c.priority = Some(prio);
+                    c.ts = self.now();
+                    self.outbox.push(Output::Action(c));
+                }
+                Ok(())
+            }
             "transition.vote" => self.transition_vote(args, origin, ctx),
             "scene.next" | "scene.prev" => {
                 let names = scene_order(&self.config);
@@ -2267,6 +2413,26 @@ impl Core {
                             .with("toggle", p.toggle)
                             .with("confirm", p.confirm)
                             .with("chat", p.chat.unwrap_or(!p.confirm))
+                            // stays on for a while or until released (so it can be stopped)
+                            .with("held", p.hold.is_some() || p.toggle || !p.set.is_empty())
+                            .with(
+                                "knobs",
+                                Value::List(
+                                    p.knobs
+                                        .iter()
+                                        .map(|k| {
+                                            // the file's value, else the knob's default, else what the address holds now
+                                            let v = p
+                                                .knob_value(&k.target)
+                                                .or(k.default.as_ref())
+                                                .or_else(|| self.state.get(&k.target))
+                                                .cloned()
+                                                .unwrap_or_default();
+                                            k.to_value().with("value", v)
+                                        })
+                                        .collect(),
+                                ),
+                            )
                     })
                     .collect(),
             ),
@@ -2393,6 +2559,7 @@ impl Core {
             }
             "config.scenes" => Value::from(serde_json::to_value(&self.config.scenes).map_err(|e| e.to_string())?),
             "config.presets" => Value::from(serde_json::to_value(&self.config.presets).map_err(|e| e.to_string())?),
+            "config.transitions" => Value::from(serde_json::to_value(&self.config.transitions).map_err(|e| e.to_string())?),
             "config.rules" => Value::from(serde_json::to_value(&self.config.rules).map_err(|e| e.to_string())?),
             "config.bindings" => Value::from(serde_json::to_value(&self.config.bindings).map_err(|e| e.to_string())?),
             "config.project" => Value::from(serde_json::to_value(&self.config.project).map_err(|e| e.to_string())?),
@@ -2481,9 +2648,22 @@ pub fn declare_scene(st: &mut StateTree, s: &SceneDef) {
 
 /// The light cue a running preset owns (and releases when it ends). One-shot presets
 /// (no hold/toggle/set) fire their cue and let it run its own course, so ending the
-/// preset must not switch the look off again.
+/// preset must not switch the look off again. A light look has no course of its own: it is
+/// always held for as long as the preset runs.
 fn held_lights(def: &PresetDef) -> Option<crate::config::LightsRef> {
-    def.lights.clone().filter(|l| l.hold.is_some() || def.hold.is_some() || def.toggle || !def.set.is_empty())
+    def.lights.clone().filter(|l| l.look.is_some() || l.hold.is_some() || def.hold.is_some() || def.toggle || !def.set.is_empty())
+}
+
+/// Keys of a preset `fx` entry that shape its trigger (timing, strength) rather than being
+/// settings of the effect.
+const EFFECT_TIMING: &[&str] = &["hold", "attack", "release", "level", "amount"];
+
+/// A duration in a trigger payload: `"2s"`, `"500ms"`, or a number of milliseconds.
+fn payload_ms(p: &Value, k: &str) -> Option<u64> {
+    p.get_path(k).and_then(|v| match v {
+        Value::Str(s) => se_proto::parse_duration_ms(s),
+        v => v.as_f64().map(|f| f.max(0.0) as u64),
+    })
 }
 
 /// The address pattern of a Set/Animate/Release that uses `*`.

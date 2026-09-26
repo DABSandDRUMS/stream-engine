@@ -9,15 +9,12 @@ use std::path::{Component, Path};
 use std::sync::Arc;
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, TableLike};
 
-/// Validate a project-relative config path: relative, no `..`, no hidden or engine-owned
-/// directories, `.toml` only.
-pub fn check_path(rel: &str) -> Result<()> {
+/// Validate a project-relative path: relative, no `..` or root, nothing hidden. Shared by config
+/// files ([`check_path`]) and media files (`assets::check_asset_path`).
+pub fn check_relative(rel: &str) -> Result<()> {
     let p = Path::new(rel);
     if rel.is_empty() || p.is_absolute() {
         bail!("`{rel}`: path must be relative to the project");
-    }
-    if p.extension().and_then(|e| e.to_str()) != Some("toml") {
-        bail!("`{rel}`: only .toml files can be written");
     }
     for c in p.components() {
         match c {
@@ -29,6 +26,17 @@ pub fn check_path(rel: &str) -> Result<()> {
             }
             _ => bail!("`{rel}`: `..` and root components are not allowed"),
         }
+    }
+    Ok(())
+}
+
+/// Validate a project-relative config path: [`check_relative`], no engine-owned directories,
+/// `.toml` only.
+pub fn check_path(rel: &str) -> Result<()> {
+    check_relative(rel)?;
+    let p = Path::new(rel);
+    if p.extension().and_then(|e| e.to_str()) != Some("toml") {
+        bail!("`{rel}`: only .toml files can be written");
     }
     let first = p.components().next().map(|c| c.as_os_str().to_string_lossy().to_string()).unwrap_or_default();
     if matches!(first.as_str(), "sessions" | "assets" | "target" | "node_modules") {

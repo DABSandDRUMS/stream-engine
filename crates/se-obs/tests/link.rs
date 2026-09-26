@@ -61,6 +61,7 @@ async fn engine() -> Engine {
         http: "127.0.0.1:0".parse().unwrap(),
         dev: true,
     };
+    hub.register_query("recording.prepare", Arc::new(|_, _| Box::pin(async { Ok(Value::Str("/tmp/stream-engine-show".into())) })));
     se_obs::start(ctx).await.unwrap();
     Engine { hub, cfg_tx, sock, session, bus, _dir: dir, core: Some(core) }
 }
@@ -281,6 +282,9 @@ async fn actions_reach_obs_and_replies_are_reported() {
         let cmd = p.recv().await;
         assert_eq!(cmd["t"], "cmd");
         assert_eq!(cmd["op"], op);
+        if op == "record.start" {
+            assert_eq!(cmd["dir"], "/tmp/stream-engine-show", "record.start must configure OBS's output folder");
+        }
         let id = cmd["id"].as_u64().unwrap();
         if op == "fallback.on" {
             p.send(serde_json::json!({"t":"reply","id":id,"ok":false,"error":"no canvas program shows a stream-engine source"})).await;
@@ -423,7 +427,9 @@ async fn rehearsal_never_starts_the_stream() {
     assert_eq!(ev.payload.get_path("action").and_then(Value::as_str), Some("obs.stream.start"));
     // recording is a test output: it still reaches OBS (and is the first command OBS sees)
     e.action("obs.record.start");
-    assert_eq!(p.recv().await["op"], "record.start");
+    let cmd = p.recv().await;
+    assert_eq!(cmd["op"], "record.start");
+    assert_eq!(cmd["dir"], "/tmp/stream-engine-show");
 
     // "Go live" from rehearsal: the mode change sent just before stream.start counts
     e.hub.command(Command::new(Origin::Cli, Op::ModeSet { mode: "preshow".into() }));

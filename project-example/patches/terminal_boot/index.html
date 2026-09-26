@@ -1,0 +1,93 @@
+<!doctype html>
+<!-- Boot sequence of the win31 "starting soon" terminal. Browser test:
+     /patches/terminal_boot/index.html?token=<token>, then `streamctl do patch.terminal_boot.trigger`.
+     When the typing is done the page ends its own trigger (a replacing fire with `hold=0`); the
+     manifest's `hold` only matters if the page never gets there (keep it above ~15 s). -->
+<html>
+<head>
+<meta charset="utf-8">
+<title>terminal_boot</title>
+<link rel="stylesheet" href="/patches/_lib/win31/dos.css">
+</head>
+<body>
+<div class="dos" id="screen"><div class="term"><div><span id="out"></span><span class="dos-caret"></span></div></div></div>
+<script src="/engine.js"></script>
+<script src="/web/overlay.js"></script>
+<script src="/patches/_lib/win31/dos.js"></script>
+<script>
+  "use strict";
+  const se = Engine.connect();
+  const ID = se.patch ? se.patch.id : "terminal_boot";
+  const out = document.getElementById("out");
+  const P = Overlay.params(se, { brand: "DABS" });
+  let channel = "";
+  se.state("twitch.broadcaster.login", (_, v) => { channel = String(v || ""); });
+
+  Dos.fit(document.getElementById("screen"));
+
+  let run = 0;
+  async function boot() {
+    const me = ++run;
+    const on = () => me === run;
+    const sleep = ms => Dos.sleep(ms).then(on);
+    const write = s => { if (on()) out.textContent += s; };
+    const type = async s => {
+      for (const ch of s) {
+        write(ch);
+        if (!(await sleep(40 + Math.random() * 40))) return false;
+      }
+      return true;
+    };
+    const brand = String(P.brand || "STREAM").toUpperCase();
+    out.textContent = "";
+    write(`${brand} BIOS v3.10, An Energy Star Ally\nCopyright (C) 1984-92, ${brand} Corp.\n\n`);
+    if (!(await sleep(600))) return;
+    write("Main Processor : 80486DX-33\nMemory Testing : ");
+    const memAt = out.textContent.length;
+    for (let k = 0; k <= 16384; k += 256) {
+      out.textContent = out.textContent.slice(0, memAt) + String(k).padStart(5) + "K";
+      if (!(await sleep(22))) return;
+    }
+    write(" OK\n\n");
+    if (!(await sleep(400))) return;
+    for (const [dev, name] of [["Primary Master  ", "STREAM HDD 420MB"], ["Primary Slave   ", "WEBCAM"], ["Secondary Master", "MICROPHONE"], ["Secondary Slave ", "SNACKS"]]) {
+      write(`Detecting ${dev} ... `);
+      if (!(await sleep(380))) return;
+      write(name + "\n");
+    }
+    if (!(await sleep(900))) return;
+    out.textContent = "";
+    if (!(await sleep(400))) return;
+    write("Starting MS-DOS...\n\n");
+    if (!(await sleep(900))) return;
+    write("HIMEM is testing extended memory...");
+    if (!(await sleep(700))) return;
+    write("done.\n\n");
+    const chat = (channel || brand).toUpperCase().slice(0, 16);
+    for (const [cmd, res] of [["SMARTDRV /X", ""], ["MOUSE", "Mouse driver installed\n"], [`SET CHAT=#${chat}`, ""], ["CD \\STREAM", ""]]) {
+      write("C:\\>");
+      if (!(await type(cmd)) || !(await sleep(250))) return;
+      write("\n" + res + (res ? "\n" : ""));
+      if (!(await sleep(200))) return;
+    }
+    write("C:\\STREAM>");
+    if (!(await sleep(500))) return;
+    if (!(await type("STREAM.EXE /SOON")) || !(await sleep(700))) return;
+    // done: end the trigger now (retrigger = "replace" drops the scene's long-hold instance) so
+    // the scene swaps to the title and chat; `done` tells our own handler not to boot again
+    if (se.value(`patch.${ID}.active`)) se.cmd(`patch.${ID}.trigger hold=0 done=true`).catch(e => console.error("boot: ending the trigger:", e));
+  }
+
+  // every start plays it from the top; the scene hides this piece when `active` goes off
+  se.on(`patch.${ID}.trigger`, e => {
+    if (!(e.payload && e.payload.done)) boot();
+  });
+  se.state(`patch.${ID}.active`, (_, v) => {
+    if (!v) {
+      run++;
+      out.textContent = "";
+    }
+  });
+</script>
+</body>
+</html>

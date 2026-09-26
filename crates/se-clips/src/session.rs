@@ -3,10 +3,114 @@
 //! mappings — written by the OBS adapter through `session.meta`).
 
 use crate::config::ClipsConfig;
+use crate::show;
 use se_proto::{Ts, Value};
+use se_store::LogRec;
 use std::path::{Path, PathBuf};
 
 const S: f64 = 1e9;
+/// A requested song on the master clock, from the indexed show or the session journal.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Song {
+    pub start: u64,
+    pub end: u64,
+    pub title: String,
+    pub user: String,
+    pub video: String,
+    pub channel: String,
+    pub dmca: bool,
+}
+
+impl Song {
+    pub fn context(&self) -> serde_json::Value {
+        serde_json::json!({"title": self.title, "user": self.user, "video": self.video, "channel": self.channel, "dmca": self.dmca})
+    }
+}
+
+/// Prefer the durable show index, but jobs queued before indexing still see song events.
+pub fn songs(dir: &Path, show_paths: &show::ShowPaths, last_ns: u64) -> Vec<Song> {
+    if let Some(manifest) = show::read_manifest(show_paths) {
+        let items = show::read_lane(&show_paths.lane("songs"));
+        if items.iter().any(|v| v.get("t0").is_some()) {
+            return items
+                .iter()
+                .filter_map(|v| {
+                    let start = v.get("t0")?.as_f64()?;
+                    let end = v.get("t1")?.as_f64()?;
+                    if !start.is_finite() || !end.is_finite() || start < 0.0 || end <= start {
+                        return None;
+                    }
+                    let ns = |t: f64| (manifest.t0_ns as f64 + t * S).max(0.0) as u64;
+                    Some(Song {
+                        start: ns(start),
+                        end: ns(end),
+                        title: v.get("title").or_else(|| v.get("label")).and_then(|x| x.as_str()).unwrap_or("").into(),
+                        user: v.get("user").and_then(|x| x.as_str()).unwrap_or("").into(),
+                        video: v.get("video").and_then(|x| x.as_str()).unwrap_or("").into(),
+                        channel: v.get("channel").and_then(|x| x.as_str()).unwrap_or("").into(),
+                        dmca: v.get("dmca").and_then(|x| x.as_bool()).unwrap_or(true),
+                    })
+                })
+                .collect();
+        }
+    }
+    let mut songs: Vec<Song> = Vec::new();
+    if let Ok(log) = se_store::read_log(dir) {
+        for entry in log {
+            let LogRec::Ev { event } = entry else { continue };
+            match event.ty.as_str() {
+                "queue.song_started" => {
+                    let get = |field| event.payload.get_path(field).and_then(Value::as_str).unwrap_or("").to_string();
+                    songs.push(Song {
+                        start: event.ts,
+                        end: last_ns,
+                        title: get("title"),
+                        user: get("user"),
+                        video: get("video"),
+                        channel: get("channel"),
+                        dmca: true,
+                    });
+                }
+                "queue.song_ended" => {
+                    let id = event.payload.get_path("id").and_then(Value::as_i64);
+                    let video = event.payload.get_path("video").and_then(Value::as_str);
+                    if let Some(song) = songs
+                        .iter_mut()
+                        .rev()
+                        .find(|s| s.end == last_ns && s.start <= event.ts && (video == Some(s.video.as_str()) || id.is_none() && video.is_none()))
+                    {
+                        song.end = event.ts;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    songs.retain(|s| s.end > s.start);
+    songs
+}
+
+pub fn song_candidates(songs: &[Song], cfg: &ClipsConfig) -> Vec<Candidate> {
+    let target = cfg.max_len.0.saturating_mul(1_000_000).min(45_000_000_000);
+    songs
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let peak = s.start + (s.end - s.start) / 2;
+            let half = target / 2;
+            Candidate {
+                key: format!("song-{}-{i}", s.start / 1_000_000),
+                start: peak.saturating_sub(half).max(s.start),
+                peak,
+                end: peak.saturating_add(half).min(s.end),
+                score: cfg.manual_score,
+                reasons: vec!["song request".into()],
+                labels: vec![s.title.clone()],
+                markers: Vec::new(),
+            }
+        })
+        .collect()
+}
 
 /// A clip candidate window in master-clock ns.
 #[derive(Clone, Debug, PartialEq)]
@@ -357,5 +461,32 @@ clock = { obs_record = { master_ref = 7000000000, other_ref = 0, rate = 1.0, val
         assert_eq!(m.clock.unwrap().twitch_delay_ms, 2500);
         assert!(parse_meta("recordings = 3").unwrap().recordings.is_empty());
         assert!(parse_meta("= broken").is_err());
+    }
+    #[test]
+    fn indexed_song_spans_become_candidates_even_without_markers() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = show::ShowPaths::new(dir.path());
+        std::fs::create_dir_all(paths.lanes()).unwrap();
+        let manifest = show::Manifest { t0_ns: 1_000_000_000, ..Default::default() };
+        std::fs::write(paths.manifest(), serde_json::to_string(&manifest).unwrap()).unwrap();
+        std::fs::write(
+            paths.lane("songs"),
+            concat!(
+                r#"{"t0":10,"t1":130,"title":"One","user":"listener","video":"id1","channel":"artist","dmca":true}"#,
+                "\n",
+                r#"{"t0":150,"t1":210,"title":"Two","user":"dj","video":"id2","dmca":false}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let songs = songs(dir.path(), &paths, 500 * SEC as u64);
+        assert_eq!(songs.len(), 2);
+        assert_eq!((songs[0].start, songs[0].end), (11 * SEC as u64, 131 * SEC as u64));
+        assert_eq!(songs[0].context()["user"], "listener");
+        assert!(!songs[1].dmca);
+        let candidates = song_candidates(&songs, &ClipsConfig::default());
+        assert_eq!(candidates.len(), 2);
+        assert_ne!(candidates[0].key, candidates[1].key);
+        assert_eq!(candidates[1].labels, vec!["Two"]);
     }
 }

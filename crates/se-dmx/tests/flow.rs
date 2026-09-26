@@ -97,6 +97,23 @@ impl H {
         self.hub.submit(Input::Config { config: Box::new(cfg.clone()) });
         self.tx.send(Arc::new(cfg)).unwrap();
     }
+    fn remove(&mut self, kind: &str, name: &str) {
+        self.files.retain(|f| !(f.kind == kind && f.name == name));
+        let cfg = Config::build(&self.files);
+        self.hub.submit(Input::Config { config: Box::new(cfg.clone()) });
+        self.tx.send(Arc::new(cfg)).unwrap();
+    }
+    /// `lights.cue` / `lights.release` for a look, shaped as the core emits them for a preset.
+    fn look(&self, action: &str, look: &str, priority: Option<u16>) {
+        let mut args = Value::map().with("cue", "").with("cuelist", "").with("look", look);
+        if let Some(p) = priority {
+            args = args.with("priority", p as i64);
+        }
+        self.hub.command(Command::new(Origin::Rule, Op::Action { name: action.into(), args }));
+    }
+    async fn layer(&self, addr: &str, source: &str) -> bool {
+        self.hub.explain(addr).await.unwrap().layers.iter().any(|l| l.source == source && l.active)
+    }
 }
 
 async fn wait_for(what: &str, secs: f64, mut f: impl FnMut() -> bool) {
@@ -384,4 +401,224 @@ async fn running_playbacks_are_restored_after_a_restart() {
     }
     let h = harness_with_db(files(), db).await;
     wait_for("restored at cue 2", 2.0, || h.s("lights.cuelist.main.cue") == "2" && near(h.f("lights.p1.intensity"), 0.9, 1e-6)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_look_holds_its_palette_follows_edits_and_releases() {
+    let mut h = harness(vec![
+        file("project", "project", PROJECT),
+        file("lights", "rig", &rig("")),
+        file("lights/palettes", "warm", "[set]\nall = { color = \"#ff8000\" }\np1 = { intensity = 0.5 }"),
+    ])
+    .await;
+    let mut bus = h.hub.subscribe();
+    h.look("lights.cue", "warm", Some(se_proto::PRIORITY_PRESET));
+    wait_for("look on", 1.0, || {
+        let c = h.color("lights.p2.color");
+        near(h.f("lights.p1.intensity"), 0.5, 1e-6) && near(c[0] as f64, 1.0, 1e-3) && near(c[1] as f64, 128.0 / 255.0, 1e-2) && c[2] < 1e-3
+    })
+    .await;
+    assert!(h.layer("lights.p1.color", "look:warm").await);
+    assert!(!h.layer("lights.p2.intensity", "look:warm").await, "heads the palette has no value for stay untouched");
+    let q = h.hub.query("lights.palettes", Value::Null).await.unwrap();
+    assert_eq!(q.as_list().unwrap()[0].get_path("look_active"), Some(&Value::Bool(true)));
+    let q = h.hub.query("lights.cuelists", Value::Null).await.unwrap();
+    assert!(q.as_list().unwrap().is_empty(), "looks are not cue lists: {q}");
+    // palette edit covering other heads: the look is rebuilt (p1 intensity goes, p2's comes)
+    h.reload("lights/palettes", "warm", "[set]\nall = { color = \"#00ff00\" }\np2 = { intensity = 0.3 }");
+    wait_for("rebuilt look", 2.0, || {
+        let c = h.color("lights.p1.color");
+        c[1] > 0.99 && c[0] < 0.01 && near(h.f("lights.p2.intensity"), 0.3, 1e-6) && h.f("lights.p1.intensity") == 0.0
+    })
+    .await;
+    assert!(!h.layer("lights.p1.intensity", "look:warm").await);
+    // value-only edit
+    h.reload("lights/palettes", "warm", "[set]\nall = { color = \"#0000ff\" }\np2 = { intensity = 0.3 }");
+    wait_for("edited value", 2.0, || h.color("lights.p2.color")[2] > 0.99 && h.color("lights.p2.color")[1] < 0.01).await;
+    // the preset ends
+    h.look("lights.release", "warm", None);
+    wait_for("look released", 1.0, || h.f("lights.p2.intensity") == 0.0).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!h.layer("lights.p2.color", "look:warm").await);
+    let q = h.hub.query("lights.palettes", Value::Null).await.unwrap();
+    assert_eq!(q.as_list().unwrap()[0].get_path("look_active"), Some(&Value::Bool(false)));
+    // release-all clears looks; releasing a look that is no longer running is fine
+    h.look("lights.cue", "warm", None);
+    wait_for("look on again", 1.0, || near(h.f("lights.p2.intensity"), 0.3, 1e-6)).await;
+    h.act(Origin::Ui, "lights.release all");
+    wait_for("released by release-all", 1.0, || h.f("lights.p2.intensity") == 0.0).await;
+    h.look("lights.release", "warm", None);
+    // a deleted palette releases its running look
+    h.look("lights.cue", "warm", None);
+    wait_for("look on once more", 1.0, || near(h.f("lights.p2.intensity"), 0.3, 1e-6)).await;
+    h.remove("lights/palettes", "warm");
+    wait_for("released with its palette", 2.0, || h.f("lights.p2.intensity") == 0.0).await;
+    // unknown looks are errors (no error for the release of an existing, stopped look above)
+    h.look("lights.cue", "nope", None);
+    let end = Instant::now() + Duration::from_secs(2);
+    let mut errors = Vec::new();
+    while Instant::now() < end {
+        let Ok(Ok(m)) = tokio::time::timeout(Duration::from_millis(100), bus.recv()).await else { continue };
+        if let se_hub::Bus::Log { msg, target, .. } = &*m
+            && target == "lights"
+            && (msg.contains("look") || msg.contains("lights.release"))
+        {
+            errors.push(msg.clone());
+            if msg.contains("nope") {
+                break;
+            }
+        }
+    }
+    assert_eq!(errors.last().map(String::as_str), Some("lights.cue: unknown look `nope`"), "{errors:?}");
+    assert!(!errors.iter().any(|e| e.starts_with("lights.release")), "{errors:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn looks_layer_with_cue_lists_by_priority() {
+    let h = harness(vec![
+        file("project", "project", PROJECT),
+        file("lights", "rig", &rig("")),
+        file("lights/palettes", "blue", "[set]\np1 = { color = \"#0000ff\" }"),
+        file("lights/cuelists", "base", "[[cue]]\n[cue.set]\np1 = { intensity = 1.0, color = \"#ff0000\" }"),
+    ])
+    .await;
+    let red = |h: &H| h.color("lights.p1.color")[0] > 0.99 && h.color("lights.p1.color")[2] < 0.01;
+    let blue = |h: &H| h.color("lights.p1.color")[2] > 0.99 && h.color("lights.p1.color")[0] < 0.01;
+    h.act(Origin::Deck, "lights.cue base");
+    wait_for("cue list red", 1.0, || red(&h)).await;
+    // a higher-priority look wins over the running cue list…
+    h.look("lights.cue", "blue", Some(se_proto::PRIORITY_PRESET + 50));
+    wait_for("look wins", 1.0, || blue(&h)).await;
+    // …and the cue list shows again once it is released
+    h.look("lights.release", "blue", None);
+    wait_for("cue list back", 1.0, || red(&h)).await;
+    // a lower-priority look loses to the cue list
+    h.look("lights.cue", "blue", Some(se_proto::PRIORITY_PRESET - 50));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let layers = h.hub.explain("lights.p1.color").await.unwrap().layers;
+    assert!(layers.iter().any(|l| l.source == "look:blue" && l.priority == Some(se_proto::PRIORITY_PRESET - 50)), "look held underneath: {layers:?}");
+    assert!(red(&h), "{:?}", h.color("lights.p1.color"));
+    h.act(Origin::Deck, "lights.release cuelist=base fade=0");
+    wait_for("look alone shows", 1.0, || blue(&h)).await;
+}
+
+const WARM_KNOBS: &str = r##"# the warm wash
+label = "Warm"
+
+[set]
+all = { color = "#ff8000", intensity = 0.5 } # keep me
+
+[[knob]]
+label = "Color"
+target = "set.all.color"
+kind = "color"
+
+[[knob]]
+label = "Brightness"
+target = "set.all.intensity"
+min = 0.0
+max = 1.0
+step = 0.05
+unit = "%"
+"##;
+
+const PULSING: &str = r##"label = "Pulsing"
+[[cue]]
+effects = { pulse = {} } # breathing
+[cue.set]
+all = { intensity = 1.0 }
+
+[[knob]]
+label = "Speed"
+target = "cue.1.effects.pulse.rate"
+min = 0.5
+max = 8.0
+"##;
+
+impl H {
+    fn knob(&self, origin: Origin, item: (&str, &str), target: &str, value: Value, save: bool) {
+        let args = Value::map().with(item.0, item.1).with("target", target).with("value", value).with("save", save);
+        self.hub.command(Command::new(origin, Op::Action { name: "lights.knob".into(), args }));
+    }
+    fn disk(&self, rel: &str) -> String {
+        std::fs::read_to_string(self._dir.path().join(rel)).unwrap()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn knobs_move_running_looks_and_cue_lists_and_the_saved_value_fires_next_time() {
+    let pulse = "kind = \"dimmer_sine\"\nunit = \"hz\"\nrate = 1.0\nsize = 0.5";
+    let mut h = harness(vec![
+        file("project", "project", PROJECT),
+        file("lights", "rig", &rig("")),
+        file("lights/palettes", "warm", WARM_KNOBS),
+        file("lights/effects", "pulse", pulse),
+        file("lights/cuelists", "pulsing", PULSING),
+    ])
+    .await;
+    let root = h._dir.path().to_path_buf();
+    std::fs::write(root.join("project.toml"), PROJECT).unwrap();
+    std::fs::create_dir_all(root.join("lights/palettes")).unwrap();
+    std::fs::create_dir_all(root.join("lights/cuelists")).unwrap();
+    std::fs::write(root.join("lights/palettes/warm.toml"), WARM_KNOBS).unwrap();
+    std::fs::write(root.join("lights/cuelists/pulsing.toml"), PULSING).unwrap();
+    let rgb = |c: [f32; 4]| c.map(|x| (x * 255.0).round() as i64);
+
+    h.look("lights.cue", "warm", Some(se_proto::PRIORITY_PRESET));
+    wait_for("look on", 1.0, || near(h.f("lights.p1.intensity"), 0.5, 1e-6) && rgb(h.color("lights.p1.color"))[..3] == [255, 128, 0]).await;
+    // dragging the colour knob: the running look follows, the file doesn't change yet
+    h.knob(Origin::Ui, ("look", "warm"), "set.all.color", Value::from("#0000ff"), false);
+    wait_for("dragged colour", 2.0, || rgb(h.color("lights.p2.color"))[..3] == [0, 0, 255]).await;
+    assert_eq!(h.disk("lights/palettes/warm.toml"), WARM_KNOBS);
+    // letting go saves it (comments kept); brightness snaps to its step
+    h.knob(Origin::Ui, ("look", "warm"), "set.all.color", Value::from("#00FF00"), true);
+    h.knob(Origin::Ui, ("look", "warm"), "set.all.intensity", Value::Float(0.26), true);
+    wait_for("saved knobs on the lights", 2.0, || rgb(h.color("lights.p2.color"))[..3] == [0, 255, 0] && near(h.f("lights.p1.intensity"), 0.25, 1e-6)).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let dmx = h.dmx().await;
+    assert!(dmx[0] == 0 && (63..=64).contains(&dmx[1]) && dmx[2] == 0, "green at a quarter on the wire: {:?}", &dmx[..6]);
+    let saved = h.disk("lights/palettes/warm.toml");
+    assert!(saved.contains("all = { color = \"#00ff00\", intensity = 0.25 } # keep me") && saved.starts_with("# the warm wash\n"), "{saved}");
+    let q = h.hub.query("lights.palettes", Value::Null).await.unwrap();
+    let knobs = q.as_list().unwrap()[0].get_path("knobs").and_then(Value::as_list).unwrap();
+    assert_eq!(knobs.iter().map(|k| k.get_path("value").cloned().unwrap()).collect::<Vec<_>>(), [Value::from("#00ff00"), Value::Float(0.25)]);
+    assert_eq!(knobs[1].get_path("unit"), Some(&Value::from("%")));
+    // the next firing (after the file reloads) uses the saved values
+    h.look("lights.release", "warm", None);
+    wait_for("look off", 1.0, || h.f("lights.p1.intensity") == 0.0).await;
+    h.reload("lights/palettes", "warm", &saved);
+    h.look("lights.cue", "warm", Some(se_proto::PRIORITY_PRESET));
+    wait_for("fired with the saved knobs", 2.0, || rgb(h.color("lights.p1.color"))[..3] == [0, 255, 0] && near(h.f("lights.p2.intensity"), 0.25, 1e-6)).await;
+
+    // a cue list's effect speed: the running effect takes the new rate, the file keeps it
+    h.act(Origin::Deck, "lights.cue pulsing");
+    wait_for("pulsing", 1.0, || h.hub.snapshot.load().bool("lights.effect.pulse.active")).await;
+    assert!(near(h.f("lights.effect.pulse.rate"), 1.0, 1e-6));
+    let q = h.hub.query("lights.cuelists", Value::Null).await.unwrap();
+    assert_eq!(q.as_list().unwrap()[0].get_path("knobs.0.value"), Some(&Value::Float(1.0)), "unset = the effect's own rate");
+    h.knob(Origin::Ui, ("cuelist", "pulsing"), "cue.1.effects.pulse.rate", Value::Int(4), true);
+    wait_for("new rate", 2.0, || near(h.f("lights.effect.pulse.rate"), 4.0, 1e-6)).await;
+    let saved = h.disk("lights/cuelists/pulsing.toml");
+    assert!(saved.contains("effects = { pulse = { rate = 4.0 } } # breathing"), "{saved}");
+    assert!(h.layer("lights.effect.pulse.rate", "cuelist:pulsing").await);
+
+    // refused: chat, values that don't fit, unknown knobs
+    let mut bus = h.hub.subscribe();
+    h.knob(Origin::Chat, ("look", "warm"), "set.all.color", Value::from("#ff0000"), true);
+    h.knob(Origin::Ui, ("look", "warm"), "set.all.color", Value::from("orange"), true);
+    h.knob(Origin::Ui, ("look", "warm"), "set.all.nope", Value::Float(1.0), true);
+    let mut logs = Vec::new();
+    let end = Instant::now() + Duration::from_secs(2);
+    while logs.len() < 2 && Instant::now() < end {
+        let Ok(Ok(m)) = tokio::time::timeout(Duration::from_millis(100), bus.recv()).await else { continue };
+        if let se_hub::Bus::Log { msg, target, .. } = &*m
+            && target == "lights"
+            && msg.starts_with("lights.knob")
+        {
+            logs.push(msg.clone());
+        }
+    }
+    assert_eq!(logs, ["lights.knob: knob “Color” can't take `orange`", "lights.knob: look `warm` has no knob for `set.all.nope`"]);
+    assert_eq!(rgb(h.color("lights.p1.color"))[..3], [0, 255, 0], "chat moved no knob");
+    assert!(h.disk("lights/palettes/warm.toml").contains("#00ff00"));
 }

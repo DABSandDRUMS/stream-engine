@@ -11,6 +11,7 @@ pub mod control;
 pub mod cuelist;
 pub mod effects;
 pub mod engine;
+pub mod knobs;
 pub mod limiter;
 pub mod output;
 pub mod palette;

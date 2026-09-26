@@ -6,6 +6,11 @@ the Stream Deck and voice control lights with no special path. Cue lists, palett
 plain TOML files under `lights/` in the project; they hot-reload when saved (a broken file is logged
 and the last good version keeps running).
 
+Looks and cue lists are made by developers in these files. The app's **Lights** page is a
+console for using them: turn looks on and off, run cue lists (Go / Back / Stop), move the few
+**knobs** each one declares (§2.7), set the overall brightness and blackout, and watch a live
+stage picture. There is no programmer or patching in the app; those stay here and in `streamctl`.
+
 ```
 lights/
   rig.toml              patch, groups, stage layout, outputs, safety, RDM
@@ -314,6 +319,71 @@ Live references (`stream:`, `@`, and palettes containing them) follow their sour
 changes, running cues crossfade to the new value in 300 ms. A live source that has no value yet
 (e.g. the renderer hasn't published the stream palette) is held and applied as soon as it appears.
 
+### 2.7 Knobs — `[[knob]]` in a palette or cue list
+
+A look (palette) or cue list can expose a few premade controls — its colour, brightness, chase
+speed — that the Lights page shows and the operator can move. They use the shared knob shape
+(`se_core::knob`, also used by quick effects); `target` says which value of *this file* the knob
+changes:
+
+```toml
+# lights/palettes/warm.toml
+[set]
+all = { color = "#ffb070", intensity = 0.8 }
+
+[[knob]]
+label = "Color"              # plain words shown in the app
+target = "set.all.color"     # set.<fixture | group | all>.<attribute>
+kind = "color"               # value "#rrggbb"
+default = "#ffb070"          # optional: "Reset knobs" goes back to it
+
+[[knob]]
+label = "Brightness"
+target = "set.all.intensity"
+min = 0.0
+max = 1.0
+step = 0.05                  # optional
+unit = "%"                   # optional, plain words; "%" shows 0–1 as 0–100%
+
+# lights/cuelists/chase_fast.toml
+[[knob]]
+label = "Speed"
+target = "cue.1.effects.chase_fast.rate"   # cue.<id>.effects.<effect>.rate | .size
+min = 0.5
+max = 6.0
+unit = "rounds a second"
+
+[[knob]]
+label = "Brightness"
+target = "cue.1.set.all.intensity"         # cue.<id>.set.<fixture | group | all>.<attribute>
+min = 0.0
+max = 1.0
+unit = "%"
+
+# a choice: kind = "choice", options = [{ label = "Every beat", value = 1.0 }, …]
+```
+
+Rules (checked on load; a broken knob is a config error for that file, which keeps its last good
+version):
+- The target must be a **plain value** that is in the file: a look's `[set]` entry, a value a cue
+  sets (for a timed value `{ value, fade, delay }` the knob changes `value`), or the `rate` /
+  `size` of an effect that cue starts. `palette:`, `stream:` and `@` references can't have knobs.
+  An effect rate the cue doesn't set yet reads as the effect's own rate; moving the knob writes it.
+- Colours need `kind = "color"`; numbers need `min < max` (or a `choice` with number values).
+  Brightness and other 0–1 attributes stay within 0–1 (reported against the rig); effect sizes
+  within 0–1; effect rates above 0. No two knobs of a file may share a target.
+- `lights.knob {look | cuelist, target, value, save?}` moves a knob (§6): the value is fitted
+  (clamped, snapped to `step`, colours normalised), the loaded look / cue list changes at once —
+  a running look or cue list crossfades to it (300 ms), including a running effect's rate — and
+  with `save` (default `true`) it is written into the file with comments and layout kept, so the
+  next firing and every reload use it. The app sends `save = false` while a slider is dragged and
+  saves when it's released (or, for colours, once the picker is still for 0.6 s).
+
+The example project's colour looks expose Color + Brightness, `accent` and `half` Brightness,
+`chase` a beat-based Speed choice + Brightness, `chase_fast` Speed + Brightness, `main` Front
+light + Pulse strength, `warm_duo` Brightness. (The strobe's speed is a knob on the `strobe`
+quick effect, which sets `lights.effect.strobe.rate`, so the `strobe` cue list has none.)
+
 ---
 
 ## 3. Cue list semantics
@@ -370,8 +440,7 @@ below the 3 Hz limiter cap), `sparkle`, `circle`.
 
 ## 5. Programmer
 
-1. **Select** heads or groups: `lights.programmer.select {targets: ["front", "par1"], add?}`
-   (or click in the Lights view stage).
+1. **Select** heads or groups: `lights.programmer.select {targets: ["front", "par1"], add?}`.
 2. **Set / nudge** attributes: `lights.programmer.set {attr, value}`,
    `lights.programmer.nudge {attr, delta}` (X-TOUCH encoders nudge).
 3. **Highlight** (`lights.programmer.highlight {on?}`): selection at full open white so you can
@@ -397,8 +466,8 @@ highlight, active}` show its state.
 
 | Action | Arguments |
 |---|---|
-| `lights.cue` | `cue` (list name) — start that list at its first cue (restarts a running list); or `cuelist` + `cue` — go to that cue id with its full tracked state. `priority?`, `fade?` (ms or `"500ms"`, overrides all fade/delay times) |
-| `lights.release` | `cue?` \| `cuelist?`, `fade?` — release one playback; none (or `all`) = every playback |
+| `lights.cue` | `cue` (list name) — start that list at its first cue (restarts a running list); or `cuelist` + `cue` — go to that cue id with its full tracked state; or `look` (palette name) — hold that look (see below). `priority?`, `fade?` (ms or `"500ms"`, overrides all fade/delay times) |
+| `lights.release` | `cue?` \| `cuelist?` \| `look?`, `fade?` — release one playback or look; none (or `all`) = every playback and look |
 | `lights.panic` | release everything, stop effects, clear the programmer, set the safe look |
 | `lights.go` / `lights.back` | `cuelist` |
 | `lights.goto` | `cuelist`, `cue`, `fade?`, `priority?` |
@@ -410,6 +479,7 @@ highlight, active}` show its state.
 | `lights.programmer.highlight` | `on?` |
 | `lights.programmer.locate` / `.release` / `.clear` | — |
 | `lights.programmer.store` | `palette?`, `kind?`, `cuelist?`, `cue?`, `preset?` |
+| `lights.knob` | `look` \| `cuelist`, `target` (the knob's), `value`, `save?` (default `true`) — move a knob (§2.7); not from chat |
 | `lights.rdm.discover` | run RDM discovery now |
 
 Positional forms work: `streamctl do "lights.go main"`, `streamctl do "lights.goto main 3"`,
@@ -418,6 +488,20 @@ In command *text*, a bare `<something>.release` is the core's release op — wri
 `lights.release all` / `lights.release cuelist=main` and `lights.programmer.release all`
 (the UI and the deck send these actions directly, so this only matters when typing them).
 Chat may fire cue lists and flashes (chat priority, capped) but never the programmer.
+
+**Held looks** (the Lights page's look tiles, and quick effects with `lights = { look = "warm" }`): `lights.cue {look}` runs a
+one-step playback built from the palette — every target in the palette gets the palette on its
+attributes, like a cue with `palette = "<look>"` on each target; heads the palette has no value
+for are left alone. It layers like a cue list: priority = the `priority` arg (quick effects send
+theirs, 200 by default), else 200; chat callers are capped at chat priority; override key
+`look:<name>` (shown by `explain`). Without `fade` it applies at once. Re-firing at another
+priority (or from another chat viewer) restarts it at the new priority. `lights.release {look}`
+releases it (`fade` or 0; releasing a look that isn't running is fine); release-all and panic
+release every look. Palette edits stay live: a running look crossfades to the edited palette
+(300 ms), a deleted palette releases its look. Giving `look` together with `cue`/`cuelist` is an
+error, as is an unknown look (logged as `lights.cue: unknown look `x``). Looks are not cue lists:
+they don't appear in `lights.cuelists` or `lights.cuelist.*` state and aren't restored after a
+restart (the quick effect that holds them is).
 
 ### Events
 - `lights.cue.go {cuelist, cue}` — a cue started.
@@ -430,9 +514,9 @@ Chat may fire cue lists and flashes (chat priority, capped) but never the progra
 `lights.output.{fps, jitter_ms, frames, limited, alloc_violations}` (heap allocations on the output thread after its first second; debug builds count them, 0 is expected), `health.dmx`.
 
 ### Queries (`streamctl query <name>`)
-- `lights.rig` — fixtures, heads, groups, profiles, outputs (status `ok|warn|fail|off` + detail), patch errors.
-- `lights.cuelists` — every list with playing state, current/next cue, progress, cue timing.
-- `lights.palettes` — palettes with their values and `used_by`.
+- `lights.rig` — fixtures, heads, groups, profiles, outputs (status `ok|warn|fail|off` + detail), patch errors, `safety {max_flash_hz, max_intensity, strobe}`.
+- `lights.cuelists` — every list with playing state, current/next cue, progress, cue timing, and `knobs`.
+- `lights.palettes` — palettes with their values, `used_by`, `look_active` (held right now), and `knobs`.
 - `lights.effects` — effects with kind, targets, unit, rate, size, spread, active.
 - `lights.programmer` — selection, heads, values, highlight.
 - `lights.output` — fps, frame count, timing (`jitter.{p50_ms, p99_ms, p999_ms, max_ms}` of the
@@ -440,6 +524,9 @@ Chat may fire cue lists and flashes (chat priority, capped) but never the progra
   scheduling, the raw 512 values of every universe (the **DMX monitor**), per-head output
   (intensity, colour, pan/tilt, zoom, strobe, limited) and limiter counters.
 - `lights.rdm` — discovery status, widget firmware/serial, discovered devices.
+
+`knobs` = `[{label, target, kind, min, max, step, unit, default, options: [{label, value}], value}]`
+(`value` = the current one: `"#rrggbb"` or a number).
 
 ---
 
@@ -501,8 +588,8 @@ clamp the extra onsets — the output never exceeds 3 flashes/s.
 Several outputs may be enabled at once (e.g. USB PRO for universe 1 and sACN for a network node).
 
 **Rehearsal** (show mode `rehearsal`, §17.2): outputs keep sending, but each one holds the look it
-had when rehearsal started, so the room doesn't flash through the practice run; the Lights view
-(visualizer, DMX monitor) shows what the rehearsal does. An output with `rehearsal = true` (for
+had when rehearsal started, so the room doesn't flash through the practice run; the Lights page's
+stage picture (and the `lights.output` query) shows what the rehearsal does. An output with `rehearsal = true` (for
 example an Art-Net output to a test node or a visualizer program) gets the live rehearsal frames
 instead. Leaving rehearsal puts every output back on the live show. While held, the `lights.rig`
 query marks the output `held` and `health.dmx` says so.
@@ -511,7 +598,7 @@ query marks the output `held` and `health.dmx` says so.
 With `[rdm] discover_on_start = true` (or `lights.rdm.discover`), the engine runs RDM discovery
 through the USB PRO once the widget is connected: every RDM-capable fixture on the line reports
 its UID, manufacturer, model, DMX footprint, personality (mode) and current start address.
-Results appear in the Lights view and the `lights.rdm` query. Many budget fixtures do not
+Results appear in the `lights.rdm` query (`streamctl query lights.rdm`). Many budget fixtures do not
 implement RDM; they simply do not appear and are patched from the fixture list by hand.
 
 RDM needs the widget's **RDM firmware** (major version 2). ENTTEC ships the DMX USB PRO with the
@@ -541,8 +628,8 @@ For every fixture: **model** (manufacturer + name), **DMX mode** (personality / 
 set on the fixture) and **start address** (and universe if more than one). Also roughly where it
 hangs (for `position`) and which ones belong together (groups: front, back, floor, …).
 
-1. Plug in the ENTTEC and start the engine: RDM discovery fills the Lights view with every fixture
-   that answers — note their footprint, personality and start address.
+1. Plug in the ENTTEC and start the engine: RDM discovery lists every fixture that answers
+   (`streamctl query lights.rdm`) — note their footprint, personality and start address.
 2. For each fixture add `[fixtures.<id>]` to `lights/rig.toml` with `profile`, `mode`,
    `universe`, `address`, `position` (and `length` for bars, `rotation` for movers).
 3. Add the groups, remove `par1`.
@@ -563,10 +650,11 @@ hangs (for `position`) and which ones belong together (groups: front, back, floo
    the manual.
 
 ### Verifying with the DMX monitor
-1. Open the Lights view → DMX monitor (or `streamctl query lights.output` → `universes`).
-2. Select a fixture and **highlight** it: exactly its channels, starting at its start address,
-   should change — and the physical fixture should light up open white.
-3. Step through attributes in the programmer (colour, pan, tilt, gobo…) and confirm the fixture
+1. Watch `streamctl query lights.output` → `universes` (the raw DMX values).
+2. Select a fixture and **highlight** it (`streamctl do "lights.programmer.select par1"`, then
+   `lights.programmer.highlight`): exactly its channels, starting at its start address, should
+   change — and the physical fixture should light up open white.
+3. Step through attributes with `lights.programmer.set` (colour, pan, tilt, gobo…) and confirm the fixture
    follows. Wrong colours or channels mean a wrong mode (on the fixture or in the rig) or a wrong
    profile channel order; a fixture reacting to another's values means overlapping addresses.
 4. Run the `safe` and `blackout` cue lists and a chase to confirm the whole rig responds.

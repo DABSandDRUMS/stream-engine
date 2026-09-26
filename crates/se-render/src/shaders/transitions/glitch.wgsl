@@ -8,7 +8,8 @@
 // a noise texture, and the displacement envelope peaks mid-transition (strength × 4p(1−p)) so the
 // shader also works as a glitch burst over a morph (kind = "combined", where A == B).
 //
-// Params (transitions/glitch.toml): strength (default 1.0), block (px, default 16).
+// Built-in transition shader `glitch` (`shader = "glitch"`); settings and defaults in
+// se_core::transitions::SHADERS: strength (1.0), block (px, 16).
 fn hash2(p: vec2<f32>) -> vec2<f32> {
     var q = vec2<f32>(dot(p, vec2<f32>(127.1, 311.7)), dot(p, vec2<f32>(269.5, 183.3)));
     return fract(sin(q) * 43758.5453);

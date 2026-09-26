@@ -67,6 +67,8 @@ fn items(app: &App) -> Vec<Item> {
     add(format!("{} panic", icon::WARN), "all automation off, safe lights + mix", app.keys_label("panic"), Act::Op(Op::Panic));
     for (l, c) in [
         ("reload project", "project.reload"),
+        ("undo last change to the project", "project.undo"),
+        ("redo the project change you undid", "project.redo"),
         ("add session marker", "session.marker"),
         ("start stream (OBS)", "obs.stream.start"),
         ("stop stream (OBS)", "obs.stream.stop"),

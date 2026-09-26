@@ -1,8 +1,11 @@
 //! The lights control task: config (hot reload with last-good fallback), declarations,
 //! actions (`lights.*`), the `lights.flash` event, playback timers, playback masters and fader
-//! start, live palette following, health (`health.dmx`), persistence, and UI queries.
+//! start, held looks (palettes run as one-cue playbacks), live palette following, health
+//! (`health.dmx`), persistence, and UI queries.
 
+use crate::cuelist::{self, CueList};
 use crate::engine::Plan;
+use crate::knobs;
 use crate::output::{self, Monitor, Shared};
 use crate::playback::{self, Nav, Playback, Timer};
 use crate::programmer::{self, Programmer};
@@ -36,7 +39,16 @@ pub struct View {
     pub show: Arc<Show>,
     pub plan_errors: Vec<String>,
     pub playbacks: BTreeMap<String, PbView>,
+    /// Held looks (palette name → priority).
+    pub looks: BTreeMap<String, u16>,
     pub prog: Programmer,
+}
+
+/// A held look: a palette run as a one-cue playback. The synthetic list is built here on the
+/// control task (never on the output thread) and rebuilt when the palette changes.
+struct Look {
+    pb: Playback,
+    list: CueList,
 }
 
 pub struct Ctl {
@@ -46,6 +58,8 @@ pub struct Ctl {
     shared: Arc<Shared>,
     view: Arc<RwLock<View>>,
     playbacks: BTreeMap<String, Playback>,
+    /// Running looks by palette name.
+    looks: BTreeMap<String, Look>,
     prog: Programmer,
     timers: BinaryHeap<Reverse<(Instant, u64)>>,
     timer_data: HashMap<u64, Timer>,
@@ -88,6 +102,17 @@ fn arg_ms(args: &Value, name: &str) -> Result<Option<u64>, String> {
         Some(Value::Str(s)) => se_proto::parse_duration_ms(s).map(Some).ok_or_else(|| format!("bad duration `{s}`")),
         Some(o) => Err(format!("bad duration `{o}`")),
     }
+}
+
+/// Effective priority from a caller's explicit `priority`, the item's own floor, and whether
+/// the request came from chat (always clamped to chat priority).
+fn effective_priority(own: Option<u16>, chat: bool, explicit: Option<u16>) -> u16 {
+    let p = match (explicit, own) {
+        (Some(e), Some(o)) => e.max(o),
+        (Some(e), None) => e,
+        (None, o) => o.unwrap_or(PRIORITY_PRESET),
+    };
+    if chat { p.min(PRIORITY_CHAT) } else { p }
 }
 
 impl Ctl {
@@ -133,11 +158,20 @@ impl Ctl {
             .iter()
             .map(|(n, p)| (n.clone(), PbView { current: p.current, go_at: p.go_at, total_ms: p.total_ms, priority: p.priority, master: p.master }))
             .collect();
+        v.looks = self.looks.iter().map(|(n, l)| (n.clone(), l.pb.priority)).collect();
         v.prog = self.prog.clone();
     }
 
+    /// The playback a timer refers to (cue list name or [`playback::look_id`]).
+    fn running_mut(&mut self, id: &str) -> Option<&mut Playback> {
+        match id.strip_prefix("look:") {
+            Some(n) => self.looks.get_mut(n).map(|l| &mut l.pb),
+            None => self.playbacks.get_mut(id),
+        }
+    }
+
     fn publish_playbacks(&mut self) {
-        self.live = self.playbacks.values().flat_map(|p| p.applied.values().filter_map(|a| a.live.clone())).collect();
+        self.live = self.playbacks.values().chain(self.looks.values().map(|l| &l.pb)).flat_map(|p| p.applied.values().filter_map(|a| a.live.clone())).collect();
         let names: Vec<String> = self.show.lists.keys().cloned().collect();
         for n in names {
             let (cue, next, playing) = match self.playbacks.get(&n).and_then(|p| p.current.map(|c| (p, c))) {
@@ -226,14 +260,47 @@ impl Ctl {
                 self.out(o);
             }
         }
+        self.refresh_running();
+    }
+
+    /// Running cue lists and looks follow edits of their files (and knob moves) with a short
+    /// crossfade.
+    fn refresh_running(&mut self) {
         let get = self.get();
         let now = Instant::now();
         let show = self.show.clone();
-        let outs: Vec<playback::Out> = self.playbacks.values_mut().map(|p| p.refresh(&show, None, &get, now)).collect();
+        let tokens = &mut self.tokens;
+        let outs: Vec<playback::Out> =
+            self.playbacks.values_mut().filter_map(|p| Some(p.refresh(show.lists.get(&p.list)?, &show, None, &get, tokens, now))).collect();
         for o in outs {
             self.out(o);
         }
+        self.reload_looks(&get, now);
         self.publish_playbacks();
+    }
+
+    /// Running looks follow their palette: values re-resolve with a short crossfade, a palette
+    /// that now covers other heads/attributes re-applies the rebuilt look, and a deleted palette
+    /// releases it.
+    fn reload_looks(&mut self, get: &dyn Fn(&str) -> Option<Value>, now: Instant) {
+        let show = self.show.clone();
+        let names: Vec<String> = self.looks.keys().cloned().collect();
+        for n in names {
+            let Some(pal) = show.palettes.get(&n) else {
+                self.look_off(&n, Some(0), None);
+                self.hub.log("info", "lights", format!("look `{n}` released: its palette was removed"));
+                continue;
+            };
+            let Some(look) = self.looks.get_mut(&n) else { continue };
+            look.list = CueList::look(pal);
+            let target = cuelist::tracked(&look.list, 0, &show.rig, &show.palettes);
+            let o = if target.values.keys().eq(look.pb.applied.keys()) {
+                look.pb.refresh(&look.list, &show, None, get, &mut self.tokens, now)
+            } else {
+                look.pb.goto(&look.list, 0, Nav::Goto, Some(playback::REFRESH_FADE_MS), &show, get, &mut self.tokens, now)
+            };
+            self.out(o);
+        }
     }
 
     // ---- playbacks ---------------------------------------------------------------------
@@ -246,13 +313,7 @@ impl Ctl {
     /// timelines) or the list's own priority (default 200), with the list's priority as a
     /// floor; chat-origin requests always run at chat priority.
     fn priority(&self, list: &str, chat: bool, explicit: Option<u16>) -> u16 {
-        let own = self.show.lists.get(list).and_then(|l| l.priority);
-        let p = match (explicit, own) {
-            (Some(e), Some(o)) => e.max(o),
-            (Some(e), None) => e,
-            (None, o) => o.unwrap_or(PRIORITY_PRESET),
-        };
-        if chat { p.min(PRIORITY_CHAT) } else { p }
+        effective_priority(self.show.lists.get(list).and_then(|l| l.priority), chat, explicit)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -322,6 +383,42 @@ impl Ctl {
         true
     }
 
+    /// Hold the look `name` (palette) at `priority`; re-firing at another priority (or from
+    /// another chat actor) drops the old layer first, like cue lists.
+    fn look_on(&mut self, name: &str, fade: Option<u64>, priority: u16, origin: Origin, actor: Option<Actor>, cause: Option<Id>) -> Result<(), String> {
+        let pal = self.show.palettes.get(name).ok_or_else(|| format!("unknown look `{name}`"))?;
+        let list = CueList::look(pal);
+        if self.looks.get(name).is_some_and(|l| l.pb.priority != priority || (l.pb.priority <= PRIORITY_CHAT && l.pb.actor != actor)) {
+            self.look_off(name, Some(0), cause);
+        }
+        let get = self.get();
+        let show = self.show.clone();
+        let now = Instant::now();
+        let look = match self.looks.entry(name.to_string()) {
+            std::collections::btree_map::Entry::Occupied(e) => {
+                let l = e.into_mut();
+                l.list = list;
+                l
+            }
+            std::collections::btree_map::Entry::Vacant(e) => e.insert(Look { pb: Playback::look(name, priority, origin, actor, cause), list }),
+        };
+        look.pb.cause = cause;
+        let o = look.pb.goto(&look.list, 0, Nav::Goto, fade, &show, &get, &mut self.tokens, now);
+        self.out(o);
+        self.publish_playbacks();
+        Ok(())
+    }
+
+    /// Release a held look (fade: intensities fade out, then its overrides go); false if it
+    /// wasn't running.
+    fn look_off(&mut self, name: &str, fade: Option<u64>, cause: Option<Id>) -> bool {
+        let Some(mut look) = self.looks.remove(name) else { return false };
+        look.pb.cause = cause;
+        let o = look.pb.release(fade.unwrap_or(0), Instant::now());
+        self.out(o);
+        true
+    }
+
     /// Remove the built-in safe look (used when the project has no `safe` cue list).
     fn release_builtin_safe(&mut self, cause: Option<Id>) {
         let key = playback::key(SAFE_LIST);
@@ -343,6 +440,10 @@ impl Ctl {
         let names: Vec<String> = self.playbacks.keys().cloned().collect();
         for n in names {
             self.release_list(&n, fade, cause);
+        }
+        let looks: Vec<String> = self.looks.keys().cloned().collect();
+        for n in looks {
+            self.look_off(&n, fade, cause);
         }
         self.publish_playbacks();
     }
@@ -448,6 +549,12 @@ impl Ctl {
         let fade = arg_ms(args, "fade")?;
         match name {
             "lights.cue" => {
+                if let Some(look) = arg_str(args, "look", usize::MAX).filter(|s| !s.is_empty()) {
+                    if arg_str(args, "cuelist", usize::MAX).or_else(|| arg_str(args, "cue", 0)).is_some_and(|s| !s.is_empty()) {
+                        return Err("give either `look` or a cue list, not both".into());
+                    }
+                    return self.look_on(&look, fade, effective_priority(None, chat, explicit), cmd.origin, cmd.actor.clone(), cause);
+                }
                 let (list, cue) = match (arg_str(args, "cuelist", usize::MAX).filter(|s| !s.is_empty()), arg_str(args, "cue", 0).filter(|s| !s.is_empty())) {
                     (Some(l), c) => (l, c.or_else(|| arg_str(args, "cue", 1))),
                     (None, Some(c)) => (c, arg_str(args, "cue_id", 1)),
@@ -477,6 +584,16 @@ impl Ctl {
                 self.nav(&list, if nav == Nav::Go || nav == Nav::Back { None } else { cue.as_deref() }, nav, fade, p, cmd.origin, cmd.actor.clone(), cause)
             }
             "lights.release" => {
+                if let Some(look) = arg_str(args, "look", usize::MAX).filter(|s| !s.is_empty()) {
+                    if arg_str(args, "cuelist", usize::MAX).or_else(|| arg_str(args, "cue", 0)).is_some_and(|s| !s.is_empty()) {
+                        return Err("give either `look` or a cue list, not both".into());
+                    }
+                    if !self.look_off(&look, fade, cause) && !self.show.palettes.contains_key(&look) {
+                        return Err(format!("unknown look `{look}`"));
+                    }
+                    self.publish_playbacks();
+                    return Ok(());
+                }
                 // `lights.release all` is the text form of release-all (bare `lights.release`
                 // text parses as the core's release op).
                 let list = arg_str(args, "cuelist", usize::MAX).or_else(|| arg_str(args, "cue", 0)).filter(|s| !s.is_empty() && s != "all");
@@ -530,6 +647,12 @@ impl Ctl {
                 }
                 self.programmer(&n["lights.programmer.".len()..], args, cmd.origin)
             }
+            "lights.knob" => {
+                if chat {
+                    return Err("knobs are not available to chat".into());
+                }
+                self.knob(args)
+            }
             "lights.rdm.discover" => {
                 self.shared.rdm_request.store(true, Ordering::Release);
                 self.rdm_started = true;
@@ -537,6 +660,42 @@ impl Ctl {
             }
             other => Err(format!("unknown lights action `{other}`")),
         }
+    }
+
+    /// `lights.knob {look | cuelist, target, value, save?}`: move one of a look's or cue list's
+    /// knobs. The loaded look / cue list changes at once (running ones follow with a short
+    /// crossfade); with `save` (the default) the value is also written into its file, comments
+    /// kept. Callers dragging a slider send `save = false` until it settles.
+    fn knob(&mut self, args: &Value) -> Result<(), String> {
+        let s = |k: &str| args.get_path(k).and_then(Value::as_str).filter(|s| !s.is_empty()).map(String::from);
+        let target = s("target").ok_or("needs `target` (which knob)")?;
+        let value = args.get_path("value").filter(|v| !v.is_null()).ok_or("needs `value`")?;
+        let save = args.get_path("save").is_none_or(Value::truthy);
+        let mut show = (*self.show).clone();
+        let (rel, at, v) = match (s("look"), s("cuelist")) {
+            (Some(n), None) => {
+                let p = show.palettes.get_mut(&n).ok_or_else(|| format!("unknown look `{n}`"))?;
+                let b = p.knobs.iter().find(|b| b.knob.target == target).cloned().ok_or_else(|| format!("look `{n}` has no knob for `{target}`"))?;
+                let v = b.knob.fit(value).ok_or_else(|| format!("knob “{}” can't take `{value}`", b.knob.label))?;
+                knobs::set_look(p, &b.at, &v);
+                (format!("lights/palettes/{n}.toml"), b.at, v)
+            }
+            (None, Some(n)) => {
+                let l = show.lists.get_mut(&n).ok_or_else(|| format!("unknown cue list `{n}`"))?;
+                let b = l.knobs.iter().find(|b| b.knob.target == target).cloned().ok_or_else(|| format!("cue list `{n}` has no knob for `{target}`"))?;
+                let v = b.knob.fit(value).ok_or_else(|| format!("knob “{}” can't take `{value}`", b.knob.label))?;
+                knobs::set_cue(l, &b.at, &v);
+                (format!("lights/cuelists/{n}.toml"), b.at, v)
+            }
+            _ => return Err("needs `look` or `cuelist` (one of them)".into()),
+        };
+        if save {
+            let project = se_store::Project::open(&self.ctx.project_root).map_err(|e| e.to_string())?;
+            project.edit(&rel, |doc| knobs::write(doc, &at, &v)).map_err(|e| format!("{rel}: {e:#}"))?;
+        }
+        self.show = Arc::new(show);
+        self.refresh_running();
+        Ok(())
     }
 
     fn programmer(&mut self, op: &str, args: &Value, origin: Origin) -> Result<(), String> {
@@ -630,7 +789,10 @@ impl Ctl {
                     let get = |a: &str| fresh.get(a).cloned().or_else(|| snap(a));
                     let show = self.show.clone();
                     let now = Instant::now();
-                    let outs: Vec<playback::Out> = self.playbacks.values_mut().map(|p| p.refresh(&show, Some(src), &get, now)).collect();
+                    let tokens = &mut self.tokens;
+                    let mut outs: Vec<playback::Out> =
+                        self.playbacks.values_mut().filter_map(|p| Some(p.refresh(show.lists.get(&p.list)?, &show, Some(src), &get, tokens, now))).collect();
+                    outs.extend(self.looks.values_mut().map(|l| l.pb.refresh(&l.list, &show, Some(src), &get, tokens, now)));
                     for o in outs {
                         self.out(o);
                     }
@@ -695,7 +857,7 @@ impl Ctl {
     fn timer(&mut self, t: Timer) {
         match t {
             Timer::Entry { list, addr, token } => {
-                if let Some(c) = self.playbacks.get_mut(&list).and_then(|p| p.fire_entry(&addr, token)) {
+                if let Some(c) = self.running_mut(&list).and_then(|p| p.fire_entry(&addr, token)) {
                     self.hub.command(c);
                 }
             }
@@ -718,7 +880,7 @@ impl Ctl {
             Timer::Release { list, cmds } => {
                 for (addr, token, c) in cmds {
                     // skip addresses a restarted playback holds again
-                    let reapplied = self.playbacks.get(&list).and_then(|p| p.applied.get(&addr)).is_some_and(|a| a.token > token);
+                    let reapplied = self.running_mut(&list).and_then(|p| p.applied.get(&addr)).is_some_and(|a| a.token > token);
                     if !reapplied {
                         self.hub.command(c);
                     }
@@ -940,7 +1102,7 @@ pub async fn run(ctx: EngineCtx) -> anyhow::Result<Lights> {
         retired: parking_lot::Mutex::new(retired),
     });
     let thread = output::spawn(hub.clone(), shared.clone(), monitor_in, retire)?;
-    let view = Arc::new(RwLock::new(View { show: show.clone(), plan_errors, playbacks: BTreeMap::new(), prog: Programmer::default() }));
+    let view = Arc::new(RwLock::new(View { show: show.clone(), plan_errors, playbacks: BTreeMap::new(), looks: BTreeMap::new(), prog: Programmer::default() }));
     crate::query::register(&hub, view.clone(), shared.clone());
     let mut ctl = Ctl {
         hub: hub.clone(),
@@ -949,6 +1111,7 @@ pub async fn run(ctx: EngineCtx) -> anyhow::Result<Lights> {
         shared: shared.clone(),
         view,
         playbacks: BTreeMap::new(),
+        looks: BTreeMap::new(),
         prog: Programmer::default(),
         timers: BinaryHeap::new(),
         timer_data: HashMap::new(),

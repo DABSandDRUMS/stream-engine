@@ -5,7 +5,8 @@
 //! auto_process = true          # queue the clip job when a session closes (§15.8)
 //! encoder = "auto"             # auto (NVENC, x264 when NVENC is busy) | nvenc | x264
 //! tall_source = "auto"         # auto (tall recording if present, else crop) | recording | crop
-//! rank_command = []            # optional external ranker (argv); JSON on stdin → JSON on stdout
+//! auto_rank = true             # use bundled, tool-free omp ranker when installed; false = deterministic only
+//! rank_command = []            # optional ranker override (argv); JSON on stdin → JSON on stdout
 //! upload_command = []          # optional upload hook (argv); JSON on stdin → {"url": …}
 //!
 //! [clips.hype]                 # hype detector (§18)
@@ -51,6 +52,9 @@ pub struct ClipsConfig {
     pub boundary_slack: Dur,
     /// Optional external ranker: argv, receives the candidates as JSON on stdin.
     pub rank_command: Vec<String>,
+    /// Use bundled tool-free OMP ranker when it and `omp` are installed, unless
+    /// `rank_command` is explicitly set. Disable for deterministic ranking only.
+    pub auto_rank: bool,
     pub rank_timeout: Dur,
     /// Optional upload hook: argv, receives the clip as JSON on stdin.
     pub upload_command: Vec<String>,
@@ -86,6 +90,7 @@ impl Default for ClipsConfig {
             max_clips: 20,
             boundary_slack: Dur(4_000),
             rank_command: Vec::new(),
+            auto_rank: true,
             rank_timeout: Dur(120_000),
             upload_command: Vec::new(),
             upload_timeout: Dur(600_000),

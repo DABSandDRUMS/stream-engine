@@ -440,3 +440,173 @@ fn patch_trigger_publishes_its_payload_in_the_same_tick_as_the_edge() {
     c.step();
     assert!(c.get("fx.glitch.payload.bits").is_none());
 }
+
+#[test]
+fn quick_effect_settings_last_through_the_fade_toggles_hold_effects_and_looks_are_held() {
+    let files = vec![
+        file("project", "project", "schema = 1"),
+        file("presets", "flash", "fx = [{ name = \"fade_to_black\", level = 1.0, hold = \"0.2s\", color_r = 1.0 }]"),
+        file("presets", "dreamy", "toggle = true\nfx = [{ name = \"blur\", radius = 40.0 }]"),
+        file("presets", "warm", "lights = { look = \"warm\", hold = \"0.5s\" }"),
+    ];
+    let cfg = Config::build(&files);
+    assert!(cfg.errors.is_empty(), "{:?}", cfg.errors);
+    let mut c = Core::new(cfg, 1_000 * MS);
+    let press =
+        |c: &mut Core, name: &str| c.submit(Input::Command { cmd: Command::new(Origin::Ui, Op::PresetFire { name: name.into(), payload: Value::Null }) });
+    let active = |c: &Core, name: &str| c.get(&format!("preset.{name}.active")).is_some_and(Value::truthy);
+
+    // once: the effect's own settings don't make it latch, and they last through its fade-out
+    press(&mut c, "flash");
+    run(&mut c, 100);
+    assert!(active(&c, "flash"));
+    assert_eq!(f(&c, "fx.fade_to_black.color_r"), 1.0);
+    run(&mut c, 300);
+    assert!(!active(&c, "flash"), "a one-shot ends by itself");
+    assert!(f(&c, "fx.fade_to_black.env") > 0.0, "still fading out");
+    assert_eq!(f(&c, "fx.fade_to_black.color_r"), 1.0, "the color holds while it fades");
+    run(&mut c, 500);
+    assert_eq!(f(&c, "fx.fade_to_black.env"), 0.0);
+    assert_eq!(f(&c, "fx.fade_to_black.color_r"), 0.0, "the setting goes once the effect is gone");
+
+    // until pressed again: the effect stays up past the default two-second burst
+    press(&mut c, "dreamy");
+    run(&mut c, 3_000);
+    assert!(active(&c, "dreamy"));
+    assert_eq!(f(&c, "fx.blur.env"), 1.0);
+    assert_eq!(f(&c, "fx.blur.radius"), 40.0);
+    press(&mut c, "dreamy");
+    run(&mut c, 100);
+    assert!(!active(&c, "dreamy"));
+    assert!(f(&c, "fx.blur.env") < 1.0 && f(&c, "fx.blur.env") > 0.0, "fading out");
+    assert_eq!(f(&c, "fx.blur.radius"), 40.0);
+    run(&mut c, 600);
+    assert_eq!(f(&c, "fx.blur.env"), 0.0);
+    assert_eq!(f(&c, "fx.blur.radius"), 0.0);
+
+    // a light look goes to the lights with the preset's priority and is released with it,
+    // even for a one-shot preset (a look has no course of its own: it lasts its `hold`)
+    let lights = |out: &[Output], name: &str| -> Vec<Value> {
+        out.iter()
+            .filter_map(|o| match o {
+                Output::Action(c) => match &c.op {
+                    Op::Action { name: n, args } if n == name => Some(args.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    };
+    press(&mut c, "warm");
+    let out = run(&mut c, 50);
+    let cue = lights(&out, "lights.cue");
+    assert_eq!(cue.len(), 1, "{out:?}");
+    assert_eq!(cue[0].get_path("look").and_then(Value::as_str), Some("warm"));
+    assert_eq!(cue[0].get_path("priority").and_then(Value::as_i64), Some(200));
+    assert!(lights(&out, "lights.release").is_empty());
+    let out = run(&mut c, 500);
+    let rel = lights(&out, "lights.release");
+    assert_eq!(rel.len(), 1, "{out:?}");
+    assert_eq!(rel[0].get_path("look").and_then(Value::as_str), Some("warm"));
+}
+
+#[test]
+fn a_knob_turns_what_is_running_and_the_next_firing_uses_it() {
+    let files = vec![
+        file("project", "project", "schema = 1"),
+        file(
+            "presets",
+            "chill",
+            "toggle = true\nset = { \"fx.vhs.amount\" = 0.5 }\n[[knob]]\nlabel = \"Tape look\"\ntarget = \"fx.vhs.amount\"\nmin = 0\nmax = 1\nstep = 0.05",
+        ),
+        file(
+            "presets",
+            "shake",
+            "fx = [{ name = \"shake\", hold = \"2s\" }]\n[[knob]]\nlabel = \"How far\"\ntarget = \"fx.shake.strength\"\nmin = 0.01\nmax = 0.15",
+        ),
+        file(
+            "presets",
+            "dreamy",
+            "toggle = true\nfx = [{ name = \"blur\" }]\n[[knob]]\nlabel = \"How blurry\"\ntarget = \"fx.blur.radius\"\nmin = 0\nmax = 96",
+        ),
+    ];
+    let cfg = Config::build(&files);
+    assert!(cfg.errors.is_empty(), "{:?}", cfg.errors);
+    let mut c = Core::new(cfg, 1_000 * MS);
+    let press =
+        |c: &mut Core, name: &str| c.submit(Input::Command { cmd: Command::new(Origin::Ui, Op::PresetFire { name: name.into(), payload: Value::Null }) });
+    let turn = |c: &mut Core, origin: Origin, name: &str, target: &str, v: f64, save: bool| {
+        let args = Value::map().with("name", name).with("target", target).with("value", v).with("save", save);
+        c.submit(Input::Command { cmd: Command::new(origin, Op::Action { name: "preset.knob".into(), args }) });
+    };
+    let saved = |out: &[Output]| -> Vec<Value> {
+        out.iter()
+            .filter_map(|o| match o {
+                Output::Action(c) => match &c.op {
+                    Op::Action { name, args } if name == "preset.knob" => Some(args.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    };
+
+    // while it's held, the held value follows the knob at once (fitted to its step)
+    press(&mut c, "chill");
+    run(&mut c, 20);
+    assert_eq!(f(&c, "fx.vhs.amount"), 0.5);
+    turn(&mut c, Origin::Ui, "chill", "fx.vhs.amount", 0.83, false);
+    let out = run(&mut c, 20);
+    assert_eq!(f(&c, "fx.vhs.amount"), 0.85);
+    assert!(saved(&out).is_empty(), "no file write while the knob is still moving");
+    press(&mut c, "chill");
+    run(&mut c, 20);
+    assert_eq!(f(&c, "fx.vhs.amount"), 0.0, "released");
+    // a knob still moving isn't the quick effect's value yet: the next firing is as the file says
+    press(&mut c, "chill");
+    run(&mut c, 20);
+    assert_eq!(f(&c, "fx.vhs.amount"), 0.5);
+    // a settled knob goes to the file (fitted) and is the value from then on
+    turn(&mut c, Origin::Ui, "chill", "fx.vhs.amount", 2.0, true);
+    let out = run(&mut c, 20);
+    assert_eq!(f(&c, "fx.vhs.amount"), 1.0);
+    let w = saved(&out);
+    assert_eq!(w.len(), 1, "{out:?}");
+    assert_eq!(w[0].get_path("value"), Some(&Value::Float(1.0)));
+    assert_eq!(c.query("presets", &Value::Null).unwrap().get_path("0.knobs.0.value"), Some(&Value::Float(1.0)));
+    press(&mut c, "chill");
+    run(&mut c, 20);
+    press(&mut c, "chill");
+    run(&mut c, 20);
+    assert_eq!(f(&c, "fx.vhs.amount"), 1.0, "the next firing uses the saved knob");
+
+    // a built-in effect's setting the file didn't have yet: held while it runs, gone with it
+    press(&mut c, "shake");
+    run(&mut c, 50);
+    turn(&mut c, Origin::Ui, "shake", "fx.shake.strength", 0.12, false);
+    run(&mut c, 20);
+    assert_eq!(f(&c, "fx.shake.strength"), 0.12);
+    run(&mut c, 3_000);
+    assert_eq!(f(&c, "fx.shake.strength"), 0.0, "gone with the effect");
+    turn(&mut c, Origin::Ui, "shake", "fx.shake.strength", 0.12, true);
+    press(&mut c, "shake");
+    run(&mut c, 50);
+    assert_eq!(f(&c, "fx.shake.strength"), 0.12, "saved while idle: the next firing has it");
+    // … and on an effect that stays up until pressed again, it fades out with the effect
+    press(&mut c, "dreamy");
+    run(&mut c, 50);
+    turn(&mut c, Origin::Ui, "dreamy", "fx.blur.radius", 50.0, false);
+    run(&mut c, 20);
+    assert_eq!(f(&c, "fx.blur.radius"), 50.0);
+    press(&mut c, "dreamy");
+    run(&mut c, 1_500);
+    assert_eq!(f(&c, "fx.blur.env"), 0.0);
+    assert_eq!(f(&c, "fx.blur.radius"), 0.0, "not left behind after it's gone");
+
+    // viewers can't turn knobs, and only declared knobs turn
+    turn(&mut c, Origin::Chat, "chill", "fx.vhs.amount", 0.1, false);
+    turn(&mut c, Origin::Ui, "chill", "fx.grade.warmth", 0.1, false);
+    run(&mut c, 20);
+    assert_eq!(f(&c, "fx.vhs.amount"), 1.0);
+    assert!(c.get("fx.grade.warmth").is_none());
+}

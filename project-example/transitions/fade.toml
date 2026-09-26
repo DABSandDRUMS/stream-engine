@@ -1,3 +1,4 @@
+label = "Crossfade"
 kind = "shader"
-shader = "transitions/fade.wgsl"
+shader = "fade"
 ms = 600

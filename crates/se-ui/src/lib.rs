@@ -8,6 +8,7 @@ pub mod model;
 pub mod monitors;
 pub mod palette;
 pub mod panels;
+pub mod preferences;
 pub mod shortcuts;
 pub mod shortcuts_ui;
 pub mod views;

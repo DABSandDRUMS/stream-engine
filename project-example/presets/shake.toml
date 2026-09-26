@@ -1,0 +1,22 @@
+# Screen shake: one hit that jolts the whole picture (a big drum hit, a raid).
+label = "SHAKE"
+color = "#c0a36e"
+fx = [{ name = "shake", strength = 0.05, speed = 14 }]
+
+[[knob]]
+label = "How far it shakes"
+target = "fx.shake.strength"
+min = 0.01
+max = 0.15
+step = 0.01
+unit = "%"
+default = 0.05
+
+[[knob]]
+label = "Speed"
+target = "fx.shake.speed"
+min = 4
+max = 30
+step = 1
+unit = "shakes a second"
+default = 14

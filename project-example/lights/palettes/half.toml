@@ -3,3 +3,12 @@ label = "Half"
 
 [set]
 all = { intensity = 0.5 }
+
+[[knob]]
+label = "Brightness"
+target = "set.all.intensity"
+min = 0.0
+max = 1.0
+step = 0.05
+unit = "%"
+default = 0.5

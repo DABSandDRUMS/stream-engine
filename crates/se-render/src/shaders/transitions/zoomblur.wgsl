@@ -6,7 +6,8 @@
 // software and associated documentation files, to deal in the Software without restriction,
 // subject to including this notice. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
 //
-// Params (transitions/zoomblur.toml): strength (default 0.4).
+// Built-in transition shader `zoomblur` (`shader = "zoomblur"`); settings and defaults in
+// se_core::transitions::SHADERS: strength (0.4).
 const PI: f32 = 3.141592653589793;
 
 fn linear_ease(begin: f32, change: f32, duration: f32, time: f32) -> f32 {

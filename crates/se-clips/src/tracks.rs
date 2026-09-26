@@ -111,6 +111,45 @@ pub fn plan(streams: usize, tracks: &[TrackInfo], cfg: &AudioConfig) -> AudioPla
     AudioPlan { transcribe: pick_transcribe(&mix), music_dropped: true, note: format!("mix of {} ({} track(s) dropped)", names.join(", "), dropped_n), mix }
 }
 
+/// Musical passage: retain the song and the live performance, never add a program
+/// stream on top of its constituent tracks. Unknown layouts use one mixed stream.
+pub fn plan_song(streams: usize, tracks: &[TrackInfo], cfg: &AudioConfig) -> AudioPlan {
+    if streams == 0 {
+        return plan(streams, tracks, cfg);
+    }
+    let role_sets: Vec<_> = (0..streams)
+        .map(|i| {
+            tracks
+                .iter()
+                .find(|t| t.index == i)
+                .map(|t| roles(t, cfg))
+                .or_else(|| cfg.tracks.get(i).map(|name| roles(&TrackInfo { index: i, name: name.clone(), ..Default::default() }, cfg)))
+                .unwrap_or_default()
+        })
+        .collect();
+    let has_music = role_sets.iter().any(|r| r.contains("music") && !r.contains("program"));
+    let program = role_sets.iter().position(|r| r.contains("program"));
+    let mix: Vec<usize> = if has_music {
+        role_sets.iter().enumerate().filter(|(_, r)| !r.is_empty() && !r.contains("program")).map(|(i, _)| i).collect()
+    } else if let Some(program) = program {
+        // With no separately identified song bus, program is the only safe source:
+        // mixing it with the performance streams would double the live instruments.
+        vec![program]
+    } else if role_sets.iter().any(|r| !r.is_empty()) {
+        role_sets.iter().enumerate().filter(|(_, r)| !r.is_empty()).map(|(i, _)| i).collect()
+    } else {
+        vec![0]
+    };
+    let note = if has_music {
+        "song and performance kept; program excluded where separate tracks exist"
+    } else if program.is_some() {
+        "one mixed program track kept (no separate song track reported)"
+    } else {
+        "performance tracks kept; no song track reported"
+    };
+    AudioPlan { mix, transcribe: None, music_dropped: false, note: note.into() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,5 +196,17 @@ mod tests {
         let cfg = AudioConfig { tracks: vec!["mic".into(), "music".into(), "band".into()], ..AudioConfig::default() };
         let p = plan(3, &[], &cfg);
         assert_eq!((p.mix, p.transcribe, p.music_dropped), (vec![0, 2], Some(0), true));
+    }
+    #[test]
+    fn requested_song_keeps_music_and_performance_without_duplicate_program() {
+        let cfg = AudioConfig::default();
+        let tracks = [t(0, "Program", &["se-program"]), t(1, "Mic", &["se-mic"]), t(2, "Song", &["se-music"]), t(3, "Band", &["se-band"])];
+        let song = plan_song(4, &tracks, &cfg);
+        assert_eq!(song.mix, vec![1, 2, 3]);
+        assert!(!song.music_dropped);
+        assert_eq!(song.transcribe, None, "lyrics must not be captioned");
+        assert_eq!(plan(4, &tracks, &cfg).mix, vec![1, 3], "non-song behavior unchanged");
+        // If only the mixed program contains the song, use it alone.
+        assert_eq!(plan_song(3, &tracks[..2], &cfg).mix, vec![0]);
     }
 }

@@ -319,8 +319,79 @@ Rules:
 - Changing `grants` and saving takes effect on the page's existing token immediately (the log
   says `patch.<id>: page permissions now [...]`); removing them drops the page back to its own
   namespace.
-- *Scenes → Overlays & effects* shows each patch's grants in plain words ("Can also control:
+- *Scenes → Overlays* shows each patch's grants in plain words ("Can also control:
   lights, Cam1") on its card.
+
+### Bringing your own overlay pages
+
+A page made for an OBS browser source (its own Twitch IRC client, a `?channel=` URL, one
+full-screen HTML file) ports to the engine as a few web patches placed in a scene. The worked
+example is the owner's win31 DOS "the stream is about to start" page, now the `starting_soon`
+scene (mode `preshow`) built from `patches/terminal_title`, `terminal_chat` and `terminal_boot`
+plus the shared `patches/_lib/win31/`.
+
+1. **Split the page into pieces** that can move on their own: one patch folder per box on
+   screen (`layer = "source"`), each with a transparent page background. A plain background
+   is not a patch: use the scene's `[canvas.<name>] background = "#000000"` (or a colour
+   node). Size a piece's page from its own viewport so it scales with the node: the terminal
+   pieces draw an 80-column text screen (960 px at 1x) and `Dos.fit()` scales it to the page
+   width, so a 1920-wide node draws exactly like the original page at 1920×1080. The page is
+   rendered at its largest node's size (docs/web.md), so give its other nodes the same shape.
+2. **Share code, styles and fonts** from `patches/_lib/<name>/`. Everything under `patches/` is
+   served at `/patches/…`; a folder without `patch.toml` is not a patch, and ids starting with
+   `_` can't be created, so `_lib` never collides. Pages load
+   `/patches/_lib/win31/dos.css` + `dos.js`; the CSS loads the fonts with URLs relative to
+   itself (`fonts/…`). Keep each font's licence next to it (`_lib/win31/fonts/FONTS.txt`:
+   PxPlus IBM VGA 8x16, VileR's Ultimate Oldschool PC Font Pack, CC BY-SA 4.0 — ship the
+   licence text and credit; Fixedsys Excelsior 3.02, public domain). Saving a file in `_lib`
+   does not reload the pages; `streamctl do web.reload` does.
+3. **Swap the Twitch client for the engine.** Load `/engine.js` and `/web/overlay.js`, then:
+
+   | Browser-source page | Engine page |
+   |---|---|
+   | IRC `PRIVMSG` | `se.on("chat.message", …)`: `{id, user, login, user_id, color, text, fragments, …}`, already filtered |
+   | backlog on load | `await se.query("chat.recent")` in `se.onconnect` (last 100, oldest first, deleted ones gone) |
+   | `CLEARMSG` / `CLEARCHAT user` / `CLEARCHAT` | `chat.delete {message_id}` / `chat.purge {user_id, user}` / `chat.clear` |
+   | `USERNOTICE` sub/resub/gift/raid, cheers | `se.on("alert.show", …)`: `{id, event, user, amount, currency, tier, title, variation}` in queue order, after the veto window; drop a line again on `alert.hide` with reason `vetoed` or `purged`. `amount` is months for subs, count for gifts, viewers for raids, bits for cheers, money for tips |
+   | `?message=…&startingMinutes=5` | manifest `params` (below) |
+   | `localStorage` | patch state: `se.set("patch.<id>.<key>", v)` + `se.state(…)`; the page may write any `patch.<id>.*` address, declared or not, and it survives a page reload |
+   | page load = "start" | a trigger: the scene's `on_enter = ["patch.<id>.trigger"]` |
+
+   Insert viewer text with `textContent` only. Alert sounds already play from the alert queue;
+   don't add page sounds for them.
+4. **Settings as params.** Each thing the owner should change becomes a manifest param whose
+   `description` is the plain label shown in *Scenes → Overlays* (keep it under ~20
+   characters): `title` ("Title"), `count_to` ("Countdown", `minutes` | `clock_time`),
+   `minutes`, `clock_time` on terminal_title; `prompt`, `lines` ("Chat lines to keep"),
+   `show_alerts` on terminal_chat; `brand` ("Name on boot screen") on terminal_boot. Read them
+   with `Overlay.params(se, defaults, onChange)` so edits apply live (and `?param=` works in a
+   normal browser). Machine state (terminal_title's `started`) stays out of the manifest so it
+   isn't shown as a setting.
+5. **Make it survive reloads.** The countdown keeps the moment the scene came on in
+   `patch.terminal_title.started` (written through `Dos.keeper`, which resends after a
+   reconnect) and derives the end from the current settings, so a reload, a crash or a
+   settings change continues the same countdown.
+6. **Sequence the pieces with the trigger envelope, not page messages.**
+   `patch.terminal_boot.active` is on from the scene's first frame, so the scene places the boot
+   piece with `when = "patch.terminal_boot.active"` and the title and chat with
+   `when = "!patch.terminal_boot.active"` (no flash of the other pieces). When its typing is done
+   the page ends the trigger itself, 0.7 s later: `se.cmd("patch.terminal_boot.trigger hold=0
+   done=true")`. That works because the manifest's `retrigger = "replace"` drops the running
+   instance, and it's within the page's own namespace. A plain `release` from the page would
+   only end the page's own instances, not the scene's. The page's trigger handler ignores
+   `done`. The manifest's `hold = "16s"` is only the safety net for a page that never loads.
+   The chat page reads the same address to hold new lines until the boot is done.
+7. **Wire the scene.** `rules/modes.toml` cuts to `starting_soon` on `mode.enter.preshow` (and
+   to `duo` when going live from it); `[overlays.countdown]` and `[overlays.goals]` have
+   `scene != 'starting_soon'` in their `when` so the generic countdown and goal bars don't
+   cover the terminal.
+
+Try it on a dev engine: `streamctl mode preshow`, then `streamctl sim chat user=Clippy
+message='how do i double click'`, `streamctl sim sub`, `streamctl sim raid viewers=42`, and
+`streamctl fire twitch.chat.delete message_id=<id from streamctl query chat.recent>`. Open a
+piece in a normal browser at
+`http://127.0.0.1:<http port>/patches/terminal_chat/index.html?token=<API token>` (sized like
+its node) to work on it.
 
 ## 9. DSP patches (`kind = "dsp"`)
 

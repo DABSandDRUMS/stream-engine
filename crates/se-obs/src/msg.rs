@@ -141,9 +141,21 @@ pub struct Reply {
 #[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum EngineMsg {
-    Config { stale_ms: u32, fallback_mode: String, fallback_scene: String, fallback_text: String },
-    Cmd { id: u64, op: String },
-    Error { error: String },
+    Config {
+        stale_ms: u32,
+        fallback_mode: String,
+        fallback_scene: String,
+        fallback_text: String,
+    },
+    Cmd {
+        id: u64,
+        op: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        dir: Option<String>,
+    },
+    Error {
+        error: String,
+    },
 }
 
 impl EngineMsg {
@@ -189,8 +201,8 @@ mod tests {
 
     #[test]
     fn engine_messages_are_single_lines() {
-        let l = EngineMsg::Cmd { id: 7, op: "record.start".into() }.line();
-        assert_eq!(l, "{\"t\":\"cmd\",\"id\":7,\"op\":\"record.start\"}\n");
+        let l = EngineMsg::Cmd { id: 7, op: "record.start".into(), dir: Some("/tmp/show".into()) }.line();
+        assert_eq!(l, "{\"t\":\"cmd\",\"id\":7,\"op\":\"record.start\",\"dir\":\"/tmp/show\"}\n");
         let c = EngineMsg::Config { stale_ms: 500, fallback_mode: "live".into(), fallback_scene: "A\nB".into(), fallback_text: "x".into() }.line();
         assert_eq!(c.matches('\n').count(), 1);
     }

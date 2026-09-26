@@ -3,6 +3,7 @@
 
 pub mod canvas;
 pub mod curve;
+pub mod motion;
 pub mod theme;
 pub mod widgets;
 

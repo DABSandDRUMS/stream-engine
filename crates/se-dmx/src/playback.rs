@@ -17,6 +17,12 @@ pub fn key(list: &str) -> String {
     format!("cuelist:{list}")
 }
 
+/// Playback id and override key of a held look (a palette run as a one-cue playback). Cue list
+/// names are plain address segments, so a `:` never collides with them.
+pub fn look_id(palette: &str) -> String {
+    format!("look:{palette}")
+}
+
 /// What a playback currently holds on one address.
 #[derive(Clone, Debug)]
 pub struct Applied {
@@ -38,7 +44,10 @@ pub struct Applied {
 }
 
 pub struct Playback {
+    /// Cue list name, or [`look_id`] for a held look (timers refer to the playback by it).
     pub list: String,
+    /// Override key of the playback's layer.
+    pub key: String,
     pub priority: u16,
     pub origin: Origin,
     pub actor: Option<Actor>,
@@ -124,6 +133,7 @@ impl Playback {
     pub fn new(list: &str, priority: u16, origin: Origin, actor: Option<Actor>, cause: Option<Id>, master: f32) -> Playback {
         Playback {
             list: list.into(),
+            key: key(list),
             priority,
             origin,
             actor,
@@ -138,10 +148,17 @@ impl Playback {
         }
     }
 
+    /// A held look: the one-cue list from [`CueList::look`] run at full master under the
+    /// override key `look:<palette>`.
+    pub fn look(palette: &str, priority: u16, origin: Origin, actor: Option<Actor>, cause: Option<Id>) -> Playback {
+        let id = look_id(palette);
+        Playback { key: id.clone(), ..Playback::new(&id, priority, origin, actor, cause, 1.0) }
+    }
+
     fn cmd(&self, op: Op) -> Command {
         let mut c = Command::new(self.origin, op).with_priority(Some(self.priority)).with_actor(self.actor.clone()).caused_by(self.cause);
         if self.priority > PRIORITY_CHAT {
-            c = c.with_key(key(&self.list));
+            c = c.with_key(self.key.clone());
         }
         c
     }
@@ -364,36 +381,72 @@ impl Playback {
         v
     }
 
-    /// Re-resolve values after a palette/cue edit or a live source change; returns commands
-    /// for values that changed (short crossfade).
-    pub fn refresh(&mut self, show: &Show, only_live: Option<&str>, get: &dyn Fn(&str) -> Option<Value>, now: Instant) -> Out {
+    /// Re-resolve values after a palette/cue edit (a knob) or a live source change; returns
+    /// commands for values that changed (short crossfade). `list` is the playback's (current)
+    /// list. Effect rates/sizes and other plain addresses the cue now holds but didn't before
+    /// (a knob giving the effect its own rate) are taken on as well.
+    pub fn refresh(
+        &mut self,
+        list: &CueList,
+        show: &Show,
+        only_live: Option<&str>,
+        get: &dyn Fn(&str) -> Option<Value>,
+        tokens: &mut u64,
+        now: Instant,
+    ) -> Out {
         let mut out = Out::default();
         let Some(k) = self.current else { return out };
-        let Some(list) = show.lists.get(&self.list) else { return out };
         if k >= list.cues.len() {
             return out;
         }
         let target = cuelist::tracked(list, k, &show.rig, &show.palettes);
-        for (addr, tr) in target.values {
-            let Some(a) = self.applied.get(&addr) else { continue };
-            if a.pending.is_some() {
+        let mut values = target.values;
+        for (e, (size, rate)) in &target.effects {
+            values.extend(effect_entries(e, size.unwrap_or_else(|| default_size(show, e)), *rate, k));
+        }
+        for (addr, tr) in values {
+            let held = self.applied.get(&addr);
+            if held.is_some_and(|a| a.pending.is_some()) {
                 continue;
             }
             if let Some(src) = only_live
-                && a.live.as_deref() != Some(src)
+                && held.and_then(|a| a.live.as_deref()) != Some(src)
             {
                 continue;
             }
-            let Some((h, kind)) = tr.head else { continue };
-            let Ok(v) = palette::resolve(&tr.entry.spec, &show.palettes, &show.rig, h, &tr.attr, kind, get) else { continue };
-            if v == a.value && tr.entry.spec == a.spec {
-                continue;
-            }
-            let mut na = a.clone();
-            na.value = v;
-            na.spec = tr.entry.spec.clone();
-            na.live = tr.entry.spec.live(&show.palettes, &show.rig, h, &tr.attr).map(String::from);
-            na.fade_end = now + Duration::from_millis(REFRESH_FADE_MS);
+            let (v, live) = match tr.head {
+                Some((h, kind)) => {
+                    if held.is_none() {
+                        continue;
+                    }
+                    let Ok(v) = palette::resolve(&tr.entry.spec, &show.palettes, &show.rig, h, &tr.attr, kind, get) else { continue };
+                    (v, tr.entry.spec.live(&show.palettes, &show.rig, h, &tr.attr).map(String::from))
+                }
+                None => match &tr.entry.spec {
+                    Spec::Literal(v) => (v.clone(), None),
+                    _ => continue,
+                },
+            };
+            let na = match held {
+                Some(a) if v == a.value && tr.entry.spec == a.spec => continue,
+                Some(a) => Applied { value: v, spec: tr.entry.spec.clone(), live, fade_end: now + Duration::from_millis(REFRESH_FADE_MS), ..a.clone() },
+                None => {
+                    *tokens += 1;
+                    Applied {
+                        value: v,
+                        scaled: addr.ends_with(".size") && addr.starts_with("lights.effect."),
+                        spec: tr.entry.spec.clone(),
+                        head: None,
+                        attr: tr.attr.clone(),
+                        kind: effect_kind(&addr),
+                        live,
+                        fade_end: now + Duration::from_millis(REFRESH_FADE_MS),
+                        ease: Ease::Smoothstep,
+                        pending: None,
+                        token: *tokens,
+                    }
+                }
+            };
             out.cmds.push(self.send(&addr, &self.scaled_value(&na), REFRESH_FADE_MS, Ease::Smoothstep));
             self.applied.insert(addr, na);
         }
@@ -554,12 +607,12 @@ release = ["b"]
         assert_eq!(pb.applied["lights.a.color"].live.as_deref(), Some("palette.accent"));
         // the stream palette changes → only live entries re-resolve
         *accent.borrow_mut() = Value::from([0.0f32, 0.0, 1.0, 1.0]);
-        let o = pb.refresh(&s, Some("palette.accent"), &get, now);
+        let o = pb.refresh(&s.lists["main"], &s, Some("palette.accent"), &get, &mut t, now);
         assert_eq!(describe(&o.cmds).len(), 2, "{:?}", describe(&o.cmds));
         assert!(describe(&o.cmds)[0].starts_with("animate lights.a.color [0.0,0.0,1.0,1.0] 300ms"));
         // editing the palette file updates the running cue
         s.palettes.insert("warm".into(), Palette::parse("warm", &toml::from_str("[set]\nall = { color = \"#00ff00\" }").unwrap()).unwrap());
-        let o = pb.refresh(&s, None, &get, now);
+        let o = pb.refresh(&s.lists["main"], &s, None, &get, &mut t, now);
         assert!(describe(&o.cmds).iter().all(|c| c.contains("[0.0,1.0,0.0,1.0]")), "{:?}", describe(&o.cmds));
         assert_eq!(o.cmds.len(), 2);
         let _ = BTreeMap::<String, String>::new();
@@ -579,7 +632,7 @@ release = ["b"]
         pb.master = 0.5;
         assert_eq!(pb.apply_master(now).len(), 1, "no bogus value for the unresolved colour");
         *accent.borrow_mut() = Some(Value::from([0.0f32, 1.0, 0.0, 1.0]));
-        let o = pb.refresh(&s, Some("palette.accent"), &get, now);
+        let o = pb.refresh(&s.lists["main"], &s, Some("palette.accent"), &get, &mut t, now);
         let d = describe(&o.cmds);
         assert_eq!(d.len(), 1, "{d:?}");
         assert!(d[0].starts_with("animate lights.a.color [0.0,1.0,0.0,1.0]"), "{d:?}");

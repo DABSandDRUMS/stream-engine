@@ -16,6 +16,17 @@ pub const FLASH_WGSL: &str = include_str!("shaders/flash.wgsl");
 pub const BLUR_PASSES_WGSL: &str = include_str!("shaders/blur_passes.wgsl");
 pub const FADE_WGSL: &str = include_str!("shaders/fade.wgsl");
 
+/// Source of a built-in transition shader (`se_core::transitions::SHADERS`; `shader = "<name>"`
+/// in a transition file). Compiled like a project transition, with the file's settings.
+pub fn builtin_transition_wgsl(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "fade" => FADE_WGSL,
+        "glitch" => include_str!("shaders/transitions/glitch.wgsl"),
+        "zoomblur" => include_str!("shaders/transitions/zoomblur.wgsl"),
+        _ => return None,
+    })
+}
+
 pub fn blend_state(b: Blend) -> wgpu::BlendState {
     use wgpu::{BlendComponent as C, BlendFactor as F, BlendOperation as O};
     let over_alpha = C { src_factor: F::One, dst_factor: F::OneMinusSrcAlpha, operation: O::Add };
@@ -252,18 +263,49 @@ mod tests {
     }
 
     #[test]
+    fn builtin_transitions_validate_with_their_settings() {
+        for sh in se_core::transitions::SHADERS {
+            let src = builtin_transition_wgsl(sh.name).unwrap_or_else(|| panic!("no source for built-in transition shader {}", sh.name));
+            let params: Vec<(String, se_patch::ParamSpec)> = sh
+                .params
+                .iter()
+                .map(|p| {
+                    let spec = se_patch::ParamSpec {
+                        ty: "float".into(),
+                        default: Some(toml::Value::Float(p.default)),
+                        range: None,
+                        options: Vec::new(),
+                        unit: None,
+                        description: None,
+                    };
+                    (p.name.to_string(), spec)
+                })
+                .collect();
+            let layout = Layout::new(&transition_manifest(sh.name, &params));
+            let full = format!("{}{src}", layout.header());
+            crate::gpu::validate_wgsl(&full).unwrap_or_else(|e| panic!("{}: {}", sh.name, map_error(sh.name, layout.header_lines(), &e)));
+            assert!(sh.name == "fade" || src.contains("License"), "{} needs its license header", sh.name);
+        }
+    }
+
+    #[test]
     fn example_transitions_validate_with_their_params() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../project-example");
         let c = crate::plan::tests::example_config();
+        let plan = crate::plan::Plan::build(&c, &[], root.clone());
+        assert!(plan.errors.iter().all(|e| !e.starts_with("transitions/")), "{:?}", plan.errors);
         for t in c.transitions.values() {
-            let Some(shader) = &t.shader else { continue };
-            let plan = crate::plan::Plan::build(&c, &[], root.clone());
             let tp = plan.transition(&t.name);
-            let src = std::fs::read_to_string(root.join(shader)).unwrap_or_else(|e| panic!("{shader}: {e}"));
+            let (file, src) = match &tp.shader {
+                Some(crate::plan::ShaderSource::Builtin(n)) => (n.to_string(), builtin_transition_wgsl(n).expect("built-in source").to_string()),
+                Some(crate::plan::ShaderSource::File(p)) => {
+                    (p.display().to_string(), std::fs::read_to_string(root.join(p)).unwrap_or_else(|e| panic!("{}: {e}", p.display())))
+                }
+                _ => continue,
+            };
             let layout = Layout::new(&transition_manifest(&t.name, &tp.params));
             let full = format!("{}{src}", layout.header());
-            crate::gpu::validate_wgsl(&full).unwrap_or_else(|e| panic!("{shader}: {}", map_error(shader, layout.header_lines(), &e)));
-            assert!(src.contains("License") || src.contains("license"), "{shader} needs a license header");
+            crate::gpu::validate_wgsl(&full).unwrap_or_else(|e| panic!("{}: {}", t.name, map_error(&file, layout.header_lines(), &e)));
         }
     }
 

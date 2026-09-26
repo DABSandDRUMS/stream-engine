@@ -1,8 +1,11 @@
 //! The component library. Every screen is built from these, so the whole app shares one look:
 //! calm surfaces, clear hierarchy, big obvious targets, plain words (§15.1).
 
+use crate::motion;
 use crate::theme::{Theme, font, font_bold, font_medium, font_mono, font_semibold, mix, radius, spacing, type_scale};
-use egui::{Align, Align2, Color32, CornerRadius, Layout, Pos2, Rect, Response, RichText, Sense, Stroke, StrokeKind, Ui, Vec2};
+use egui::{
+    Align, Align2, Color32, CornerRadius, CursorIcon, Layout, Pos2, Rect, Response, RichText, Sense, Stroke, StrokeKind, Ui, Vec2, WidgetInfo, WidgetType,
+};
 
 /// Nerd Font glyphs used as the icon set.
 pub mod icon {
@@ -165,30 +168,61 @@ impl Size {
     }
 }
 
-fn kind_colors(t: &Theme, kind: Kind, hovered: bool, pressed: bool, enabled: bool) -> (Color32, Color32, Color32) {
-    let (fill, text, stroke) = match kind {
-        Kind::Primary => (t.accent, t.on_accent, Color32::TRANSPARENT),
-        Kind::Secondary => (t.surface_hi, t.fg, t.border),
-        Kind::Ghost => (if hovered { t.surface_hi } else { Color32::TRANSPARENT }, t.fg, Color32::TRANSPARENT),
-        Kind::Danger => (mix(t.surface, t.bright_red, 0.18), mix(t.fg, t.bright_red, 0.55), mix(t.border, t.bright_red, 0.5)),
-        Kind::Live => (t.tally_program(), Color32::WHITE, Color32::TRANSPARENT),
-    };
-    let mut fill = fill;
-    if enabled && kind != Kind::Ghost {
-        if pressed {
-            fill = mix(fill, Color32::BLACK, 0.15);
-        } else if hovered {
-            fill = mix(fill, Color32::WHITE, 0.08);
-        }
-    }
+/// (fill, text, border) of a button kind, lifted by `hover` and pushed down by `press` (0–1).
+fn kind_colors(t: &Theme, kind: Kind, hover: f32, press: f32, enabled: bool) -> (Color32, Color32, Color32) {
     if !enabled {
-        return (
-            if kind == Kind::Ghost { Color32::TRANSPARENT } else { t.surface_hi },
-            t.text_faint,
-            if kind == Kind::Ghost { Color32::TRANSPARENT } else { t.border },
+        let solid = kind != Kind::Ghost;
+        return (if solid { t.surface_hi } else { Color32::TRANSPARENT }, t.text_faint, if solid { t.border } else { Color32::TRANSPARENT });
+    }
+    let (fill, text, stroke) = match kind {
+        Kind::Primary => (mix(t.accent, Color32::WHITE, 0.10 * hover), t.on_accent, Color32::TRANSPARENT),
+        Kind::Secondary => (mix(t.surface_hi, t.fg, 0.07 * hover), t.fg, mix(t.border, t.fg, 0.16 * hover)),
+        Kind::Ghost => (t.surface_hi, t.fg, Color32::TRANSPARENT),
+        Kind::Danger => (mix(t.surface, t.bright_red, 0.18 + 0.10 * hover), mix(t.fg, t.bright_red, 0.55), mix(t.border, t.bright_red, 0.5 + 0.2 * hover)),
+        Kind::Live => (mix(t.tally_program(), Color32::WHITE, 0.10 * hover), Color32::WHITE, Color32::TRANSPARENT),
+    };
+    let fill = mix(fill, Color32::BLACK, 0.14 * press);
+    // a ghost button is only a surface while it is hovered or held
+    let fill = if kind == Kind::Ghost { fill.gamma_multiply(hover.max(press)) } else { fill };
+    (fill, text, stroke)
+}
+
+/// Hover and press amounts (0–1, eased) of an interactive widget.
+fn hover_press(ui: &Ui, resp: &Response, enabled: bool) -> (f32, f32) {
+    let ctx = ui.ctx();
+    (
+        motion::t(ctx, resp.id.with("hover"), enabled && resp.hovered(), motion::FAST),
+        motion::t(ctx, resp.id.with("press"), enabled && resp.is_pointer_button_down_on(), motion::FAST),
+    )
+}
+
+/// Keyboard focus ring around `rect`. A click never gives a kit control focus, so the ring only
+/// shows while someone moves through the screen with Tab or the arrow keys.
+pub(crate) fn focus_ring(ui: &Ui, t: &Theme, resp: &Response, rect: Rect, corner: u8) {
+    let k = motion::t(ui.ctx(), resp.id.with("focus"), resp.has_focus(), motion::BASE);
+    if k > 0.0 {
+        ui.painter().rect_stroke(
+            rect.expand(3.0),
+            CornerRadius::same(corner.saturating_add(3)),
+            Stroke::new(2.0, t.accent.gamma_multiply(k)),
+            StrokeKind::Middle,
         );
     }
-    (fill, text, stroke)
+}
+
+/// Pointer cursor over live controls, "not allowed" over disabled ones.
+pub(crate) fn cursor(resp: Response, enabled: bool) -> Response {
+    if enabled {
+        return resp.on_hover_cursor(CursorIcon::PointingHand);
+    }
+    if resp.contains_pointer() {
+        resp.ctx.set_cursor_icon(CursorIcon::NotAllowed);
+    }
+    resp
+}
+
+pub(crate) fn sense(enabled: bool) -> Sense {
+    if enabled { Sense::click() } else { Sense::hover() }
 }
 
 /// A button with an optional leading icon. Width grows with the label (or pass `min_width`).
@@ -239,18 +273,29 @@ fn paint_icon_text(
 /// A button with an optional leading icon. Width grows with the label (or pass `min_width`).
 #[allow(clippy::too_many_arguments)]
 pub fn button_ex(ui: &mut Ui, t: &Theme, icon: Option<&str>, label: &str, kind: Kind, size: Size, min_width: f32, enabled: bool) -> Response {
+    button_impl(ui, t, icon, label, label, kind, size, min_width, enabled)
+}
+
+/// `a11y`: the words a screen reader (or a UI test) finds the button by.
+#[allow(clippy::too_many_arguments)]
+fn button_impl(ui: &mut Ui, t: &Theme, icon: Option<&str>, label: &str, a11y: &str, kind: Kind, size: Size, min_width: f32, enabled: bool) -> Response {
+    let enabled = enabled && ui.is_enabled();
     let parts = icon_text(ui, icon, label, font_medium(size.text()), t.fg);
     let pad = if size == Size::Small { 10.0 } else { 16.0 };
     let w = (parts.2 + pad * 2.0).max(min_width).max(size.height());
-    let sense = if enabled { Sense::click() } else { Sense::hover() };
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, size.height()), sense);
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, size.height()), sense(enabled));
     if ui.is_rect_visible(rect) {
-        let (fill, fg, stroke) = kind_colors(t, kind, resp.hovered(), resp.is_pointer_button_down_on(), enabled);
-        let p = ui.painter();
-        p.rect(rect, CornerRadius::same(radius::CONTROL), fill, Stroke::new(1.0, stroke), StrokeKind::Inside);
-        paint_icon_text(p, rect.center(), parts, fg);
+        let (h, p) = hover_press(ui, &resp, enabled);
+        let (fill, fg, stroke) = kind_colors(t, kind, h, p, enabled);
+        // pressed buttons sink by a pixel
+        let r = rect.translate(Vec2::new(0.0, p));
+        let painter = ui.painter();
+        painter.rect(r, CornerRadius::same(radius::CONTROL), fill, Stroke::new(1.0, stroke), StrokeKind::Inside);
+        paint_icon_text(painter, r.center(), parts, fg);
+        focus_ring(ui, t, &resp, rect, radius::CONTROL);
     }
-    if enabled { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp }
+    resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, a11y));
+    cursor(resp, enabled)
 }
 
 pub fn button(ui: &mut Ui, t: &Theme, label: &str, kind: Kind) -> Response {
@@ -261,82 +306,152 @@ pub fn icon_label_button(ui: &mut Ui, t: &Theme, icon: &str, label: &str, kind: 
     button_ex(ui, t, Some(icon), label, kind, Size::Medium, 0.0, true)
 }
 
-/// Square icon-only button (tooltip required: icons alone are not self-explanatory).
+/// Small square icon-only button (tooltip required: icons alone are not self-explanatory).
+/// Replaces `ui.small_button(icon)`.
 pub fn icon_button(ui: &mut Ui, t: &Theme, icon: &str, tooltip: &str) -> Response {
-    button_ex(ui, t, Some(icon), "", Kind::Ghost, Size::Small, 0.0, true).on_hover_text(tooltip)
+    icon_button_ex(ui, t, icon, tooltip, Kind::Ghost, true)
+}
+
+/// [`icon_button`] with a look (`Secondary` = framed square, `Danger` = delete) and an enabled
+/// flag; the tooltip also shows while disabled.
+pub fn icon_button_ex(ui: &mut Ui, t: &Theme, icon: &str, tooltip: &str, kind: Kind, enabled: bool) -> Response {
+    let r = button_impl(ui, t, Some(icon), "", tooltip, kind, Size::Small, 0.0, enabled);
+    r.on_hover_text(tooltip)
 }
 
 /// Choice chip (pick one or several from a set: event kinds, filters, lights). Selected =
 /// accent tint + accent border; unselected = the secondary look.
 pub fn chip(ui: &mut Ui, t: &Theme, icon: &str, label: &str, selected: bool) -> Response {
+    let enabled = ui.is_enabled();
     let parts = icon_text(ui, Some(icon), label, font_medium(type_scale::SMALL + 0.5), t.fg);
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(parts.2 + 24.0, 28.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(parts.2 + 24.0, 28.0), sense(enabled));
     if ui.is_rect_visible(rect) {
-        let (fill, stroke) = if selected {
-            (mix(t.surface, t.accent, if resp.hovered() { 0.26 } else { 0.18 }), t.accent)
-        } else {
-            (if resp.hovered() { mix(t.surface_hi, t.fg, 0.06) } else { t.surface_hi }, t.border)
-        };
-        let p = ui.painter();
-        p.rect(rect, CornerRadius::same(radius::PILL), fill, Stroke::new(1.0, stroke), StrokeKind::Inside);
-        paint_icon_text(p, rect.center(), parts, if selected { t.fg } else { mix(t.text_dim, t.fg, 0.4) });
+        let (h, p) = hover_press(ui, &resp, enabled);
+        let s = motion::t(ui.ctx(), resp.id.with("selected"), selected, motion::BASE);
+        let fill = mix(mix(t.surface_hi, t.fg, 0.06 * h), mix(t.surface, t.accent, 0.18 + 0.08 * h), s);
+        let stroke = mix(mix(t.border, t.fg, 0.14 * h), t.accent, s);
+        let r = rect.translate(Vec2::new(0.0, p));
+        let painter = ui.painter();
+        painter.rect(r, CornerRadius::same(radius::PILL), mix(fill, Color32::BLACK, 0.12 * p), Stroke::new(1.0, stroke), StrokeKind::Inside);
+        paint_icon_text(painter, r.center(), parts, mix(mix(t.text_dim, t.fg, 0.4 + 0.3 * h), t.fg, s));
+        focus_ring(ui, t, &resp, rect, radius::PILL);
     }
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+    cursor(resp, enabled)
 }
 
-/// Hold-to-confirm button (destructive actions in Show mode, §15.1).
+/// Hold-to-confirm button (destructive actions in Show mode, §15.1): a ring fills while you hold
+/// the mouse (or Space/Enter when it has keyboard focus); letting go early drains it.
 /// Returns true once, when the hold completes.
 pub fn hold_button(ui: &mut Ui, t: &Theme, label: &str, color: Color32, hold_secs: f32) -> bool {
+    const RING: f32 = 7.0;
     let id = ui.make_persistent_id(("hold", label));
-    let fid = font_semibold(type_scale::BODY);
-    let galley = ui.painter().layout_no_wrap(label.to_string(), fid, t.fg);
-    let size = Vec2::new(galley.size().x + 32.0, 36.0);
-    let (rect, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
+    let enabled = ui.is_enabled();
+    let galley = ui.painter().layout_no_wrap(label.to_string(), font_semibold(type_scale::BODY), t.fg);
+    let size = Vec2::new(galley.size().x + 32.0 + RING * 2.0 + spacing::S, 36.0);
+    let (rect, resp) = ui.allocate_exact_size(size, if enabled { Sense::click_and_drag() } else { Sense::hover() });
     let now = ui.input(|i| i.time);
-    let mut start: Option<f64> = ui.data(|d| d.get_temp(id));
+    let keys = resp.has_focus() && ui.input(|i| i.key_down(egui::Key::Space) || i.key_down(egui::Key::Enter));
+    let held = enabled && (resp.is_pointer_button_down_on() || keys);
+    let start: Option<f64> = ui.data(|d| d.get_temp(id));
+    let progress = |s: f64| if s.is_infinite() { 1.0 } else { ((now - s) as f32 / hold_secs).clamp(0.0, 1.0) };
+    let drain_id = id.with("drain");
     let mut fired = false;
-    if resp.is_pointer_button_down_on() {
-        let s = *start.get_or_insert(now);
-        ui.data_mut(|d| d.insert_temp(id, s));
+    let prog = if held {
+        let s = start.unwrap_or(now);
         if now - s >= hold_secs as f64 {
             fired = true;
             ui.data_mut(|d| d.insert_temp(id, f64::INFINITY));
+        } else if start.is_none() {
+            ui.data_mut(|d| d.insert_temp(id, s));
         }
         ui.ctx().request_repaint();
+        progress(s)
     } else {
-        start = None;
-        ui.data_mut(|d| d.remove::<f64>(id));
+        if let Some(s) = start {
+            ui.data_mut(|d| {
+                d.remove::<f64>(id);
+                d.insert_temp(drain_id, (progress(s), now));
+            });
+        }
+        // let go early: the ring drains instead of snapping back to empty
+        match ui.data(|d| d.get_temp::<(f32, f64)>(drain_id)) {
+            Some((p0, at)) if !motion::reduced(ui.ctx()) && ((now - at) as f32) < motion::SLOW => {
+                ui.ctx().request_repaint();
+                p0 * (1.0 - motion::ease_out((now - at) as f32 / motion::SLOW))
+            }
+            Some(_) => {
+                ui.data_mut(|d| d.remove::<(f32, f64)>(drain_id));
+                0.0
+            }
+            None => 0.0,
+        }
+    };
+    if ui.is_rect_visible(rect) {
+        let (h, p) = hover_press(ui, &resp, enabled);
+        let r = rect.translate(Vec2::new(0.0, p));
+        let cr = CornerRadius::same(radius::CONTROL);
+        let painter = ui.painter();
+        let base = if enabled { color } else { t.text_faint };
+        painter.rect(r, cr, mix(t.surface, base, 0.14 + 0.08 * h), Stroke::new(1.0, mix(t.border, base, 0.6 + 0.2 * h)), StrokeKind::Inside);
+        if prog > 0.0 {
+            painter.rect_filled(Rect::from_min_size(r.min, Vec2::new(r.width() * prog, r.height())), cr, base);
+        }
+        // the ring: a faint track that fills clockwise from the top
+        let c = Pos2::new(r.left() + 16.0 + RING, r.center().y);
+        let on_fill = prog * r.width() > 16.0 + RING;
+        let ring_c = if on_fill { Color32::WHITE } else { base };
+        painter.circle_stroke(c, RING, Stroke::new(2.0, ring_c.gamma_multiply(0.35)));
+        if prog > 0.0 {
+            let n = (prog * 32.0).ceil().max(2.0) as usize;
+            let pts: Vec<Pos2> = (0..=n)
+                .map(|i| {
+                    let a = -std::f32::consts::FRAC_PI_2 + std::f32::consts::TAU * prog * i as f32 / n as f32;
+                    c + RING * Vec2::angled(a)
+                })
+                .collect();
+            painter.add(egui::Shape::line(pts, Stroke::new(2.0, ring_c)));
+        }
+        let fg = if !enabled {
+            t.text_faint
+        } else if prog > 0.5 {
+            Color32::WHITE
+        } else {
+            mix(t.fg, color, 0.5)
+        };
+        let gp = Pos2::new(c.x + RING + spacing::S, r.center().y - galley.size().y / 2.0);
+        painter.galley_with_override_text_color(gp, galley, fg);
+        focus_ring(ui, t, &resp, rect, radius::CONTROL);
     }
-    let prog = start.map(|s| if s.is_infinite() { 1.0 } else { ((now - s) as f32 / hold_secs).clamp(0.0, 1.0) }).unwrap_or(0.0);
-    let p = ui.painter();
-    let r = CornerRadius::same(radius::CONTROL);
-    p.rect(rect, r, mix(t.surface, color, if resp.hovered() { 0.22 } else { 0.14 }), Stroke::new(1.0, mix(t.border, color, 0.6)), StrokeKind::Inside);
-    if prog > 0.0 {
-        p.rect_filled(Rect::from_min_size(rect.min, Vec2::new(rect.width() * prog, rect.height())), r, color);
-    }
-    let fg = if prog > 0.5 { Color32::WHITE } else { mix(t.fg, color, 0.5) };
-    p.galley_with_override_text_color(rect.center() - galley.size() / 2.0, galley, fg);
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("Press and hold to {}", label.to_lowercase()));
+    resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, label));
+    cursor(resp, enabled).on_hover_text(format!("Press and hold to {}", label.to_lowercase()));
     fired
 }
 
 // ---- toggles, tabs, inputs -----------------------------------------------------------------------
 
-/// On/off switch. Returns the response (`changed()` when flipped).
+/// On/off switch: the knob slides, the track fades to the accent, the knob stretches while
+/// pressed. Returns the response (`changed()` when flipped).
 pub fn toggle(ui: &mut Ui, t: &Theme, on: &mut bool) -> Response {
-    let size = Vec2::new(40.0, 22.0);
-    let (rect, mut resp) = ui.allocate_exact_size(size, Sense::click());
+    let enabled = ui.is_enabled();
+    let (rect, mut resp) = ui.allocate_exact_size(Vec2::new(40.0, 22.0), sense(enabled));
     if resp.clicked() {
         *on = !*on;
         resp.mark_changed();
     }
-    let k = ui.ctx().animate_bool_responsive(resp.id, *on);
-    let p = ui.painter();
-    let track = mix(t.inset, t.accent, k);
-    p.rect(rect, CornerRadius::same(radius::PILL), track, Stroke::new(1.0, mix(t.border, t.accent, k)), StrokeKind::Inside);
-    let x = egui::lerp(rect.left() + 11.0..=rect.right() - 11.0, k);
-    p.circle_filled(Pos2::new(x, rect.center().y), 8.0, if *on { t.on_accent } else { t.fg });
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+    if ui.is_rect_visible(rect) {
+        let k = motion::t(ui.ctx(), resp.id.with("on"), *on, motion::SLOW);
+        let (h, p) = hover_press(ui, &resp, enabled);
+        let painter = ui.painter();
+        let track = mix(mix(t.inset, t.fg, 0.06 * h), mix(t.accent, Color32::WHITE, 0.08 * h), k);
+        painter.rect(rect, CornerRadius::same(radius::PILL), track, Stroke::new(1.0, mix(mix(t.border, t.fg, 0.15 * h), t.accent, k)), StrokeKind::Inside);
+        let stretch = 5.0 * p;
+        let x = egui::lerp(rect.left() + 11.0..=rect.right() - 11.0, k) + (0.5 - k) * stretch;
+        let knob = Rect::from_center_size(Pos2::new(x, rect.center().y), Vec2::new(16.0 + stretch, 16.0));
+        painter.rect_filled(knob, CornerRadius::same(radius::PILL), mix(t.fg, t.on_accent, k));
+        focus_ring(ui, t, &resp, rect, radius::PILL);
+    }
+    resp.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, enabled, *on, ""));
+    cursor(resp, enabled)
 }
 
 /// A labelled switch row: text on the left, switch on the right.
@@ -353,32 +468,37 @@ pub fn toggle_row(ui: &mut Ui, t: &Theme, label: &str, help: &str, on: &mut bool
     .inner
 }
 
-/// Underlined tabs. Returns true when the selection changed.
+/// Underlined tabs; the underline glides to the picked tab. Returns true when the selection
+/// changed.
 pub fn tabs(ui: &mut Ui, t: &Theme, selected: &mut usize, labels: &[&str]) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = spacing::XL;
+        let x0 = ui.max_rect().left();
+        let mut bar = None;
         for (i, label) in labels.iter().enumerate() {
             let on = *selected == i;
             let fid = if on { font_semibold(type_scale::BODY + 0.5) } else { font_medium(type_scale::BODY + 0.5) };
             let galley = ui.painter().layout_no_wrap(label.to_string(), fid, t.fg);
             let (rect, resp) = ui.allocate_exact_size(Vec2::new(galley.size().x, 34.0), Sense::click());
-            let c = if on {
-                t.fg
-            } else if resp.hovered() {
-                mix(t.text_dim, t.fg, 0.5)
-            } else {
-                t.text_dim
-            };
+            let h = motion::t(ui.ctx(), resp.id.with("hover"), resp.hovered(), motion::FAST);
+            let s = motion::t(ui.ctx(), resp.id.with("selected"), on, motion::BASE);
+            let c = mix(mix(t.text_dim, t.fg, 0.5 * h), t.fg, s);
             ui.painter().galley_with_override_text_color(Pos2::new(rect.left(), rect.center().y - galley.size().y / 2.0 - 2.0), galley, c);
             if on {
-                let bar = Rect::from_min_max(Pos2::new(rect.left(), rect.bottom() - 3.0), rect.right_bottom());
-                ui.painter().rect_filled(bar, CornerRadius::same(2), t.accent);
+                bar = Some(rect);
             }
-            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() && !on {
+            focus_ring(ui, t, &resp, rect.expand2(Vec2::new(6.0, -2.0)), radius::CONTROL);
+            if cursor(resp, true).clicked() && !on {
                 *selected = i;
                 changed = true;
             }
+        }
+        if let Some(r) = bar {
+            let id = ui.id().with("underline");
+            let l = x0 + motion::value(ui.ctx(), id.with(0), r.left() - x0, motion::SLOW);
+            let rr = x0 + motion::value(ui.ctx(), id.with(1), r.right() - x0, motion::SLOW);
+            ui.painter().rect_filled(Rect::from_min_max(Pos2::new(l, r.bottom() - 3.0), Pos2::new(rr, r.bottom())), CornerRadius::same(2), t.accent);
         }
     });
     let r = ui.min_rect();
@@ -387,9 +507,11 @@ pub fn tabs(ui: &mut Ui, t: &Theme, selected: &mut usize, labels: &[&str]) -> bo
     changed
 }
 
-/// Segmented control (small choice between 2–4 options). Returns true when changed.
+/// Segmented control (small choice between 2–4 options); the raised pill glides to the pick.
+/// Returns true when changed.
 pub fn segmented(ui: &mut Ui, t: &Theme, selected: &mut usize, labels: &[&str]) -> bool {
     let mut changed = false;
+    let enabled = ui.is_enabled();
     let fid = font_medium(type_scale::SMALL + 0.5);
     let widths: Vec<f32> = labels.iter().map(|l| ui.painter().layout_no_wrap(l.to_string(), fid.clone(), t.fg).size().x + 24.0).collect();
     let total: f32 = widths.iter().sum::<f32>() + 6.0;
@@ -397,19 +519,26 @@ pub fn segmented(ui: &mut Ui, t: &Theme, selected: &mut usize, labels: &[&str]) 
     let base = ui.next_auto_id();
     ui.skip_ahead_auto_ids(1);
     let (rect, _) = ui.allocate_exact_size(Vec2::new(total, 32.0), Sense::hover());
-    let p = ui.painter();
-    p.rect_filled(rect, CornerRadius::same(radius::CONTROL), t.inset);
+    ui.painter().rect_filled(rect, CornerRadius::same(radius::CONTROL), t.inset);
+    if let Some(w) = widths.get(*selected) {
+        let x = motion::value(ui.ctx(), base.with("pill-x"), widths[..*selected].iter().sum(), motion::SLOW);
+        let pw = motion::value(ui.ctx(), base.with("pill-w"), *w, motion::SLOW);
+        let pill = Rect::from_min_size(Pos2::new(rect.left() + 3.0 + x, rect.top() + 3.0), Vec2::new(pw, rect.height() - 6.0));
+        ui.painter().rect(pill, CornerRadius::same(radius::CONTROL - 2), t.surface_hi, Stroke::new(1.0, t.border), StrokeKind::Inside);
+    }
     let mut x = rect.left() + 3.0;
     for (i, (label, w)) in labels.iter().zip(&widths).enumerate() {
         let r = Rect::from_min_size(Pos2::new(x, rect.top() + 3.0), Vec2::new(*w, rect.height() - 6.0));
-        let resp = ui.interact(r, base.with(i), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+        let resp = ui.interact(r, base.with(i), sense(enabled));
         let on = *selected == i;
-        if on {
-            ui.painter().rect(r, CornerRadius::same(radius::CONTROL - 2), t.surface_hi, Stroke::new(1.0, t.border), StrokeKind::Inside);
+        let h = motion::t(ui.ctx(), resp.id.with("hover"), enabled && resp.hovered() && !on, motion::FAST);
+        let s = motion::t(ui.ctx(), resp.id.with("selected"), on, motion::BASE);
+        if h > 0.0 {
+            ui.painter().rect_filled(r, CornerRadius::same(radius::CONTROL - 2), t.fg.gamma_multiply(0.05 * h));
         }
-        let c = if on { t.fg } else { t.text_dim };
-        ui.painter().text(r.center(), Align2::CENTER_CENTER, *label, fid.clone(), c);
-        if resp.clicked() && !on {
+        ui.painter().text(r.center(), Align2::CENTER_CENTER, *label, fid.clone(), mix(mix(t.text_dim, t.fg, 0.45 * h), t.fg, s));
+        focus_ring(ui, t, &resp, r, radius::CONTROL - 2);
+        if cursor(resp, enabled).clicked() && !on {
             *selected = i;
             changed = true;
         }
@@ -418,19 +547,68 @@ pub fn segmented(ui: &mut Ui, t: &Theme, selected: &mut usize, labels: &[&str]) 
     changed
 }
 
+/// The app's top-level switch (Overview / Edit / Clipping): icon + label per tab in one
+/// inset group, the selected one raised (the raised pill glides). `badges` may put a small
+/// count on a tab. Returns the clicked tab (only when it changed).
+pub fn master_tabs(ui: &mut Ui, t: &Theme, selected: usize, tabs: &[(&str, &str, Option<(String, Color32)>)]) -> Option<usize> {
+    let fid = font_semibold(type_scale::BODY);
+    let parts: Vec<_> = tabs.iter().map(|(ic, label, _)| icon_text(ui, Some(ic), label, fid.clone(), t.fg)).collect();
+    let badge_w = |b: &Option<(String, Color32)>| b.as_ref().map_or(0.0, |(s, _)| 10.0 + 8.0 * s.chars().count() as f32 + 12.0);
+    let widths: Vec<f32> = parts.iter().zip(tabs).map(|(p, (_, _, b))| p.2 + 36.0 + badge_w(b)).collect();
+    let total: f32 = widths.iter().sum::<f32>() + 8.0;
+    let base = ui.next_auto_id();
+    ui.skip_ahead_auto_ids(1);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(total, 40.0), Sense::hover());
+    ui.painter().rect_filled(rect, CornerRadius::same(radius::CONTROL + 2), t.inset);
+    if let Some(w) = widths.get(selected) {
+        let x = motion::value(ui.ctx(), base.with("pill-x"), widths[..selected].iter().sum(), motion::SLOW);
+        let pw = motion::value(ui.ctx(), base.with("pill-w"), *w, motion::SLOW);
+        let pill = Rect::from_min_size(Pos2::new(rect.left() + 4.0 + x, rect.top() + 4.0), Vec2::new(pw, rect.height() - 8.0));
+        ui.painter().rect(pill, CornerRadius::same(radius::CONTROL), t.surface_hi, Stroke::new(1.0, t.border), StrokeKind::Inside);
+    }
+    let mut x = rect.left() + 4.0;
+    let mut clicked = None;
+    for (i, (((_, label, badge), w), part)) in tabs.iter().zip(&widths).zip(parts).enumerate() {
+        let r = Rect::from_min_size(Pos2::new(x, rect.top() + 4.0), Vec2::new(*w, rect.height() - 8.0));
+        let resp = ui.interact(r, base.with(i), Sense::click());
+        resp.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, *label));
+        let on = selected == i;
+        let h = motion::t(ui.ctx(), resp.id.with("hover"), resp.hovered() && !on, motion::FAST);
+        let s = motion::t(ui.ctx(), resp.id.with("selected"), on, motion::BASE);
+        if h > 0.0 {
+            ui.painter().rect_filled(r, CornerRadius::same(radius::CONTROL), t.surface.gamma_multiply(h));
+        }
+        let content_w = r.width() - badge_w(badge);
+        paint_icon_text(ui.painter(), Pos2::new(r.left() + content_w / 2.0, r.center().y), part, mix(mix(t.text_dim, t.fg, 0.45 * h), t.fg, s));
+        if let Some((txt, bc)) = badge {
+            let bw = badge_w(badge) - 12.0;
+            let br = Rect::from_center_size(Pos2::new(r.left() + content_w + bw / 2.0 - 6.0, r.center().y), Vec2::new(bw, 20.0));
+            ui.painter().rect_filled(br, CornerRadius::same(10), *bc);
+            ui.painter().text(br.center(), Align2::CENTER_CENTER, txt, font_bold(type_scale::SMALL), t.on_accent);
+        }
+        focus_ring(ui, t, &resp, r, radius::CONTROL);
+        if cursor(resp, true).clicked() && !on {
+            clicked = Some(i);
+        }
+        x += w;
+    }
+    clicked
+}
+
 /// Horizontal slider with a label above and the value on the right.
 pub fn labeled_slider(ui: &mut Ui, t: &Theme, label: &str, value: &mut f32, range: std::ops::RangeInclusive<f32>, suffix: &str) -> Response {
+    // 0–1 ranges read as percentages; everything else as whole numbers with the unit
+    let pct = *range.start() >= 0.0 && *range.end() <= 1.0;
+    let fmt = move |v: f64| if pct { format!("{:.0}%", v * 100.0) } else { format!("{v:.0}{suffix}") };
     ui.vertical(|ui| {
         ui.horizontal(|ui| {
             ui.label(RichText::new(label).font(font_medium(type_scale::SMALL + 0.5)).color(t.text_dim));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                // 0–1 ranges read as percentages; everything else as whole numbers with the unit
-                let txt = if *range.start() >= 0.0 && *range.end() <= 1.0 { format!("{:.0}%", *value * 100.0) } else { format!("{:.0}{suffix}", value) };
-                ui.label(RichText::new(txt).font(font_mono(type_scale::SMALL)).color(t.fg));
+                ui.label(RichText::new(fmt(*value as f64)).font(font_mono(type_scale::SMALL)).color(t.fg));
             });
         });
         ui.spacing_mut().slider_width = ui.available_width();
-        ui.spacing_mut().interact_size.y = 20.0;
+        let _ = fmt;
         ui.add(egui::Slider::new(value, range).show_value(false))
     })
     .inner
@@ -587,11 +765,13 @@ pub fn pill(ui: &mut Ui, t: &Theme, icon: &str, text: &str, s: LedState) -> Resp
     let c = if s == LedState::Idle { t.text_dim } else { led_color(t, s) };
     let parts = icon_text(ui, Some(icon), text, font_medium(type_scale::SMALL + 0.5), c);
     let size = Vec2::new(parts.2 + 24.0, 28.0);
-    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
-    let fill = if resp.hovered() { t.surface_hi } else { mix(t.surface, c, if s == LedState::Idle { 0.0 } else { 0.1 }) };
-    ui.painter().rect_filled(rect, CornerRadius::same(radius::PILL), fill);
-    paint_icon_text(ui.painter(), rect.center(), parts, c);
-    resp
+    let (rect, resp) = ui.allocate_exact_size(size, sense(ui.is_enabled()));
+    let (h, press) = hover_press(ui, &resp, ui.is_enabled());
+    let fill = mix(mix(t.surface, c, if s == LedState::Idle { 0.0 } else { 0.1 }), t.surface_hi, h * 0.85);
+    ui.painter().rect_filled(rect.translate(Vec2::new(0.0, press)), CornerRadius::same(radius::PILL), fill);
+    paint_icon_text(ui.painter(), rect.center() + Vec2::new(0.0, press), parts, c);
+    focus_ring(ui, t, &resp, rect, radius::PILL);
+    cursor(resp, ui.is_enabled())
 }
 
 /// A single-line text field with comfortable padding and the standard control height. Use it
@@ -657,18 +837,25 @@ pub fn callout(ui: &mut Ui, t: &Theme, tone: Tone, icon: &str, title: &str, body
 /// Sidebar navigation item. `badge` shows a count/dot on the right.
 pub fn nav_item(ui: &mut Ui, t: &Theme, icon: &str, label: &str, selected: bool, badge: Option<(String, Color32)>) -> Response {
     let w = ui.available_width();
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 42.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 42.0), sense(ui.is_enabled()));
+    let (hover, press) = hover_press(ui, &resp, ui.is_enabled());
+    let sel = motion::t(ui.ctx(), resp.id.with("selected"), selected, motion::SLOW);
     let p = ui.painter();
-    if selected {
-        p.rect_filled(rect, CornerRadius::same(radius::CONTROL), mix(t.chrome, t.accent, 0.16));
-        p.rect_filled(Rect::from_min_size(rect.left_top() + Vec2::new(0.0, 10.0), Vec2::new(3.0, rect.height() - 20.0)), CornerRadius::same(2), t.accent);
-    } else if resp.hovered() {
-        p.rect_filled(rect, CornerRadius::same(radius::CONTROL), mix(t.chrome, t.fg, 0.06));
+    if sel > 0.0 || hover > 0.0 {
+        p.rect_filled(rect, CornerRadius::same(radius::CONTROL), mix(t.chrome, t.accent, 0.16 * sel + 0.06 * hover));
     }
-    let c = if selected { t.fg } else { t.text_dim };
-    p.text(Pos2::new(rect.left() + 26.0, rect.center().y), Align2::CENTER_CENTER, icon, font(type_scale::LARGE), if selected { t.accent } else { c });
+    if sel > 0.0 {
+        p.rect_filled(
+            Rect::from_min_size(rect.left_top() + Vec2::new(0.0, 10.0 + (1.0 - sel) * 10.0), Vec2::new(3.0, (rect.height() - 20.0) * sel)),
+            CornerRadius::same(2),
+            t.accent.gamma_multiply(sel),
+        );
+    }
+    let c = mix(t.text_dim, t.fg, sel);
+    let y = rect.center().y + press;
+    p.text(Pos2::new(rect.left() + 26.0, y), Align2::CENTER_CENTER, icon, font(type_scale::LARGE), mix(c, t.accent, sel));
     p.text(
-        Pos2::new(rect.left() + 48.0, rect.center().y),
+        Pos2::new(rect.left() + 48.0, y),
         Align2::LEFT_CENTER,
         label,
         if selected { font_semibold(type_scale::BODY + 0.5) } else { font_medium(type_scale::BODY + 0.5) },
@@ -682,36 +869,38 @@ pub fn nav_item(ui: &mut Ui, t: &Theme, icon: &str, label: &str, selected: bool,
         ui.painter().rect_filled(br, CornerRadius::same(radius::PILL), col);
         ui.painter().galley_with_override_text_color(br.center() - g.size() / 2.0, g, contrast(col));
     }
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+    focus_ring(ui, t, &resp, rect, radius::CONTROL);
+    cursor(resp, ui.is_enabled())
 }
 
 /// Clickable list row: icon, title, subtitle, trailing text.
 pub fn list_row(ui: &mut Ui, t: &Theme, icon: &str, title: &str, subtitle: &str, trailing: &str, selected: bool) -> Response {
     let w = ui.available_width();
     let h = if subtitle.is_empty() { 40.0 } else { 54.0 };
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), sense(ui.is_enabled()));
+    let (hover, press) = hover_press(ui, &resp, ui.is_enabled());
+    let sel = motion::t(ui.ctx(), resp.id.with("selected"), selected, motion::SLOW);
     let p = ui.painter();
-    if selected {
-        p.rect_filled(rect, CornerRadius::same(radius::CONTROL), mix(t.surface, t.accent, 0.14));
-    } else if resp.hovered() {
-        p.rect_filled(rect, CornerRadius::same(radius::CONTROL), t.surface_hi);
+    if sel > 0.0 || hover > 0.0 {
+        p.rect_filled(rect, CornerRadius::same(radius::CONTROL), mix(t.surface, t.accent, 0.14 * sel + 0.06 * hover));
     }
     let mut x = rect.left() + 12.0;
     if !icon.is_empty() {
-        p.text(Pos2::new(x + 8.0, rect.center().y), Align2::CENTER_CENTER, icon, font(type_scale::BODY + 1.0), if selected { t.accent } else { t.text_dim });
+        p.text(Pos2::new(x + 8.0, rect.center().y + press), Align2::CENTER_CENTER, icon, font(type_scale::BODY + 1.0), mix(t.text_dim, t.accent, sel));
         x += 28.0;
     }
     let right = rect.right() - 12.0;
     if !trailing.is_empty() {
-        p.text(Pos2::new(right, rect.center().y), Align2::RIGHT_CENTER, trailing, font(type_scale::SMALL + 0.5), t.text_dim);
+        p.text(Pos2::new(right, rect.center().y + press), Align2::RIGHT_CENTER, trailing, font(type_scale::SMALL + 0.5), t.text_dim);
     }
     if subtitle.is_empty() {
-        p.text(Pos2::new(x, rect.center().y), Align2::LEFT_CENTER, title, font_medium(type_scale::BODY), t.fg);
+        p.text(Pos2::new(x, rect.center().y + press), Align2::LEFT_CENTER, title, font_medium(type_scale::BODY), t.fg);
     } else {
-        p.text(Pos2::new(x, rect.center().y - 9.0), Align2::LEFT_CENTER, title, font_medium(type_scale::BODY), t.fg);
-        p.text(Pos2::new(x, rect.center().y + 10.0), Align2::LEFT_CENTER, subtitle, font(type_scale::SMALL), t.text_dim);
+        p.text(Pos2::new(x, rect.center().y - 9.0 + press), Align2::LEFT_CENTER, title, font_medium(type_scale::BODY), t.fg);
+        p.text(Pos2::new(x, rect.center().y + 10.0 + press), Align2::LEFT_CENTER, subtitle, font(type_scale::SMALL), t.text_dim);
     }
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+    focus_ring(ui, t, &resp, rect, radius::CONTROL);
+    cursor(resp, ui.is_enabled())
 }
 
 /// Label/value row for read-only facts.
@@ -740,27 +929,27 @@ pub fn pad(
     progress: Option<f32>,
     hint: Option<&str>,
 ) -> Response {
-    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(size, sense(ui.is_enabled()));
     if !ui.is_rect_visible(rect) {
         return resp;
     }
     let p = ui.painter();
     let active = matches!(state, LedState::Active | LedState::Armed);
     let tint = color.unwrap_or(t.accent);
-    let base = if active { mix(t.surface, tint, 0.32) } else { t.surface_hi };
-    let fill = if resp.is_pointer_button_down_on() {
-        mix(base, Color32::BLACK, 0.18)
-    } else if resp.hovered() {
-        mix(base, t.fg, 0.07)
-    } else {
-        base
-    };
+    let (hover, press) = hover_press(ui, &resp, ui.is_enabled());
+    let lit = motion::t(ui.ctx(), resp.id.with("active"), active, motion::SLOW);
+    let fill = mix(mix(t.surface_hi, tint, 0.32 * lit), t.fg, 0.07 * hover);
+    let rect = rect.translate(Vec2::new(0.0, press));
     let r = CornerRadius::same(radius::TILE);
-    let edge = match state {
-        LedState::Idle => t.border,
-        s => led_color(t, s),
-    };
-    p.rect(rect, r, fill, Stroke::new(if active { 2.0 } else { 1.0 }, edge), StrokeKind::Inside);
+    let edge = mix(
+        t.border,
+        match state {
+            LedState::Idle => tint,
+            s => led_color(t, s),
+        },
+        lit,
+    );
+    p.rect(rect, r, fill, Stroke::new(1.0 + lit, edge), StrokeKind::Inside);
     // colored top strip = the preset's own color
     if let Some(c) = color {
         let strip = Rect::from_min_size(rect.min + Vec2::new(10.0, 0.0), Vec2::new(rect.width() - 20.0, 3.0));
@@ -784,7 +973,8 @@ pub fn pad(
         ui.painter().rect_filled(bar, CornerRadius::same(2), mix(t.surface, edge, 0.25));
         ui.painter().rect_filled(Rect::from_min_size(bar.min, Vec2::new(w * pr.clamp(0.0, 1.0), 3.0)), CornerRadius::same(2), edge);
     }
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+    focus_ring(ui, t, &resp, rect, radius::TILE);
+    cursor(resp, ui.is_enabled())
 }
 
 /// Black or white, whichever reads better on `bg`.

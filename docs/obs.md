@@ -44,11 +44,22 @@ or changes anything else; running it again adds nothing.
    its own track (2–6). `obs.setup` does all of this.
 6. Separate recording tracks (the only step `obs.setup` leaves to you, because it changes your
    encoder settings): **Settings → Output → Output Mode: Advanced**, check that Streaming and
-   Recording still use NVENC, and tick tracks 1–6 under Recording. Clips can then leave the music
-   out (docs/clips.md). The plugin reports which sources feed which recording track (session meta
-   `recordings[].tracks`).
+   Recording still use NVENC, and tick tracks 1–6 under Recording. Talk clips can omit music
+   while requested-song performance clips keep it (docs/clips.md). The plugin reports which
+   sources feed which recording track (session meta `recordings[].tracks`).
 
 Check: `streamctl preflight` → `obs: pass — OBS 32.2.2, plugin 0.1.0: receiving wide + tall`.
+
+## Recording destination and automation
+
+Set **Clipping → Recording → Save recordings in** to choose the folder. The app persists it as
+`[recording] dir` in `project.toml`, creates a folder per show, and directs OBS's **actual output
+path** there before starting a file. The default is `~/Videos/Stream Engine`. When `[recording]
+auto = true`, recording starts in preshow/live and stops off air; the manual Start/Stop recording
+controls remain available. Changing the folder never moves an in-progress file. The UI shows the
+real OBS recording path, track count, free space and any capture errors. Separate tracks still
+require OBS Advanced Output setup in step 6 above; selecting a folder does not change encoders
+or tracks. See [clips.md](clips.md) for the show timeline and review flow.
 
 ## Fallback scene (§22)
 

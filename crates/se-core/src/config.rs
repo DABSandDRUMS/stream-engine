@@ -2,6 +2,7 @@
 //! independently so one broken file never takes down the rest (last-good is kept per file by
 //! [`Config::merge_last_good`]).
 
+use crate::knob::{Knob, KnobKind};
 use se_proto::{Value, parse_duration_ms};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -111,6 +112,9 @@ pub struct ProjectDef {
     pub tick_hz: u32,
     /// Seed for deterministic randomness (transition pools, sim payloads).
     pub seed: u64,
+    /// `[transitions]`: how scenes switch when the target scene (and its pair) gives no pool
+    /// or `name` of its own; its `ms`/`lights` are the base the scene's override key by key.
+    pub transitions: TransitionPool,
     /// Everything else (devices, safety, palette, api, …) for subsystems.
     #[serde(flatten)]
     pub extra: BTreeMap<String, toml::Value>,
@@ -133,6 +137,7 @@ impl Default for ProjectDef {
             lfo: BTreeMap::new(),
             tick_hz: 240,
             seed: 0x5eed,
+            transitions: TransitionPool::default(),
             extra: BTreeMap::new(),
         }
     }
@@ -288,8 +293,11 @@ impl Default for TransitionVoteDef {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct LightsRef {
+    /// A cue list to run (`cue` alone) or, with `cuelist`, one of its cues.
     pub cue: Option<String>,
     pub cuelist: Option<String>,
+    /// A light look (`lights/palettes/<look>.toml`) held on the lights it covers.
+    pub look: Option<String>,
     pub hold: Option<Dur>,
 }
 
@@ -333,9 +341,12 @@ impl SceneDef {
 #[serde(default)]
 pub struct TransitionDef {
     pub name: String,
+    /// Display name (the file name when absent).
+    pub label: Option<String>,
     /// `morph | shader | combined | cut`
     pub kind: String,
-    /// WGSL file (relative to the project) for shader/combined.
+    /// For shader/combined: a built-in shader name (`crate::transitions::SHADERS`), a WGSL file
+    /// relative to the project (`*.wgsl`), or `patch.<id>`.
     pub shader: Option<String>,
     pub ms: Option<Dur>,
     pub ease: se_proto::Ease,
@@ -349,6 +360,7 @@ impl Default for TransitionDef {
     fn default() -> Self {
         TransitionDef {
             name: String::new(),
+            label: None,
             kind: "morph".into(),
             shader: None,
             ms: None,
@@ -373,8 +385,11 @@ pub enum Conflict {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct PresetFx {
+    /// A built-in effect (`glitch` → trigger `fx.glitch`) or any trigger address (`patch.confetti`).
     pub name: String,
     pub hold: Option<Dur>,
+    /// Trigger payload (`level`, `attack`, `release`, …). For built-in effects the other keys
+    /// are the effect's settings (`speed = 2.0` → `fx.glitch.speed`), held until it has faded out.
     #[serde(flatten)]
     pub params: BTreeMap<String, Value>,
 }
@@ -413,6 +428,94 @@ pub struct PresetDef {
     pub on_release: Vec<String>,
     pub scene: Option<String>,
     pub mode: Option<String>,
+    /// The few premade controls the operator may turn (`[[knob]]`). Each drives an address this
+    /// quick effect already changes; its value lives where firing picks it up ([`KnobSlot`]).
+    #[serde(rename = "knob")]
+    pub knobs: Vec<Knob>,
+}
+
+/// Where a quick effect keeps a knob's value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum KnobSlot {
+    /// `set = { "<target>" = … }`: held while it runs.
+    Set,
+    /// Key `key` of `fx` entry `index`: the target is that entry's trigger address plus the key
+    /// (`fx.shake.strength` → `{ name = "shake", strength = … }`, `patch.confetti.count` →
+    /// `{ name = "patch.confetti", count = … }`). Built-in effect settings are held while it
+    /// runs; other keys (an overlay's `count`, `level`) go with the trigger when it fires.
+    Fx { index: usize, key: String },
+}
+
+/// Keys of an `fx` entry that are timings, not values a knob can turn.
+const FX_TIMINGS: &[&str] = &["name", "hold", "attack", "release"];
+
+impl PresetFx {
+    /// The trigger address it fires: `fx.<name>` for a built-in effect, else the name itself.
+    pub fn trigger(&self) -> String {
+        if self.name.contains('.') { self.name.clone() } else { format!("fx.{}", self.name) }
+    }
+}
+
+impl PresetDef {
+    /// Where the value of a knob driving `target` lives, if this quick effect changes it.
+    pub fn knob_slot(&self, target: &str) -> Option<KnobSlot> {
+        if self.set.contains_key(target) {
+            return Some(KnobSlot::Set);
+        }
+        self.fx.iter().enumerate().find_map(|(index, f)| {
+            let key = target.strip_prefix(f.trigger().as_str())?.strip_prefix('.')?;
+            (!key.is_empty() && !key.contains('.') && !FX_TIMINGS.contains(&key)).then(|| KnobSlot::Fx { index, key: key.to_string() })
+        })
+    }
+
+    /// A knob's value as the file has it (`None` when its slot has no value yet: the effect's
+    /// own default applies when it fires).
+    pub fn knob_value(&self, target: &str) -> Option<&Value> {
+        match self.knob_slot(target)? {
+            KnobSlot::Set => self.set.get(target),
+            KnobSlot::Fx { index, key } => self.fx[index].params.get(&key),
+        }
+    }
+
+    /// Put a knob's value where firing picks it up. `false` when no knob drives `target`.
+    pub fn set_knob_value(&mut self, target: &str, v: Value) -> bool {
+        match self.knobs.iter().any(|k| k.target == target).then(|| self.knob_slot(target)).flatten() {
+            Some(KnobSlot::Set) => {
+                self.set.insert(target.to_string(), v);
+                true
+            }
+            Some(KnobSlot::Fx { index, key }) => {
+                self.fx[index].params.insert(key, v);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Knobs are well formed and each drives something this quick effect changes, with a value
+    /// of the right kind there.
+    fn check_knobs(&self) -> Result<(), String> {
+        crate::knob::check_all(&self.knobs)?;
+        for k in &self.knobs {
+            if self.knob_slot(&k.target).is_none() {
+                return Err(format!(
+                    "knob “{}”: this quick effect doesn't change `{}` — put it in `set`, or name a setting of one of its effects (like `fx.shake.strength`)",
+                    k.label, k.target
+                ));
+            }
+            if let Some(v) = self.knob_value(&k.target)
+                && k.fit(v).is_none()
+            {
+                let want = match k.kind {
+                    KnobKind::Number => "a number",
+                    KnobKind::Color => "a colour written \"#rrggbb\"",
+                    KnobKind::Choice => "one of its options' values",
+                };
+                return Err(format!("knob “{}”: the value this quick effect has for `{}` must be {want}", k.label, k.target));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
@@ -628,6 +731,7 @@ impl Config {
                 for c in p.commands.iter().chain(&p.on_release) {
                     se_proto::Op::parse(c).map_err(|e| format!("command `{c}`: {e}"))?;
                 }
+                p.check_knobs()?;
                 self.presets.insert(p.name.clone(), p);
             }
             "rules" => {
@@ -691,29 +795,33 @@ impl Config {
     fn validate(&mut self) {
         let mut errs = Vec::new();
         let known = |n: &str| self.transitions.contains_key(n) || BUILTIN_TRANSITIONS.contains(&n);
-        for s in self.scenes.values() {
-            let file = self.files.get(&format!("scenes/{}", s.name)).cloned().unwrap_or_default();
-            let mut err = |msg: String| errs.push(ConfigError { file: file.clone(), msg });
-            for e in &s.transitions.pool {
-                if !known(&e.name) {
-                    err(format!("unknown transition `{}`", e.name));
+        // a pool (scene's or the project default) and its `from` pairs
+        let check = |p: &TransitionPool, err: &mut dyn FnMut(String)| {
+            for n in p.pool.iter().map(|e| &e.name).chain(&p.name) {
+                if !known(n) {
+                    err(format!("unknown transition `{n}`"));
                 }
             }
-            for (from, p) in &s.transitions.from {
+            for (from, pair) in &p.from {
                 if !self.scenes.contains_key(from) {
                     err(format!("[transitions.from.{from}]: unknown scene `{from}`"));
                 }
-                if !p.from.is_empty() {
+                if !pair.from.is_empty() {
                     err(format!("[transitions.from.{from}] can't have its own `from` pools"));
                 }
-                for n in p.pool.iter().map(|e| &e.name).chain(&p.name) {
+                for n in pair.pool.iter().map(|e| &e.name).chain(&pair.name) {
                     if !known(n) {
                         err(format!("[transitions.from.{from}]: unknown transition `{n}`"));
                     }
                 }
             }
+        };
+        for s in self.scenes.values() {
+            let file = self.files.get(&format!("scenes/{}", s.name)).cloned().unwrap_or_default();
+            check(&s.transitions, &mut |msg| errs.push(ConfigError { file: file.clone(), msg }));
         }
         let project_file = self.files.get("project/project").cloned().unwrap_or_else(|| "project.toml".into());
+        check(&self.project.transitions, &mut |msg| errs.push(ConfigError { file: project_file.clone(), msg }));
         match self.transition_vote() {
             Ok(Some(v)) => {
                 for n in v.choices.iter().filter(|n| !known(n)) {

@@ -701,6 +701,11 @@ fn appearance(app: &mut App, ui: &mut Ui, t: &Theme) {
                     app.set_zoom(ui.ctx(), 1.0);
                 }
             });
+            ui.add_space(spacing::S);
+            let mut reduced = app.preferences.reduce_motion;
+            if widgets::toggle_row(ui, t, "Reduce motion", "Turn off animated movement in controls and menus.", &mut reduced).changed() {
+                app.set_reduced_motion(ui.ctx(), reduced);
+            }
             widgets::details(ui, t, "appearance-details", "Details", |ui| {
                 widgets::fact(ui, t, "Theme", if t.light { "Light" } else { "Dark" });
                 widgets::fact(ui, t, "Numbers font", app.font_name().unwrap_or("Built-in"));
@@ -719,7 +724,7 @@ fn appearance(app: &mut App, ui: &mut Ui, t: &Theme) {
 fn key_words(a: &ActionInfo) -> &'static str {
     match a.id {
         "palette" => "Find anything",
-        "mode.toggle" => "Jump between Live and Scenes",
+        "mode.toggle" => "Jump between Overview and Edit",
         "take" => "Put the preview on air",
         "undo" => "Undo",
         "redo" => "Redo",
@@ -787,7 +792,7 @@ fn shortcuts_card(app: &mut App, ui: &mut Ui, t: &Theme) {
                     }
                 }
                 _ => {
-                    widgets::hint(ui, t, "The quick effect buttons on the Live page, in order.");
+                    widgets::hint(ui, t, "The quick effect buttons on Overview, in order.");
                     ui.add_space(spacing::XS);
                     for a in shortcuts::ACTIONS.iter().filter(|a| a.id.starts_with("pad.")) {
                         key_row(app, ui, t, &format!("Effect button {}", a.id.trim_start_matches("pad.")), &[a.id]);

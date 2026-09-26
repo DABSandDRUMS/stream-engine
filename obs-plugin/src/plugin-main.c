@@ -13,6 +13,7 @@
 #include <util/config-file.h>
 #include <util/dstr.h>
 #include <util/platform.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 OBS_DECLARE_MODULE()
@@ -696,6 +697,7 @@ static void task_restore(void *param)
 struct cmd_task {
 	json_int_t id;
 	char op[64];
+	char *dir; /* owned; optional absolute directory for record.start */
 };
 
 static void reply(json_int_t id, bool ok, const char *error, json_t *result)
@@ -705,6 +707,46 @@ static void reply(json_int_t id, bool ok, const char *error, json_t *result)
 	if (result)
 		json_object_set_new(m, "result", result);
 	send_json(m);
+}
+
+/* OBS's recording output is assembled from the profile settings on start. Write
+ * both output modes, so switching Simple/Advanced doesn't silently revert to an
+ * old location. Never change these settings while a file is being written. */
+static bool set_record_directory(const char *dir, char *err, size_t len)
+{
+	if (!dir || dir[0] != '/') {
+		snprintf(err, len, "recording directory must be an absolute path");
+		return false;
+	}
+	struct stat st;
+	if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode)) {
+		snprintf(err, len, "recording directory does not exist: %s", dir);
+		return false;
+	}
+	if (access(dir, W_OK | X_OK) != 0) {
+		snprintf(err, len, "recording directory is not writable: %s", dir);
+		return false;
+	}
+	config_t *cfg = obs_frontend_get_profile_config();
+	if (!cfg) {
+		snprintf(err, len, "OBS profile config is not available");
+		return false;
+	}
+	config_set_string(cfg, "SimpleOutput", "FilePath", dir);
+	config_set_string(cfg, "AdvOut", "RecFilePath", dir);
+	config_set_string(cfg, "AdvOut", "FFFilePath", dir);
+	if (config_save_safe(cfg, "tmp", NULL) != CONFIG_SUCCESS) {
+		snprintf(err, len, "cannot save OBS recording directory in profile");
+		return false;
+	}
+	refresh_profile_info();
+	char *actual = obs_frontend_get_current_record_output_path();
+	bool matches = actual && strcmp(actual, dir) == 0;
+	if (!matches)
+		snprintf(err, len, "OBS profile recording directory differs from requested path");
+	bfree(actual);
+	atomic_store(&force_status, true);
+	return matches;
 }
 
 static void task_cmd(void *param)
@@ -728,9 +770,16 @@ static void task_cmd(void *param)
 		reply(t->id, true, NULL, json_string(active ? "stopping" : "not streaming"));
 	} else if (strcmp(op, "record.start") == 0) {
 		bool already = obs_frontend_recording_active();
-		if (!already)
+		if (already) {
+			reply(t->id, true, NULL, json_string("already recording"));
+		} else if (!t->dir) {
+			reply(t->id, false, "record.start needs a show directory", NULL);
+		} else if (!set_record_directory(t->dir, err, sizeof(err))) {
+			reply(t->id, false, err, NULL);
+		} else {
 			obs_frontend_recording_start();
-		reply(t->id, true, NULL, json_string(already ? "already recording" : "starting"));
+			reply(t->id, true, NULL, json_pack("{s:s, s:s}", "state", "starting", "dir", t->dir));
+		}
 	} else if (strcmp(op, "record.stop") == 0) {
 		bool active = obs_frontend_recording_active();
 		if (active)
@@ -760,6 +809,7 @@ static void task_cmd(void *param)
 		snprintf(msg, sizeof(msg), "unknown op '%s'", op);
 		reply(t->id, false, msg, NULL);
 	}
+	bfree(t->dir);
 	bfree(t);
 }
 
@@ -825,9 +875,15 @@ static void on_message(void *ud, json_t *msg)
 			blog(LOG_WARNING, "[stream-engine] cmd without id/op ignored");
 			return;
 		}
+		const char *dir = json_string_value(json_object_get(msg, "dir"));
+		if (dir && strlen(dir) >= 768) {
+			reply(json_integer_value(id), false, "recording directory is too long for OBS path reporting", NULL);
+			return;
+		}
 		struct cmd_task *task = bzalloc(sizeof(*task));
 		task->id = json_integer_value(id);
 		snprintf(task->op, sizeof(task->op), "%s", op);
+		task->dir = dir ? bstrdup(dir) : NULL;
 		blog(LOG_INFO, "[stream-engine] engine command %" PRId64 ": %s", (int64_t)task->id, task->op);
 		obs_queue_task(OBS_TASK_UI, task_cmd, task, false);
 	}

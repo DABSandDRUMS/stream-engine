@@ -91,11 +91,48 @@ pub struct CueList {
     pub tracking: bool,
     pub back_fade_ms: Option<u64>,
     pub cues: Vec<Cue>,
+    /// Premade knobs (`[[knob]]`, targets `cue.<id>.…`; see [`crate::knobs`]).
+    pub knobs: Vec<crate::knobs::Bound>,
 }
 
 impl CueList {
     pub fn index_of(&self, id: &str) -> Option<usize> {
         self.cues.iter().position(|c| c.id == id)
+    }
+
+    /// The one-cue list a held look runs: every target of the palette takes the palette
+    /// (target-level `palette = "<name>"`), so each covered head gets the palette's most
+    /// specific value per attribute and heads it has no value for stay untouched.
+    pub fn look(p: &Palette) -> CueList {
+        let cue = Cue {
+            id: "look".into(),
+            label: p.label.clone(),
+            fade_ms: 0,
+            fade_out_ms: None,
+            delay_ms: 0,
+            follow_ms: None,
+            wait_ms: None,
+            ease: Ease::Linear,
+            block: false,
+            release: Vec::new(),
+            effects: Vec::new(),
+            stop_effects: Vec::new(),
+            set: p.set.iter().map(|(t, _)| (t.clone(), Vec::new(), vec![p.name.clone()])).collect(),
+            addresses: Vec::new(),
+        };
+        CueList {
+            name: p.name.clone(),
+            label: p.label.clone(),
+            priority: None,
+            looped: false,
+            autorelease: false,
+            release_ms: 0,
+            fader_start: false,
+            tracking: true,
+            back_fade_ms: None,
+            cues: vec![cue],
+            knobs: Vec::new(),
+        }
     }
 }
 
@@ -129,6 +166,8 @@ struct RawList {
     cue: Vec<RawCue>,
     #[serde(default)]
     notes: Option<String>,
+    #[serde(default)]
+    knob: Vec<se_core::knob::Knob>,
 }
 
 #[derive(Deserialize)]
@@ -252,7 +291,7 @@ impl CueList {
                 return Err(format!("duplicate cue id `{}`", c.id));
             }
         }
-        Ok(CueList {
+        let mut list = CueList {
             name: name.into(),
             label: r.label.unwrap_or_else(|| name.to_string()),
             priority: r.priority,
@@ -263,7 +302,14 @@ impl CueList {
             tracking: r.tracking.unwrap_or(true),
             back_fade_ms: opt_dur(&r.back_fade, "back_fade")?,
             cues,
-        })
+            knobs: Vec::new(),
+        };
+        se_core::knob::check_all(&r.knob)?;
+        for k in r.knob {
+            let at = crate::knobs::cue_at(&list, &k)?;
+            list.knobs.push(crate::knobs::Bound { knob: k, at });
+        }
+        Ok(list)
     }
 }
 
@@ -419,6 +465,13 @@ pub fn validate(list: &CueList, rig: &Rig, palettes: &BTreeMap<String, Palette>,
             if e != "all" && !effects.contains(e) {
                 errors.push(format!("cue `{}`: stop of unknown effect `{e}`", c.id));
             }
+        }
+    }
+    for b in &list.knobs {
+        if let crate::knobs::At::CueSet { target, attr, .. } = &b.at
+            && let Some(err) = crate::knobs::check_attr_range(rig, &b.knob, target, attr)
+        {
+            errors.push(err);
         }
     }
     errors.sort();

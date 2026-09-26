@@ -1,16 +1,15 @@
-//! Recordings (§15.6, §18): clips waiting for review as video cards (play, approve, reject, trim,
-//! upload), and past streams as cards (date, length, markers, clips) with each stream's markers
-//! timeline, recordings and clips; clip-making progress in words. Data: `sessions`,
-//! `clips.session {session}` (one reply per stream, kept side by side), `clips {status}` queries
-//! and `clips.*` actions (se-clips).
+//! Clipping: recording storage and health, time-aligned past shows, and clips to review.
+//! Queries are throttled; only the selected show's timeline is loaded.
 
 use crate::app::App;
+use crossbeam_channel::{Receiver, TryRecvError};
 use egui::{Align, Align2, CornerRadius, Layout, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2};
 use se_proto::{Op, Value};
 use se_ui_kit::Theme;
 use se_ui_kit::theme::{font, font_mono, font_semibold, mix, radius, spacing, type_scale};
 use se_ui_kit::widgets::{self, Kind, Size, icon};
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -20,12 +19,28 @@ const CLIP_MIN: f32 = 400.0;
 /// View state kept in egui memory (no fields on `App`).
 #[derive(Default)]
 struct State {
-    /// 0 = clips to review, 1 = past streams.
+    /// 0 = recording, 1 = past streams, 2 = clips.
     view: usize,
-    /// The first view was picked (clips to review when there are any, else past streams).
-    view_picked: bool,
     /// Stream open in "Past streams".
     selected: Option<String>,
+    /// Folder chooser result, delivered outside the UI thread.
+    chooser: Option<Receiver<Result<Option<PathBuf>, String>>>,
+    folder: Option<String>,
+    folder_saved: Option<String>,
+    folder_notice: Option<(String, bool)>,
+    read_at: Option<Instant>,
+    status_at: Option<Instant>,
+    timeline_key: Option<String>,
+    timeline_seq: u64,
+    timeline: Option<Value>,
+    window_requested: Option<(f64, f64)>,
+    window_updated: Option<Instant>,
+    /// Visible show window and a two-click clip selection, in show seconds.
+    window_start: f64,
+    window_len: f64,
+    range: Option<(f64, f64)>,
+    range_start: Option<f64>,
+    cursor: Option<f64>,
     /// Decoded thumbnails by `path#version` (`None` = unreadable).
     thumbs: HashMap<String, Option<egui::TextureHandle>>,
     /// Trim edits per clip id: (in, out) in recording seconds.
@@ -122,27 +137,25 @@ pub fn ui(app: &mut App, ui: &mut Ui) {
     let st = state(ui);
     let mut st = st.lock().unwrap_or_else(|p| p.into_inner());
     refresh(app, &mut st);
+    folder_result(app, &mut st);
 
     let pending = app.m.f("clips.pending").max(0.0) as i64;
-    if !st.view_picked && app.m.has("clips.pending") {
-        st.view_picked = true;
-        st.view = usize::from(pending == 0);
-    }
     ui.horizontal(|ui| {
-        let review = if pending > 0 { format!("Clips to review ({pending})") } else { "Clips to review".to_string() };
-        if widgets::segmented(ui, &t, &mut st.view, &[review.as_str(), "Past streams"]) {
-            st.last_query = None;
-        }
+        let review = if pending > 0 { format!("Clips ({pending} to review)") } else { "Clips".to_string() };
+        widgets::segmented(ui, &t, &mut st.view, &["Recording", "Past streams", review.as_str()]);
     });
     ui.add_space(spacing::M);
-    job_banner(app, ui, &t);
+    if st.view != 0 {
+        job_banner(app, ui, &t);
+    }
     match st.view {
-        0 => queue(app, ui, &t, &mut st),
-        _ => streams(app, ui, &t, &mut st),
+        0 => recording(app, ui, &t, &mut st),
+        1 => streams(app, ui, &t, &mut st),
+        _ => queue(app, ui, &t, &mut st),
     }
 }
 
-/// Periodic + event-driven queries.
+/// Periodic + event-driven queries. A large timeline is fetched only for the selected stream.
 fn refresh(app: &mut App, st: &mut State) {
     if !app.m.connected {
         return;
@@ -150,6 +163,18 @@ fn refresh(app: &mut App, st: &mut State) {
     if st.asked_conn != app.m.conn_gen {
         st.asked_conn = app.m.conn_gen;
         st.asked.clear();
+        st.timeline_key = None;
+        st.timeline = None;
+        st.read_at = None;
+        st.status_at = None;
+    }
+    if st.read_at.is_none_or(|at| at.elapsed().as_secs() >= 30) {
+        st.read_at = Some(Instant::now());
+        app.m.query_as("clipping.project", "project.read", Value::map().with("path", "project.toml"));
+    }
+    if st.status_at.is_none_or(|at| at.elapsed().as_secs() >= 3) {
+        st.status_at = Some(Instant::now());
+        app.m.query("recording.status", Value::Null);
     }
     let newest = app.m.events.back().map(|e| e.id).unwrap_or(0);
     let changed = newest != st.last_event
@@ -165,7 +190,6 @@ fn refresh(app: &mut App, st: &mut State) {
         st.last_sessions = Some(Instant::now());
         app.m.query("sessions", Value::Null);
     }
-    // one summary per stream (markers, clips, recordings); the open one and the live one refresh
     let ids: Vec<String> = app.m.q_list("sessions").iter().map(|x| s(x, "id").to_string()).collect();
     for id in ids {
         if st.asked.insert(id.clone()) {
@@ -180,6 +204,317 @@ fn refresh(app: &mut App, st: &mut State) {
             app.m.query_as(&key(&id), "clips.session", Value::map().with("session", id.clone()));
         }
     }
+    if st.view == 1
+        && let Some(id) = &st.selected
+    {
+        let window = (st.window_start.round(), st.window_len.max(1.0).round());
+        let new_show = st.timeline_key.as_deref() != Some(id);
+        let moved = st.window_requested != Some(window);
+        let settled = st.window_updated.is_none_or(|at| at.elapsed().as_millis() >= 300);
+        if new_show || changed || (moved && settled) {
+            st.timeline_key = Some(id.clone());
+            if new_show {
+                st.timeline = None;
+            }
+            st.window_requested = Some(window);
+            st.timeline_seq = app.m.q_seq("clipping.timeline");
+            app.m.query_as(
+                "clipping.timeline",
+                "recording.timeline",
+                Value::map().with("session", id.clone()).with("from", window.0).with("to", window.0 + window.1).with("limit", 500i64),
+            );
+        }
+        let seq = app.m.q_seq("clipping.timeline");
+        if seq != st.timeline_seq {
+            st.timeline_seq = seq;
+            let reply = app.m.q("clipping.timeline").cloned();
+            let same_session = reply.as_ref().and_then(|v| v.get_path("manifest.session")).and_then(Value::as_str).is_none_or(|session| session == id);
+            if same_session {
+                st.timeline = reply;
+            } else {
+                st.timeline_key = None;
+            }
+        }
+    }
+}
+
+/// The portal's file:// URI is percent-encoded; keep filesystem bytes intact.
+fn folder_uri(uri: &str) -> Option<PathBuf> {
+    let raw = uri.strip_prefix("file://")?;
+    let raw = if raw.starts_with('/') { raw } else { raw.strip_prefix("localhost")? };
+    if !raw.starts_with('/') {
+        return None;
+    }
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut n = 0;
+    while n < bytes.len() {
+        if bytes[n] == b'%'
+            && n + 2 < bytes.len()
+            && let Ok(hex) = std::str::from_utf8(&bytes[n + 1..n + 3])
+            && let Ok(byte) = u8::from_str_radix(hex, 16)
+        {
+            out.push(byte);
+            n += 3;
+        } else {
+            out.push(bytes[n]);
+            n += 1;
+        }
+    }
+    use std::os::unix::ffi::OsStringExt;
+    Some(PathBuf::from(std::ffi::OsString::from_vec(out)))
+}
+
+fn choose_folder() -> Receiver<Result<Option<PathBuf>, String>> {
+    let (tx, rx) = crossbeam_channel::bounded(1);
+    let spawned = std::thread::Builder::new().name("se-ui-recording-folder".into()).spawn({
+        let tx = tx.clone();
+        move || {
+            let result = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(rt) => rt.block_on(async {
+                    use ashpd::desktop::ResponseError;
+                    use ashpd::desktop::file_chooser::SelectedFiles;
+                    let answer = SelectedFiles::open_file()
+                        .title("Choose where to save recordings")
+                        .accept_label("Use this folder")
+                        .directory(true)
+                        .modal(true)
+                        .send()
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    match answer.response() {
+                        Ok(files) => files
+                            .uris()
+                            .first()
+                            .map(|uri| folder_uri(uri.as_str()).ok_or_else(|| "This folder isn't on your computer. Choose a local folder instead.".to_string()))
+                            .transpose(),
+                        Err(ashpd::Error::Response(ResponseError::Cancelled)) => Ok(None),
+                        Err(e) => Err(e.to_string()),
+                    }
+                }),
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = tx.send(result);
+        }
+    });
+    if let Err(e) = spawned {
+        let _ = tx.send(Err(e.to_string()));
+    }
+    rx
+}
+
+fn save_folder(app: &mut App, st: &mut State, dir: &str) {
+    let dir = dir.trim();
+    if dir.is_empty() {
+        st.folder_notice = Some(("Choose a folder first.".into(), true));
+        return;
+    }
+    app.m.action("project.write", Value::map().with("path", "project.toml").with("set", Value::map().with("recording.dir", dir)));
+    st.folder = Some(dir.into());
+    st.folder_notice = Some(("Recording folder saved. New recordings will go there.".into(), false));
+    st.read_at = None;
+    st.status_at = None;
+}
+
+fn folder_result(app: &mut App, st: &mut State) {
+    let Some(rx) = &st.chooser else { return };
+    match rx.try_recv() {
+        Ok(Ok(Some(dir))) => {
+            st.chooser = None;
+            save_folder(app, st, &dir.to_string_lossy());
+        }
+        Ok(Ok(None)) => st.chooser = None,
+        Ok(Err(e)) => {
+            st.chooser = None;
+            st.folder_notice = Some((format!("The folder chooser didn't open. Enter a folder below and press Save folder. ({e})"), true));
+        }
+        Err(TryRecvError::Disconnected) => {
+            st.chooser = None;
+            st.folder_notice = Some(("The folder chooser closed unexpectedly. Enter a folder below and press Save folder.".into(), true));
+        }
+        Err(TryRecvError::Empty) => {}
+    }
+}
+
+fn recording(app: &mut App, ui: &mut Ui, t: &Theme, st: &mut State) {
+    let status = app.m.q("recording.status").cloned();
+    let saved = app
+        .m
+        .q("clipping.project")
+        .and_then(|v| v.get_path("text"))
+        .and_then(Value::as_str)
+        .and_then(|text| text.parse::<toml::Value>().ok())
+        .and_then(|doc| doc.get("recording")?.get("dir")?.as_str().map(String::from));
+    let saved = saved.or_else(|| status.as_ref().map(|r| s(r, "dir").to_string()).filter(|d| !d.is_empty())).unwrap_or_else(|| "~/Videos/Stream Engine".into());
+    if st.folder.is_none() || st.folder.as_deref() == st.folder_saved.as_deref() {
+        st.folder = Some(saved.clone());
+    }
+    st.folder_saved = Some(saved.clone());
+    let mut dest = st.folder.clone().unwrap_or(saved.clone());
+    if !app.m.connected {
+        widgets::callout(ui, t, widgets::Tone::Warn, icon::WARN, "Not connected", "Start Stream Engine to see recording health and save your folder.", None);
+    }
+    widgets::titled(
+        ui,
+        t,
+        "Save recordings",
+        "Each stream gets its own folder here.",
+        |_| {},
+        |ui| {
+            ui.set_width(ui.available_width());
+            widgets::hint(ui, t, "Recording folder");
+            ui.horizontal_wrapped(|ui| {
+                ui.add(widgets::field(&mut dest).desired_width(ui.available_width().min(560.0)));
+                if widgets::button_ex(
+                    ui,
+                    t,
+                    None,
+                    "Save folder",
+                    Kind::Secondary,
+                    Size::Medium,
+                    0.0,
+                    app.m.connected && !dest.trim().is_empty() && dest.trim() != saved,
+                )
+                .clicked()
+                {
+                    let dir = dest.clone();
+                    save_folder(app, st, &dir);
+                }
+                if widgets::button_ex(
+                    ui,
+                    t,
+                    None,
+                    if st.chooser.is_some() { "Choosing…" } else { "Choose folder…" },
+                    Kind::Primary,
+                    Size::Medium,
+                    0.0,
+                    app.m.connected && st.chooser.is_none(),
+                )
+                .clicked()
+                {
+                    st.chooser = Some(choose_folder());
+                    st.folder_notice = None;
+                }
+            });
+            if let Some((message, error)) = &st.folder_notice {
+                widgets::callout(
+                    ui,
+                    t,
+                    if *error { widgets::Tone::Warn } else { widgets::Tone::Ok },
+                    if *error { icon::WARN } else { icon::CHECK },
+                    if *error { "Folder not saved" } else { "Folder saved" },
+                    message,
+                    None,
+                );
+            }
+        },
+    );
+    st.folder = Some(dest);
+    ui.add_space(spacing::L);
+    widgets::titled(
+        ui,
+        t,
+        "Recording now",
+        "Check the video before you need to clip it.",
+        |_| {},
+        |ui| {
+            ui.set_width(ui.available_width());
+            let Some(r) = status.as_ref().filter(|r| !r.is_null()) else {
+                let failed = app.m.query_errors.contains_key("recording.status");
+                if widgets::empty_state(
+                    ui,
+                    t,
+                    icon::FILM,
+                    if failed { "Recording status unavailable" } else { "Checking recording…" },
+                    if failed { "Try again. If it keeps failing, check Settings → Troubleshooting." } else { "This takes a moment." },
+                    failed.then_some("Try again"),
+                ) {
+                    st.status_at = None;
+                }
+                return;
+            };
+            let active = r.get_path("active").is_some_and(Value::truthy);
+            let health = s(r, "health.status");
+            let (health_label, health_color) = match health {
+                "pass" => ("Working", t.green),
+                "warn" => ("Needs a look", t.yellow),
+                "fail" => ("Needs a look", t.bright_red),
+                _ if active => ("Recording", t.accent),
+                _ => ("Off", t.text_dim),
+            };
+            ui.horizontal_wrapped(|ui| {
+                widgets::badge(ui, t, if active { "Recording" } else { "Not recording" }, if active { t.green } else { t.text_dim });
+                widgets::badge(ui, t, health_label, health_color);
+            });
+            ui.add_space(spacing::S);
+            let path = s(r, "path");
+            if active && !path.is_empty() {
+                widgets::fact(ui, t, "Current video", path);
+            }
+            if let Some(free) = r.get_path("free_gb").and_then(Value::as_f64) {
+                widgets::fact(ui, t, "Free space", &format!("{free:.1} GB"));
+                if free < 10.0 {
+                    widgets::callout(
+                        ui,
+                        t,
+                        widgets::Tone::Warn,
+                        icon::WARN,
+                        "Recording space is low",
+                        "Choose a folder on a disk with more space before your next stream.",
+                        None,
+                    );
+                }
+            }
+            if let Some(tracks) = r.get_path("tracks") {
+                let description = match tracks {
+                    Value::List(names) if !names.is_empty() => {
+                        let titles: Vec<_> = names
+                            .iter()
+                            .enumerate()
+                            .map(|(n, v)| {
+                                let name = if let Some(name) = v.as_str() { name } else { s(v, "name") };
+                                if name.is_empty() { format!("Track {}", n + 1) } else { name.to_string() }
+                            })
+                            .collect();
+                        format!("{} · {}", names.len(), titles.join(", "))
+                    }
+                    Value::Int(n) if *n > 0 => format!("{n} sound tracks"),
+                    _ => String::new(),
+                };
+                if !description.is_empty() {
+                    widgets::fact(ui, t, "Sound tracks", &description);
+                }
+            }
+            if matches!(health, "warn" | "fail") {
+                let detail = s(r, "health.detail");
+                widgets::callout(
+                    ui,
+                    t,
+                    widgets::Tone::Warn,
+                    icon::WARN,
+                    "Recording needs a look",
+                    if detail.is_empty() { "Check OBS and your available disk space before continuing." } else { detail },
+                    None,
+                );
+            }
+            ui.add_space(spacing::M);
+            if widgets::button_ex(
+                ui,
+                t,
+                Some(if active { icon::CROSS } else { icon::FILM }),
+                if active { "Stop recording" } else { "Start recording" },
+                if active { Kind::Secondary } else { Kind::Primary },
+                Size::Medium,
+                0.0,
+                app.m.connected,
+            )
+            .clicked()
+            {
+                app.m.action(if active { "obs.record.stop" } else { "obs.record.start" }, Value::Null);
+                st.status_at = None;
+            }
+        },
+    );
 }
 
 /// Clip-making stage in words.
@@ -263,15 +598,29 @@ fn queue(app: &mut App, ui: &mut Ui, t: &Theme, st: &mut State) {
     if clips.is_empty() {
         widgets::panel(ui, t, |ui| {
             ui.set_width(ui.available_width());
+            let failed = app.m.query_errors.contains_key("clips");
+            let (title, body) = if failed {
+                ("Couldn't load clips", "Try again. If it keeps failing, check Settings → Troubleshooting.")
+            } else if app.m.connected && app.m.q("clips").is_none() {
+                ("Looking for clips…", "This takes a moment.")
+            } else if !app.m.connected {
+                ("Clips unavailable", "Start Stream Engine to review your clips.")
+            } else {
+                ("Nothing to review", "After a stream, Stream Engine picks the best moments and cuts them into clips. They wait for you here.")
+            };
             if widgets::empty_state(
                 ui,
                 t,
                 icon::FILM,
-                "Nothing to review",
-                "After a stream, Stream Engine picks the best moments and cuts them into clips. They wait for you here.",
-                Some("See past streams"),
+                title,
+                body,
+                if failed { Some("Try again") } else { app.m.q("clips").is_some().then_some("See past streams") },
             ) {
-                st.view = 1;
+                if failed {
+                    st.last_query = None;
+                } else {
+                    st.view = 1;
+                }
             }
         });
         return;
@@ -290,14 +639,35 @@ fn streams(app: &mut App, ui: &mut Ui, t: &Theme, st: &mut State) {
     if sessions.is_empty() {
         widgets::panel(ui, t, |ui| {
             ui.set_width(ui.available_width());
-            let body = if app.m.connected { "Your streams show up here after you go live." } else { "They show up here once Stream Engine is running." };
-            widgets::empty_state(ui, t, icon::FILM, "No streams yet", body, None);
+            let failed = app.m.query_errors.contains_key("sessions");
+            let body = if failed {
+                "Try again. If it keeps failing, check Settings → Troubleshooting."
+            } else if app.m.connected {
+                "Your streams show up here after you go live."
+            } else {
+                "They show up here once Stream Engine is running."
+            };
+            if widgets::empty_state(
+                ui,
+                t,
+                icon::FILM,
+                if failed {
+                    "Couldn't load streams"
+                } else if app.m.connected && app.m.q("sessions").is_none() {
+                    "Looking for streams…"
+                } else {
+                    "No streams yet"
+                },
+                body,
+                failed.then_some("Try again"),
+            ) {
+                st.last_sessions = None;
+            }
         });
         return;
     }
     if st.selected.as_ref().is_none_or(|sel| !sessions.iter().any(|x| s(x, "id") == sel)) {
-        st.selected = Some(s(&sessions[0], "id").to_string());
-        st.last_query = None;
+        select_stream(st, s(&sessions[0], "id"));
     }
     let list_w = (ui.available_width() * 0.28).clamp(300.0, 420.0);
     let h = ui.available_height();
@@ -307,8 +677,7 @@ fn streams(app: &mut App, ui: &mut Ui, t: &Theme, st: &mut State) {
             egui::ScrollArea::vertical().id_salt("streams-list").auto_shrink([false, false]).show(ui, |ui| {
                 for sess in &sessions {
                     if stream_card(app, ui, t, st, sess) {
-                        st.selected = Some(s(sess, "id").to_string());
-                        st.last_query = None;
+                        select_stream(st, s(sess, "id"));
                     }
                     ui.add_space(spacing::S);
                 }
@@ -323,6 +692,22 @@ fn streams(app: &mut App, ui: &mut Ui, t: &Theme, st: &mut State) {
             });
         });
     });
+}
+fn select_stream(st: &mut State, id: &str) {
+    if st.selected.as_deref() == Some(id) {
+        return;
+    }
+    st.selected = Some(id.to_string());
+    st.last_query = None;
+    st.timeline_key = None;
+    st.timeline = None;
+    st.window_start = 0.0;
+    st.window_len = 1800.0;
+    st.window_requested = None;
+    st.window_updated = None;
+    st.range = None;
+    st.range_start = None;
+    st.cursor = None;
 }
 
 /// Start, end (now while it runs) and whether it's still open.
@@ -378,20 +763,21 @@ fn stream(app: &mut App, ui: &mut Ui, t: &Theme, st: &mut State, id: &str) {
     let clips = data.as_ref().map(|d| list(d, "clips").to_vec()).unwrap_or_default();
     let markers = data.as_ref().map(|d| list(d, "markers").to_vec()).unwrap_or_default();
     let recorded = data.as_ref().is_some_and(|d| !list(d, "recordings").is_empty());
+    let running = app.m.str("clips.job.state") == "running" && app.m.str("clips.job.session") == id;
+    let process = std::cell::Cell::new(false);
     widgets::titled(
         ui,
         t,
         &when(start),
         &format!("{}{}", length_words(end - start), if open && id == app.m.session { " so far" } else { "" }),
         |ui| {
-            let running = app.m.str("clips.job.state") == "running" && app.m.str("clips.job.session") == id;
             let label = if clips.is_empty() { "Make clips" } else { "Make clips again" };
             let kind = if clips.is_empty() { Kind::Primary } else { Kind::Secondary };
             if widgets::button_ex(ui, t, Some(icon::FILM), label, kind, Size::Medium, 0.0, !running && recorded)
                 .on_hover_text(if recorded { "Find the best moments and cut them into clips" } else { "There's no recording of this stream to cut clips from" })
                 .clicked()
             {
-                app.m.command(Op::Action { name: "clips.process".into(), args: Value::map().with("session", id.to_string()) });
+                process.set(true);
             }
         },
         |ui| {
@@ -422,8 +808,8 @@ fn stream(app: &mut App, ui: &mut Ui, t: &Theme, st: &mut State, id: &str) {
                     t,
                     widgets::Tone::Warn,
                     icon::WARN,
-                    "OBS didn't record this stream",
-                    "Clips are cut from OBS recordings. Before your next stream, press Start Recording in OBS (or turn on automatic recording in OBS's settings under Output → Recording).",
+                    "No recording for this stream",
+                    "Clips need a video recording. Check the Recording tab before your next stream.",
                     None,
                 );
             } else {
@@ -457,15 +843,40 @@ fn stream(app: &mut App, ui: &mut Ui, t: &Theme, st: &mut State, id: &str) {
                 }
             });
             ui.add_space(spacing::M);
-            widgets::section(ui, t, icon::TIMELINE, "Markers");
-            timeline(ui, t, &markers, start * 1000, end * 1000);
-            ui.horizontal(|ui| {
-                legend(ui, t, t.accent, "Hype moment (found for you)");
-                ui.add_space(spacing::M);
-                legend(ui, t, t.cyan, "Marker you placed");
-            });
+            let show_data = st.timeline.take();
+            if let Some(show) = show_data.as_ref() {
+                show_timeline(app, ui, t, st, id, show, data, &clips);
+            } else if app.m.query_errors.contains_key("clipping.timeline") {
+                if widgets::callout(
+                    ui,
+                    t,
+                    widgets::Tone::Warn,
+                    icon::WARN,
+                    "Couldn't load the timeline",
+                    "Try again. Your markers and clips are still available.",
+                    Some("Try again"),
+                ) {
+                    st.timeline_key = None;
+                }
+            } else {
+                widgets::hint(ui, t, "Loading this stream's timeline…");
+            }
+            let indexed = show_data.as_ref().is_some_and(|show| show.get_path("manifest").is_some_and(|v| !v.is_null()));
+            st.timeline = show_data;
+            if !indexed {
+                widgets::section(ui, t, icon::TIMELINE, "Markers");
+                timeline(ui, t, &markers, start * 1000, end * 1000);
+                ui.horizontal(|ui| {
+                    legend(ui, t, t.accent, "Hype moment");
+                    ui.add_space(spacing::M);
+                    legend(ui, t, t.cyan, "Marker you placed");
+                });
+            }
         },
     );
+    if process.get() {
+        app.m.command(Op::Action { name: "clips.process".into(), args: Value::map().with("session", id.to_string()) });
+    }
     ui.add_space(spacing::L);
     let count = if clips.len() == 1 { "1 clip".to_string() } else { format!("{} clips", clips.len()) };
     widgets::titled(
@@ -479,10 +890,8 @@ fn stream(app: &mut App, ui: &mut Ui, t: &Theme, st: &mut State, id: &str) {
             if clips.is_empty() {
                 let body = if !recorded {
                     "There's no recording of this stream, so there's nothing to cut."
-                } else if markers.is_empty() {
-                    "No markers in this stream, so there were no moments to cut."
                 } else {
-                    "Press Make clips to cut the best moments."
+                    "Make clips to find the best moments, or select a range on the timeline."
                 };
                 widgets::empty_state(ui, t, icon::FILM, "No clips yet", body, None);
             } else {
@@ -490,6 +899,254 @@ fn stream(app: &mut App, ui: &mut Ui, t: &Theme, st: &mut State, id: &str) {
             }
         },
     );
+}
+
+/// Draw only the chosen window, so a multi-hour show stays legible at either screen width.
+fn show_timeline(app: &mut App, ui: &mut Ui, t: &Theme, st: &mut State, id: &str, show: &Value, session: &Value, clips: &[Value]) {
+    let Some(manifest) = show.get_path("manifest").filter(|v| !v.is_null()) else {
+        widgets::callout(
+            ui,
+            t,
+            widgets::Tone::Info,
+            icon::TIMELINE,
+            "Timeline not ready",
+            "This stream hasn't been indexed yet. You can still use its markers and Make clips.",
+            None,
+        );
+        return;
+    };
+    let duration = f(manifest, "duration");
+    if duration <= 0.0 {
+        widgets::hint(ui, t, "The timeline will appear after the recording has finished.");
+        return;
+    }
+    widgets::section(ui, t, icon::TIMELINE, "Show timeline");
+    widgets::hint(ui, t, "Move through the show, then click twice to choose the start and end of a clip.");
+    ui.add_space(spacing::S);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new("Show").color(t.text_dim));
+        for (label, seconds) in [("15 min", 900.0), ("30 min", 1800.0), ("1 hour", 3600.0), ("All", duration)] {
+            if widgets::button_ex(ui, t, None, label, if (st.window_len - seconds).abs() < 1.0 { Kind::Secondary } else { Kind::Ghost }, Size::Small, 0.0, true)
+                .clicked()
+            {
+                st.window_len = seconds;
+                st.window_updated = Some(Instant::now());
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(320));
+            }
+        }
+    });
+    let len = st.window_len.clamp(1.0, duration);
+    st.window_start = st.window_start.clamp(0.0, (duration - len).max(0.0));
+    if duration > len && ui.add(egui::Slider::new(&mut st.window_start, 0.0..=(duration - len)).text("From").custom_formatter(|v, _| short_clock(v))).changed()
+    {
+        st.window_updated = Some(Instant::now());
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(320));
+    }
+    let left = st.window_start;
+    let right = left + len;
+    let width = ui.available_width().max(240.0);
+    let gutter = 104.0;
+    let chart_width = (width - gutter).max(140.0);
+    let x = |at: f64| gutter + (((at - left) / len).clamp(0.0, 1.0) as f32) * chart_width;
+    let tracks = [
+        ("songs", "Songs", t.accent),
+        ("talk", "Talk", t.cyan),
+        ("scenes", "Scenes", t.modulated()),
+        ("modes", "Show", t.text_dim),
+        ("lights", "Lights", t.yellow),
+        ("effects", "Effects", t.cyan),
+        ("chat", "Chat activity", t.green),
+        ("moments", "Hype", t.accent),
+        ("markers", "Markers", t.cyan),
+        ("clips", "Clips", t.green),
+    ];
+    // Per lane we draw a bounded number of visible items. The query is cached until another
+    // show is selected; changing the window does not fetch the whole timeline again.
+    for (name, title, color) in tracks {
+        let items = match name {
+            "talk" => list(show, "transcript"),
+            "clips" => clips,
+            _ => list(show, &format!("lanes.{name}")),
+        };
+        if items.is_empty() && !matches!(name, "songs" | "markers") {
+            continue;
+        }
+        let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 38.0), Sense::click());
+        let canvas = Rect::from_min_max(Pos2::new(rect.left() + gutter, rect.top()), rect.max);
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(canvas, CornerRadius::same(3), t.inset);
+        painter.text(Pos2::new(rect.left(), rect.center().y), Align2::LEFT_CENTER, title, font(type_scale::SMALL), t.text_dim);
+        let tx = |time: f64| rect.left() + x(time);
+        let step = [60.0, 300.0, 900.0, 1800.0, 3600.0].into_iter().find(|step| len / step <= 10.0).unwrap_or(7200.0);
+        let mut tick = (left / step).ceil() * step;
+        while tick <= right {
+            let xx = tx(tick);
+            painter.line_segment([Pos2::new(xx, rect.top()), Pos2::new(xx, rect.bottom())], Stroke::new(1.0, t.border));
+            if name == "songs" {
+                painter.text(Pos2::new(xx + 3.0, rect.top() + 2.0), Align2::LEFT_TOP, short_clock(tick), font_mono(type_scale::SMALL), t.text_dim);
+            }
+            tick += step;
+        }
+        if let Some((a, b)) = st.range
+            && b >= left
+            && a <= right
+        {
+            let band = Rect::from_min_max(Pos2::new(tx(a.max(left)), canvas.top()), Pos2::new(tx(b.min(right)), canvas.bottom()));
+            painter.rect_filled(band, CornerRadius::ZERO, t.accent.gamma_multiply(0.20));
+        }
+        if let Some(a) = st.range_start.or(st.cursor)
+            && (left..=right).contains(&a)
+        {
+            let xx = tx(a);
+            painter.line_segment([Pos2::new(xx, canvas.top()), Pos2::new(xx, canvas.bottom())], Stroke::new(1.5, t.accent));
+        }
+        let mut hovered = None;
+        let mut drawn = 0;
+        for item in items {
+            let begin = match name {
+                "clips" => f(item, "in"),
+                _ => item.get_path("t0").and_then(Value::as_f64).or_else(|| item.get_path("t").and_then(Value::as_f64)).unwrap_or(0.0),
+            };
+            let end = if name == "clips" { f(item, "out") } else { item.get_path("t1").and_then(Value::as_f64).unwrap_or(begin) };
+            if end < left || begin > right {
+                continue;
+            }
+            if drawn == 250 {
+                break;
+            }
+            drawn += 1;
+            let a = tx(begin.max(left));
+            let b = tx(end.min(right)).max(a + 3.0);
+            let bar = Rect::from_min_max(Pos2::new(a, canvas.top() + 10.0), Pos2::new(b.min(canvas.right()), canvas.bottom() - 4.0));
+            painter.rect_filled(bar, CornerRadius::same(2), color.gamma_multiply(0.60));
+            let raw = if name == "talk" {
+                s(item, "text")
+            } else if name == "clips" {
+                s(item, "title")
+            } else {
+                s(item, "label")
+            };
+            let label = if matches!(name, "scenes" | "modes" | "effects" | "lights") {
+                std::borrow::Cow::Owned(crate::views::live::nice(raw))
+            } else {
+                std::borrow::Cow::Borrowed(raw)
+            };
+            if bar.width() > 78.0 {
+                let cropped: String = label.chars().take((bar.width() / 7.0).floor().max(2.0) as usize).collect();
+                painter.text(Pos2::new(bar.left() + 4.0, bar.center().y), Align2::LEFT_CENTER, cropped, font(type_scale::SMALL), t.fg);
+            }
+            if response.hover_pos().is_some_and(|p| bar.expand2(Vec2::new(2.0, 3.0)).contains(p)) {
+                hovered = Some(format!(
+                    "{} · {}{}\n{}{}",
+                    short_clock(begin),
+                    label,
+                    if end > begin { format!(" – {}", short_clock(end)) } else { String::new() },
+                    [s(item, "title"), s(item, "user"), s(item, "channel")].into_iter().filter(|v| !v.is_empty()).collect::<Vec<_>>().join(" · "),
+                    if item.get_path("dmca").is_some_and(Value::truthy) { "\nRisk of DMCA" } else { "" }
+                ));
+            }
+        }
+        if drawn == 250 {
+            painter.text(Pos2::new(canvas.right() - 4.0, rect.center().y), Align2::RIGHT_CENTER, "Zoom in for more", font(type_scale::SMALL), t.fg);
+        }
+        if let Some(text) = hovered {
+            response.clone().on_hover_text(text);
+        }
+        if response.clicked()
+            && let Some(pos) = response.interact_pointer_pos()
+            && canvas.contains(pos)
+        {
+            let at = (left + ((pos.x - canvas.left()) / chart_width) as f64 * len).clamp(0.0, duration);
+            st.cursor = Some(at);
+            if let Some(first) = st.range_start.take() {
+                if (at - first).abs() >= 1.0 {
+                    st.range = Some((first.min(at), first.max(at)));
+                } else {
+                    st.range_start = Some(first);
+                }
+            } else {
+                st.range = None;
+                st.range_start = Some(at);
+            }
+        }
+    }
+    ui.add_space(spacing::M);
+    ui.horizontal_wrapped(|ui| {
+        if let Some((mut a, mut b)) = st.range {
+            ui.label(RichText::new("Selected").color(t.text_dim));
+            ui.add(egui::DragValue::new(&mut a).range(0.0..=(b - 1.0).max(0.0)).speed(0.5).custom_formatter(|v, _| short_clock(v)));
+            ui.label(RichText::new("to").color(t.text_dim));
+            ui.add(egui::DragValue::new(&mut b).range((a + 1.0)..=duration).speed(0.5).custom_formatter(|v, _| short_clock(v)));
+            st.range = Some((a, b));
+            let min = f(session, "min_len");
+            let max = f(session, "max_len");
+            let valid = b - a >= min && b - a <= max && recording_covers(manifest, session, a, b);
+            if widgets::button_ex(ui, t, None, "Make clip", Kind::Primary, Size::Medium, 0.0, app.m.connected && valid).clicked() {
+                app.m.action("clips.make", Value::map().with("session", id).with("in", a).with("out", b));
+            }
+            if widgets::button_ex(ui, t, None, "Clear", Kind::Ghost, Size::Small, 0.0, true).clicked() {
+                st.range = None;
+                st.range_start = None;
+            }
+        } else if let Some(a) = st.range_start {
+            widgets::hint(ui, t, &format!("Start at {}. Click again to choose the end.", short_clock(a)));
+        } else {
+            widgets::hint(ui, t, "Click once for the start, then again for the end.");
+        }
+        let at = st.cursor.or_else(|| st.range.map(|(a, _)| a)).unwrap_or(0.0);
+        if widgets::button_ex(ui, t, Some(icon::PLAY), "Play from here", Kind::Secondary, Size::Medium, 0.0, !list(manifest, "recordings").is_empty()).clicked()
+        {
+            play_recording(app, manifest, at);
+        }
+    });
+    if let Some((a, b)) = st.range {
+        let min = f(session, "min_len");
+        let max = f(session, "max_len");
+        if b - a < min || b - a > max {
+            widgets::hint(ui, t, &format!("Choose a clip between {min:.0} and {max:.0} seconds long."));
+        } else if !recording_covers(manifest, session, a, b) {
+            widgets::hint(ui, t, "Choose a range inside one available wide recording.");
+        }
+    }
+}
+
+/// A selection cannot cross an OBS recording boundary or use a missing/vertical recording.
+fn recording_covers(manifest: &Value, session: &Value, start: f64, end: f64) -> bool {
+    list(manifest, "recordings").iter().any(|rec| {
+        s(rec, "canvas") != "tall"
+            && f(rec, "offset") <= start
+            && f(rec, "offset") + f(rec, "duration") >= end
+            && list(session, "recordings").iter().any(|file| s(file, "path") == s(rec, "path") && file.get_path("exists").is_some_and(Value::truthy))
+    })
+}
+
+fn play_recording(app: &mut App, manifest: &Value, at: f64) {
+    let recordings = list(manifest, "recordings");
+    let chosen = recordings
+        .iter()
+        .filter(|r| s(r, "canvas") != "tall" && f(r, "offset") <= at)
+        .max_by(|a, b| f(a, "offset").total_cmp(&f(b, "offset")))
+        .or_else(|| recordings.iter().find(|r| s(r, "canvas") != "tall"));
+    let Some(rec) = chosen else {
+        app.m.toast("No video recording was found for this point.", true);
+        return;
+    };
+    let path = s(rec, "path");
+    if !std::path::Path::new(path).is_file() {
+        app.m.toast("That recording has moved. Restore it to its original folder to play it.", true);
+        return;
+    }
+    let offset = (at - f(rec, "offset")).max(0.0);
+    if let Err(e) = std::process::Command::new("mpv")
+        .arg(format!("--start={offset:.2}"))
+        .arg("--")
+        .arg(path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        app.m.toast(format!("Couldn't play the recording. Install mpv or check the file. ({e})"), true);
+    }
 }
 
 fn legend(ui: &mut Ui, t: &Theme, c: egui::Color32, text: &str) {
@@ -630,11 +1287,11 @@ fn clip_card(app: &mut App, ui: &mut Ui, t: &Theme, st: &mut State, c: &Value, s
         let named = s(c, "title");
         let title = if named.is_empty() { format!("Moment {}", i(c, "rank")) } else { named.to_string() };
         ui.horizontal(|ui| {
-            ui.label(RichText::new(title).font(font_semibold(type_scale::LARGE)).color(t.fg));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let (txt, col) = status_words(t, &status);
-                widgets::badge(ui, t, txt, col);
-            });
+            let available = (ui.available_width() - 110.0).max(120.0);
+            ui.add_sized([available, 23.0], egui::Label::new(RichText::new(title.clone()).font(font_semibold(type_scale::LARGE)).color(t.fg)).truncate())
+                .on_hover_text(&title);
+            let (txt, col) = status_words(t, &status);
+            widgets::badge(ui, t, txt, col);
         });
         let mut sub = Vec::new();
         if show_stream && let Some(start) = app.m.q_list("sessions").iter().find(|x| s(x, "id") == s(c, "session")).map(|x| i(x, "started_at")) {
@@ -642,6 +1299,29 @@ fn clip_card(app: &mut App, ui: &mut Ui, t: &Theme, st: &mut State, c: &Value, s
         }
         sub.push(format!("{} long", short_clock(f(c, "duration"))));
         widgets::hint(ui, t, &sub.join(" · "));
+        if s(c, "kind") == "song" || !s(c, "song").is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                widgets::badge(ui, t, "Song", t.accent);
+                let song = s(c, "song");
+                if !song.is_empty() {
+                    ui.add(egui::Label::new(RichText::new(song).color(t.fg)).truncate()).on_hover_text(song);
+                }
+                let requester = s(c, "requester");
+                if !requester.is_empty() {
+                    ui.label(RichText::new(format!("Requested by {requester}")).color(t.text_dim));
+                }
+            });
+            let channel = s(c, "context.channel");
+            let video = s(c, "context.video");
+            if !channel.is_empty() {
+                widgets::hint(ui, t, &format!("From {channel}"));
+            }
+            if !video.is_empty() {
+                widgets::details(ui, t, ("song-context", id), "Song source", |ui| {
+                    widgets::fact(ui, t, "Video", video);
+                });
+            }
+        }
         // why it was picked
         ui.add_space(spacing::XS);
         ui.horizontal_wrapped(|ui| {
@@ -651,9 +1331,16 @@ fn clip_card(app: &mut App, ui: &mut Ui, t: &Theme, st: &mut State, c: &Value, s
             for l in list(c, "labels").iter().filter_map(Value::as_str) {
                 widgets::badge(ui, t, &crate::views::live::nice(l), t.yellow);
             }
-            let music = c.get_path("music_dropped").is_some_and(Value::truthy);
-            let (txt, col) = if music { ("Music removed", t.green) } else { ("May include music", t.yellow) };
-            widgets::badge(ui, t, txt, col).on_hover_text(s(c, "audio"));
+            if c.get_path("dmca_risk").is_some_and(Value::truthy) {
+                widgets::badge(ui, t, "Risk of DMCA", t.yellow).on_hover_text("This clip includes a requested song. Review its rights before uploading.");
+            }
+            if s(c, "kind") == "song" {
+                widgets::badge(ui, t, "Music preserved", t.modulated());
+            } else {
+                let music = c.get_path("music_dropped").is_some_and(Value::truthy);
+                let (txt, col) = if music { ("Music removed", t.green) } else { ("May include music", t.yellow) };
+                widgets::badge(ui, t, txt, col).on_hover_text(s(c, "audio"));
+            }
         });
         // what was said
         let captions = s(c, "captions");
@@ -662,9 +1349,13 @@ fn clip_card(app: &mut App, ui: &mut Ui, t: &Theme, st: &mut State, c: &Value, s
         let more = if captions.chars().count() > 220 { "…" } else { "" };
         ui.add(
             egui::Label::new(
-                RichText::new(if captions.is_empty() { "No talking in this one.".into() } else { format!("“{shown}{more}”") })
-                    .italics()
-                    .color(if captions.is_empty() { t.text_faint } else { t.fg }),
+                RichText::new(if captions.is_empty() {
+                    if s(c, "kind") == "song" { "Music and crowd moments.".into() } else { "No talking in this one.".into() }
+                } else {
+                    format!("“{shown}{more}”")
+                })
+                .italics()
+                .color(if captions.is_empty() { t.text_faint } else { t.fg }),
             )
             .wrap(),
         );

@@ -284,6 +284,10 @@ impl Obs {
 
     /// Sends a command to the plugin and waits for its reply.
     pub async fn command(&self, op: &str) -> Result<serde_json::Value, String> {
+        self.command_with_dir(op, None).await
+    }
+
+    async fn command_with_dir(&self, op: &str, dir: Option<String>) -> Result<serde_json::Value, String> {
         let (rx, timeout) = {
             let mut g = self.inner.lock();
             if g.conn.as_ref().and_then(|c| c.hello.as_ref()).is_none() {
@@ -293,7 +297,7 @@ impl Obs {
             g.next_cmd += 1;
             let (tx, rx) = oneshot::channel();
             g.pending.insert(id, (op.to_string(), tx));
-            if !self.send(&g, &EngineMsg::Cmd { id, op: op.into() }) {
+            if !self.send(&g, &EngineMsg::Cmd { id, op: op.into(), dir }) {
                 g.pending.remove(&id);
                 return Err("OBS plugin connection closed".into());
             }
@@ -397,6 +401,9 @@ impl Obs {
         self.set(g, "obs.record.dir", s.record_dir.clone());
         if !s.record_path.is_empty() {
             self.set(g, "obs.record.path", s.record_path.clone());
+        } else if s.recording {
+            // The previous file is not evidence that a newly starting output has opened one.
+            self.set(g, "obs.record.path", "");
         }
         self.set(g, "obs.fps", round1(s.fps));
         self.set(g, "obs.render.ms", (s.render_ms * 100.0).round() / 100.0);
@@ -802,12 +809,12 @@ pub fn action_op(name: &str) -> Option<&'static str> {
 
 async fn route_actions(obs: Arc<Obs>, mut rx: mpsc::UnboundedReceiver<Command>) {
     while let Some(c) = rx.recv().await {
-        let Op::Action { name, .. } = &c.op else { continue };
+        let Op::Action { name, args } = &c.op else { continue };
         let Some(op) = action_op(name) else {
             obs.ctx.hub.log("warn", TARGET, format!("unknown action `{name}`"));
             continue;
         };
-        let (obs, name) = (obs.clone(), name.clone());
+        let (obs, name, automatic) = (obs.clone(), name.clone(), args.get_path("auto").is_some_and(Value::truthy));
         tokio::spawn(async move {
             // Rehearsal never goes on air (§17.2). Ask the core rather than the snapshot: a
             // "mode, then stream.start" pair from one client is then judged after the mode change.
@@ -816,7 +823,34 @@ async fn route_actions(obs: Arc<Obs>, mut rx: mpsc::UnboundedReceiver<Command>) 
                 obs.ctx.hub.emit(Event::new("obs.dry_run", Origin::Obs, Value::map().with("action", name.as_str())));
                 return;
             }
-            match obs.command(op).await {
+            if op == "record.start" && automatic && obs.ctx.hub.with_core(|core| Value::Bool(core.mode_str() == "offline")).await.truthy() {
+                return;
+            }
+            if op == "record.start" && !obs.ctx.hub.snapshot.load().bool("obs.link") {
+                obs.ctx.hub.log("error", TARGET, format!("{name} failed: OBS plugin not connected"));
+                return;
+            }
+            let dir = if op == "record.start" && !obs.ctx.hub.snapshot.load().bool("obs.record.active") {
+                match obs.ctx.hub.query("recording.prepare", Value::Null).await {
+                    Ok(v) => match v.as_str() {
+                        Some(path) if !path.is_empty() => Some(path.to_owned()),
+                        _ => {
+                            obs.ctx.hub.log("error", TARGET, "recording.prepare did not return a show folder");
+                            return;
+                        }
+                    },
+                    Err(e) => {
+                        obs.ctx.hub.log("error", TARGET, format!("{name} failed: {e}"));
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
+            if op == "record.start" && automatic && obs.ctx.hub.with_core(|core| Value::Bool(core.mode_str() == "offline")).await.truthy() {
+                return;
+            }
+            match obs.command_with_dir(op, dir).await {
                 Ok(v) => obs.ctx.hub.log("info", TARGET, format!("{name}: {}", if v.is_null() { "ok".to_string() } else { v.to_string() })),
                 Err(e) => obs.ctx.hub.log("error", TARGET, format!("{name} failed: {e}")),
             }

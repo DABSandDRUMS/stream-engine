@@ -160,13 +160,18 @@ impl Project {
 
     /// Atomic write (temp + rename), remembered so the watcher ignores it.
     pub fn write_file(&self, rel: &str, content: &str) -> Result<()> {
+        self.write_bytes(rel, content.as_bytes())
+    }
+
+    /// [`Project::write_file`] for any bytes (project versions put back binary files too).
+    pub fn write_bytes(&self, rel: &str, content: &[u8]) -> Result<()> {
         let p = self.root.join(rel);
         if let Some(dir) = p.parent() {
             std::fs::create_dir_all(dir)?;
         }
         let tmp = p.with_extension(format!("tmp.{}", std::process::id()));
         std::fs::write(&tmp, content)?;
-        self.written.lock().insert(p.clone(), hash(content.as_bytes()));
+        self.written.lock().insert(p.clone(), hash(content));
         std::fs::rename(&tmp, &p)?;
         Ok(())
     }

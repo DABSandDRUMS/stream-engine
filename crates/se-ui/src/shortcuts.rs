@@ -44,7 +44,7 @@ const fn repeat(a: ActionInfo) -> ActionInfo {
 /// Every action, in display order.
 pub const ACTIONS: &[ActionInfo] = &[
     global(act("palette", "Command palette", &["Ctrl+K"])),
-    act("mode.toggle", "Jump between Live and Scenes", &["Tab"]),
+    act("mode.toggle", "Jump between Overview and Edit", &["Tab"]),
     act("scene.preview.1", "Scene 1 to preview", &["1"]),
     act("scene.preview.2", "Scene 2 to preview", &["2"]),
     act("scene.preview.3", "Scene 3 to preview", &["3"]),

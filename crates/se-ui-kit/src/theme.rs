@@ -170,7 +170,8 @@ impl Theme {
         Theme::omarchy_path().and_then(|p| std::fs::read_to_string(p).ok()).map(|s| Theme::parse(&s)).unwrap_or_default()
     }
 
-    /// Apply to egui: every surface, stroke, and text color comes from the tokens.
+    /// Apply to egui: every surface, stroke, and text color comes from the tokens, so any plain
+    /// egui widget left in a view still looks and moves like the kit.
     pub fn apply(&self, ctx: &egui::Context, zoom: f32) {
         let mut v = if self.light { Visuals::light() } else { Visuals::dark() };
         v.override_text_color = Some(self.fg);
@@ -185,23 +186,26 @@ impl Theme {
         v.error_fg_color = self.bright_red;
         v.selection.bg_fill = mix(self.bg, self.accent, 0.3);
         v.selection.stroke = Stroke::new(1.0, self.accent);
+        v.text_cursor.stroke = Stroke::new(2.0, self.accent);
         v.window_stroke = Stroke::new(1.0, self.border);
         v.window_corner_radius = CornerRadius::same(radius::CARD);
-        v.menu_corner_radius = CornerRadius::same(radius::CONTROL);
+        v.menu_corner_radius = CornerRadius::same(radius::CONTROL + 2);
         v.window_shadow = egui::Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(90) };
-        v.popup_shadow = egui::Shadow { offset: [0, 6], blur: 18, spread: 0, color: Color32::from_black_alpha(80) };
+        v.popup_shadow = egui::Shadow { offset: [0, 8], blur: 22, spread: 0, color: Color32::from_black_alpha(85) };
         v.indent_has_left_vline = false;
         v.striped = false;
         v.slider_trailing_fill = true;
         v.handle_shape = egui::style::HandleShape::Circle;
+        v.interact_cursor = Some(egui::CursorIcon::PointingHand);
         let r = CornerRadius::same(radius::CONTROL);
         // `bg_fill` paints slider rails and other recessed parts, `weak_bg_fill` paints buttons
+        let lift = mix(self.surface_hi, self.fg, 0.07);
         for (w, fill, stroke) in [
             (&mut v.widgets.noninteractive, self.surface, self.border),
             (&mut v.widgets.inactive, self.surface_hi, self.border),
-            (&mut v.widgets.hovered, mix(self.surface_hi, self.fg, 0.06), self.border),
+            (&mut v.widgets.hovered, lift, mix(self.border, self.fg, 0.18)),
             (&mut v.widgets.active, mix(self.surface_hi, self.accent, 0.2), self.accent),
-            (&mut v.widgets.open, self.surface_hi, self.border),
+            (&mut v.widgets.open, mix(self.surface_hi, self.accent, 0.12), self.accent),
         ] {
             w.bg_fill = self.inset;
             w.weak_bg_fill = fill;
@@ -212,19 +216,45 @@ impl Theme {
         }
         v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, self.text_dim);
         v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, self.border);
+        let reduced = crate::motion::reduced(ctx);
+        ctx.add_plugin(crate::motion::PopupMotion::default());
         ctx.set_theme(if self.light { egui::Theme::Light } else { egui::Theme::Dark });
         ctx.all_styles_mut(|s| {
             s.visuals = v.clone();
+            s.animation_time = crate::motion::egui_animation_time(reduced);
             s.spacing.item_spacing = egui::vec2(spacing::S, spacing::S);
             s.spacing.button_padding = egui::vec2(spacing::M + 2.0, spacing::S);
             s.spacing.interact_size.y = 32.0;
             s.spacing.slider_rail_height = 4.0;
             s.spacing.window_margin = Margin::same(spacing::L as i8);
-            s.spacing.menu_margin = Margin::same(spacing::S as i8);
+            s.spacing.menu_margin = Margin::same(6);
             s.spacing.combo_width = 180.0;
+            s.spacing.combo_height = 320.0;
             s.spacing.text_edit_width = 240.0;
-            s.spacing.scroll = egui::style::ScrollStyle::floating();
+            s.spacing.tooltip_width = 320.0;
+            s.spacing.icon_width = 18.0;
+            s.spacing.icon_width_inner = 10.0;
+            s.spacing.icon_spacing = spacing::S;
+            // thin floating scroll bars that fade in while the pointer is over the list
+            s.spacing.scroll = egui::style::ScrollStyle {
+                bar_width: 8.0,
+                floating_width: 4.0,
+                handle_min_length: 24.0,
+                bar_inner_margin: 3.0,
+                bar_outer_margin: 2.0,
+                foreground_color: true,
+                dormant_handle_opacity: 0.0,
+                active_handle_opacity: 0.28,
+                interact_handle_opacity: 0.5,
+                dormant_background_opacity: 0.0,
+                active_background_opacity: 0.0,
+                interact_background_opacity: 0.0,
+                ..egui::style::ScrollStyle::floating()
+            };
             s.interaction.selectable_labels = false;
+            s.interaction.tooltip_delay = 0.35;
+            s.interaction.tooltip_grace_time = 0.3;
+            s.interaction.show_tooltips_only_when_still = true;
             s.text_styles = [
                 (TextStyle::Small, FontId::new(type_scale::SMALL * zoom, FontFamily::Proportional)),
                 (TextStyle::Body, FontId::new(type_scale::BODY * zoom, FontFamily::Proportional)),

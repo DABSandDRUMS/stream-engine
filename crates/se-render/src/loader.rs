@@ -1,11 +1,12 @@
-//! Loader thread: compiles user shaders (shader/particles patches, project transitions), the
+//! Loader thread: compiles user shaders (shader/particles patches, project transitions, the
+//! built-in transition shaders with each transition's settings), the
 //! plan's fused effect chains (`crate::fuse`), and decodes assets (LUTs, masks) off the render
 //! thread (§3.4, §21). A failed compile publishes the
 //! error with the patch source line and sends nothing, so the renderer keeps the last good
 //! pipeline; after a device loss the last good sources are recompiled for the new device.
 
 use crate::lut::Lut;
-use crate::pipelines::{UserPipes, compile_fullscreen, compile_fused, compile_particles, transition_manifest};
+use crate::pipelines::{UserPipes, builtin_transition_wgsl, compile_fullscreen, compile_fused, compile_particles, transition_manifest};
 use crate::plan::{Plan, ShaderSource, TrKind};
 use crate::renderer::{AssetRequest, Msg, PipeKey};
 use crate::resources::{Layouts, WINDOW};
@@ -112,14 +113,22 @@ fn units(plan: &Plan) -> Vec<Result<Unit, (PipeKey, String)>> {
         if !matches!(tp.kind, TrKind::Shader | TrKind::Combined) {
             continue;
         }
-        let Some(ShaderSource::File(rel)) = &tp.shader else { continue };
         let key = PipeKey::Transition(tp.name.clone());
-        let unit = project_path(&plan.project_root, &rel.to_string_lossy()).and_then(|p| read(&p)).map(|s| Unit {
-            key: key.clone(),
-            layout: se_patch::wgsl::Layout::new(&transition_manifest(&tp.name, &tp.params)),
-            kind: UnitKind::Fullscreen,
-            sources: vec![(rel.to_string_lossy().to_string(), s)],
-        });
+        let layout = se_patch::wgsl::Layout::new(&transition_manifest(&tp.name, &tp.params));
+        let unit = match &tp.shader {
+            Some(ShaderSource::File(rel)) => project_path(&plan.project_root, &rel.to_string_lossy()).and_then(|p| read(&p)).map(|s| Unit {
+                key: key.clone(),
+                layout,
+                kind: UnitKind::Fullscreen,
+                sources: vec![(rel.to_string_lossy().to_string(), s)],
+            }),
+            // the plain crossfade needs no settings: the fixed `fade` pipeline draws it
+            Some(ShaderSource::Builtin(name)) if *name != "fade" => match builtin_transition_wgsl(name) {
+                Some(s) => Ok(Unit { key: key.clone(), layout, kind: UnitKind::Fullscreen, sources: vec![(format!("{name}.wgsl"), s.to_string())] }),
+                None => continue,
+            },
+            _ => continue,
+        };
         out.push(unit.map_err(|e| (key, e)));
     }
     for st in &plan.styles {

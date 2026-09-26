@@ -1,8 +1,8 @@
-//! Clips (§18, M10): the hype detector turns chat/events/mic/music into a hype score and
-//! session markers (+ Twitch stream markers); when a session closes, the post-stream job
-//! transcribes the mic track with Whisper, picks in/out on sentence boundaries, ranks, and
-//! cuts wide + tall clips with NVENC, burned-in captions, and without the music track; the
-//! review queue (`clips` query, `clips.approve|reject|retrim|upload`) feeds the UI.
+//! Recording and clips (§18): OBS captures every show in the chosen folder; the session journal
+//! and an indexed show timeline keep video, songs, chat, scenes, lights and transcript aligned.
+//! The hype detector makes markers; the post-show job ranks song and marker candidates, cuts
+//! wide + tall video, and sends them to a human review queue. Talk clips may drop music;
+//! performance clips keep it. The external `rank_command` can supply AI decisions.
 //!
 //! State: `clips.hype.enabled`, `clips.hype.threshold` (live), readback `clips.hype.active`,
 //! `clips.hype.delay_ms`, `clips.hype.markers`, `clips.job.*`, `clips.pending`.
@@ -13,9 +13,12 @@ pub mod captions;
 pub mod config;
 pub mod ffmpeg;
 pub mod hype;
+pub mod index;
 pub mod job;
+pub mod recording;
 pub mod select;
 pub mod session;
+pub mod show;
 pub mod store;
 pub mod tracks;
 pub mod transcribe;
@@ -35,6 +38,7 @@ const TARGET: &str = "clips";
 #[derive(Clone, Debug, PartialEq)]
 enum Work {
     Process(String),
+    Make { session: String, t_in: f64, t_out: f64 },
     Retrim { id: i64, t_in: f64, t_out: f64 },
     Upload(i64),
 }
@@ -122,6 +126,8 @@ pub async fn start(ctx: EngineCtx) -> anyhow::Result<()> {
     tokio::spawn(actions(shared.clone()));
     tokio::spawn(events(shared.clone()));
     register_queries(&shared);
+    recording::start(ctx.clone()).await?;
+    index::start(ctx.clone()).await?;
     tokio::spawn(preflight(shared.clone()));
     // resume jobs interrupted by a restart
     for s in store::jobs_unfinished(&ctx.db).unwrap_or_default() {
@@ -322,9 +328,22 @@ async fn run_work(sh: &Arc<Shared>, w: Work) {
             let _ = store::job_update(&env.db, &session, "running", "load", None, 0, &Value::Null);
             let prog = progress_fn(hub.clone());
             let s = session.clone();
-            let res = tokio::task::spawn_blocking(move || transcribe::niced(nice, move || job::process(&env, &s, &prog)).and_then(|r| r))
-                .await
-                .unwrap_or_else(|e| Err(format!("clip job panicked: {e}")));
+            let index_hub = hub.clone();
+            let index_cfg = show::RecordingConfig::from_section(sh.ctx.project_section("recording").as_ref());
+            let res = tokio::task::spawn_blocking(move || {
+                transcribe::niced(nice, move || {
+                    if let Ok(cfg) = index_cfg
+                        && cfg.index.enabled
+                        && let Err(e) = index::ensure(&job::session_dir(&env, &s), &s, &cfg)
+                    {
+                        index_hub.log("warn", TARGET, format!("show timeline for {s}: {e}; cutting from markers and events"));
+                    }
+                    job::process(&env, &s, &prog)
+                })
+                .and_then(|r| r)
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("clip job panicked: {e}")));
             sh.queued.lock().remove(&session);
             let env = sh.env();
             match res {
@@ -357,6 +376,25 @@ async fn run_work(sh: &Arc<Shared>, w: Work) {
                 }
             }
             job::update_keep(&env, &session);
+        }
+        Work::Make { session, t_in, t_out } => {
+            hub.publish("clips.job.state", Value::Str("running".into()));
+            hub.publish("clips.job.session", Value::Str(session.clone()));
+            hub.publish("clips.job.stage", Value::Str("cutting your selection".into()));
+            let prog = progress_fn(hub.clone());
+            let s = session.clone();
+            let res = tokio::task::spawn_blocking(move || transcribe::niced(nice, move || job::make(&env, &s, t_in, t_out, &prog)).and_then(|r| r))
+                .await
+                .unwrap_or_else(|e| Err(format!("manual clip panicked: {e}")));
+            hub.publish("clips.job.state", Value::Str("idle".into()));
+            match res {
+                Ok(row) => {
+                    job::update_keep(&sh.env(), &row.session);
+                    sh.publish_pending();
+                    hub.emit(Event::new("clips.updated", Origin::System, Value::map().with("id", row.id).with("change", "made").with("clip", row.to_value())));
+                }
+                Err(e) => hub.log("error", TARGET, format!("manual clip for {session}: {e}")),
+            }
         }
         Work::Retrim { id, t_in, t_out } => {
             hub.publish("clips.job.state", Value::Str("running".into()));
@@ -427,6 +465,15 @@ fn action(sh: &Arc<Shared>, name: &str, args: &Value) -> Result<(), String> {
             };
             sh.push(Work::Process(session));
         }
+        "clips.make" => {
+            let session = arg(args, "session", 0).and_then(Value::as_str).ok_or("needs a session")?;
+            let t_in = arg(args, "in", 1).and_then(seconds).ok_or("needs a start time")?;
+            let t_out = arg(args, "out", 2).and_then(seconds).ok_or("needs an end time")?;
+            if !t_in.is_finite() || !t_out.is_finite() || t_in < 0.0 || t_out <= t_in {
+                return Err("select a range with an end after its start".into());
+            }
+            sh.push(Work::Make { session: session.to_string(), t_in, t_out });
+        }
         "clips.approve" | "clips.reject" => {
             let id = id()?;
             let status = if name == "clips.approve" { "approved" } else { "rejected" };
@@ -458,7 +505,7 @@ fn action(sh: &Arc<Shared>, name: &str, args: &Value) -> Result<(), String> {
             }
             sh.push(Work::Upload(id()?));
         }
-        other => return Err(format!("unknown action `{other}` (clips.process|approve|reject|retrim|upload)")),
+        other => return Err(format!("unknown action `{other}` (clips.process|make|approve|reject|retrim|upload)")),
     }
     Ok(())
 }
@@ -486,8 +533,8 @@ fn register_queries(sh: &Arc<Shared>) {
 }
 
 /// `clips {session?, status?, limit?}` → ranked review queue;
-/// `clips.session {session}` → markers timeline + clips + job + recordings;
-/// `clips.jobs` → recent jobs.
+/// `clips.session {session}` → markers timeline + clips + job + recordings + clip length limits;
+/// `clips.jobs` → recent jobs; `clips.feedback {session}` → review decisions.
 fn query(sh: &Shared, name: &str, args: &Value) -> Result<Value, String> {
     let db = &sh.ctx.db;
     let s = |k: &str| args.get_path(k).and_then(Value::as_str).map(String::from);
@@ -523,11 +570,17 @@ fn query(sh: &Shared, name: &str, args: &Value) -> Result<Value, String> {
                 .with("dir", dir.to_string_lossy().into_owned())
                 .with("markers", files.markers.iter().map(session::Marker::to_value).collect::<Vec<_>>())
                 .with("clips", rows.iter().map(store::ClipRow::to_value).collect::<Vec<_>>())
+                .with("min_len", env.cfg.min_len.0 as f64 / 1000.0)
+                .with("max_len", env.cfg.max_len.0 as f64 / 1000.0)
                 .with("job", store::job(db, &session).map_err(e)?.unwrap_or_default())
                 .with("recordings", recordings))
         }
         "clips.jobs" => Ok(Value::List(store::jobs(db, 50).map_err(e)?)),
-        other => Err(format!("unknown query `{other}` (clips | clips.session | clips.jobs)")),
+        "clips.feedback" => {
+            let session = s("session").ok_or("needs session")?;
+            Ok(Value::List(store::feedback(db, &session).map_err(e)?))
+        }
+        other => Err(format!("unknown query `{other}` (clips | clips.session | clips.jobs | clips.feedback)")),
     }
 }
 

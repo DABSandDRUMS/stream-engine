@@ -296,6 +296,7 @@ An event is `{id, ts, type, origin, actor?, payload, causal?}` (`actor` =
 | `policy.accepted`, `policy.rejected`, `policy.pending`, `policy.approved` | chat policy decisions ([twitch.md](twitch.md)) |
 | `twitch.*`, `tip`, … | platform adapters, relay, simulator ([twitch.md](twitch.md), [relay.md](relay.md), [tiktok.md](tiktok.md)) |
 | `osc.<path>` | OSC input ([below](#osc)) |
+| `project.imported`, `project.import.failed`, `project.asset.renamed`, `project.asset.deleted`, `project.asset.failed` | media library actions ([below](#project-media)) |
 | anything | `emit` from rules, patches, clients |
 
 Events with origin `twitch`, `chat`, `relay`, or `sim` and an actor pass the chat policy before
@@ -331,7 +332,7 @@ else by the core. Unknown names reply with ``error: "unknown query `<name>`"``.
 
 | Name | Args | Returns |
 |---|---|---|
-| `presets` | – | `[{name, label, color, active, remaining_ms, toggle, confirm, chat}]` |
+| `presets` | – | `[{name, label, color, active, remaining_ms, toggle, confirm, chat, held, knobs}]` — `held`: it stays on (a `hold`, `toggle`, or `set`), so it can be stopped; `knobs`: its [knobs](#quick-effect-knobs), each with its current `value` |
 | `rules` | – | `[{name, when, if, do, enabled, file, last_fired_ms_ago}]` |
 | `bindings` | – | `[{name, target, signal, enabled, active, output, targets, file, mode, scope}]` |
 | `scenes` | – | `[{name, label, key, nodes, sources}]` |
@@ -346,7 +347,7 @@ else by the core. Unknown names reply with ``error: "unknown query `<name>`"``.
 | `timelines`, `timeline` | –, `{name}` | timeline definitions and state ([timelines.md](timelines.md)) |
 | `sim.presets` | – | `[{name, args}]` |
 | `undo` | – | `{undo, redo}` stack depths |
-| `config.scenes`, `config.presets`, `config.rules`, `config.bindings`, `config.project` | – | parsed project config |
+| `config.scenes`, `config.presets`, `config.transitions`, `config.rules`, `config.bindings`, `config.project` | – | parsed project config (`config.transitions`: every `transitions/*.toml` by name, with `label`, `kind`, `shader`, `ms`, `ease`, `enter`, `exit` and its settings) |
 
 **Engine**
 
@@ -361,6 +362,8 @@ else by the core. Unknown names reply with ``error: "unknown query `<name>`"``.
 | `secrets.status` | – | `[{name, label, set}]` |
 | `project.read` | `{path}` | `{path, exists, text}` |
 | `project.files` | `{kind}`? | `[{kind, name, path}]` |
+| `project.assets` | – | the media library: `[{path, kind, name, bytes, used_by, abs, modified_ms, sound?}]` ([below](#project-media)) |
+| `project.versions` | – | every project version, newest first: `[{id, at_ms, label, auto, kind, changed, first, restored_from}]` ([below](#project-versions)) |
 
 **Subsystems** (details in their docs)
 
@@ -375,7 +378,7 @@ else by the core. Unknown names reply with ``error: "unknown query `<name>`"``.
 | `audio.mix`, `audio.devices`, `analysis.grid {path, force} \| {media}` | [audio.md](audio.md) |
 | `controllers.page {deck, page}`, `controllers.pages`, `controllers.deck`, `controllers.deck.preview {deck, since}`, `controllers.midi`, `controllers.midi.ports`, `controllers.midi.monitor {n, device}`, `controllers.voice`, `controllers.learn` | [controllers.md](controllers.md) |
 | `patches {id}`, `patch.templates` | [patches.md](patches.md) |
-| `clips {session, status, limit}`, `clips.session {session}`, `clips.jobs` | [clips.md](clips.md) |
+| `clips {session, status, limit}`, `clips.session {session}`, `clips.jobs`, `clips.feedback {session}`, `recording.status`, `recording.timeline {session, from?, to?, limit?}` | [clips.md](clips.md) |
 | `timeline.grid {name}`, `timeline.ports` | [timelines.md](timelines.md) |
 | `devices`, `sources` | [devices-and-sources.md](devices-and-sources.md) |
 | `render` | [render.md](render.md) |
@@ -384,6 +387,115 @@ else by the core. Unknown names reply with ``error: "unknown query `<name>`"``.
 | `tts` | [tts.md](tts.md) |
 | `tiktok` | [tiktok.md](tiktok.md) |
 | `giveaway`, `retention`, `remote_mod.request` (used by the relay link) | [extras.md](extras.md) |
+
+### Project media
+
+Media files live in the project's `assets/` folder, one folder per kind: `images` (png, jpg,
+jpeg, webp, gif, svg), `video` (mp4, mov, webm, mkv), `sounds` (wav, mp3, ogg, flac, opus),
+`luts` (cube) and `fonts` (ttf, otf). The UI's Scenes → Media tab and its file picker use:
+
+| Field (`project.assets`) | Meaning |
+|---|---|
+| `path` | project-relative path (`assets/sounds/horn.wav`) — what scenes, presets and patches store |
+| `kind` | `images`, `video`, `sounds`, `luts`, `fonts` (from the extension) |
+| `name` | file name without the extension |
+| `bytes`, `modified_ms` | size, last change (unix ms) |
+| `used_by` | project files that refer to it: its path (`assets/…` anywhere; the part after `assets/` inside TOML strings, e.g. alert images), and for a sound the sampler plays by name, `sound = "<name>"` / `audio.play <name>` in TOML files. `assets/`, `sessions/`, hidden folders and files over 2 MiB are not scanned |
+| `abs` | absolute path (the UI runs on the engine's machine and reads thumbnails directly) |
+| `sound` | the name `audio.play` knows it by (files directly in `assets/sounds/` of a type the sampler loads) |
+
+| Action | Args | Effect |
+|---|---|---|
+| `project.import` | `{src, kind?, name?}` | copy the local file `src` (absolute path) to `assets/<kind>/<slug>.<ext>` (`slug` of `name`, else of the file name; lowercase, `_` for anything else). Never overwrites: a taken name gets `-2`, `-3`, …. Refuses unknown types, folders, files over 2 GB, a `kind` that doesn't match the file, and files already in `assets/`. The copy runs in the background |
+| `project.asset.rename` | `{path, name}` | move the file to `<slug of name>.<ext>` in the same folder and rewrite every reference `used_by` found (a sound's name references follow too, unless a `[sounds.<name>]` entry defines that name). Refuses a name that's taken |
+| `project.asset.delete` | `{path, force?}` | delete the file; refused while something uses it unless `force` |
+
+Events: `project.imported {src, path, kind, name}`, `project.import.failed {src, error}`
+(`error` is a plain sentence for the user), `project.asset.renamed {path, to, updated}`
+(`updated` = the project files rewritten), `project.asset.deleted {path}`,
+`project.asset.failed {path, error, used_by?}`. Changes under `assets/sounds/` also send
+`audio.reload` so the sampler picks them up. Paths are checked like `project.write` paths
+(relative, no `..`, nothing hidden) and must be under `assets/` with a known extension.
+
+### Project versions
+
+The engine keeps the project's history in `<data_dir>/versions/` (never inside the project):
+a version is saved at startup, 5 s after each burst of changes to the project (from any
+writer: `project.write`, `set_base`, imports, a text editor; a steady stream of writes still
+gets one every 60 s), and before anything is put back. Everything in the project is included
+except `sessions/`, hidden files and folders, `node_modules/`, `target/`, symlinks, and editor
+scratch files. File contents are stored once by blake3 hash (text zstd-compressed, media as
+is), so an unchanged video costs nothing per version.
+
+| Field | Meaning |
+|---|---|
+| `id` | version id (a string; unix ms, unique and increasing) |
+| `at_ms` | when it was saved (unix ms) |
+| `kind` | `edit` (saved automatically), `named` (saved by `project.version.save`), `restore`, `undo`, `redo` |
+| `auto` | `kind != "named"` |
+| `label` | the name of a named version |
+| `changed` | project paths added, changed, or removed since the version before it |
+| `first` | the first version (nothing before it) |
+| `restored_from` | restore/undo/redo: `{id, at_ms, label, kind}` of the version put back, else `null` |
+
+| Action | Args | Effect |
+|---|---|---|
+| `project.version.save` | `{label}` | save the project as it is now as a named version (kept forever) |
+| `project.version.restore` | `{id}` | save the current state, then put version `id` back: changed files are rewritten atomically, files the version didn't have are removed (never `sessions/` or anything untracked), the project reloads |
+| `project.undo` | – | put back the state before the latest change; again steps further back (an undo stands for the state it put back); undoing a `restore` brings back what was there before it |
+| `project.redo` | – | right after an undo (nothing changed since): put back what the undo took away |
+
+State: `project.versions.count`, `project.versions.latest` (id), `project.versions.undo` /
+`project.versions.redo` (`{kind, at_ms, changed}` of what they would change, or `null`),
+`project.versions.bytes` (disk used). Events: `project.version.saved {id, kind, label,
+changed}`, `project.version.restored {id, kind, restored_from, changed}`. `health.versions`
+fails while versions can't be saved (disk full, permissions); a failed save is retried every
+minute.
+
+Retention: every version from the last 7 days, then the newest per day for 90 days; named
+versions and the newest version are kept forever. Stored files no kept version uses are
+deleted.
+
+### Quick effect knobs
+
+Quick effects (`presets/<id>.toml`) are written by developers; the operator only turns the few
+premade knobs each one declares. A knob maps to one engine address and a value range:
+
+```toml
+set = { "lights.effect.strobe.rate" = 2.5 }   # where the knob's value lives
+
+[[knob]]
+label = "Strobe speed"             # plain words shown in the UI
+target = "lights.effect.strobe.rate"
+min = 0.5
+max = 3.0
+step = 0.25                        # optional
+unit = "flashes a second"          # optional, plain words; "%" shows value × 100 ("60%", "+30%")
+default = 2.5                      # optional: what "Reset knobs" goes back to
+# kind = "color" (value "#rrggbb", no min/max), or kind = "choice" with
+# options = [{ label = "Slow", value = 1.0 }, { label = "Fast", value = 4.0 }]
+```
+
+The target must be something the quick effect already changes, and its value lives where
+firing picks it up:
+
+- a key of its `set` map (held while it runs), or
+- `<trigger address>.<key>` of one of its `fx` entries — `fx.shake.strength` is the `strength`
+  key of `{ name = "shake" }` (a built-in effect setting, held while the effect runs),
+  `patch.confetti.count` the `count` key of `{ name = "patch.confetti" }` (sent with the trigger
+  when it fires). Timings (`hold`, `attack`, `release`) aren't knobs.
+
+A file whose knobs are malformed (no label, `min` not below `max`, a `default` outside the range
+or not `#rrggbb`, a choice without options, two knobs on one address, a target the quick effect
+doesn't change, or a value of the wrong kind at the target) is a config error for that file
+(query `errors`), with a message naming the knob. Shared type: `se_core::knob::Knob`.
+
+| Action | Args | Effect |
+|---|---|---|
+| `preset.knob` | `{name, target, value, save?}` | turn quick effect `name`'s knob on `target`: the value is fitted to the knob (clamped, snapped to `step`, colour normalised), the next firing uses it, and a running instance's held value follows at once (`set` entries and built-in effect settings; an overlay's burst size and trigger strengths apply on the next firing). With `save` (default true) the value is also written into `presets/<name>.toml` with `toml_edit`, comments kept. Not from chat. |
+
+The Quick effects tab sends `save: false` while a slider is held and `save: true` when it's let
+go or has rested for 0.6 s.
 
 ## Auth
 

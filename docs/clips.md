@@ -1,8 +1,38 @@
-# Clips: hype markers, the post-stream clip job, and review
+# Recording and clips
 
-`se-clips` (PLAN §18, M10). During the show it scores hype and writes markers; when the session
-closes it turns markers into ranked wide + tall clips with burned-in captions and without the
-music track; the Session review view is where you approve, reject, retrim, and upload them.
+`se-clips` (PLAN §18) manages recording, the time-aligned show timeline, and the review queue.
+The live hype detector and manual markers identify moments; song and talking passages can also
+produce candidates. After the show, the clip job ranks them, cuts wide + tall clips, and lets
+you Keep, Skip, Trim, or Upload. A requested-song clip keeps the performance and backing music;
+talk clips may omit music. A `Risk of DMCA` badge is information only, never a filter.
+
+## Recording and show data
+
+Set the recording destination on the **Clipping → Recording** screen. The engine writes the
+choice to `[recording] dir` in `project.toml` and directs OBS's output to a show folder there.
+With `auto = true`, recording starts in preshow/live and stops when you go off air; Start/Stop
+recording remains available manually. A changed destination applies to the next recording.
+The screen also shows whether OBS is recording, the real file and track layout, and free space.
+
+Each recorded show has video files and `data/` beside them. The session journal is copied into
+`data/session/` and a snapshot of the project's text settings into `data/project/` (no secrets or
+assets). `data/show.json` is the versioned time base, `data/lanes/*.jsonl` are the songs, scenes,
+lights, chat, markers and other show context, `data/features.csv` holds sampled values, and
+`data/transcript.jsonl` holds timed speech. All `t` fields mean seconds since the first video
+file began; later recording files have offsets in `show.json`. The index can be rebuilt from
+the original journal. Retention never deletes a recording needed by a pending job or clip review.
+
+```toml
+[recording]
+dir = "~/Videos/Stream Engine"
+auto = true
+modes = ["preshow", "live"]
+snapshot_project = true
+
+[recording.index]
+enabled = true
+transcript = true
+```
 
 ## During the show: the hype detector
 
@@ -82,30 +112,40 @@ track info, `[clips.audio] tracks = ["mic", "music", "band"]` names the streams 
 
 ## Review
 
-**Recordings** page: *Clips to review* (every clip waiting for a decision, as video cards), and
-*Past streams* (one card per stream with its length, markers and clips; open one for its markers
-timeline, recordings and clips). Clip cards: wide + vertical thumbnails (click to play with
-`xdg-open`), reasons, captions, music flag, **Keep** (approve), **Skip** (reject), **Upload**, and
-**Trim** (re-cuts both canvases; the transcript is extended when needed).
+**Clipping** master tab: **Recording** selects the OBS output folder and checks health.
+**Past streams** opens a show with time-aligned lanes (songs, talk, scenes, modes, lights,
+effects, chat activity, hype, markers and existing clips). Choose a time window, click start
+and end on a lane, adjust the times, then **Make clip**. The selection must be between the
+`min_len` and `max_len` returned by `clips.session` and fit inside one wide recording; the
+manual job cuts wide and tall output, transcribes it when appropriate, and adds it to review.
+**Make clips** still runs the automatic ranking job. **Clips** lists the review queue as
+video cards with reasons, captions, music flag, **Keep**, **Skip**, **Upload**, and **Trim**
+(re-cuts both canvases; the transcript is extended when needed).
 
 CLI:
 
 ```sh
 streamctl query clips '{"status": "ready"}'          # ranked review queue
 streamctl query clips.session '{"session": "20260925-200000"}'
+streamctl do "clips.make session=20260925-200000 in=1:02.5 out=1:31" # show time (s or m:ss.mmm)
 streamctl do "clips.approve id=3"
 streamctl do "clips.retrim id=3 in=1:02.5 out=1:31"  # recording time (s or m:ss.mmm)
 streamctl do "clips.upload id=3"
 ```
 
-Retention keeps a session folder while it has queued jobs or clips that are unreviewed or
-approved-but-not-uploaded (`sessions/<id>/.keep`).
+Retention keeps a session folder and its recording while jobs need them or clips await review or
+upload. Decisions and trim changes are saved as feedback beside the show timeline.
 
-## Hooks (off by default)
+## AI ranking
 
-Both are argv lists in `[clips]`; the program gets JSON on stdin and answers JSON on stdout.
+By default, `[clips] auto_rank = true` uses `scripts/rank-clips-omp.py` when both the script and
+`omp` are installed. It runs `omp -p` using the operator's model with no tools, project rules
+or session history; it sees only bounded candidate context. A failure falls back to deterministic
+ranking. Set `auto_rank = false` to use deterministic ranking only, or specify `rank_command` to
+override the bundled ranker. The optional upload hook stays off until configured. Hooks are argv
+lists: JSON on stdin, JSON on stdout.
 
-`rank_command` — e.g. an LLM pass:
+`rank_command` accepts:
 
 ```json
 in:  {"session": "…", "min_len": 8, "max_len": 60,
@@ -202,6 +242,7 @@ approval.
 ```toml
 [clips]
 auto_process = true
+auto_rank = true            # use omp when installed; false = deterministic-only
 encoder = "auto"            # auto | nvenc | x264
 canvases = ["wide", "tall"]
 tall_source = "auto"        # auto | recording | crop

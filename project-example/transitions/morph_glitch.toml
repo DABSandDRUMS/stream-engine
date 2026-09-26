@@ -1,6 +1,7 @@
 # Morph with a glitch burst over the move (combined: morph geometry + shader overlay).
+label = "Glide + glitch"
 kind = "combined"
-shader = "transitions/glitch.wgsl"
+shader = "glitch"
 ms = 700
 ease = "in_out_cubic"
 enter = "fade"

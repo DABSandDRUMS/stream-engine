@@ -55,14 +55,10 @@ nodes = [{ src = "cam_b", rect = [0, 0, 1, 1] }]
     write_file(root, "scenes/aurora.toml", "[canvas.wide]\nnodes = [{ src = \"patch.aurora\" }]\n");
     write_file(root, "sources/cam_b.toml", "fx = [{ name = \"chroma_key\", amount = 1.0, when = \"scene == 'key'\" }]\n");
     write_file(root, "transitions/morph.toml", "kind = \"morph\"\nms = 1000\nease = \"linear\"\nenter = \"scale\"\nexit = \"fade\"\n");
+    // one project shader file (a copy of the built-in source) and one built-in by name
     write_file(root, "transitions/zoomblur.toml", "kind = \"shader\"\nshader = \"transitions/zoomblur.wgsl\"\nms = 1000\nstrength = 0.4\n");
-    write_file(
-        root,
-        "transitions/glitchy.toml",
-        "kind = \"combined\"\nshader = \"transitions/glitch.wgsl\"\nms = 1000\nease = \"linear\"\nstrength = 1.5\nblock = 24.0\n",
-    );
-    std::fs::copy(example_dir().join("transitions/zoomblur.wgsl"), root.join("transitions/zoomblur.wgsl")).unwrap();
-    std::fs::copy(example_dir().join("transitions/glitch.wgsl"), root.join("transitions/glitch.wgsl")).unwrap();
+    write_file(root, "transitions/zoomblur.wgsl", se_render::pipelines::builtin_transition_wgsl("zoomblur").unwrap());
+    write_file(root, "transitions/glitchy.toml", "kind = \"combined\"\nshader = \"glitch\"\nms = 1000\nease = \"linear\"\nstrength = 1.5\nblock = 24.0\n");
     copy_dir(&example_dir().join("patches/aurora"), &root.join("patches/aurora"));
     d
 }
@@ -285,6 +281,44 @@ nodes = [
         } else {
             // grade | blur | [vignette, fade_to_black] + node [chroma_key, grade]
             assert_eq!(f.fx_fused, 4, "{f:?}");
+        }
+    }
+}
+
+/// `shake` moves the picture along a deterministic function of time, never uncovers an edge, and
+/// is the identity at `strength` 0.
+#[test]
+fn shake_moves_the_picture_deterministically_without_showing_edges() {
+    let dir = project();
+    let mut h = Harness::new(dir.path());
+    let _w = publish_sources(&mut h);
+    no_transition(&mut h, "yuv");
+    let at = |h: &mut Harness, ms: u64| {
+        h.frame_at(T0 + ms * 1_000_000);
+        h.read(WIDE)
+    };
+    let max_diff = |a: &(u32, u32, Vec<u8>), b: &(u32, u32, Vec<u8>)| a.2.iter().zip(&b.2).map(|(x, y)| x.abs_diff(*y)).max().unwrap();
+    let still = at(&mut h, 1000);
+
+    h.set("fx.shake.amount", Value::Float(1.0));
+    h.set("fx.shake.strength", Value::Float(0.0));
+    let zero = at(&mut h, 1000);
+    assert!(max_diff(&zero, &still) <= 1, "strength 0 is the identity (max diff {})", max_diff(&zero, &still));
+
+    h.set("fx.shake.strength", Value::Float(0.15));
+    let a = at(&mut h, 1000);
+    let b = at(&mut h, 1370);
+    let a_again = at(&mut h, 1000);
+    assert_eq!(a.2, a_again.2, "same time → same frame");
+    assert!(max_diff(&a, &still) > 100, "the picture moved");
+    assert!(max_diff(&a, &b) > 100, "and keeps moving over time");
+    // where the pattern has colored bars (left edge upper half, top edge left 3/4) the shaken
+    // edges still show them (or a blend of two), never black or transparent
+    for img in [&a, &b] {
+        let edge = (0..60).map(|y| (0, y)).chain((0..240).map(|x| (x, 0)));
+        for (x, y) in edge {
+            let p = px(img, x, y);
+            assert!(p[..3].iter().any(|c| *c > 100) && p[3] == 255, "edge pixel ({x}, {y}): {p:?}");
         }
     }
 }
