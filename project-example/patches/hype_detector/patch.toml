@@ -1,0 +1,20 @@
+# Hype detector (§18) as a script patch: the same scoring as the built-in se-clips detector
+# (chat rate vs baseline, emote spam, `!clip` votes, bits/subs/gifts/raids/tips, mic spikes and
+# laughter, music drops), with chat shifted back by the stream delay the engine publishes at
+# `clips.hype.delay_ms`. It always publishes `patch.hype_detector.score`; with `write_markers`
+# on it also writes session + Twitch markers. Turn the built-in detector off first
+# (`set clips.hype.enabled false`) or both will mark the same moments. Hack away: weights and
+# windows are at the top of main.lua.
+kind        = "script"
+entry       = "main.lua"
+layer       = "overlay"
+label       = "Hype detector"
+description = "Hype score from chat, events, mic, and music; writes clip markers"
+signals     = ["mic.level", "music.level", "band.level"]
+params.write_markers = { type = "bool",  default = false, description = "Write session + Twitch markers (disable clips.hype.enabled first)" }
+params.threshold     = { type = "float", default = 1.0, range = [0.1, 10.0], description = "Score that opens a hype moment" }
+params.preroll_min   = { type = "float", default = 10.0, range = [0.0, 60.0], unit = "s", description = "Shortest lead-in before the peak" }
+params.preroll_max   = { type = "float", default = 30.0, range = [0.0, 60.0], unit = "s", description = "Longest lead-in before the peak" }
+params.clip_votes    = { type = "int",   default = 3, range = [1, 50], description = "Unique !clip voters that force a marker" }
+params.clip_command  = { type = "string", default = "!clip" }
+budget = { cpu_ms = 1.0 }

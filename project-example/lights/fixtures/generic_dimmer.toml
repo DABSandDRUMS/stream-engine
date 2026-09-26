@@ -1,0 +1,13 @@
+# Generic dimmer channel: dimmer packs, dimmable PARs, single-channel LED drivers.
+name = "Generic Dimmer"
+manufacturer = "Generic"
+kind = "dimmer"
+beam = 30.0
+
+# 8-bit: one channel, 0 = off, 255 = full.
+[modes.1ch]
+channels = ["dimmer"]
+
+# 16-bit: coarse + fine for smooth low-level fades.
+[modes.2ch]
+channels = ["dimmer", "dimmer_fine"]

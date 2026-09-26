@@ -1,0 +1,9 @@
+# Slow hue rotation, one full cycle every 10 s, spread across the stage.
+label = "Rainbow"
+kind = "rainbow"
+targets = ["all"]
+unit = "hz"
+rate = 0.1
+size = 1.0
+spread = 1.0
+order = "x"

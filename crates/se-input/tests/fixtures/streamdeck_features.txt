@@ -1,0 +1,7 @@
+# stream-engine HID fixture: getter feature reports read from the Stream Deck Original V2 on
+# this machine (/dev/hidraw8, 2026-09-25): 06 serial, 05 firmware AP2, 04 LD, 07 AP1.
+# <report id> <hex bytes (32)>
+6 06 0C 41 4C 34 36 4A 32 43 36 32 37 36 38 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+5 05 0C 81 57 5E DB 31 2E 30 33 2E 30 30 30 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+4 04 0C FF 46 A9 D2 31 2E 30 30 2E 30 30 32 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+7 07 0C 87 4F A8 43 31 2E 30 32 2E 30 30 35 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00

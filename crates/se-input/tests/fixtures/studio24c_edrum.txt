@@ -1,0 +1,13 @@
+# stream-engine MIDI fixture: e-drum module on the Studio 24c DIN input (GM map, channel 10),
+# with MTC quarter frames and a full-frame SysEx interleaved (raw passthrough for Timelines).
+# <ms since start> <hex bytes>
+0 99 24 64
+2 89 24 00
+120 99 26 50
+122 99 26 00
+130 F1 01
+138 F1 12
+146 F1 23
+154 F1 34
+200 F0 7F 7F 01 01 21 02 03 04 F7
+240 99 2A 7F

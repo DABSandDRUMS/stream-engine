@@ -1,0 +1,171 @@
+# Compositor (se-render)
+
+The engine renders the `wide` (1920×1080) and `tall` (1080×1920) canvases at 60 fps on a
+dedicated render thread on the NVIDIA GPU (wgpu/Vulkan), plus the `preview` canvas (the scene on
+preview, only while a client asks for it) and the multiview `atlas` (~30 fps). Canvases leave
+the GPU as dmabufs with explicit sync over `frames.sock` (see `docs/frames-protocol.md`); the OBS
+plugin and the UI import them without copies. A shared-memory copy is the debugging fallback.
+
+Per frame and canvas: sources → scene nodes (+ node effects) → transition (morph and/or shader)
+→ scene effects → overlays that opt into effects → canvas effects → overlays → output effects →
+flash limiter → export.
+
+## Settings (`project.toml`)
+
+```toml
+[canvas.wide]            # sizes and frame rate (the render clock follows wide.fps)
+width = 1920
+height = 1080
+fps = 60
+
+[render]
+adapter = "NVIDIA"       # GPU name substring (default: the NVIDIA GPU; env SE_GPU overrides)
+frames_socket = "/run/user/1000/stream-engine/frames.sock"  # default: $SE_FRAMES_SOCKET,
+                         # else $SE_RUNTIME_DIR/frames.sock, else $XDG_RUNTIME_DIR/stream-engine/
+export_modifier = "auto" # auto (non-compressed NVIDIA block-linear) | linear | "0x…"
+buffers = 4              # dmabufs per canvas (3–4)
+preview = { scale = 0.5, layout = "wide" }
+atlas = { width = 1920, height = 1080, fps = 30 }
+no_signal = "#101014"    # color of sources without frames ("transparent" hides them)
+font = "JetBrainsMono Nerd Font"   # script patch text
+canvas_fx.wide = [{ name = "grade", warmth = 0.1 }]      # always-on canvas effects
+output_fx.tall = [{ name = "vignette", amount = 0.2 }]   # after overlays
+
+[safety]
+video_flash_limit = true # §22 flash limiter on the output
+video_max_flashes = 3    # flashes per second allowed
+
+[palette]                # stream palette (palette.<slot> state, patches, lights)
+mode = "fixed"           # or "follow_theme" (tracks the Omarchy theme)
+accent = "#7e9cd8"       # accent background foreground red yellow green cyan magenta
+
+[overlays.alertbox]      # optional placement of an overlay-layer patch
+canvases = ["wide", "tall"]
+rect.tall = [0.0, 0.1, 1.0, 0.4]
+when = "mode != 'brb'"
+z = 10
+fx = false               # true: drawn before canvas effects (effects apply to it)
+```
+
+## Sources
+
+A node's `src` names a source:
+
+| `src` | Source |
+|---|---|
+| `cam_kit`, `youtube`, … | `hub.video` slot of that name (cameras: se-video-in; web pages: se-web) |
+| `patch.<id>` | a patch: shader/particles rendered here, script draw lists (vello), web pages (video slot) |
+| `color:#rrggbb` | solid color |
+
+One decode feeds every placement. Sources nobody shows are not uploaded or rendered; the set in
+use is published as `render.sources.used` (se-video-in captures only those).
+
+Per-source color correction (read live): `source.<n>.color.{brightness,contrast,saturation,gamma,
+temperature,tint}`, `source.<n>.lut` (project-relative `.cube`), `source.<n>.lut_amount`, and the
+YUV hints `source.<n>.matrix` (`bt601`/`bt709`) and `source.<n>.range` (`full`/`limited`).
+Source-level effects (all placements) go in `sources/<name>.toml`: `fx = [{ name = "chroma_key" }]`.
+
+## Scenes and nodes
+
+Every node property is live state: `scene.<s>.node.<id>.rect.<canvas>` (x, y, w, h normalized),
+`crop.<canvas>` (left, top, right, bottom insets), `radius.<canvas>` (px, rounded corners with
+anti-aliased SDF edges), `z.<canvas>`, `opacity`, `offset_x`/`offset_y` (px), `scale` (about the
+center), `rotation` (degrees clockwise), `visible`. Nodes also take `blend` (`normal`, `add`,
+`screen`, `multiply`), `mask` (image in the project; white = visible), `when` (expression;
+hidden when false — a broken expression hides the node), `fx`, and `enter`/`exit` styles for
+morphs. Transparent or off-canvas nodes are culled.
+
+## Effects
+
+Each effect has params `fx.<name>.<param>`, a trigger `fx.<name>` (envelope `fx.<name>.env`), and
+two standard params: `amount` (latched strength: presets `set`, bindings, manual) and `level`
+(strength while triggered). The implicit global instance runs at
+`max(amount, level × env)`; a trigger payload `amount`/`level` overrides `level` for that trigger.
+Attached instances (`fx = [...]` on a source, node, scene, `canvas_fx`, `output_fx`) run at their
+own `amount` (default 1) or, with `enabled = false`, only while triggered; `when` makes them
+conditional, `group` makes them exclusive (the strongest in a group wins). Strength 0 skips the
+pass.
+
+| Effect | Params | Where the global instance runs |
+|---|---|---|
+| `zoom_pulse` | zoom, beat (1 = pulse on `beat.phase`), center_x, center_y | canvas |
+| `pixelate` | size (px) | canvas |
+| `blur` | radius (px; runs at quarter resolution) | canvas |
+| `glitch` | blocks, shift, color, speed | canvas |
+| `rgb_split` | angle (deg), spread | canvas |
+| `vhs` | noise, jitter, scanlines, bleed | canvas |
+| `grade` | warmth, tint, contrast, saturation, lift, exposure (on at identity = no pass) | canvas |
+| `lut` | `fx.lut.file` (.cube) | canvas |
+| `chroma_key` | key_r/g/b, similarity, smoothness, spill | attach only (source/node) |
+| `vignette` | radius, softness | canvas |
+| `fade_to_black` | color_r/g/b | output (covers overlays) |
+
+Effect-layer shader patches work the same way (`fx = [{ name = "patch.<id>" }]`); with a trigger
+they also run at canvas level while triggered.
+
+## Transitions
+
+Driven by the core's `show.transition.*` state, interpolated by master-clock time every frame:
+
+- `kind = "morph"`: nodes showing the same source animate rect/crop/radius/opacity/rotation with
+  `ease`; others enter/exit with `enter`/`exit` (`fade`, `scale`, `slide_left|right|up|down`,
+  `none`; per node overrides).
+- `kind = "shader"`: both scenes render to textures and `shader` blends them. The file gets the
+  generated patch header: `se.progress` (0→1), `se_input` (outgoing), `se_input_b` (incoming),
+  `se_sampler`, extra TOML keys as params `p_<name>()`; entry point `fs`. `shader = "patch.<id>"`
+  uses a transition-layer patch.
+- `kind = "combined"`: morph geometry with the shader applied over it (A = B = the morph frame).
+
+Shipped: `morph`, `fade`, `zoomblur` (gl-transitions CrossZoom, MIT), `glitch` (after
+gl-transitions GlitchMemories, MIT), `morph_glitch` (combined). Ported shaders keep their license
+header. A shader that fails to compile keeps its last good version (else a crossfade) and the
+error is published at `render.transition.<name>.error`.
+
+## Shader and particles patches
+
+The renderer compiles `shader` and `particles` patches (the patch loader declares their params and
+triggers). The generated header is `se_patch::wgsl::Layout::header()` (time, dt, frame, env,
+resolution, progress, trigger_count, palette, params, signals — see docs/patches.md).
+
+- `shader`: fragment entry `fs(in: SeVsOut) -> @location(0) vec4<f32>`, premultiplied output.
+- `particles`: `sim.wgsl` (`@compute @workgroup_size(64) fn sim`) and `draw.wgsl` (`vs` with
+  `vertex_index`/`instance_index`, 6 vertices per particle, and `fs`), with the particles prelude
+  (`Particle`, `se_particles`, `SE_PARTICLE_COUNT`, `se_hash`).
+
+Pipelines are built on a loader thread when files change, never on trigger. A compile error
+publishes `patch.<id>.error` as `file:line:col: message` (line in your file) and the previous
+version keeps running; `""` when it compiles again. Overlay-layer patches draw over every canvas
+while `patch.<id>.env > 0` (or always without a trigger); `fps = N` in the manifest throttles a
+patch.
+
+## Safety: video flash limiter
+
+The output of wide/tall is reduced on the GPU to an 8×8 grid of relative luminance; a flash is a
+pair of opposing changes ≥ 10 % with the darker state below 0.8 (WCAG). When more than 10 % of
+the screen flashes faster than `video_max_flashes`, flashy effects are scaled down and the output
+pass caps the per-frame luminance step. State: `safety.video.limited`, `safety.video.limit`,
+`safety.video.flash_rate`.
+
+## Performance and health
+
+`perf.fps`, `perf.frame_ms` (render thread CPU), `perf.frame_ms_max`, `perf.gpu_ms` (GPU
+timestamps), `perf.pass.<sources|wide|tall|preview|atlas|output>_ms`, `perf.dropped`, `perf.late`,
+`perf.vram_mb` / `perf.vram_budget_mb` (VK_EXT_memory_budget, whole process),
+`perf.render_mb` (renderer's own textures), `render.clients`, `render.export`,
+`render.recoveries`, `health.render`, query `render`. The frame loop does no heap allocation in
+steady state (checked in debug builds by the counting allocator; the GPU API's own allocations
+are excluded).
+
+GPU device loss (driver reset, runaway shader) is recovered automatically: clients get
+`se_goodbye{reason: 2}`, the device and every resource are recreated, pipelines are rebuilt from
+the last good sources, and new `se_canvas` messages follow. Actions: `render.simulate_device_loss`
+(test the path), `render.reload` (rescan patches).
+
+## Testing
+
+`cargo test -p se-render` runs headless on the GPU: golden images in `crates/se-render/tests/golden`
+(scenes, transitions at fixed progress, every effect), YUYV accuracy, LUTs, last-good shaders,
+particles, frames.sock export (dmabuf fences + shm content), and the no-allocation check.
+Regenerate goldens after verifying the output with `SE_UPDATE_GOLDEN=1`.
+`se-frames-client --want wide,tall --import --expect-fps 58` validates a running engine's
+dmabufs (Vulkan import + pixel readback).

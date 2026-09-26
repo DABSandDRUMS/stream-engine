@@ -1,0 +1,17 @@
+[package]
+name = "se-analysis"
+description = "Audio analysis: live features/onsets/beat tracking, drum triggers, offline song analysis"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+rustfft = "6.4"
+realfft = "3"
+blake3 = "1"
+symphonia = { version = "0.6", default-features = false, features = ["opt-simd", "wav", "pcm", "adpcm", "flac", "mp3", "ogg", "vorbis", "aac", "isomp4", "mkv", "aiff", "caf", "alac", "id3v1", "id3v2", "ape"] }
+
+[dev-dependencies]
+se-alloc.workspace = true

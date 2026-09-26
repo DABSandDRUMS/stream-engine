@@ -10,7 +10,11 @@ fn file(kind: &str, name: &str, src: &str) -> SourceFile {
 
 fn project() -> Vec<SourceFile> {
     vec![
-        file("project", "project", "schema = 1\nname = \"test\"\n[safety]\nchat_ttl = \"10s\"\nchat_caps = { \"fx.*.amount\" = [0.0, 0.5] }"),
+        file(
+            "project",
+            "project",
+            "schema = 1\nname = \"test\"\n[safety]\nchat_ttl = \"10s\"\nchat_caps = { \"fx.*.amount\" = [0.0, 0.5], \"lights.blackout\" = [0, 0] }",
+        ),
         file(
             "scenes",
             "duo",
@@ -27,6 +31,7 @@ fn project() -> Vec<SourceFile> {
             "hold = \"8s\"\nfx = [{ name = \"rgb_split\" }]\nset = { \"fx.rgb_split.amount\" = 0.8 }\nsound = \"airhorn\"\nlights = { cue = \"chase_fast\" }\nconflict = \"replace\"",
         ),
         file("presets", "chill", "set = { \"fx.vhs.amount\" = 0.6 }\ntoggle = true"),
+        file("presets", "safe", "lights = { cue = \"safe\" }"),
         file(
             "rules",
             "cheers",
@@ -133,6 +138,12 @@ fn priorities_chat_caps_mixer_and_clean() {
         cmd.actor = Some(Actor { platform: "twitch".into(), id: "v".into(), name: "viewer".into(), roles: vec![] });
         Input::Command { cmd }
     };
+    // chat effects only run in live (§12.1)
+    c.submit(chat(Op::Set { address: "fx.vhs.amount".into(), value: Value::Float(0.9) }));
+    let out = run(&mut c, 5);
+    assert!(out.iter().any(|o| matches!(o, Output::Ack { ok: false, error: Some(e), .. } if e.contains("paused"))));
+    assert_eq!(f(&c, "fx.vhs.amount"), 0.0);
+    c.submit(Input::Command { cmd: Command::new(Origin::Ui, Op::ModeSet { mode: "live".into() }) });
     c.submit(chat(Op::Set { address: "fx.vhs.amount".into(), value: Value::Float(0.9) }));
     run(&mut c, 5);
     assert_eq!(f(&c, "fx.vhs.amount"), 0.5, "chat cap");
@@ -283,4 +294,89 @@ fn panic_clears_automation() {
     assert_eq!(c.get("manual.x"), Some(&Value::Int(3)), "manual survives panic");
     assert!(f(&c, "fx.rgb_split.env") < 0.01);
     assert!(out.iter().any(|o| matches!(o, Output::Action(c) if c.op.describe() == "lights.panic")));
+}
+
+#[test]
+fn command_keys_layer_overrides_per_owner() {
+    let mut c = core();
+    let a = |v: f64, key: &str| Input::Command {
+        cmd: Command::new(Origin::System, Op::Set { address: "lights.par.intensity".into(), value: Value::Float(v) }).with_key(key),
+    };
+    c.submit(Input::Declare { address: "lights.par.intensity".into(), meta: Meta::float(0.0, [0.0, 1.0]).htp() });
+    c.submit(a(0.4, "cuelist:main"));
+    c.submit(a(0.7, "cuelist:chase"));
+    run(&mut c, 5);
+    assert_eq!(f(&c, "lights.par.intensity"), 0.7, "HTP across playbacks");
+    c.submit(Input::Command { cmd: Command::new(Origin::System, Op::Release { address: "lights.par.intensity".into() }).with_key("cuelist:chase") });
+    run(&mut c, 5);
+    assert_eq!(f(&c, "lights.par.intensity"), 0.4, "releasing one playback keeps the other");
+    let p = c.explain("lights.par.intensity").unwrap();
+    assert!(p.layers.iter().any(|l| l.source == "cuelist:main"));
+}
+
+#[test]
+fn chat_caps_apply_to_booleans() {
+    let mut c = core();
+    c.submit(Input::Command { cmd: Command::new(Origin::Ui, Op::ModeSet { mode: "live".into() }) });
+    run(&mut c, 5);
+    let mut cmd = Command::new(Origin::Chat, Op::Set { address: "lights.blackout".into(), value: Value::Bool(true) });
+    cmd.actor = Some(Actor { platform: "twitch".into(), id: "v".into(), name: "viewer".into(), roles: vec![] });
+    c.submit(Input::Command { cmd });
+    run(&mut c, 5);
+    assert_eq!(c.get("lights.blackout"), Some(&Value::Bool(false)));
+}
+
+#[test]
+fn pickup_fader_follows_external_changes_without_jumps() {
+    let mut files = project();
+    files.push(file("controllers", "faders", "[[binding]]\ntarget = \"mixer.16r.ch.3.fader\"\nsignal = \"midi.xtouch.fader\"\ntakeover = \"pickup\""));
+    let mut c = Core::new(Config::build(&files), 1_000 * MS);
+    let fader = |c: &mut Core, v: f32| {
+        c.submit(Input::Signal { name: "midi.xtouch.fader".into(), value: v });
+        run(c, 5);
+    };
+    c.submit(Input::Publish { address: "mixer.16r.ch.3.fader".into(), value: Value::Float(0.6) });
+    fader(&mut c, 0.1);
+    fader(&mut c, 0.2);
+    assert_eq!(f(&c, "mixer.16r.ch.3.fader"), 0.6, "no jump before pickup");
+    fader(&mut c, 0.65);
+    assert!((f(&c, "mixer.16r.ch.3.fader") - 0.65).abs() < 1e-6, "picked up after crossing");
+    fader(&mut c, 0.7);
+    assert!((f(&c, "mixer.16r.ch.3.fader") - 0.7).abs() < 1e-6);
+    // console-side change: the mixer adapter publishes the base and releases overrides
+    c.submit(Input::Publish { address: "mixer.16r.ch.3.fader".into(), value: Value::Float(0.3) });
+    c.submit(Input::Command { cmd: Command::new(Origin::Mixer, Op::Release { address: "mixer.16r.ch.3.fader".into() }) });
+    run(&mut c, 5);
+    assert_eq!(f(&c, "mixer.16r.ch.3.fader"), 0.3, "UC Surface move wins");
+    fader(&mut c, 0.72);
+    assert_eq!(f(&c, "mixer.16r.ch.3.fader"), 0.3, "pickup dropped: no jump from the X-TOUCH");
+    fader(&mut c, 0.35);
+    fader(&mut c, 0.28);
+    assert!((f(&c, "mixer.16r.ch.3.fader") - 0.28).abs() < 1e-6, "picked up again");
+}
+
+fn light_actions(out: &[Output]) -> Vec<String> {
+    out.iter()
+        .filter_map(|o| match o {
+            Output::Action(c) => Some(c.op.describe()).filter(|d| d.starts_with("lights.")),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn one_shot_preset_leaves_its_light_cue_running_but_held_preset_releases_it() {
+    let mut c = core();
+    c.submit(Input::Command { cmd: Command::new(Origin::Ui, Op::PresetFire { name: "safe".into(), payload: Value::Null }) });
+    let out = run(&mut c, 2000);
+    let lights = light_actions(&out);
+    assert!(lights.iter().any(|a| a.starts_with("lights.cue")), "{lights:?}");
+    assert!(!lights.iter().any(|a| a.starts_with("lights.release")), "one-shot preset must not switch its look off: {lights:?}");
+
+    // `hype` holds 8 s: its cue is released when the hold ends
+    c.submit(Input::Command { cmd: Command::new(Origin::Ui, Op::PresetFire { name: "hype".into(), payload: Value::Null }) });
+    let lights = light_actions(&run(&mut c, 7000));
+    assert!(!lights.iter().any(|a| a.starts_with("lights.release")), "{lights:?}");
+    let lights = light_actions(&run(&mut c, 2000));
+    assert!(lights.iter().any(|a| a.starts_with("lights.release")), "{lights:?}");
 }

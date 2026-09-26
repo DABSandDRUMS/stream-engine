@@ -1,0 +1,9 @@
+# Follows: short and quiet — they can pile up during raids.
+[[alert]]
+name = "follow"
+when = "twitch.follow"
+title = "{user}"
+message = "just followed!"
+sound = "alert_follow"
+duration = "4s"
+priority = 10

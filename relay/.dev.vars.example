@@ -1,0 +1,9 @@
+# Copy to .dev.vars (gitignored) for `npm run dev` (wrangler dev on 127.0.0.1:8787).
+# Production values are Worker secrets: `npx wrangler secret put RELAY_SECRET` etc.
+
+# Shared secret of the engine link; the engine keeps the same value in its keyring
+# (`stream do relay.secret.set <secret>`). Generate with `openssl rand -hex 32`.
+RELAY_SECRET=dev-relay-secret-change-me-0123456789abcdef0123456789
+
+# Ko-fi → Settings → API → Webhooks → "Verification Token".
+KOFI_VERIFICATION_TOKEN=dev-kofi-verification-token

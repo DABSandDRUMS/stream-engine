@@ -5,6 +5,7 @@
 pub mod bindings;
 pub mod config;
 pub mod core;
+pub mod policy;
 pub mod rng;
 pub mod signals;
 pub mod sim;
@@ -12,5 +13,5 @@ pub mod state;
 pub mod trace;
 pub mod triggers;
 
-pub use crate::core::{Core, Input, Output, RuntimeState, addr};
+pub use crate::core::{Core, Input, Output, RuntimeState, addr, timeline};
 pub use config::{Config, SourceFile};

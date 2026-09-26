@@ -1,0 +1,16 @@
+# Hype meter: blends chat rate, band loudness, and trigger activity into a smoothed 0–1
+# score, draws a bar, publishes it as the signal `patch.hype_meter.level`, and fires `hype.peak`
+# when the score crosses the threshold (rules can react to it).
+kind        = "script"
+entry       = "main.lua"
+layer       = "overlay"
+label       = "Hype meter"
+description = "Smoothed hype score from chat rate + band level; fires hype.peak"
+signals     = ["twitch.chat_rate", "twitch.viewers"]
+params.x         = { type = "float", default = 0.03, range = [0.0, 1.0] }
+params.y         = { type = "float", default = 0.06, range = [0.0, 1.0] }
+params.width     = { type = "float", default = 0.22, range = [0.05, 0.9] }
+params.chat_full = { type = "float", default = 4.0, range = [0.5, 30.0], unit = "msg/s", description = "Chat rate that counts as full hype" }
+params.threshold = { type = "float", default = 0.8, range = [0.1, 1.0], description = "Score that fires hype.peak" }
+params.smoothing = { type = "float", default = 1.5, range = [0.1, 10.0], unit = "s", description = "Rise/fall time constant" }
+budget = { cpu_ms = 0.5 }

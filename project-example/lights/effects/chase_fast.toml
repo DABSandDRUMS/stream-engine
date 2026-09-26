@@ -1,0 +1,10 @@
+# Free-running fast colour chase (2 cycles per second, independent of the beat clock).
+label = "Fast chase"
+kind = "color_chase"
+targets = ["all"]
+unit = "hz"
+rate = 2.0
+size = 1.0
+spread = 1.0
+order = "x"
+colors = ["#ff2020", "#ff9000", "#00e0a0", "#3050ff"]

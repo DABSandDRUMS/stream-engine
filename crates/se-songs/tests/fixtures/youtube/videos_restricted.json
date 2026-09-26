@@ -1,0 +1,389 @@
+{
+  "kind": "youtube#videoListResponse",
+  "etag": "list-etag",
+  "items": [
+    {
+      "kind": "youtube#video",
+      "etag": "etag-NoEmbed0001",
+      "id": "NoEmbed0001",
+      "snippet": {
+        "publishedAt": "2009-10-25T06:57:33Z",
+        "channelId": "UCiMhD4jzUqG-IgPzUmmytRQ",
+        "title": "Bohemian Rhapsody (Live Aid 1985)",
+        "description": "Bohemian Rhapsody (Live Aid 1985) — official channel upload.",
+        "thumbnails": {
+          "default": {
+            "url": "https://i.ytimg.com/vi/NoEmbed0001/default.jpg",
+            "width": 120,
+            "height": 90
+          },
+          "medium": {
+            "url": "https://i.ytimg.com/vi/NoEmbed0001/mqdefault.jpg",
+            "width": 320,
+            "height": 180
+          },
+          "high": {
+            "url": "https://i.ytimg.com/vi/NoEmbed0001/hqdefault.jpg",
+            "width": 480,
+            "height": 360
+          }
+        },
+        "channelTitle": "Queen Official",
+        "categoryId": "10",
+        "liveBroadcastContent": "none",
+        "localized": {
+          "title": "Bohemian Rhapsody (Live Aid 1985)",
+          "description": "Bohemian Rhapsody (Live Aid 1985) — official channel upload."
+        }
+      },
+      "contentDetails": {
+        "duration": "PT6M2S",
+        "dimension": "2d",
+        "definition": "hd",
+        "caption": "false",
+        "licensedContent": true,
+        "contentRating": {},
+        "projection": "rectangular"
+      },
+      "status": {
+        "uploadStatus": "processed",
+        "privacyStatus": "public",
+        "license": "youtube",
+        "embeddable": false,
+        "publicStatsViewable": true,
+        "madeForKids": false
+      }
+    },
+    {
+      "kind": "youtube#video",
+      "etag": "etag-AgeGate0001",
+      "id": "AgeGate0001",
+      "snippet": {
+        "publishedAt": "2009-10-25T06:57:33Z",
+        "channelId": "UCsomedrummer00000000000",
+        "title": "Drum Cover (Age-restricted)",
+        "description": "Drum Cover (Age-restricted) — official channel upload.",
+        "thumbnails": {
+          "default": {
+            "url": "https://i.ytimg.com/vi/AgeGate0001/default.jpg",
+            "width": 120,
+            "height": 90
+          },
+          "medium": {
+            "url": "https://i.ytimg.com/vi/AgeGate0001/mqdefault.jpg",
+            "width": 320,
+            "height": 180
+          },
+          "high": {
+            "url": "https://i.ytimg.com/vi/AgeGate0001/hqdefault.jpg",
+            "width": 480,
+            "height": 360
+          }
+        },
+        "channelTitle": "Some Drummer",
+        "categoryId": "10",
+        "liveBroadcastContent": "none",
+        "localized": {
+          "title": "Drum Cover (Age-restricted)",
+          "description": "Drum Cover (Age-restricted) — official channel upload."
+        }
+      },
+      "contentDetails": {
+        "duration": "PT4M1S",
+        "dimension": "2d",
+        "definition": "hd",
+        "caption": "false",
+        "licensedContent": true,
+        "contentRating": {
+          "ytRating": "ytAgeRestricted"
+        },
+        "projection": "rectangular"
+      },
+      "status": {
+        "uploadStatus": "processed",
+        "privacyStatus": "public",
+        "license": "youtube",
+        "embeddable": true,
+        "publicStatsViewable": true,
+        "madeForKids": false
+      }
+    },
+    {
+      "kind": "youtube#video",
+      "etag": "etag-RegionBlk01",
+      "id": "RegionBlk01",
+      "snippet": {
+        "publishedAt": "2009-10-25T06:57:33Z",
+        "channelId": "UClabelvevo0000000000000",
+        "title": "Region Blocked Song",
+        "description": "Region Blocked Song — official channel upload.",
+        "thumbnails": {
+          "default": {
+            "url": "https://i.ytimg.com/vi/RegionBlk01/default.jpg",
+            "width": 120,
+            "height": 90
+          },
+          "medium": {
+            "url": "https://i.ytimg.com/vi/RegionBlk01/mqdefault.jpg",
+            "width": 320,
+            "height": 180
+          },
+          "high": {
+            "url": "https://i.ytimg.com/vi/RegionBlk01/hqdefault.jpg",
+            "width": 480,
+            "height": 360
+          }
+        },
+        "channelTitle": "Label VEVO",
+        "categoryId": "10",
+        "liveBroadcastContent": "none",
+        "localized": {
+          "title": "Region Blocked Song",
+          "description": "Region Blocked Song — official channel upload."
+        }
+      },
+      "contentDetails": {
+        "duration": "PT3M3S",
+        "dimension": "2d",
+        "definition": "hd",
+        "caption": "false",
+        "licensedContent": true,
+        "contentRating": {},
+        "projection": "rectangular",
+        "regionRestriction": {
+          "blocked": [
+            "US",
+            "DE"
+          ]
+        }
+      },
+      "status": {
+        "uploadStatus": "processed",
+        "privacyStatus": "public",
+        "license": "youtube",
+        "embeddable": true,
+        "publicStatsViewable": true,
+        "madeForKids": false
+      }
+    },
+    {
+      "kind": "youtube#video",
+      "etag": "etag-RegionAlw01",
+      "id": "RegionAlw01",
+      "snippet": {
+        "publishedAt": "2009-10-25T06:57:33Z",
+        "channelId": "UCjplabel000000000000000",
+        "title": "Japan Only Song",
+        "description": "Japan Only Song — official channel upload.",
+        "thumbnails": {
+          "default": {
+            "url": "https://i.ytimg.com/vi/RegionAlw01/default.jpg",
+            "width": 120,
+            "height": 90
+          },
+          "medium": {
+            "url": "https://i.ytimg.com/vi/RegionAlw01/mqdefault.jpg",
+            "width": 320,
+            "height": 180
+          },
+          "high": {
+            "url": "https://i.ytimg.com/vi/RegionAlw01/hqdefault.jpg",
+            "width": 480,
+            "height": 360
+          }
+        },
+        "channelTitle": "JP Label",
+        "categoryId": "10",
+        "liveBroadcastContent": "none",
+        "localized": {
+          "title": "Japan Only Song",
+          "description": "Japan Only Song — official channel upload."
+        }
+      },
+      "contentDetails": {
+        "duration": "PT3M45S",
+        "dimension": "2d",
+        "definition": "hd",
+        "caption": "false",
+        "licensedContent": true,
+        "contentRating": {},
+        "projection": "rectangular",
+        "regionRestriction": {
+          "allowed": [
+            "JP"
+          ]
+        }
+      },
+      "status": {
+        "uploadStatus": "processed",
+        "privacyStatus": "public",
+        "license": "youtube",
+        "embeddable": true,
+        "publicStatsViewable": true,
+        "madeForKids": false
+      }
+    },
+    {
+      "kind": "youtube#video",
+      "etag": "etag-LiveNow0001",
+      "id": "LiveNow0001",
+      "snippet": {
+        "publishedAt": "2009-10-25T06:57:33Z",
+        "channelId": "UCSJ4gkVC6NrvII8umztf0Ow",
+        "title": "24/7 lofi radio",
+        "description": "24/7 lofi radio — official channel upload.",
+        "thumbnails": {
+          "default": {
+            "url": "https://i.ytimg.com/vi/LiveNow0001/default.jpg",
+            "width": 120,
+            "height": 90
+          },
+          "medium": {
+            "url": "https://i.ytimg.com/vi/LiveNow0001/mqdefault.jpg",
+            "width": 320,
+            "height": 180
+          },
+          "high": {
+            "url": "https://i.ytimg.com/vi/LiveNow0001/hqdefault.jpg",
+            "width": 480,
+            "height": 360
+          }
+        },
+        "channelTitle": "Lofi Girl",
+        "categoryId": "10",
+        "liveBroadcastContent": "live",
+        "localized": {
+          "title": "24/7 lofi radio",
+          "description": "24/7 lofi radio — official channel upload."
+        }
+      },
+      "contentDetails": {
+        "duration": "P0D",
+        "dimension": "2d",
+        "definition": "hd",
+        "caption": "false",
+        "licensedContent": true,
+        "contentRating": {},
+        "projection": "rectangular"
+      },
+      "status": {
+        "uploadStatus": "processed",
+        "privacyStatus": "public",
+        "license": "youtube",
+        "embeddable": true,
+        "publicStatsViewable": true,
+        "madeForKids": false
+      }
+    },
+    {
+      "kind": "youtube#video",
+      "etag": "etag-MatureR0001",
+      "id": "MatureR0001",
+      "snippet": {
+        "publishedAt": "2009-10-25T06:57:33Z",
+        "channelId": "UCstudio0000000000000000",
+        "title": "Movie Clip Soundtrack",
+        "description": "Movie Clip Soundtrack — official channel upload.",
+        "thumbnails": {
+          "default": {
+            "url": "https://i.ytimg.com/vi/MatureR0001/default.jpg",
+            "width": 120,
+            "height": 90
+          },
+          "medium": {
+            "url": "https://i.ytimg.com/vi/MatureR0001/mqdefault.jpg",
+            "width": 320,
+            "height": 180
+          },
+          "high": {
+            "url": "https://i.ytimg.com/vi/MatureR0001/hqdefault.jpg",
+            "width": 480,
+            "height": 360
+          }
+        },
+        "channelTitle": "Studio",
+        "categoryId": "10",
+        "liveBroadcastContent": "none",
+        "localized": {
+          "title": "Movie Clip Soundtrack",
+          "description": "Movie Clip Soundtrack — official channel upload."
+        }
+      },
+      "contentDetails": {
+        "duration": "PT2M30S",
+        "dimension": "2d",
+        "definition": "hd",
+        "caption": "false",
+        "licensedContent": true,
+        "contentRating": {
+          "mpaaRating": "mpaaR"
+        },
+        "projection": "rectangular"
+      },
+      "status": {
+        "uploadStatus": "processed",
+        "privacyStatus": "public",
+        "license": "youtube",
+        "embeddable": true,
+        "publicStatsViewable": true,
+        "madeForKids": false
+      }
+    },
+    {
+      "kind": "youtube#video",
+      "etag": "etag-Private0001",
+      "id": "Private0001",
+      "snippet": {
+        "publishedAt": "2009-10-25T06:57:33Z",
+        "channelId": "UCsomeone000000000000000",
+        "title": "Private upload",
+        "description": "Private upload — official channel upload.",
+        "thumbnails": {
+          "default": {
+            "url": "https://i.ytimg.com/vi/Private0001/default.jpg",
+            "width": 120,
+            "height": 90
+          },
+          "medium": {
+            "url": "https://i.ytimg.com/vi/Private0001/mqdefault.jpg",
+            "width": 320,
+            "height": 180
+          },
+          "high": {
+            "url": "https://i.ytimg.com/vi/Private0001/hqdefault.jpg",
+            "width": 480,
+            "height": 360
+          }
+        },
+        "channelTitle": "Someone",
+        "categoryId": "10",
+        "liveBroadcastContent": "none",
+        "localized": {
+          "title": "Private upload",
+          "description": "Private upload — official channel upload."
+        }
+      },
+      "contentDetails": {
+        "duration": "PT3M",
+        "dimension": "2d",
+        "definition": "hd",
+        "caption": "false",
+        "licensedContent": true,
+        "contentRating": {},
+        "projection": "rectangular"
+      },
+      "status": {
+        "uploadStatus": "processed",
+        "privacyStatus": "private",
+        "license": "youtube",
+        "embeddable": true,
+        "publicStatsViewable": true,
+        "madeForKids": false
+      }
+    }
+  ],
+  "pageInfo": {
+    "totalResults": 7,
+    "resultsPerPage": 7
+  }
+}

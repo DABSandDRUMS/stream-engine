@@ -1,0 +1,12 @@
+# Warm front light for the duo scene.
+label = "Warm duo"
+priority = 200
+release = "1.5s"
+
+[[cue]]
+id = "1"
+label = "Warm front"
+fade = "1.5s"
+
+[cue.set]
+front = { intensity = 0.85, palette = "warm" }

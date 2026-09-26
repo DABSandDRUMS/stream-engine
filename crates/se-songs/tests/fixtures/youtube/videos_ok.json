@@ -1,0 +1,69 @@
+{
+  "kind": "youtube#videoListResponse",
+  "etag": "list-etag",
+  "items": [
+    {
+      "kind": "youtube#video",
+      "etag": "etag-dQw4w9WgXcQ",
+      "id": "dQw4w9WgXcQ",
+      "snippet": {
+        "publishedAt": "2009-10-25T06:57:33Z",
+        "channelId": "UCuAXFkgsw1L7xaCfnd5JJOw",
+        "title": "Rick Astley - Never Gonna Give You Up (Official Video) (4K Remaster)",
+        "description": "Rick Astley - Never Gonna Give You Up (Official Video) (4K Remaster) — official channel upload.",
+        "thumbnails": {
+          "default": {
+            "url": "https://i.ytimg.com/vi/dQw4w9WgXcQ/default.jpg",
+            "width": 120,
+            "height": 90
+          },
+          "medium": {
+            "url": "https://i.ytimg.com/vi/dQw4w9WgXcQ/mqdefault.jpg",
+            "width": 320,
+            "height": 180
+          },
+          "high": {
+            "url": "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg",
+            "width": 480,
+            "height": 360
+          }
+        },
+        "channelTitle": "Rick Astley",
+        "categoryId": "10",
+        "liveBroadcastContent": "none",
+        "localized": {
+          "title": "Rick Astley - Never Gonna Give You Up (Official Video) (4K Remaster)",
+          "description": "Rick Astley - Never Gonna Give You Up (Official Video) (4K Remaster) — official channel upload."
+        },
+        "tags": [
+          "rick astley",
+          "Never Gonna Give You Up",
+          "nggyu",
+          "never gonna give you up lyrics",
+          "rick rolled"
+        ]
+      },
+      "contentDetails": {
+        "duration": "PT3M33S",
+        "dimension": "2d",
+        "definition": "hd",
+        "caption": "false",
+        "licensedContent": true,
+        "contentRating": {},
+        "projection": "rectangular"
+      },
+      "status": {
+        "uploadStatus": "processed",
+        "privacyStatus": "public",
+        "license": "youtube",
+        "embeddable": true,
+        "publicStatsViewable": true,
+        "madeForKids": false
+      }
+    }
+  ],
+  "pageInfo": {
+    "totalResults": 1,
+    "resultsPerPage": 1
+  }
+}

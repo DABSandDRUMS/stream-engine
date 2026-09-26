@@ -1,0 +1,19 @@
+{
+  // stream-engine entries for the Omarchy menu (merge into
+  // ~/.config/omarchy/extensions/omarchy-menu.jsonc; omarchy/install.sh --menu does it).
+  //
+  // Omarchy's parser only strips whole-line // comments and trailing commas, so keep comments on
+  // their own lines. Every action reports failures (engine down, rejected command) as a
+  // notification instead of failing silently.
+  "stream": {"icon": "\uf2ce", "label": "Stream", "description": "stream-engine live production", "aliases": ["stream-engine", "live"], "when": "command -v stream"},
+  "stream.open-ui": {"icon": "\uf108", "label": "Open UI", "action": "stream-engine-launch-or-focus"},
+  "stream.program": {"icon": "\uf26c", "label": "Program Window", "description": "Confidence monitor (fullscreen on the TV)", "action": "stream-engine-launch-or-focus --program"},
+  "stream.go-live": {"icon": "\uf111", "label": "Go Live", "description": "Switch the show to live mode", "checked": "stream get show.mode | grep -qx 'show.mode = live'", "action": "stream mode live || omarchy-notification-send -u critical 'stream-engine' 'Go live failed: is the engine running?'"},
+  "stream.brb": {"icon": "\uf0f4", "label": "BRB", "description": "Toggle live and be-right-back", "checked": "stream get show.mode | grep -qx 'show.mode = brb'", "action": "stream brb || omarchy-notification-send -u critical 'stream-engine' 'BRB failed: is the engine running?'"},
+  "stream.layout": {"icon": "\uf009", "label": "Layout", "description": "Switch the UI layout"},
+  "stream.layout.show-3disp": {"icon": "\uf0db", "label": "Show (3 displays)", "action": "stream fire ui.layout name=show-3disp || omarchy-notification-send -u critical 'stream-engine' 'Layout switch failed: is the engine running?'"},
+  "stream.layout.show-2disp": {"icon": "\uf0db", "label": "Show (2 displays)", "action": "stream fire ui.layout name=show-2disp || omarchy-notification-send -u critical 'stream-engine' 'Layout switch failed: is the engine running?'"},
+  "stream.layout.build": {"icon": "\uf0ad", "label": "Build", "action": "stream fire ui.layout name=build || omarchy-notification-send -u critical 'stream-engine' 'Layout switch failed: is the engine running?'"},
+  "stream.preflight": {"icon": "\uf046", "label": "Preflight", "description": "Run the preflight checklist in a terminal", "action": "omarchy-launch-floating-terminal-with-presentation stream preflight"},
+  "stream.panic": {"icon": "\uf071", "label": "Panic", "description": "Stop all effects, safe lights, safe mix", "action": "stream panic || omarchy-notification-send -u critical 'stream-engine' 'PANIC failed: is the engine running?'"},
+}

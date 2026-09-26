@@ -1,0 +1,58 @@
+# Show list: demonstrates tracking, fades, per-attribute timing, follow and wait.
+# Go/back/goto from the Lights view, deck, X-TOUCH or `stream lights.go main`.
+# Tracking: each cue stores only what changes; everything else carries forward from earlier cues.
+label = "Main"
+priority = 200
+loop = true
+release = "2s"
+fader_start = true
+
+# 1: warm wash, movers centred. `block` = hard values (nothing tracks in from cue 4 when the list
+# loops back here); also stops the pulse left running by cue 5.
+[[cue]]
+id = "1"
+label = "Warm"
+fade = "2s"
+block = true
+stop_effects = ["pulse"]
+
+[cue.set]
+all = { intensity = 0.8, palettes = ["warm", "center"] }
+
+# 2: cross to cool at half; colour fades in over 3 s, intensity drops over 1 s.
+[[cue]]
+id = "2"
+label = "Cool"
+fade = "3s"
+fade_out = "1s"
+
+[cue.set]
+all = { color = "palette:cool", intensity = "palette:half" }
+
+# 3: stream accent colour (follows the Omarchy/stream palette); auto-goes to 4 two seconds after its fade ends.
+[[cue]]
+id = "3"
+label = "Accent"
+fade = "1s"
+follow = "2s"
+
+[cue.set]
+all = { color = "stream:accent" }
+
+# 4: tracked intensity-only change — the accent colour carries forward from cue 3.
+# Per-attribute timing: the front comes up over 4 s after a 0.5 s delay.
+[[cue]]
+id = "4"
+label = "Front up"
+fade = "1s"
+
+[cue.set]
+front = { intensity = { value = 1.0, fade = "4s", delay = "0.5s" } }
+
+# 5: beat pulse on top; 4 s after this cue starts the list goes on — back to cue 1 (loop).
+[[cue]]
+id = "5"
+label = "Pulse"
+fade = "0.5s"
+wait = "4s"
+effects = { pulse = { size = 0.6 } }

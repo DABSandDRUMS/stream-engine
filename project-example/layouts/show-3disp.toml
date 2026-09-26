@@ -1,0 +1,49 @@
+# Show layout for three displays (PLAN §15.3), the default:
+#   DP-1  (MSI MAG341CQ, 3440×1440 @ 100 Hz)  main window in Show mode
+#   DP-2  (WEH WC34DX9019, 3440×1440 @ 60 Hz) multiview pop-out, nothing else
+#   TV    (Philips FTV on HDMI)               fullscreen confidence (program) window
+#
+# Switch layouts with Ctrl+L or the command palette. The UI rewrites changed values only:
+# comments and key order survive saves.
+#
+# Monitor matches: a connector name ("DP-1"), or "desc:<text>" / "make:<text>" / "model:<text>":
+# case-insensitive substrings of what `hyprctl monitors all` reports.
+
+name = "show-3disp"
+mode = "show"   # show | build
+zoom = 1.0      # in-app zoom on top of the Hyprland monitor scale
+# While the TV is off (`tv off`) or unplugged, use show-2disp; switch back when it returns.
+auto_fallback = "show-2disp"
+
+[main]
+# Main window (app-id stream-engine).
+monitor = "DP-1"
+
+# Pop-out panels: each is its own window with app-id stream-engine.<panel>, so Hyprland can
+# tile it anywhere. Optional: size = [width, height] in logical points.
+[[windows]]
+panel = "multiview"
+monitor = "DP-2"
+fullscreen = false
+
+[confidence]
+# Borderless stream-engine.program window showing exactly what goes out.
+enabled = true
+# First present and enabled match wins; the TV's description is stable across ports.
+monitors = ["desc:Philips FTV", "HDMI-A-1"]
+# Used while none of `monitors` is present.
+fallback = ["DP-2"]
+canvases = "both"   # wide | tall | both (side by side)
+fullscreen = true
+
+[dock]
+# Build-mode bottom dock: tab groups left to right, each with a width share.
+# Tabs: rules, timeline, scopes, trace, simulator, console, perf, view.<name>
+groups = [["rules", "timeline", "scopes", "trace", "simulator", "console", "perf"]]
+fractions = [1.0]
+height = 300.0
+
+[show]
+rail_tab = "events"   # events | chat | queue | mod
+rail_width = 360.0
+multiview = false     # multiview lives in its own window on DP-2

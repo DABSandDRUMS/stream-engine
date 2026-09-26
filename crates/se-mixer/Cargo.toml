@@ -1,0 +1,28 @@
+[package]
+name = "se-mixer"
+description = "PreSonus StudioLive III (16R) adapter over UCNET: discovery, control, meters, two-way sync, mix snapshots"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+se-proto.workspace = true
+se-core.workspace = true
+se-hub.workspace = true
+se-store.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+toml_edit.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+libc.workspace = true
+flate2 = "1.1"
+socket2 = { version = "0.6", features = ["all"] }
+
+[dev-dependencies]
+se-clock.workspace = true
+tempfile.workspace = true

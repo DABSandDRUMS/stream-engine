@@ -1,0 +1,49 @@
+# Subs and resubs. Gifted subs are combined into their gift bomb (alerts/gifts.toml);
+# a lone gifted sub (no gift event) lands here with `event.is_gift`.
+[[alert]]
+name = "sub"
+when = "twitch.sub"
+title = "{user} subscribed!"
+message = "{message}"
+sound = "alert_sub"
+duration = "6s"
+priority = 40
+tts = true
+
+[[alert.variation]]
+name = "gifted"
+if = "event.is_gift"
+title = "{gifter} gifted a sub to {user}!"
+tts = false
+
+[[alert.variation]]
+name = "tier3"
+if = "tier >= 3"
+title = "{user} subscribed at TIER 3!"
+duration = "10s"
+priority = 70
+
+[[alert.variation]]
+name = "tier2"
+if = "tier == 2"
+title = "{user} subscribed at tier 2!"
+duration = "8s"
+priority = 55
+
+[[alert]]
+name = "resub"
+when = "twitch.resub"
+title = "{user} resubscribed for {months} months!"
+message = "{message}"
+sound = "alert_sub"
+duration = "7s"
+priority = 45
+tts = true
+tts_text = "{user} says: {message}"
+
+[[alert.variation]]
+name = "year"
+if = "event.months >= 12"
+title = "{user}: {months} months of drums!"
+duration = "10s"
+priority = 65

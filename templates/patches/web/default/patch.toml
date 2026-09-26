@@ -1,0 +1,13 @@
+# {{label}} — a web patch: HTML/CSS/JS rendered by the engine's Chromium (CEF) off screen.
+# The page is served at /patches/{{id}}/index.html with a token scoped to `patch.{{id}}.*`;
+# /engine.js gives it events, state, signals, and commands (docs/patches.md).
+kind        = "web"
+entry       = "index.html"
+layer       = "overlay"
+label       = "{{label}}"
+description = "Animated banner that shows who triggered it"
+fps         = 60
+params.title    = { type = "string", default = "Thank you!" }
+params.color    = { type = "color",  default = "#7aa2f7" }
+params.duration = { type = "float",  default = 5.0, range = [1.0, 30.0], unit = "s" }
+trigger = { attack = "100ms", hold = "5s", release = "500ms", retrigger = "queue" }

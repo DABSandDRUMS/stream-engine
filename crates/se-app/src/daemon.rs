@@ -125,7 +125,13 @@ pub fn run(opts: DaemonOpts) -> Result<()> {
         let tx = log_tx.clone();
         let hooks = RunnerHooks {
             on_applied: Box::new(move |v| {
-                for (tick, input) in v {
+                for (tick, mut input) in v {
+                    // secrets never reach the session log (§19)
+                    if let Input::Command { cmd } = &mut input
+                        && cmd.op.is_secret()
+                    {
+                        cmd.op = cmd.op.redacted();
+                    }
                     let _ = tx.send(SessionMsg::Rec(LogRec::In { tick, input }));
                 }
             }),
@@ -314,6 +320,11 @@ async fn async_main(ctx: Ctx) -> Result<()> {
                         }
                     }
                     "project.reload" => reload(&ctx, &["(manual)".into()]),
+                    "project.write" => match crate::project_io::write(&ctx, args) {
+                        Ok(Some(rel)) => reload(&ctx, &[rel]),
+                        Ok(None) => {}
+                        Err(e) => ctx.hub.log("error", "project", format!("project.write: {e:#}")),
+                    },
                     other => ctx.hub.log("warn", "project", format!("unknown action {other}")),
                 }
             }
@@ -335,6 +346,9 @@ async fn async_main(ctx: Ctx) -> Result<()> {
     // --- queries ---------------------------------------------------------------------------
     crate::queries::register(&ctx);
     crate::queries::register_preflight(&ctx);
+    crate::project_io::register_queries(&ctx);
+    crate::project_io::start_uptime(&ctx);
+    crate::api_admin::start(&ctx, auth.clone());
 
     // --- systemd readiness + watchdog -------------------------------------------------------
     let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);

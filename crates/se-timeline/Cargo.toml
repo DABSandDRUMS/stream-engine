@@ -1,0 +1,27 @@
+[package]
+name = "se-timeline"
+description = "Timeline I/O: MTC/LTC in and out, chase feeding, record-mode commits, timeline file edits, beat-grid snapping"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+se-proto.workspace = true
+se-clock.workspace = true
+se-core.workspace = true
+se-hub.workspace = true
+se-store.workspace = true
+se-input.workspace = true
+se-audio-taps.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+toml_edit.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+crossbeam-channel.workspace = true
+rtrb.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

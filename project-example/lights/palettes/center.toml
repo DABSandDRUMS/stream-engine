@@ -1,0 +1,6 @@
+# Pan/tilt centre: movers point straight ahead (fixtures without pan/tilt ignore it).
+kind = "position"
+label = "Centre"
+
+[set]
+all = { pan = 0.5, tilt = 0.5 }

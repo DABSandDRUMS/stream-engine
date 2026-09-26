@@ -1,0 +1,10 @@
+[package]
+name = "se-audio-taps"
+description = "Lock-free audio taps (input/bus channels with master-clock block stamps) exported by the audio graph"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rtrb.workspace = true
+parking_lot.workspace = true

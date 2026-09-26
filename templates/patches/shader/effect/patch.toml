@@ -1,0 +1,12 @@
+# {{label}} — a WGSL effect: reads the layer below from `se_input`. Attach it with
+# `fx = [{ name = "patch.{{id}}", amount = 0.8 }]` on a source, scene node, scene,
+# `[render.canvas_fx.<canvas>]`, or `[render.output_fx.<canvas>]`. Because it has a trigger it
+# also runs on the whole canvas while `patch.{{id}}.env` > 0 (presets: fx = [{ name = "patch.{{id}}" }]).
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "effect"
+label       = "{{label}}"
+description = "RGB split that kicks with the band and the trigger envelope"
+params.amount = { type = "float", default = 0.5, range = [0.0, 2.0] }
+params.angle  = { type = "float", default = 0.0, range = [0.0, 6.2832], unit = "rad" }
+trigger = { attack = "30ms", hold = "500ms", release = "400ms" }

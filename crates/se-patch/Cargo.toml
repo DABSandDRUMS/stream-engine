@@ -8,9 +8,22 @@ license.workspace = true
 [dependencies]
 se-proto.workspace = true
 se-core.workspace = true
+se-hub.workspace = true
+se-clock.workspace = true
+se-store.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 toml.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+notify.workspace = true
+parking_lot.workspace = true
+arc-swap.workspace = true
+crossbeam-channel.workspace = true
+mlua.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+naga = { version = "30", features = ["wgsl-in"] }

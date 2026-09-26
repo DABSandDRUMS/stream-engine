@@ -1,0 +1,17 @@
+[package]
+name = "se-web-host"
+description = "stream-engine-web: the CEF host process (off-screen web sources, audio, sign-in window)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "stream-engine-web"
+path = "src/main.rs"
+
+[dependencies]
+cef.workspace = true
+se-web = { path = "../se-web", default-features = false }
+libc.workspace = true
+parking_lot.workspace = true

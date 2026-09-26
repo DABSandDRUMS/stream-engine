@@ -1,0 +1,215 @@
+# Maintainer: DABSandDRUMS <https://github.com/DABSandDRUMS>
+#
+# Release builds download the tagged source archive from GitHub (refresh the checksum with
+# `updpkgsums` after tagging). `packaging/build-local.sh` builds the same PKGBUILD from a snapshot
+# of the working tree instead.
+#
+# Environment:
+#   CARGO_TARGET_DIR      reuse a cargo target directory (absolute path); default: target/ inside
+#                         the source tree.
+#   CEF_PATH              CEF binary cache (cef-dll-sys layout: <dir>/<cef version>/cef_linux_x86_64);
+#                         default: $srcdir/cef, downloaded from cef-builds.spotifycdn.com during build().
+#   SE_PKG_ALLOW_MISSING  comma list of plan-required components that may be absent from the source
+#                         tree (obs, cef, scripts). Without it a missing component fails the build;
+#                         a component that is present but fails to build always fails the build.
+
+pkgname=stream-engine
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="All-in-one live-stream production engine: compositor, lights, audio, chat, and the OBS link"
+arch=(x86_64)
+url="https://github.com/DABSandDRUMS/stream-engine"
+# Engine: MIT OR Apache-2.0. OBS plugin: GPL-2.0-or-later. CEF runtime: BSD-3-Clause (+ CREDITS.html).
+license=('MIT OR Apache-2.0' 'GPL-2.0-or-later' 'BSD-3-Clause')
+depends=(
+  alsa-lib
+  dbus
+  espeak-ng
+  gcc-libs
+  glibc
+  hidapi
+  libjpeg-turbo
+  luajit
+  pipewire
+  systemd-libs
+  vulkan-icd-loader
+  # OBS plugin (links libobs, jansson, EGL)
+  obs-studio
+  jansson
+  libglvnd
+  # linked by stream-engine (readelf NEEDED of the release build): libav* (media sources, clips),
+  # libssl/libcrypto, fontconfig (text rendering)
+  ffmpeg
+  openssl
+  fontconfig
+)
+makedepends=(
+  cargo
+  clang
+  cmake
+  simde
+)
+optdepends=(
+  'org.freedesktop.secrets: keyring for API tokens and account credentials (gnome-keyring, KeePassXC)'
+  'nvidia-utils: GPU temperature and VRAM in preflight (nvidia-smi)'
+  'hyprland: window placement and keybinds from the Omarchy extras'
+  'jq: stream-engine-launch-or-focus and the Omarchy extras installer'
+  'uwsm: launch the UI as a systemd scope from desktop entries and keybinds'
+)
+install=stream-engine.install
+# !lto: makepkg's -flto would leave GCC LTO bytecode in the C objects built by cc/cmake inside
+#       cargo, which rustc's linker invocation cannot resolve; cargo's release profile already
+#       applies thin LTO to the Rust code.
+# !strip/!debug: the release profile keeps line tables (debug = 1) so crash backtraces
+#       (RUST_BACKTRACE=1 in the user unit) name functions and lines; libcef.so is stripped
+#       explicitly below (1.4 GB unstripped).
+options=(!lto !strip !debug)
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+# Files of the CEF minimal distribution the web host loads at run time (next to the binary).
+_cef_runtime=(
+  libcef.so libEGL.so libGLESv2.so libvk_swiftshader.so libvulkan.so.1 vk_swiftshader_icd.json
+  icudtl.dat v8_context_snapshot.bin chrome_100_percent.pak chrome_200_percent.pak resources.pak
+)
+
+_se_die() {
+  printf '==> ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+# Caller-provided directories must be absolute: build functions run inside $srcdir.
+_se_abs() {
+  [[ $2 == /* ]] || _se_die "$1 must be an absolute path (got '$2')"
+  printf '%s\n' "$2"
+}
+
+_se_target_dir() {
+  if [[ -n ${CARGO_TARGET_DIR:-} ]]; then
+    _se_abs CARGO_TARGET_DIR "$CARGO_TARGET_DIR"
+  else
+    printf '%s\n' "$srcdir/$pkgname-$pkgver/target"
+  fi
+}
+
+_se_cef_path() {
+  if [[ -n ${CEF_PATH:-} ]]; then _se_abs CEF_PATH "$CEF_PATH"; else printf '%s\n' "$srcdir/cef"; fi
+}
+
+# CEF version bundled by the locked cef-dll-sys crate (`154.0.0+154.0.23` → `154.0.23`).
+_se_cef_version() {
+  sed -n '/^name = "cef-dll-sys"$/{n;s/^version = "[^+]*+\(.*\)"$/\1/p;q}' Cargo.lock
+}
+
+# True when component $1 (marker path $2) is in the tree. A missing component is an error
+# unless listed in SE_PKG_ALLOW_MISSING.
+_se_have() {
+  [[ -e $2 ]] && return 0
+  if [[ ,${SE_PKG_ALLOW_MISSING:-}, == *,$1,* ]]; then
+    printf '==> WARNING: %s: %s is not in the source tree; packaging without it (SE_PKG_ALLOW_MISSING)\n' "$1" "$2" >&2
+    return 1
+  fi
+  _se_die "$1: $2 is missing from the source tree (set SE_PKG_ALLOW_MISSING=$1 to package without it)"
+}
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/^host: //p')"
+}
+
+# Network note: se-tts links ONNX Runtime statically through the `ort` crate's
+# `download-binaries` feature, which fetches the prebuilt runtime during build() (cached in
+# ~/.cache/ort.pyke.io); cef-dll-sys likewise downloads CEF unless CEF_PATH holds it already.
+build() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  CARGO_TARGET_DIR="$(_se_target_dir)"
+  export CARGO_TARGET_DIR
+
+  cargo build --release --locked -p se-app -p se-cli
+
+  if _se_have cef crates/se-web-host/Cargo.toml; then
+    CEF_PATH="$(_se_cef_path)"
+    export CEF_PATH
+    cargo build --release --locked -p se-web-host
+  fi
+
+  if _se_have obs obs-plugin/CMakeLists.txt; then
+    cmake -S obs-plugin -B "$srcdir/build-obs" \
+      -DCMAKE_BUILD_TYPE=None \
+      -DCMAKE_INSTALL_PREFIX=/usr \
+      -DSE_OBS_BUILD_TESTS=ON
+    cmake --build "$srcdir/build-obs"
+  fi
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  if [[ -d $srcdir/build-obs ]]; then
+    ctest --test-dir "$srcdir/build-obs" --output-on-failure
+  fi
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  local release share="$pkgdir/usr/share/$pkgname"
+  release="$(_se_target_dir)/release"
+
+  install -Dm755 "$release/stream-engine" "$pkgdir/usr/bin/stream-engine"
+  install -Dm755 "$release/stream" "$pkgdir/usr/bin/stream"
+  install -Dm755 omarchy/bin/stream-engine-launch-or-focus "$pkgdir/usr/bin/stream-engine-launch-or-focus"
+
+  # Engine data: share_dir() resolves <exe>/../share/stream-engine.
+  install -d "$share"
+  cp -dr --no-preserve=ownership web project-example omarchy "$share/"
+  rm -r "$share/omarchy/bin"
+  if _se_have scripts scripts; then
+    cp -dr --no-preserve=ownership scripts "$share/"
+  fi
+
+  install -Dm644 packaging/stream-engine.service "$pkgdir/usr/lib/systemd/user/stream-engine.service"
+  install -Dm644 packaging/70-stream-engine.rules "$pkgdir/usr/lib/udev/rules.d/70-stream-engine.rules"
+  install -Dm644 packaging/stream-engine.desktop "$pkgdir/usr/share/applications/stream-engine.desktop"
+  install -Dm644 packaging/stream-engine-program.desktop "$pkgdir/usr/share/applications/stream-engine-program.desktop"
+  install -Dm644 packaging/stream-engine.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/stream-engine.svg"
+  install -Dm644 -t "$pkgdir/usr/share/doc/$pkgname" README.md docs/*.md
+  install -Dm644 -t "$pkgdir/usr/share/licenses/$pkgname" LICENSE-MIT LICENSE-APACHE
+
+  # CEF web host (se-web): the engine finds <share>/../../lib/stream-engine/stream-engine-web and
+  # runs it with LD_LIBRARY_PATH set to that directory, so the CEF runtime sits next to it.
+  if _se_have cef crates/se-web-host/Cargo.toml; then
+    local cef_version cef_dir lib="$pkgdir/usr/lib/$pkgname"
+    cef_version="$(_se_cef_version)"
+    cef_dir="$(_se_cef_path)/$cef_version/cef_linux_x86_64"
+    [[ -n $cef_version && -d $cef_dir ]] || _se_die "CEF $cef_version runtime not found at $cef_dir"
+    install -Dm755 "$release/stream-engine-web" "$lib/stream-engine-web"
+    local f
+    for f in "${_cef_runtime[@]}"; do
+      install -Dm644 "$cef_dir/$f" "$lib/$f"
+    done
+    chmod 755 "$lib"/*.so "$lib"/*.so.1
+    install -Dm644 -t "$lib/locales" "$cef_dir"/locales/*.pak
+    strip --strip-unneeded "$lib/libcef.so"
+    install -Dm644 "$cef_dir/CREDITS.html" "$pkgdir/usr/share/licenses/$pkgname/CEF-CREDITS.html"
+    # CEF's BSD license is only in the archive root: scripts/install-cef.sh keeps it as
+    # LICENSE.cef.txt beside the distribution (and may delete the archive); a fresh cef-dll-sys
+    # download still has the archive.
+    local cef_root cef_license archive
+    cef_root="$(_se_cef_path)/$cef_version"
+    cef_license="$pkgdir/usr/share/licenses/$pkgname/CEF-LICENSE.txt"
+    archive="$(find "$cef_root" -maxdepth 1 -name 'cef_binary_*_minimal.tar.bz2' -print -quit)"
+    if [[ -s $cef_root/LICENSE.cef.txt ]]; then
+      install -Dm644 "$cef_root/LICENSE.cef.txt" "$cef_license"
+    elif [[ -n $archive ]]; then
+      bsdtar -xOf "$archive" '*/LICENSE.txt' >"$cef_license"
+    fi
+    [[ -s $cef_license ]] || _se_die "CEF license not found: neither $cef_root/LICENSE.cef.txt nor a cef_binary_*_minimal.tar.bz2 archive"
+  fi
+
+  # OBS plugin: /usr/lib/obs-plugins/stream-engine.so + /usr/share/obs/obs-plugins/stream-engine/.
+  if _se_have obs obs-plugin/CMakeLists.txt; then
+    DESTDIR="$pkgdir" cmake --install "$srcdir/build-obs"
+    install -Dm644 obs-plugin/LICENSE "$pkgdir/usr/share/licenses/$pkgname/OBS-PLUGIN-LICENSE"
+  fi
+}

@@ -1,0 +1,11 @@
+# {{label}} — trigger-driven particle burst drawn with the Lua draw API.
+kind        = "script"
+entry       = "main.lua"
+layer       = "overlay"
+label       = "{{label}}"
+description = "Burst of palette-colored sparks from the center on every trigger"
+params.count   = { type = "int",   default = 120, range = [1, 2000] }
+params.speed   = { type = "float", default = 0.6, range = [0.05, 3.0] }
+params.gravity = { type = "float", default = 0.5, range = [0.0, 3.0] }
+trigger = { attack = "20ms", hold = "3s", release = "1s", retrigger = "stack" }
+budget  = { cpu_ms = 2.0 }

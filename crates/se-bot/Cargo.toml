@@ -1,0 +1,25 @@
+[package]
+name = "se-bot"
+description = "Chatbot (§14.3): commands, mod edits from chat, timers, counters, quotes, bot.* action router"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+se-proto.workspace = true
+se-core.workspace = true
+se-hub.workspace = true
+se-store.workspace = true
+se-clock.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+toml_edit.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+rusqlite.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

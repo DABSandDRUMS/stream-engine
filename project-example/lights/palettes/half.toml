@@ -1,0 +1,5 @@
+kind = "intensity"
+label = "Half"
+
+[set]
+all = { intensity = 0.5 }

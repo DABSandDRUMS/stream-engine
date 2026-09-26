@@ -1,0 +1,78 @@
+# Generic LED spot moving head (the common 60-150 W "beam/spot" layout).
+# Pan 540°, tilt 270°, 8-slot colour wheel, 6-gobo rotating wheel, 3-facet prism, motor focus and zoom.
+name = "Generic LED Spot Moving Head"
+manufacturer = "Generic"
+kind = "spot"
+beam = 15.0
+
+# Extended mode: 16-bit pan/tilt.
+# Shutter: 0-7 closed, 8-15 open, 16-131 strobe slow → fast (0.5-20 Hz), 132-255 open/pulse effects (255 = open).
+# pt_speed: 0 = fastest movement, 255 = slowest. control: reset/lamp functions, keep at 0.
+[modes.14ch]
+channels = [
+  { role = "pan", deg = 540 },
+  "pan_fine",
+  { role = "tilt", deg = 270 },
+  "tilt_fine",
+  { role = "raw", name = "pt_speed", default = 0 },
+  "dimmer",
+  { role = "shutter", range = [16, 131], hz = [0.5, 20.0], open = 255 },
+  { role = "color_wheel", slots = [
+    { value = 0, color = "#ffffff", name = "open" },
+    { value = 10, color = "#ff0000", name = "red" },
+    { value = 20, color = "#ff8000", name = "orange" },
+    { value = 30, color = "#ffe000", name = "yellow" },
+    { value = 40, color = "#00ff40", name = "green" },
+    { value = 50, color = "#00e0ff", name = "cyan" },
+    { value = 60, color = "#0030ff", name = "blue" },
+    { value = 70, color = "#ff00c0", name = "magenta" },
+    { value = 80, color = "#8040ff", name = "lavender" },
+  ] },
+  { role = "gobo", slots = [
+    { value = 0, name = "open" },
+    { value = 10, name = "dots" },
+    { value = 20, name = "star" },
+    { value = 30, name = "breakup" },
+    { value = 40, name = "triangles" },
+    { value = 50, name = "flower" },
+    { value = 60, name = "spiral" },
+  ] },
+  "gobo_rotate",
+  "prism",
+  "focus",
+  { role = "zoom", deg = [12.0, 30.0] },
+  { role = "raw", name = "control", default = 0 },
+]
+
+# Basic mode: 8-bit pan/tilt, no gobo rotation or control channel.
+[modes.10ch]
+channels = [
+  { role = "pan", deg = 540 },
+  { role = "tilt", deg = 270 },
+  { role = "raw", name = "pt_speed", default = 0 },
+  "dimmer",
+  { role = "shutter", range = [16, 131], hz = [0.5, 20.0], open = 255 },
+  { role = "color_wheel", slots = [
+    { value = 0, color = "#ffffff", name = "open" },
+    { value = 10, color = "#ff0000", name = "red" },
+    { value = 20, color = "#ff8000", name = "orange" },
+    { value = 30, color = "#ffe000", name = "yellow" },
+    { value = 40, color = "#00ff40", name = "green" },
+    { value = 50, color = "#00e0ff", name = "cyan" },
+    { value = 60, color = "#0030ff", name = "blue" },
+    { value = 70, color = "#ff00c0", name = "magenta" },
+    { value = 80, color = "#8040ff", name = "lavender" },
+  ] },
+  { role = "gobo", slots = [
+    { value = 0, name = "open" },
+    { value = 10, name = "dots" },
+    { value = 20, name = "star" },
+    { value = 30, name = "breakup" },
+    { value = 40, name = "triangles" },
+    { value = 50, name = "flower" },
+    { value = 60, name = "spiral" },
+  ] },
+  "prism",
+  "focus",
+  { role = "zoom", deg = [12.0, 30.0] },
+]

@@ -1,0 +1,36 @@
+# Build layout (PLAN §15.5): main window on DP-1 in Build mode with the full bottom dock.
+# The confidence window keeps following the TV (DP-2 while the TV is off).
+#
+# Monitor matches: a connector name ("DP-1"), or "desc:<text>" / "make:<text>" / "model:<text>":
+# case-insensitive substrings of what `hyprctl monitors all` reports.
+
+name = "build"
+mode = "build"   # show | build
+zoom = 1.0
+windows = []     # pop out a panel with [[windows]] panel = "scopes", monitor = "DP-2"
+
+[main]
+monitor = "DP-1"
+
+[confidence]
+enabled = true
+monitors = ["desc:Philips FTV", "HDMI-A-1"]
+fallback = ["DP-2"]
+canvases = "both"   # wide | tall | both
+fullscreen = true
+
+[dock]
+# Tab groups left to right with their width shares.
+# Tabs: rules, timeline, scopes, trace, simulator, console, perf, view.<name>
+groups = [
+    ["rules", "timeline"],
+    ["scopes", "trace"],
+    ["simulator", "console", "perf"],
+]
+fractions = [0.4, 0.3, 0.3]
+height = 320.0
+
+[show]
+rail_tab = "events"   # events | chat | queue | mod
+rail_width = 360.0
+multiview = true

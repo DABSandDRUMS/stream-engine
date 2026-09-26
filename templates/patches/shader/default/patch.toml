@@ -1,0 +1,14 @@
+# {{label}} — a WGSL shader patch (source layer). Place it in a scene: { src = "patch.{{id}}", rect = [...] }.
+# The engine prepends a generated header (docs/patches.md): `se` uniforms, p_<param>(),
+# s_<signal>(), palette(PAL_*), and the full-screen vertex entry `se_vs`. Write `fs`.
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "source"
+label       = "{{label}}"
+description = "Generative plasma in the stream palette, pushed by the band's bass"
+params.speed = { type = "float", default = 0.6, range = [0.0, 4.0] }
+params.scale = { type = "float", default = 3.0, range = [0.5, 12.0] }
+params.tint  = { type = "color", default = "#ffffff" }
+trigger = { attack = "50ms", hold = "1s", release = "800ms" }
+signals = []
+budget  = { gpu_ms = 1.0 }

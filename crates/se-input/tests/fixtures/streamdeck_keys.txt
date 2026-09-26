@@ -1,0 +1,8 @@
+# stream-engine HID fixture: Stream Deck Original V2 (0fd9:006d) input reports
+# (report 01, command 00, length 15 LE, one byte per key; trailing zero padding dropped).
+# Sequence: key 5 down, key 5 up, keys 0 + 14 down together, both up.
+# <ms since start> <hex bytes>
+0 01 00 0F 00 00 00 00 00 00 01 00 00 00 00 00 00 00 00 00
+80 01 00 0F 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+400 01 00 0F 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00 01
+480 01 00 0F 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00

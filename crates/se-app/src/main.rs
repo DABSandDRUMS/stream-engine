@@ -5,10 +5,12 @@
 //! * `stream-engine replay` — re-run a recorded session
 //! * `stream-engine new` — create a project from the starter template
 
+mod api_admin;
 mod daemon;
 mod http_extra;
 mod logging;
 mod omarchy;
+mod project_io;
 mod queries;
 mod replay;
 mod session_tasks;
@@ -19,6 +21,12 @@ use clap::{Parser, Subcommand};
 use serde::Deserialize;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+
+/// Debug builds count allocations on real-time threads (render, audio, DMX) to enforce the
+/// no-per-frame-allocation rule (§21).
+#[cfg(debug_assertions)]
+#[global_allocator]
+static ALLOC: se_alloc::Counting = se_alloc::Counting;
 
 #[derive(Parser)]
 #[command(name = "stream-engine", version, about = "All-in-one live-stream production engine")]

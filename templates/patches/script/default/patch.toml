@@ -1,0 +1,11 @@
+# {{label}} — a Lua script patch (docs/patches.md). Saved changes reload instantly; if the
+# new version fails, the last good one keeps running and the error shows in the UI.
+kind        = "script"
+entry       = "main.lua"
+layer       = "overlay"          # overlay: drawn above every canvas; source: place it in scenes as src = "patch.{{id}}"
+label       = "{{label}}"
+description = "Blank script: draws a pulse, reacts to its trigger"
+params.size  = { type = "float", default = 0.08, range = [0.01, 0.5], description = "Circle radius (fraction of the layer height)" }
+params.color = { type = "color", default = "#ffffff" }
+trigger = { attack = "50ms", hold = "2s", release = "500ms", retrigger = "stack" }
+budget  = { cpu_ms = 1.0 }

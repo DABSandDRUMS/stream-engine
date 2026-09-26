@@ -1,0 +1,76 @@
+<!doctype html>
+<!-- Goals: one bar per `goals.<name>` (or only ?goal=<name>). -->
+<html>
+<head>
+<meta charset="utf-8">
+<title>goals</title>
+<style>
+  :root { --accent: #9ece6a; --bar: rgba(13, 15, 26, .7); --fg: #fff; --font: "Inter", "Noto Sans", sans-serif; }
+  html, body { margin: 0; width: 100%; height: 100%; background: transparent; overflow: hidden; }
+  body { font-family: var(--font); color: var(--fg); display: flex; flex-direction: column; justify-content: center; gap: 4vh; padding: 0 2vw; box-sizing: border-box; }
+  .goal { position: relative; height: 22vh; min-height: 28px; border-radius: 11vh; background: var(--bar); overflow: hidden; box-shadow: 0 .6vh 2vh rgba(0, 0, 0, .35); }
+  .fill { position: absolute; inset: 0 auto 0 0; width: 0; border-radius: inherit; background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 70%, #000), var(--accent)); transition: width 1.2s cubic-bezier(.2, 1, .3, 1); }
+  .fill::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .35), transparent); animation: shine 2.8s linear infinite; }
+  .row { position: absolute; inset: 0; display: flex; align-items: center; justify-content: space-between; padding: 0 4vh; font-weight: 800; font-size: 11vh; text-shadow: 0 .3vh 1vh rgba(0, 0, 0, .7); white-space: nowrap; }
+  .label { overflow: hidden; text-overflow: ellipsis; }
+  .goal.done { animation: glow 1.4s ease-in-out infinite; }
+  @keyframes shine { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+  @keyframes glow { 50% { box-shadow: 0 0 4vh var(--accent); } }
+</style>
+</head>
+<body>
+<script src="/engine.js"></script>
+<script src="/web/overlay.js"></script>
+<script>
+  "use strict";
+  const O = Overlay;
+  const se = Engine.connect();
+  const P = O.params(se, { goal: "", accent: "#9ece6a", bar_bg: [0.05, 0.06, 0.1, 0.7], text_color: "#ffffff", font: "" }, () => { apply(); render(); });
+  const goals = new Map(); // name → {label, current, target, progress}
+  const els = new Map();
+
+  function apply() {
+    const r = document.documentElement.style;
+    r.setProperty("--accent", O.cssColor(P.accent) || "#9ece6a");
+    r.setProperty("--bar", O.cssColor(P.bar_bg) || "rgba(13,15,26,.7)");
+    r.setProperty("--fg", O.cssColor(P.text_color) || "#fff");
+    if (P.font) r.setProperty("--font", P.font);
+  }
+  apply();
+
+  function render() {
+    const want = String(P.goal || "").trim();
+    for (const [name, el] of els) if ((want && name !== want) || !goals.has(name)) { el.remove(); els.delete(name); }
+    for (const [name, g] of goals) {
+      if (want && name !== want) continue;
+      if (g.target == null) continue;
+      let el = els.get(name);
+      if (!el) {
+        el = O.h("div", "goal");
+        el.appendChild(O.h("div", "fill"));
+        const row = O.h("div", "row");
+        row.appendChild(O.h("span", "label"));
+        row.appendChild(O.h("span", "count"));
+        el.appendChild(row);
+        document.body.appendChild(el);
+        els.set(name, el);
+      }
+      const p = Math.max(0, Math.min(1, g.target > 0 ? (g.current || 0) / g.target : 0));
+      el.querySelector(".fill").style.width = `${(p * 100).toFixed(2)}%`;
+      el.querySelector(".label").textContent = g.label || name;
+      el.querySelector(".count").textContent = `${O.fmtNum(g.current || 0)} / ${O.fmtNum(g.target)}`;
+      el.classList.toggle("done", p >= 1);
+    }
+  }
+
+  se.state("goals.**", (addr, v) => {
+    const [, name, field] = addr.split(".");
+    if (!name || !field) return;
+    const g = goals.get(name) || {};
+    g[field] = v;
+    goals.set(name, g);
+    render();
+  });
+</script>
+</body>
+</html>

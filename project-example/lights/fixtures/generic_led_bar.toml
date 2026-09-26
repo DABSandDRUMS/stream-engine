@@ -1,0 +1,25 @@
+# Generic 8-cell RGB LED bar (≈1 m pixel bar). Each cell becomes its own head: `<fixture>_1` … `<fixture>_8`
+# (1 = the cell nearest DMX-in), so chases and sparkles run across the cells.
+name = "Generic 8-cell RGB LED Bar"
+manufacturer = "Generic"
+kind = "bar"
+beam = 30.0
+
+# Pixel mode: 8 × RGB, no master channels (heads get virtual dimmers).
+[modes.8x3]
+cells = 8
+cell_channels = ["red", "green", "blue"]
+channels = []
+
+# Pixel mode with master dimmer + strobe first (0-9 = open, 10-255 slow → fast), then 8 × RGB.
+[modes.26ch]
+cells = 8
+cell_channels = ["red", "green", "blue"]
+channels = [
+  "dimmer",
+  { role = "strobe", range = [10, 255], hz = [1.0, 20.0], open = 0 },
+]
+
+# Whole bar as one RGB head.
+[modes.3ch]
+channels = ["red", "green", "blue"]

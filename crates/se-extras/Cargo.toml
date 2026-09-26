@@ -1,0 +1,30 @@
+[package]
+name = "se-extras"
+description = "stream-engine extras: giveaways, remote mod access (engine side), first-run setup state, backups and retention"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+se-proto.workspace = true
+se-core.workspace = true
+se-hub.workspace = true
+se-store.workspace = true
+se-api.workspace = true
+se-clock.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+toml_edit.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+zstd.workspace = true
+libc.workspace = true
+parking_lot.workspace = true
+rusqlite.workspace = true
+rand = "0.9"
+
+[dev-dependencies]
+tempfile.workspace = true
+crossbeam-channel.workspace = true

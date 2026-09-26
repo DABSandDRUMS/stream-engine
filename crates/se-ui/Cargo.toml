@@ -17,3 +17,18 @@ serde_json.workspace = true
 toml.workspace = true
 tracing.workspace = true
 crossbeam-channel.workspace = true
+se-core.workspace = true
+se-clock.workspace = true
+se-expr.workspace = true
+toml_edit.workspace = true
+libc.workspace = true
+egui_dock = "0.21"
+wgpu = { version = "30", default-features = false, features = ["std", "wgsl", "vulkan"] }
+ash = "0.38"
+# clip thumbnails in session review
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+# deck key previews (Controllers view)
+base64 = "0.23"
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,6 +1,8 @@
 //! `se-ui-kit`: the stream-engine design system. Theme tokens follow the active Omarchy
 //! theme and font live; every widget draws with the tokens (egui's default look is not used).
 
+pub mod canvas;
+pub mod curve;
 pub mod theme;
 pub mod widgets;
 

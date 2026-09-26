@@ -1,0 +1,8 @@
+# Random sparkle: heads flick up at random (≈1.5 per second per head) and decay over 150 ms.
+label = "Sparkle"
+kind = "sparkle"
+targets = ["all"]
+unit = "hz"
+rate = 1.5
+size = 0.8
+decay = "150ms"

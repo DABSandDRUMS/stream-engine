@@ -270,6 +270,7 @@ Timelines are how anything (lights, video, audio, mixer, patches) gets **sequenc
 ### 3.4 Hot reload and isolation
 - Every project file and patch is watched (`notify`). Reload applies atomically; on failure the **last good version stays live** and the error shows in the UI.
 - Lua VMs: one per patch, sandboxed (no `os`/`io`), with a per-tick instruction and time budget. Over budget → suspended and flagged.
+  - **Verified (2026-09-25):** LuaJIT never calls debug hooks inside JIT-compiled traces, so `while true do end` cannot be interrupted with the JIT on. Script VMs therefore run LuaJIT's interpreter (`jit.off()`), each on its own thread with a global count hook (per-thread hooks are dropped by coroutines).
 - Shader compile failure → keep the old pipeline.
 - **GPU device loss** (e.g. a runaway user shader) → automatic recovery: recreate the device, reload resources, resume output. The OBS plugin shows the last frame or the fallback until then.
 
@@ -630,7 +631,7 @@ Target: within one render frame of analysis latency.
   - **Stream path:** processed drums → `drums` bus → program. Latency only needs to be aligned with video (cameras are usually slower than audio).
   - **Monitor path** (only if the drummer hears the processed sound in headphones): round trip ≤ ~10 ms. Requires:
     - PipeWire quantum 64 @ 48 kHz
-    - real-time scheduling. **Verified missing today:** PipeWire's data loop runs `SCHED_OTHER` because RTKit isn't installed (`mod.rt: RTKit error: ServiceUnknown`) and `ulimit -r` is 0. Fix: install `realtime-privileges` and add the user to the `realtime` group (§28.4). Also needed for glitch-free audio at any quantum during a stream.
+    - real-time scheduling. **Verified 2026-09-25 (after re-login with `realtime-privileges`):** PipeWire's `data-loop.0` runs `SCHED_FIFO` priority 88, `RLIMIT_RTPRIO` = 98 (before: `SCHED_OTHER`, RTKit missing, `ulimit -r` 0). Reported live as `health.audio.rt`. Also needed for glitch-free audio at any quantum during a stream.
     - kernel preemption: **verified** already full (`CONFIG_PREEMPT=y`, `PREEMPT_DYNAMIC`, 1000 Hz); no boot parameter needed.
 
     The monitor chain may be lighter than the stream chain.
@@ -649,7 +650,7 @@ Target: within one render frame of analysis latency.
 
 ### 8.7 Hardware mixer: PreSonus StudioLive 16R
 
-**Status:** the 16R is on the LAN (owner confirmed); connection and discovery details are handled when M8 starts. The architecture already covers it: `se-mixer` is just another adapter publishing addresses, signals, and events (§2).
+**Status (verified 2026-09-25):** the 16R is at 10.0.0.187 on `eno1`'s LAN (serial RA1E24110101, firmware 3.2.0.108461: pin it). `se-mixer` connects, syncs both ways, and streams meters (operator notes: `docs/mixer.md`). The host's ufw (default-deny input) drops the console's discovery broadcasts, so `se-mixer` also probes the LAN (PreSonus OUI in the ARP cache, then TCP 53000 on the local /24); meters pass because the adapter opens the UDP flow from our side first. Faders are console positions 0–1 (≈0.72 = 0 dB); the console echoes our own changes to every client (`PV` for mutes, `MS fdrs` with every fader for volumes).
 
 - **Control over Ethernet** with PreSonus's UCNET protocol:
   - UDP broadcast discovery
@@ -701,7 +702,7 @@ Target: within one render frame of analysis latency.
   - Enttec DMX USB Pro serial framing (label 6 = send DMX)
 
   **On this machine:** ENTTEC DMX USB PRO (FTDI 0403:6001) at `/dev/ttyUSB0`, group `uucp`; the user is already in `uucp`. This is the day-one output. sACN/Art-Net stay available for future network nodes.
-- **Fixture discovery:** attempt RDM discovery through the DMX USB PRO in M7; fixtures that don't answer RDM are patched manually from the owner's fixture list (§28.3).
+- **Fixture discovery:** attempt RDM discovery through the DMX USB PRO in M7; fixtures that don't answer RDM are patched manually from the owner's fixture list (§28.3). **Verified in M7:** this widget runs the DMX firmware 1.44, which cannot do RDM, so every fixture is patched from the owner's list unless the widget is reflashed with ENTTEC's RDM firmware.
 - **Safety limiter at the output stage** (after all logic):
   - maximum flash/strobe rate (≈3 flashes/s cap by default; photosensitivity guideline)
   - brightness caps
@@ -774,7 +775,7 @@ Target: within one render frame of analysis latency.
   - broadcast: `channel:manage:broadcast` (markers), `channel:manage:raids`
   - ads: `channel:read:ads`, `channel:manage:ads`
   - followers and shoutouts: `moderator:read:followers`, `moderator:manage:shoutouts`
-  - moderation: `moderator:manage:banned_users`, `moderator:manage:chat_messages`, `moderator:manage:automod`, `moderator:manage:blocked_terms`
+  - moderation: `moderator:manage:banned_users`, `moderator:manage:chat_messages`, `moderator:manage:automod`, `moderator:manage:blocked_terms`, plus `channel:moderate` (required by the `channel.ban` / `channel.unban` EventSub types; verified against the EventSub reference 2026-09)
 - **Ad breaks:** an `ad_break` event switches mode to `ad_break` (scene with a countdown, music up, chat effects paused), and it returns automatically. A warning shows in the UI ahead of scheduled ads.
 - **Measure stream delay** for chat time alignment (§3.2).
 - **Third-party emotes:** 7TV, BTTV, and FFZ public APIs for chat overlays (cached; animated formats decoded to GPU textures).
@@ -917,7 +918,7 @@ One small service on the owner's domain; the only code we run off this machine.
 - **Routes:**
   - `/queue`: **public song-queue page** (now playing, upcoming, requester, position). It updates live over WebSocket from the Durable Object's latest snapshot, and shows "offline" when the engine isn't connected. The chatbot's `!queue` replies with this link.
   - `/hooks/kofi`: Ko-fi webhook (§14.5).
-  - Later: `/mod` for remote mod access (Twitch OAuth login, verified against the channel's mod list; restricted command set, §19).
+  - `/mod`: remote mod console (M11). Twitch sign-in with the app's client id (implicit grant); the relay checks the channel is among the user's moderated channels (Helix `GET /moderation/channels`, scope `user:read:moderated_channels` on the moderator's own token, so no extra broadcaster scope), revokes the token, and issues a signed session cookie. The engine re-checks `[remote_mod]` (off by default, allow/deny lists) and the restricted command set (§19) on every request.
 - **Deploy:** `wrangler deploy` from `relay/`; the route is attached to the owner's domain in Cloudflare.
 
 ---
@@ -1364,7 +1365,7 @@ Each milestone ends with a **live smoke run**: the actual app, real devices, out
 - **dmabuf:** Vulkan dmabuf export/import extensions are present on the RTX 3070; OBS 32.2.2 has `gs_texture_create_from_dmabuf`; `wgpu-hal` has dmabuf import. Export is implemented through `ash` (§4.5).
 - **NVENC:** 10 concurrent 1080p60 H.264 encodes succeeded (need 4). No AV1 encode on Ampere.
 - **Kernel:** fully preemptible (`CONFIG_PREEMPT=y`, 1000 Hz).
-- **PipeWire:** not realtime today (RTKit missing) → setup step (§28.4).
+- **PipeWire:** realtime since the `realtime` group login: `data-loop.0` `SCHED_FIFO` prio 88 (§28.4).
 - **Idle:** the Omarchy idle monitor respects inhibitors, and `omarchy toggle idle` exists (§16.3).
 - **Capture:** the AVMatrix VC42 delivered ≈60 fps on HDMI 1, 2, and 4 at probe time. HDMI 3 and the MSI capture had no picture then; the owner confirms cameras are connected to all inputs, so all 6 are expected live (preflight checks it, §17.1). The USB camera runs 1080p30 MJPEG (25 fps in low light due to auto-exposure).
 - **Twitch scopes:** `channel.ad_break.begin` needs `channel:read:ads` (or `channel:manage:ads`); `channel.chat.message` needs `user:read:chat` with a user token.
@@ -1394,15 +1395,15 @@ Each milestone ends with a **live smoke run**: the actual app, real devices, out
 | USB capture | MSI "Streaming Boost" UVC capture (`/dev/video4`) with a camera attached, 1280×720@60 MJPEG/YUYV + stereo 48 kHz audio (no picture at probe time) |
 | USB camera | Sonix USB Camera (`/dev/video6`), 1080p30 MJPEG, mono mic; room view |
 | Audio interface | PreSonus Studio 24c (2×2, 5-pin MIDI I/O): its stereo input carries the 16R main mix. Also motherboard audio, NVIDIA HDMI audio |
-| Mixer | PreSonus StudioLive 16R on the LAN (owner confirmed); UCNET connection in M8 |
-| DMX | ENTTEC DMX USB PRO, `/dev/ttyUSB0` |
+| Mixer | PreSonus StudioLive 16R at 10.0.0.187 (MAC 00:0a:92:03:3a:24, serial RA1E24110101, firmware 3.2.0.108461); 16 line ch, 1 return, 2 FX returns, talkback, 6 aux, 2 FX buses, main; UCNET TCP 53000 |
+| DMX | ENTTEC DMX USB PRO, `/dev/ttyUSB0` (serial EN405589); firmware 1.44 = standard DMX firmware, which has no RDM (RDM needs ENTTEC's RDM firmware, major 2); widget output rate was stored at 40 packets/s (M7 sets it to max via `widget_rate = 0`) |
 | Control surfaces | Elgato Stream Deck Original V2 (15 keys); Behringer X-TOUCH MINI; Line 6 FBV Express Mk II |
 | Network | Wired `eno1` 10.0.0.14/24 (Intel I225-V 2.5 GbE); Tailscale also present |
 | Software | Omarchy (Hyprland 0.56.2, Quickshell 0.3.1), kernel 7.2.5, PipeWire 1.6.8, OBS 32.2.2 + Aitum Stream Suite, FFmpeg with NVENC, Node 26, Deno |
 
 ### 28.2 Accounts and keys
 - [ ] **Google Cloud project** → enable YouTube Data API v3 → API key (no billing, no OAuth needed).
-- [ ] **Twitch developer app** (2FA on the account) → Client ID; device code flow enabled; scopes per §11.
+- [ ] **Twitch developer app** (2FA on the account) → Client ID; device code flow enabled; scopes per §11. For remote mods (§14.6), add `https://<domain>/mod/callback` as an OAuth redirect URL.
 - [x] GitHub repo: `DABSandDRUMS/stream-engine`, `gh` authenticated as DABSandDRUMS.
 - [ ] **Ko-fi** account with the webhook URL set to `https://<domain>/hooks/kofi`; verification token stored as a Worker secret.
 - [ ] **Cloudflare** account with the owner's domain; Workers Free plan is enough (Durable Objects SQLite, WebSocket Hibernation).
@@ -1412,11 +1413,11 @@ Each milestone ends with a **live smoke run**: the actual app, real devices, out
 ### 28.3 Owner info needed later (not needed for the foundation)
 1. **DMX fixture list** (model, DMX mode, start address), before M7; RDM discovery is attempted first.
 2. **Domain name** for the Cloudflare relay, before M6.
-3. **16R network details**, if discovery doesn't find it, when M8 starts.
+3. ~~**16R network details**~~ — found by the LAN probe at 10.0.0.187 (2026-09-25). Optional: `sudo ufw allow in proto udp from any port 53000 to any port 47809` so broadcast discovery works too.
 
 ### 28.4 Machine setup steps
 - [x] 2026-09-25: installed `realtime-privileges` and `espeak-ng`; added the user to `realtime` (rtprio 98, memlock unlimited, nice -11).
-- [ ] After the next login: confirm PipeWire's `data-loop` thread runs `SCHED_FIFO`.
+- [x] 2026-09-25 after re-login: PipeWire's `data-loop.0` thread runs `SCHED_FIFO` priority 88 (`chrt -p`), `ulimit -r` = 98.
 - Optional diagnostics: `sudo pacman -S usbutils vulkan-tools`.
 
 ---

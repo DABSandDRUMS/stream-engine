@@ -1,0 +1,10 @@
+# MSI "Streaming Boost" UVC capture (/dev/video4) with a camera attached: 720p60.
+# YUYV at 720p60 fits USB 3 and needs no decode (MJPEG is also offered).
+label = "MSI capture"
+device = "usb-MSI_MSI_USB_Device_*-video-index0"
+format = "yuyv"
+size = [1280, 720]
+fps = 60
+
+[color]
+saturation = 1.0

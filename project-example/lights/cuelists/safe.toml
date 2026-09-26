@@ -1,0 +1,15 @@
+# Safe look (fired by Panic): steady warm white at 60 %, every effect stopped, master restored.
+label = "Safe"
+priority = 1000
+
+[[cue]]
+id = "1"
+label = "Safe warm white"
+fade = "0.5s"
+stop_effects = ["all"]
+
+[cue.set]
+all = { intensity = 0.6, color = "#ffe6cc" }
+
+[cue.addresses]
+"lights.master" = 1.0

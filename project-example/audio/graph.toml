@@ -1,0 +1,44 @@
+# Audio graph (docs/audio.md). Every audio/*.toml file is merged into project.toml's [audio]
+# table in file-name order, so settings can live in either place.
+
+# PipeWire quantum (frames per cycle) requested by the engine node: 256 @ 48 kHz = 5.3 ms.
+# Use 64 for the low-latency drum monitor path (M12); needs realtime scheduling.
+quantum = 256
+
+# The Studio 24c stereo input carries the StudioLive 16R main mix → `band` bus.
+# `target` = PipeWire node.name, or a case-insensitive substring of node.name/description.
+[inputs.band]
+target = "Studio 24c"
+channels = [1, 2]
+delay = "0ms"          # A/V delay (live: audio.input.band.delay_ms)
+
+# 16R USB multichannel stems (M12) — uncomment when the 16R is the interface. Channel
+# numbers are the 16R's USB channels (pro-audio profile port order).
+# [inputs.band]
+# target = "StudioLive 16R"
+# channels = [17, 18]      # main mix return
+# [inputs.kick]
+# target = "StudioLive 16R"
+# channels = [1]
+# bus = "drums"
+# [inputs.snare]
+# target = "StudioLive 16R"
+# channels = [2]
+# bus = "drums"
+# [inputs.vox]
+# target = "StudioLive 16R"
+# channels = [9]
+# bus = "mic"
+
+# hub.audio slots → buses (defaults: youtube, web.* → music; tts → tts; sfx.* → sfx;
+# game* → game; patch.* → sfx). Per-slot A/V delay:
+[slots]
+"youtube" = { bus = "music", delay = "0ms" }
+
+# Live analysis → band.*, music.*, beat.*, mic.* signals.
+[analysis]
+buses = ["band", "music"]
+beat_source = "auto"   # band when it has a confident beat, else music
+min_bpm = 70
+max_bpm = 180
+# mic = "vox"          # vocal stem input → mic.level, mic.hype, mic.talking

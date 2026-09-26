@@ -1,0 +1,29 @@
+// stream-engine relay (PLAN §14.6): public song-queue page, Ko-fi webhook, engine link.
+// Secrets (never in this file): `npx wrangler secret put RELAY_SECRET` and
+// `npx wrangler secret put KOFI_VERIFICATION_TOKEN`; for `wrangler dev` put them in `.dev.vars`
+// (see `.dev.vars.example`). Deploy steps: docs/relay.md.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "stream-engine-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "observability": { "enabled": true },
+  "durable_objects": {
+    "bindings": [{ "name": "RELAY", "class_name": "Relay" }]
+  },
+  // SQLite-backed Durable Object (Workers Free plan).
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Relay"] }],
+  "vars": {
+    // Ko-fi payments kept while the engine is offline (oldest dropped beyond this).
+    "KOFI_BUFFER_MAX": "500",
+    // Heading of the public /queue page.
+    "QUEUE_TITLE": "Song queue",
+    // Remote mod console (/mod): session lifetime in hours. Twitch client id and broadcaster
+    // come from the engine ([twitch] client_id); add https://<domain>/mod/callback as an OAuth
+    // redirect URL of that Twitch application. TWITCH_ID_BASE / TWITCH_API_BASE exist only to
+    // point local tests at a fake OAuth provider (`--var TWITCH_ID_BASE:http://127.0.0.1:8799`).
+    "MOD_SESSION_HOURS": "12"
+  }
+  // Attach the Worker to the owner's domain (uncomment and edit before `wrangler deploy`):
+  // "routes": [{ "pattern": "relay.example.com", "custom_domain": true }]
+}

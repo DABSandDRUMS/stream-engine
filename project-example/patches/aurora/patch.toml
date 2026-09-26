@@ -1,0 +1,12 @@
+# Aurora: slow flowing color curtains in the stream palette; reacts to the band's bass.
+# Placed as a scene source (`src = "patch.aurora"`, e.g. the BRB scene).
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "source"
+label       = "Aurora"
+description = "Flowing palette-colored light curtains; bass pushes the brightness"
+params.speed     = { type = "float", default = 0.25, range = [0.0, 2.0], description = "Flow speed" }
+params.bands     = { type = "float", default = 3.0, range = [1.0, 8.0], description = "Number of curtains" }
+params.intensity = { type = "float", default = 1.4, range = [0.0, 2.0], description = "Brightness" }
+params.bass_gain = { type = "float", default = 0.6, range = [0.0, 2.0], description = "How much band.bass brightens the curtains" }
+budget = { gpu_ms = 0.5 }

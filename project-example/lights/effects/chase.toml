@@ -1,0 +1,11 @@
+# Beat-synced colour chase: one full cycle every 4 beats (follows beat.phase / beat.bpm),
+# the colours step across the stage left → right.
+label = "Beat chase"
+kind = "color_chase"
+targets = ["all"]
+unit = "beats"
+rate = 4.0
+size = 1.0
+spread = 1.0
+order = "x"
+colors = ["#ff2020", "#ff9000", "#00e0a0", "#3050ff"]

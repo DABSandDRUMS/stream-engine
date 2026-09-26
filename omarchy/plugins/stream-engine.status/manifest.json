@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "id": "stream-engine.status",
+  "name": "stream-engine",
+  "version": "0.1.0",
+  "author": "DABSandDRUMS",
+  "license": "MIT OR Apache-2.0",
+  "description": "stream-engine status in the Omarchy bar: on-air tally and show mode, engine uptime, preflight health, and pending approvals.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "Widget.qml"
+  },
+  "barWidget": {
+    "displayName": "stream-engine",
+    "description": "On-air tally, show mode, uptime, preflight health, and pending approvals. Left = open UI · middle = program window · right = details.",
+    "category": "Streaming",
+    "aliases": ["stream", "live", "obs"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "streamCommand": "stream",
+      "socket": "",
+      "openCommand": "stream-engine-launch-or-focus",
+      "preflightIntervalSec": 30,
+      "retryIntervalSec": 5,
+      "hideWhenOffline": false
+    },
+    "schema": [
+      { "key": "streamCommand", "type": "string", "label": "stream CLI", "defaultValue": "stream", "description": "Command (or absolute path) of the stream CLI." },
+      { "key": "socket", "type": "path", "label": "Engine socket", "defaultValue": "", "description": "Empty = the engine's default ($XDG_RUNTIME_DIR/stream-engine/engine.sock)." },
+      { "key": "openCommand", "type": "string", "label": "Open UI command", "defaultValue": "stream-engine-launch-or-focus", "description": "Runs on left click; `--program` is appended for the program window." },
+      { "key": "preflightIntervalSec", "type": "integer", "label": "Preflight refresh (seconds)", "min": 5, "max": 600, "step": 5, "defaultValue": 30 },
+      { "key": "retryIntervalSec", "type": "integer", "label": "Reconnect interval (seconds)", "min": 1, "max": 60, "step": 1, "defaultValue": 5 },
+      { "key": "hideWhenOffline", "type": "boolean", "label": "Hide while the engine is offline", "defaultValue": false }
+    ]
+  }
+}

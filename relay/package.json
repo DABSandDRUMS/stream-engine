@@ -1,0 +1,24 @@
+{
+  "name": "stream-engine-relay",
+  "version": "0.1.0",
+  "private": true,
+  "description": "stream-engine Cloudflare relay: public song-queue page, Ko-fi webhook, engine link (Worker + Durable Object)",
+  "license": "MIT OR Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --port 8787",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "deploy": "wrangler deploy",
+    "types": "wrangler types --env-interface Env"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
+    "@cloudflare/workers-types": "^5.20260926.1",
+    "@vitest/runner": "~4.1.0",
+    "@vitest/snapshot": "~4.1.0",
+    "typescript": "^5.9.3",
+    "vitest": "~4.1.0",
+    "wrangler": "^4.141.0"
+  }
+}

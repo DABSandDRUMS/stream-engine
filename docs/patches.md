@@ -1,0 +1,286 @@
+# Patch authoring guide
+
+A **patch** is a folder in `project/patches/<id>/` with a `patch.toml` manifest and an entry
+file. Save a file and the engine reloads the patch in place — no rebuild, no restart. If the
+new version is broken, **the last good version keeps running** and the error (with its file
+and line) shows in the UI, in `stream get patch.<id>.error`, and in the log.
+
+Every patch gets the same addresses:
+
+| Address | What |
+|---|---|
+| `patch.<id>` | the trigger (fire with `stream do patch.<id>.trigger tier=2`, rules, presets, deck keys, chat) |
+| `patch.<id>.env` / `.active` | trigger envelope 0–1 (attack/hold/release from the manifest) and whether it is running |
+| `patch.<id>.<param>` | every manifest param, typed from its `Meta` (the UI generates controls for them) |
+| `patch.<id>.state` | `loaded` · `error` · `suspended` · `disabled` |
+| `patch.<id>.error` | last error, `file:line: message` (empty when healthy) |
+| event `patch.<id>.trigger` | emitted on every trigger with the trigger payload |
+
+## 1. Create a patch
+
+- **UI:** *Views → Patches → New patch* (id, kind, template, "open in editor").
+- **CLI:** `stream do patch.new id=my_fx kind=script template=default open=true`
+- **By hand:** make `patches/my_fx/` with a `patch.toml` and the entry file — it appears as soon as `patch.toml` exists.
+
+Templates live in `<share>/templates/patches/<kind>/<template>/` (list them with
+`stream query patch.templates`): `script/default`, `script/burst`, `shader/default` (source),
+`shader/effect`, `shader/transition`, `particles/default`, `web/default`, `dsp/default`.
+Text files may use `{{id}}` and `{{label}}` placeholders.
+
+Other actions: `patch.reload [id]` (re-read from disk; no id = all), `patch.disable <id>`,
+`patch.enable <id>` (also resumes a suspended script), `patch.open <id>` (editor). The editor
+is `editor=` from the action, else `$STREAM_ENGINE_EDITOR`, `omarchy-launch-editor`, `$VISUAL`,
+then `xdg-open`.
+
+Then (§6.5): route it (scene node `{ src = "patch.<id>" }`, overlay layer, effect, or
+transition), fire it from the simulator (`stream fire twitch.sub tier=2` with a rule), and bind
+params to signals.
+
+## 2. Kinds and layers
+
+| Kind | Entry | Runs in | Use |
+|---|---|---|---|
+| `script` | `main.lua` | a Lua VM on its own thread; draw lists rendered by vello | logic + 2D drawing |
+| `shader` | `main.wgsl` (`fs`) | the renderer | generative visuals, effects, transitions |
+| `particles` | `sim.wgsl` + `draw.wgsl` | the renderer (compute + instanced draw) | thousands of particles |
+| `web` | `index.html` | Chromium (CEF) off screen, served by the engine | HTML/CSS/Canvas/Three.js widgets |
+| `dsp` | `main.wasm` | the audio graph (WebAssembly) | audio effects/generators |
+
+| Layer | Meaning | How it is used |
+|---|---|---|
+| `source` | placeable in scenes | scene node `{ src = "patch.<id>", rect = [...] }` |
+| `overlay` | global layer above the scene on every canvas | drawn while `patch.<id>.active` or `env > 0`; always if the patch has no trigger |
+| `effect` | takes an input texture (`se_input`) | `fx = [{ name = "patch.<id>", amount = 0.8 }]` on a source, scene node, scene, `[render.canvas_fx.<canvas>]`, or `[render.output_fx.<canvas>]`; with a trigger it also runs canvas-wide while `env > 0` (so presets can `fx = [{ name = "patch.<id>" }]`) |
+| `transition` | takes A (`se_input`), B (`se_input_b`), `se.progress` | `scene.take transition=patch.<id>`, a scene's `transitions.pool = [{ name = "patch.<id>" }]`, or `transitions/<name>.toml` with `kind = "shader"`, `shader = "patch.<id>"`, `ms = 700` |
+| `audio-effect` | insert on a bus/input (`dsp` only) | audio chains `{ patch = "<id>" }` |
+| `audio-source` | generates audio (`dsp` only) | `[audio.sources."patch.<id>"] bus = "sfx"` |
+
+## 3. Manifest (`patch.toml`)
+
+```toml
+kind        = "script"            # shader | particles | script | web | dsp
+entry       = "main.lua"          # default per kind: main.lua, main.wgsl, sim.wgsl, index.html, main.wasm
+layer       = "overlay"           # source | overlay | effect | transition | audio-effect | audio-source
+label       = "Sub meteors"       # UI name (default: the folder name)
+description = "Meteor shower scaled by sub tier"
+params.count = { type = "int",   default = 40,  range = [1, 400], description = "Meteors per tier" }
+params.speed = { type = "float", default = 1.0, range = [0.1, 4.0], unit = "x" }
+params.tint  = { type = "color", default = "#ffaa33" }
+params.mode  = { type = "enum",  options = ["rain", "burst"] }
+trigger = { attack = "100ms", hold = "4s", release = "1s", retrigger = "stack" }
+budget  = { cpu_ms = 1.0 }        # scripts: + instructions, memory_mb; shaders: gpu_ms
+signals = ["twitch.chat_rate"]    # extra signals (shaders get s_<name>(); scripts get them as 0 until published)
+size    = [1920, 1080]            # render size for source/overlay web and script layers (optional)
+fps     = 60                      # web pages: CEF frame rate 1–120 (default 60)
+particles = { count = 4096, sim = "sim.wgsl", draw = "draw.wgsl" }   # particles only
+```
+
+- The folder name is the id: one address segment (`a-z`, `0-9`, `_`, `-`), no dots.
+- Param types: `float` (default), `int`, `bool`, `color` (`"#rrggbb[aa]"` or `[r,g,b,a]`), `vec2`, `vec4`, `enum` (`options`), `string`, `texture`. Reserved names: `env`, `active`, `error`, `trigger`.
+- `trigger`: `attack`/`hold`/`release` durations (`hold` absent = until released), `retrigger` = `stack` (default) · `replace` · `queue` · `reject`. The payload may override `hold`/`attack`/`release` per fire.
+- Manifest errors are reported as `patch.toml:<line>: message`; the previous manifest stays live.
+
+## 4. Inputs every patch receives (§6.3)
+
+`time`, `dt`, `frame`; `env` (trigger envelope 0–1); `trigger` (payload of the last trigger:
+`user`, `amount`, `tier`, `message`, …); `params.*`; `signals.*` (all registered signals plus
+the standard set); `palette.*` (the stream palette: `accent`, `background`, `foreground`, `red`,
+`yellow`, `green`, `cyan`, `magenta` — from the `palette.*` addresses); `resolution`; the input
+texture(s) for effect/transition layers.
+
+Standard signals (always present, 0 until something publishes them): `band.level`,
+`band.bass`, `band.mid`, `band.high`, `band.kick`, `band.snare`, `band.hat`, `band.centroid`,
+`music.level`, `music.bass`, `music.mid`, `music.high`, `beat.phase`, `beat.bpm`, `mic.level`,
+`lfo.slow`, `lfo.mid`, `lfo.fast`, `lfo.beat`, `lfo.bar`, `lfo.random`.
+
+## 5. Lua scripts (`kind = "script"`)
+
+LuaJIT (Lua 5.1 syntax) in **interpreter mode** — the JIT is off so that every budget can
+interrupt any loop. One VM and one thread per patch: a runaway script only ever blocks itself.
+
+```lua
+-- patches/sub_meteors/main.lua (PLAN §6.4)
+local rocks = {}
+on("trigger", function(e)
+  for _ = 1, params.count * (e.tier or 1) do
+    rocks[#rocks + 1] = { x = math.random(), y = -0.1, v = 0.3 + math.random() * params.speed }
+  end
+  emit("lights.flash", { color = palette.accent, ms = 400 })
+end)
+function frame(dt, s)
+  draw.clear()
+  for i = #rocks, 1, -1 do
+    local r = rocks[i]
+    r.y = r.y + r.v * dt * (1 + s.music.bass)
+    if r.y > 1.1 then table.remove(rocks, i)
+    else draw.circle(r.x, r.y, 0.006, palette.accent, env) end
+  end
+end
+```
+
+### Callbacks
+
+| | |
+|---|---|
+| `function frame(dt, s)` | called at the render rate (the highest canvas fps). `dt` in seconds (≤ 0.25), `s` = the signals table. Whatever `draw.*` produced is published as this frame's draw list (slot `patch.<id>`); if `frame` errors, the previous list stays on screen. |
+| `on(pattern, fn)` | subscribe to events. `"trigger"` = this patch was triggered (`patch.<id>.trigger`); otherwise an event-type glob (`twitch.*`, `band.kick`, `alert.**`). `fn(payload, ev)`: `payload` is the event payload table (non-table payloads arrive as `{ value = … }`); `ev = { type, origin, ts, actor = { platform, id, name, roles } }`. Handlers run as soon as the event reaches the engine. |
+
+### Globals (refreshed before every callback)
+
+| | |
+|---|---|
+| `params` | current values of `patch.<id>.<param>` (resolved: base → scene → bindings → overrides). Colors and vectors are arrays `{r, g, b, a}` that also answer `.r .g .b .a` / `.x .y .z .w`. Assigning to `params` does nothing — use `set()`. |
+| `palette` | the stream palette (color arrays as above) |
+| `env` | this patch's trigger envelope 0–1 |
+| `trigger` | payload of the most recent trigger (or `nil`) |
+| `signals` | same table as `s` in `frame`: nested by name (`s.band.kick`, `s.twitch.chat_rate`). A name that is both a value and a prefix (`band.kick` and `band.kick.env`) is `s.band.kick.value` + `s.band.kick.env`. |
+| `time` | seconds since this version was loaded |
+| `patch` | `{ id, label, frame, resolution = { w, h }, aspect }` (resolution = manifest `size` or the main canvas) |
+
+### Functions
+
+| | |
+|---|---|
+| `get(address)` | resolved state value (or a signal value) |
+| `set(address, value)` | override at patch priority (origin `patch`, layer key `patch:<id>`) |
+| `animate(address, to, ms, ease?)` | eases: `linear`, `in_quad`, `out_quad`, `in_out_quad`, `in_cubic`, `out_cubic`, `in_out_cubic`, `smoothstep`, `out_back`, `step` |
+| `emit(type, payload?)` | fire an event into the core (rules can react: `when = "hype.peak"`) |
+| `trigger(address, payload?)` | fire any triggerable address |
+| `cmd(text)` | any one-line command: `cmd("preset.fire hype")`, `cmd("lights.cue chase_fast")` |
+| `signal(name, value)` | publish a signal under `patch.<id>.<name>` (bind params, drive lights) |
+| `log.info(...)`, `log.warn(...)`, `log.error(...)`, `print(...)` | to the engine log (target `patch.<id>`) |
+| `require("module")` | load `module.lua` (dots = folders) from the patch folder, text only |
+
+Commands issued inside an event handler carry that event as their cause, so `stream trace`
+shows the chain.
+
+### Drawing (`draw.*`)
+
+Coordinates are 0–1 of the layer ((0,0) top-left, (1,1) bottom-right); sizes, radii, stroke
+widths, and text sizes are fractions of the layer **height**. Colors: `{r,g,b[,a]}`,
+`{r=,g=,b=,a=}`, `"#rrggbb[aa]"`, a palette entry, or a gray number. `alpha` (optional)
+multiplies the color's alpha — pass `env` to fade with the trigger.
+
+| | |
+|---|---|
+| `draw.clear(color?)` | start over (transparent by default); drops everything drawn before it this frame |
+| `draw.rect(x, y, w, h, color, alpha?, { radius=, stroke= }?)` | |
+| `draw.circle(x, y, r, color, alpha?, { stroke= }?)` | |
+| `draw.line(x1, y1, x2, y2, width, color, alpha?)` | |
+| `draw.path(points, color, alpha?, { close=, stroke= }?)` | `points` = `{x1, y1, x2, y2, …}` or commands `{{"M",x,y}, {"L",x,y}, {"Q",cx,cy,x,y}, {"C",c1x,c1y,c2x,c2y,x,y}, {"Z"}}` |
+| `draw.text(text, x, y, size, color, alpha?, { align = "left"|"center"|"right" }?)` | baseline at `y` |
+| `draw.image(path, x, y, w, h, alpha?)` | `path` relative to the project `assets/` |
+| `draw.push({ x=, y=, rotate=, scale= n or {sx, sy}, alpha= }?)` / `draw.pop()` | transform + opacity scope; unbalanced pushes are closed at the end of the frame |
+
+At most 100 000 draw calls per frame.
+
+### Sandbox and budgets
+
+- Available: `string` (no `dump`; `rep` capped at 16 MB), `table`, `math` (`math.random` seeded per load), `bit`, `coroutine`, `pairs`/`ipairs`/`pcall`/… and `collectgarbage("count"|"collect"|"step")`.
+- Not available: `os`, `io`, `debug`, `package`, `ffi`, `jit`, `load`/`loadstring`/`dofile`/`loadfile`, bytecode.
+- **Per call:** more than `budget.instructions` VM instructions (default 20 000 000) or longer than `max(10 × cpu_ms, 25 ms)` → the call is aborted and the patch **suspended** (`pcall` cannot catch it). The top-level chunk gets 10× the instructions and 500 ms; exceeding that fails the load (the previous version stays live).
+- **Per tick** (one render frame: all handlers + `frame`): more than `budget.cpu_ms` (default 2 ms) on 30 consecutive ticks → suspended.
+- **Heap:** above `budget.memory_mb` (default 128) → suspended.
+- Per tick: at most 256 commands (`set`/`emit`/…), 64 `signal` updates, 20 log lines.
+- A suspended patch's output is cleared. Save the file (reload) or `patch.enable <id>` to run it again. The `patches` query shows per-patch CPU (average/peak), memory, handlers, events, dropped events, and draw ops.
+
+### Errors
+
+Load errors (syntax, top-level runtime errors, over budget) keep the previous version running;
+`patch.<id>.state = "error"` and `patch.<id>.error = "main.lua:12: …"`. Runtime errors in
+callbacks are reported the same way (the patch keeps running; the state stays `error` until the
+next successful reload). Errors inside API calls point at the calling line
+(`main.lua:4: bad argument #4: bad color …`).
+
+## 6. Shaders (`kind = "shader"`)
+
+Write a fragment entry `fs`; the engine prepends a generated header and draws a full-screen
+triangle with the header's `se_vs`. Output is **premultiplied alpha**.
+
+```wgsl
+@fragment
+fn fs(in: SeVsOut) -> @location(0) vec4<f32> {
+    let p = in.uv - vec2<f32>(0.5);
+    let pulse = 0.2 + 0.1 * s_band_kick() + 0.2 * se.env;
+    let d = smoothstep(pulse, pulse - 0.01, length(p));
+    let c = palette(PAL_ACCENT) * p_tint();
+    return vec4<f32>(c.rgb * d, d);
+}
+```
+
+The header (see `crates/se-patch/src/wgsl.rs`):
+
+| Binding / item | |
+|---|---|
+| `se: SeInputs` (`@group(0) @binding(0)`, uniform) | `time`, `dt`, `frame: u32`, `env`, `resolution: vec2<f32>`, `progress` (transitions), `trigger_count: u32`, `beat_phase`, `bpm`, `palette: array<vec4<f32>, 8>`, `params`, `signals` |
+| `se_sampler` (`binding(1)`) | linear, clamp |
+| `se_input` (`binding(2)`) | effect input / transition A (outgoing) |
+| `se_input_b` (`binding(3)`) | transition B (incoming) |
+| `p_<param>()` | one accessor per param: `f32` (float), `i32` (int, enum index), `bool`, `vec2<f32>`, `vec4<f32>` (color, vec4); string/texture params have none |
+| `s_<signal>()` | every standard signal plus the manifest's `signals`, dots → `_` (`s_band_kick()`, `s_twitch_chat_rate()`) |
+| `palette(i)` with `PAL_ACCENT`, `PAL_BACKGROUND`, `PAL_FOREGROUND`, `PAL_RED`, `PAL_YELLOW`, `PAL_GREEN`, `PAL_CYAN`, `PAL_MAGENTA` | stream palette |
+| `SeVsOut { pos, uv }`, `@vertex fn se_vs` | full-screen triangle; `uv` (0,0) top-left |
+
+Compile errors are mapped back to your file (`main.wgsl:12:5: …`); a failed compile keeps the
+old pipeline.
+
+## 7. Particles (`kind = "particles"`)
+
+`sim.wgsl` and `draw.wgsl` get the same header plus the particles prelude
+(`se_patch::wgsl::particles_prelude`):
+
+```wgsl
+struct Particle { pos: vec2<f32>, vel: vec2<f32>, color: vec4<f32>, life: f32, size: f32, seed: f32, age: f32 };
+@group(0) @binding(4) var<storage, read_write> se_particles: array<Particle>;   // `read` in draw.wgsl
+const SE_PARTICLE_COUNT: u32 = <particles.count>u;
+fn se_hash(n: u32) -> f32   // 0..1
+```
+
+- `sim.wgsl`: `@compute @workgroup_size(64) fn sim(@builtin(global_invocation_id) id: vec3<u32>)`, dispatched `ceil(count / 64)` times per frame. The buffer starts zeroed (`life = 0` = dead); spawn from `se.env` / `se.trigger_count`.
+- `draw.wgsl`: `@vertex fn vs(@builtin(vertex_index) v: u32, @builtin(instance_index) i: u32)` (6 vertices per particle, instance = particle index) and `@fragment fn fs(...)`; your own vertex-output struct is fine. Positions are 0–1 of the layer (y down): clip = `(x * 2 - 1, 1 - y * 2)`. Output premultiplied alpha.
+
+## 8. Web patches (`kind = "web"`)
+
+The page is rendered by Chromium (CEF) off screen at the size of its largest scene node (or
+the canvas for overlays, or manifest `size`), at `fps`, into the video slot `patch.<id>`; page
+audio goes to the audio slot `patch.<id>`. It is loaded from
+`http://localhost:<http port>/patches/<id>/index.html?token=<token>`; the token is scoped to
+the patch (§19): it can read everything, but only write `patch.<id>.*` (set, animate, trigger,
+release, emit `patch.<id>.*` events, `patch.<id>.*` actions). Keep the page background
+transparent. A renderer crash reloads the page; the rest of the engine is unaffected. Saving any
+file in the folder reloads the page. See `docs/web.md` for the CEF runtime.
+
+```html
+<script src="/engine.js"></script>
+<script>
+  const se = Engine.connect();                 // token from ?token=…, reconnects on its own
+  se.on(`patch.${se.patch.id}.trigger`, e => show(e.payload));
+  se.state("show.*", (addr, v) => …);          // state changes (globs)
+  se.signals("band.*", vals => …, 30);         // {name: value} at up to 30 Hz
+  se.patch.params                              // live params of this patch
+  se.patch.env                                 // live trigger envelope
+  se.set(`patch.${se.patch.id}.count`, 40);    // within the token scope
+  se.emit(`patch.${se.patch.id}.clicked`, {}); // events in the patch namespace
+  await se.get("song.*");  await se.query("patches");
+</script>
+```
+
+## 9. DSP patches (`kind = "dsp"`)
+
+WebAssembly block ABI v1 (host: `se-dsp`): no imports; export `memory`, `se_dsp_abi() -> 1`,
+`init(sample_rate: f32, channels: i32, max_frames: i32) -> i32` (0 = ok; allocate only here),
+`input_buffer()`, `output_buffer()`, `params_buffer()` (byte offsets), `process(in, out,
+frames, params)`, optional `reset()` and `latency() -> i32`. Buffers are planar f32 (channel
+`c` at `ptr + c * max_frames * 4`), `max_frames = 1024`, 2 channels. The params block is
+`[env, bpm, beat_phase, bar_phase, trigger_count, 0, 0, 0, <params…>]` with the manifest
+params in alphabetical order, each `slots()` floats (bool 0/1, enum = option index). Over
+`budget.cpu_ms` per block three times in a row, or a trap → auto-bypass with a crossfade and
+`patch.<id>.error`. The template (`dsp/default`) is a Rust `no_std` crate with `build.sh`
+(`rustup target add wasm32-unknown-unknown`); the engine hot-swaps `main.wasm` on save.
+
+## 10. Troubleshooting
+
+- `stream query patches` — every patch with state, error (`error_file`, `error_line`), whether a previous version is still live, params with current values, and script stats.
+- `stream get 'patch.<id>.**'` — its addresses; `stream trace <id>` — what a trigger caused.
+- `health.patches` in `stream preflight` lists patches in `error`/`suspended`.
+- A disabled patch stays disabled across restarts (`patch.enable <id>`).

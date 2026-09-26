@@ -1,0 +1,96 @@
+# Lighting rig: patch (fixture → profile/mode/universe/address), groups, stage layout, outputs, safety.
+#
+# ┌──────────────────────────────────────────────────────────────────────────────────────────────┐
+# │ PLACEHOLDER PATCH — the real fixture list is not known yet (PLAN §28.3).                     │
+# │                                                                                              │
+# │ `par1` below is a stand-in so the example project runs end to end (cues, effects, limiter,   │
+# │ visualizer, DMX monitor). Replace it with the real fixtures:                                 │
+# │                                                                                              │
+# │ 1. RDM discovery is attempted on start ([rdm]); the Lights view (Patch tab) shows the result.│
+# │    The DMX USB PRO here runs ENTTEC's standard DMX firmware 1.44, which has no RDM (that     │
+# │    needs the RDM firmware, major version 2), so fixtures are patched from the owner's list   │
+# │    (model, DMX mode, start address).                                                         │
+# │ 2. For each fixture add a `[fixtures.<id>]` table: `profile` = a file stem in                │
+# │    lights/fixtures/ (add a profile there if the library lacks the model — docs/lights.md),   │
+# │    `mode` = the mode matching the fixture's DMX personality/channel count, `universe`,       │
+# │    `address` = the start address set on the fixture's display/DIP switches.                  │
+# │ 3. Set `position` so chases/circles follow the stage layout, put the fixtures into groups,   │
+# │    and delete `par1` (or rename it to the real fixture id if it is really an RGB PAR).       │
+# │ 4. Check each fixture in the Lights view: highlight it and watch the DMX monitor.            │
+# └──────────────────────────────────────────────────────────────────────────────────────────────┘
+#
+# Example entries for real fixtures (uncomment and adjust):
+# [fixtures.bar1]
+# profile = "generic_led_bar"
+# mode = "26ch"
+# address = 4
+# position = [0.5, 0.9]
+# length = 1.0
+#
+# [fixtures.spot_l]
+# profile = "generic_moving_head"
+# mode = "14ch"
+# address = 30
+# position = [0.2, 0.8]
+# rotation = 180.0
+
+[fixtures.par1]
+profile = "generic_rgb"
+mode = "3ch"
+universe = 1
+address = 1
+label = "Placeholder PAR (centre front)"
+position = [0.5, 0.1]
+rotation = 0.0
+max_intensity = 1.0
+
+# `all` is implicit (every fixture).
+[groups]
+front = ["par1"]
+
+[output]
+rate_hz = 44.0
+rt_priority = 40
+
+# Day-one output: ENTTEC DMX USB PRO (auto = first /dev/serial/by-id/*ENTTEC*DMX_USB_PRO*).
+[outputs.usb]
+kind = "enttec_pro"
+enabled = true
+port = "auto"
+universe = 1
+channels = 512
+# The widget's own output rate is stored in the widget (it shipped at 40 packets/s); 0 = as fast
+# as the universe size allows (~44 Hz for 512 channels), applied once on connect.
+widget_rate = 0
+
+# Network outputs for future nodes. Enable when a node is on the network.
+[outputs.sacn]
+kind = "sacn"
+enabled = false
+universes = [1]
+priority = 100
+destination = "multicast"
+
+[outputs.artnet]
+kind = "artnet"
+enabled = false
+destination = "2.255.255.255"
+universes = [1]
+net = 0
+subnet = 0
+
+# Output-stage limiter, applied after all playbacks, effects, programmer and chat.
+[safety]
+# At most this many flash onsets in any 1 s window, per head and rig-wide (photosensitivity guideline).
+max_flash_hz = 3.0
+# A flash = luminance rise of at least this much (0..1) from a level below 0.8 of full.
+flash_threshold = 0.2
+# Brightness cap for every head.
+max_intensity = 1.0
+# Hardware strobe channels: limit = cap to max_flash_hz via the profile hz mapping; block = force open.
+strobe = "limit"
+# Look set by lights.panic (warm white at 60 %).
+safe_look = { intensity = 0.6, color = "#ffe6cc" }
+
+[rdm]
+discover_on_start = true

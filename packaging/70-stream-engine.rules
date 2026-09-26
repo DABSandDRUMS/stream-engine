@@ -1,0 +1,16 @@
+# stream-engine device access (PLAN §16.1). Installed to /usr/lib/udev/rules.d/.
+# The numbering keeps these before 73-seat-late.rules, which turns TAG+="uaccess" into an ACL for
+# the user of the active seat, so the engine (a systemd user service) opens the devices without
+# group membership or root.
+
+# Elgato Stream Deck (vendor 0fd9, every model: Original V2 = 006d, MK.2, XL, Mini, +, Neo, Pedal…).
+# The engine talks to the HID interface through hidraw.
+SUBSYSTEM=="hidraw", KERNEL=="hidraw*", ATTRS{idVendor}=="0fd9", MODE="0660", TAG+="uaccess"
+
+# ENTTEC DMX USB PRO: an FTDI FT232R (0403:6001) that ENTTEC programs with the product string
+# "DMX USB PRO" and serial numbers starting with "EN". Either marker identifies it, so a plain FTDI
+# serial cable with the same ids is left alone.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", ATTRS{product}=="DMX USB PRO", ENV{STREAM_ENGINE_DMX}="1"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", ATTRS{serial}=="EN*", ENV{STREAM_ENGINE_DMX}="1"
+# Stable name /dev/dmx-usb-pro; ModemManager must never probe it (AT probes would reach the widget).
+SUBSYSTEM=="tty", ENV{STREAM_ENGINE_DMX}=="1", MODE="0660", TAG+="uaccess", SYMLINK+="dmx-usb-pro", ENV{ID_MM_DEVICE_IGNORE}="1"

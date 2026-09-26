@@ -1,0 +1,25 @@
+[package]
+name = "ringmod"
+description = "Ring modulator `dsp` patch for stream-engine (WebAssembly block ABI v1)"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Standalone: not a member of the stream-engine workspace above this folder.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+debug = false
+
+[profile.dev]
+panic = "abort"

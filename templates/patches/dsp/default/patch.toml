@@ -1,0 +1,17 @@
+# {{label}} — a `dsp` patch: a WebAssembly audio effect (block ABI v1, docs/patches.md).
+# Source in src/lib.rs; rebuild main.wasm with ./build.sh (needs
+# `rustup target add wasm32-unknown-unknown`). The engine hot-swaps main.wasm on save.
+#
+# Params reach the module as f32 slots in alphabetical order after the 8-float header:
+# drive = slot 0, output = slot 1, tone = slot 2.
+# Insert it on a bus: audio chains reference `{ patch = "{{id}}" }`.
+kind        = "dsp"
+entry       = "main.wasm"
+layer       = "audio-effect"
+label       = "{{label}}"
+description = "Soft-clip drive with a tone control"
+params.drive  = { type = "float", default = 0.4, range = [0.0, 1.0], description = "Saturation amount" }
+params.output = { type = "float", default = 0.0, range = [-24.0, 6.0], unit = "dB" }
+params.tone   = { type = "float", default = 0.5, range = [0.0, 1.0], description = "0 = dark, 1 = bright" }
+trigger = { attack = "10ms", hold = "2s", release = "200ms" }
+budget  = { cpu_ms = 0.2 }

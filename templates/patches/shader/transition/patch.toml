@@ -1,0 +1,11 @@
+# {{label}} — a WGSL transition: `se_input` = outgoing scene (A), `se_input_b` = incoming (B),
+# `se.progress` goes 0 → 1. Use it directly (`stream do scene.take transition=patch.{{id}}`, or a
+# scene's `transitions.pool = [{ name = "patch.{{id}}" }]`) or wrap it in transitions/<name>.toml:
+# `kind = "shader"`, `shader = "patch.{{id}}"`, `ms = 700` (extra keys set params).
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "transition"
+label       = "{{label}}"
+description = "Soft-edged diagonal wipe"
+params.softness = { type = "float", default = 0.15, range = [0.0, 1.0] }
+params.angle    = { type = "float", default = 0.4, range = [-1.5708, 1.5708], unit = "rad" }

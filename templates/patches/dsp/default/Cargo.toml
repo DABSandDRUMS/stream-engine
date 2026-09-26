@@ -1,0 +1,25 @@
+[package]
+name = "patch-{{id}}"
+description = "{{label}}: a stream-engine `dsp` patch (WebAssembly block ABI v1)"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Standalone: not a member of any workspace above this folder.
+[workspace]
+
+[lib]
+name = "patch"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+debug = false
+
+[profile.dev]
+panic = "abort"

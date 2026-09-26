@@ -1,0 +1,9 @@
+{
+  "kind": "youtube#videoListResponse",
+  "etag": "list-etag",
+  "items": [],
+  "pageInfo": {
+    "totalResults": 0,
+    "resultsPerPage": 0
+  }
+}

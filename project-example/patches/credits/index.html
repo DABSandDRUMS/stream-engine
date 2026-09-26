@@ -1,0 +1,120 @@
+<!doctype html>
+<!-- Credits roll. Browser test: /patches/credits/index.html?token=<token>&roll=1 -->
+<html>
+<head>
+<meta charset="utf-8">
+<title>credits</title>
+<style>
+  :root { --accent: #7aa2f7; --fg: #fff; --backdrop: rgba(5, 5, 10, .55); --font: "Inter", "Noto Sans", sans-serif; }
+  html, body { margin: 0; width: 100%; height: 100%; background: transparent; overflow: hidden; }
+  body { font-family: var(--font); color: var(--fg); text-align: center; }
+  #veil { position: absolute; inset: 0; background: var(--backdrop); opacity: 0; transition: opacity 1s ease; }
+  body.rolling #veil { opacity: 1; }
+  #roll { position: absolute; left: 0; right: 0; top: 100%; will-change: transform; text-shadow: 0 .4vh 1.6vh rgba(0, 0, 0, .7); }
+  h1 { font-size: 7vh; margin: 0 0 8vh; font-weight: 900; }
+  h2 { font-size: 3.4vh; margin: 7vh 0 2vh; letter-spacing: .25em; text-transform: uppercase; color: var(--accent); font-weight: 800; }
+  .name { font-size: 4.2vh; font-weight: 700; margin: .6vh 0; }
+  .name small { font-weight: 500; opacity: .75; margin-left: .5em; }
+  .totals { font-size: 3vh; opacity: .8; margin-top: 3vh; }
+  .end { font-size: 5vh; margin: 12vh 0 40vh; font-weight: 800; }
+</style>
+</head>
+<body>
+<div id="veil"></div>
+<div id="roll"></div>
+<script src="/engine.js"></script>
+<script src="/web/overlay.js"></script>
+<script>
+  "use strict";
+  const O = Overlay;
+  const se = Engine.connect();
+  const roll = document.getElementById("roll");
+  const P = O.params(se, {
+    title: "Thanks for hanging out!", speed: 60, chatters: 15, loop: false, accent: "#7aa2f7",
+    text_color: "#ffffff", backdrop: [0.02, 0.02, 0.04, 0.55], font: "",
+  }, apply);
+  let anim = null;
+
+  function apply() {
+    const r = document.documentElement.style;
+    r.setProperty("--accent", O.cssColor(P.accent) || "#7aa2f7");
+    r.setProperty("--fg", O.cssColor(P.text_color) || "#fff");
+    r.setProperty("--backdrop", O.cssColor(P.backdrop) || "rgba(5,5,10,.55)");
+    if (P.font) r.setProperty("--font", P.font);
+  }
+  apply();
+
+  function section(title, rows) {
+    if (!rows.length) return;
+    roll.appendChild(O.h("h2", "", title));
+    for (const [name, detail] of rows) {
+      const el = O.h("div", "name", name);
+      if (detail) el.appendChild(O.h("small", "", detail));
+      roll.appendChild(el);
+    }
+  }
+
+  function build(c) {
+    roll.textContent = "";
+    roll.appendChild(O.h("h1", "", P.title));
+    const t = c.totals || {};
+    section("Subscribers", (c.subs || []).map(s => [s.user, s.gift ? "gifted" : s.months > 1 ? `${s.months} months` : s.tier > 1 ? `tier ${s.tier}` : ""]));
+    section("Gifted subs", (c.gifts || []).map(g => [g.user, `×${O.fmtNum(g.amount)}`]));
+    section("Cheers", (c.cheers || []).map(x => [x.user, `${O.fmtNum(x.amount)} bits`]));
+    section("Tips", (c.tips || []).map(x => [x.user, O.fmtMoney(x.amount, x.currency)]));
+    section("Raids", (c.raids || []).map(r => [r.user, `${O.fmtNum(r.viewers)} viewers`]));
+    section("New followers", (c.follows || []).map(f => [f, ""]));
+    section("Top chatters", (c.chatters || []).slice(0, Math.max(0, Number(P.chatters) || 0)).map(x => [x.user, `${O.fmtNum(x.messages)} messages`]));
+    const parts = [];
+    if (t.subs) parts.push(`${t.subs} subs`);
+    if (t.bits) parts.push(`${O.fmtNum(t.bits)} bits`);
+    if (t.follows) parts.push(`${t.follows} follows`);
+    if (t.raids) parts.push(`${t.raids} raids`);
+    if (parts.length) roll.appendChild(O.h("div", "totals", parts.join(" · ")));
+    roll.appendChild(O.h("div", "end", "See you next stream 🥁"));
+  }
+
+  let lastStart = 0;
+  async function start() {
+    // the outro rule's trigger and the mode change arrive together: roll once
+    if (Date.now() - lastStart < 3000) return;
+    lastStart = Date.now();
+    let c;
+    try {
+      c = await se.query("credits", { chatters: Math.max(1, Number(P.chatters) || 1) });
+    } catch (e) {
+      console.warn("credits:", e);
+      return;
+    }
+    build(c || {});
+    if (anim) anim.cancel();
+    document.body.classList.add("rolling");
+    const dist = roll.offsetHeight + window.innerHeight;
+    const ms = (dist / Math.max(10, Number(P.speed) || 60)) * 1000;
+    anim = roll.animate([{ transform: "translateY(0)" }, { transform: `translateY(${-dist}px)` }], { duration: ms, easing: "linear", fill: "forwards" });
+    anim.onfinish = () => {
+      if (P.loop) {
+        lastStart = 0;
+        start();
+      } else document.body.classList.remove("rolling");
+    };
+  }
+
+  if (se.patch) se.on(`patch.${se.patch.id}.trigger`, () => start());
+  let rolledOnLoad = false;
+  se.onconnect = () => {
+    if (rolledOnLoad) return;
+    if (new URLSearchParams(location.search).has("roll") || se.value("show.mode") === "outro") {
+      rolledOnLoad = true;
+      start();
+    }
+  };
+  se.state("show.mode", (_, m) => {
+    if (m === "outro" && !rolledOnLoad) {
+      rolledOnLoad = true;
+      start();
+    }
+  });
+</script>
+</body>
+</html>

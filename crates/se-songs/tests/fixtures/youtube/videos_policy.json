@@ -1,0 +1,169 @@
+{
+  "kind": "youtube#videoListResponse",
+  "etag": "list-etag",
+  "items": [
+    {
+      "kind": "youtube#video",
+      "etag": "etag-LongSong001",
+      "id": "LongSong001",
+      "snippet": {
+        "publishedAt": "2009-10-25T06:57:33Z",
+        "channelId": "UCdrumarchive00000000000",
+        "title": "Ten Hours of Drum Solos",
+        "description": "Ten Hours of Drum Solos — official channel upload.",
+        "thumbnails": {
+          "default": {
+            "url": "https://i.ytimg.com/vi/LongSong001/default.jpg",
+            "width": 120,
+            "height": 90
+          },
+          "medium": {
+            "url": "https://i.ytimg.com/vi/LongSong001/mqdefault.jpg",
+            "width": 320,
+            "height": 180
+          },
+          "high": {
+            "url": "https://i.ytimg.com/vi/LongSong001/hqdefault.jpg",
+            "width": 480,
+            "height": 360
+          }
+        },
+        "channelTitle": "Drum Archive",
+        "categoryId": "10",
+        "liveBroadcastContent": "none",
+        "localized": {
+          "title": "Ten Hours of Drum Solos",
+          "description": "Ten Hours of Drum Solos — official channel upload."
+        }
+      },
+      "contentDetails": {
+        "duration": "PT10H",
+        "dimension": "2d",
+        "definition": "hd",
+        "caption": "false",
+        "licensedContent": true,
+        "contentRating": {},
+        "projection": "rectangular"
+      },
+      "status": {
+        "uploadStatus": "processed",
+        "privacyStatus": "public",
+        "license": "youtube",
+        "embeddable": true,
+        "publicStatsViewable": true,
+        "madeForKids": false
+      }
+    },
+    {
+      "kind": "youtube#video",
+      "etag": "etag-Explicit001",
+      "id": "Explicit001",
+      "snippet": {
+        "publishedAt": "2009-10-25T06:57:33Z",
+        "channelId": "UCsnarequeen000000000000",
+        "title": "Kick Drum Anthem (Explicit Version)",
+        "description": "Kick Drum Anthem (Explicit Version) — official channel upload.",
+        "thumbnails": {
+          "default": {
+            "url": "https://i.ytimg.com/vi/Explicit001/default.jpg",
+            "width": 120,
+            "height": 90
+          },
+          "medium": {
+            "url": "https://i.ytimg.com/vi/Explicit001/mqdefault.jpg",
+            "width": 320,
+            "height": 180
+          },
+          "high": {
+            "url": "https://i.ytimg.com/vi/Explicit001/hqdefault.jpg",
+            "width": 480,
+            "height": 360
+          }
+        },
+        "channelTitle": "Snare Queen",
+        "categoryId": "10",
+        "liveBroadcastContent": "none",
+        "localized": {
+          "title": "Kick Drum Anthem (Explicit Version)",
+          "description": "Kick Drum Anthem (Explicit Version) — official channel upload."
+        },
+        "tags": [
+          "explicit"
+        ]
+      },
+      "contentDetails": {
+        "duration": "PT3M10S",
+        "dimension": "2d",
+        "definition": "hd",
+        "caption": "false",
+        "licensedContent": true,
+        "contentRating": {},
+        "projection": "rectangular"
+      },
+      "status": {
+        "uploadStatus": "processed",
+        "privacyStatus": "public",
+        "license": "youtube",
+        "embeddable": true,
+        "publicStatsViewable": true,
+        "madeForKids": false
+      }
+    },
+    {
+      "kind": "youtube#video",
+      "etag": "etag-CleanVer001",
+      "id": "CleanVer001",
+      "snippet": {
+        "publishedAt": "2009-10-25T06:57:33Z",
+        "channelId": "UCsnarequeen000000000000",
+        "title": "Kick Drum Anthem (Clean Version)",
+        "description": "Kick Drum Anthem (Clean Version) — official channel upload.",
+        "thumbnails": {
+          "default": {
+            "url": "https://i.ytimg.com/vi/CleanVer001/default.jpg",
+            "width": 120,
+            "height": 90
+          },
+          "medium": {
+            "url": "https://i.ytimg.com/vi/CleanVer001/mqdefault.jpg",
+            "width": 320,
+            "height": 180
+          },
+          "high": {
+            "url": "https://i.ytimg.com/vi/CleanVer001/hqdefault.jpg",
+            "width": 480,
+            "height": 360
+          }
+        },
+        "channelTitle": "Snare Queen",
+        "categoryId": "10",
+        "liveBroadcastContent": "none",
+        "localized": {
+          "title": "Kick Drum Anthem (Clean Version)",
+          "description": "Kick Drum Anthem (Clean Version) — official channel upload."
+        }
+      },
+      "contentDetails": {
+        "duration": "PT3M10S",
+        "dimension": "2d",
+        "definition": "hd",
+        "caption": "false",
+        "licensedContent": true,
+        "contentRating": {},
+        "projection": "rectangular"
+      },
+      "status": {
+        "uploadStatus": "processed",
+        "privacyStatus": "public",
+        "license": "youtube",
+        "embeddable": true,
+        "publicStatsViewable": true,
+        "madeForKids": false
+      }
+    }
+  ],
+  "pageInfo": {
+    "totalResults": 3,
+    "resultsPerPage": 3
+  }
+}

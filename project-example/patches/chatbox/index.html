@@ -1,0 +1,117 @@
+<!doctype html>
+<!-- Chat box. Test in a browser: /patches/chatbox/index.html?token=<token>
+     then `stream sim chat message='hello Kappa'`; deleting a message removes it here. -->
+<html>
+<head>
+<meta charset="utf-8">
+<title>chatbox</title>
+<style>
+  :root { --size: 22px; --bg: rgba(13, 15, 26, .55); --fg: #e6e9f5; --font: "Inter", "Noto Sans", sans-serif; }
+  html, body { margin: 0; width: 100%; height: 100%; background: transparent; overflow: hidden; }
+  body { font-family: var(--font); font-size: var(--size); color: var(--fg); }
+  #list { position: absolute; left: 0; right: 0; bottom: 0; display: flex; flex-direction: column; gap: .35em; padding: .5em; }
+  .msg {
+    background: var(--bg); border-radius: .55em; padding: .35em .6em; line-height: 1.35;
+    overflow-wrap: anywhere; box-shadow: 0 .2em .8em rgba(0, 0, 0, .25);
+    animation: in .3s cubic-bezier(.2, 1.2, .4, 1) both;
+  }
+  .msg.gone { animation: out .35s ease both; }
+  .who { font-weight: 800; margin-right: .35em; text-shadow: 0 1px 2px rgba(0, 0, 0, .6); }
+  .badge { height: 1em; vertical-align: -.12em; margin-right: .2em; }
+  .emote { height: 1.6em; vertical-align: middle; margin: -.2em .05em; }
+  .emote.zw { margin-left: -1.7em; }
+  .mention { font-weight: 700; color: #ffd166; }
+  .cheermote { font-weight: 700; color: #c77dff; }
+  .text { text-shadow: 0 1px 2px rgba(0, 0, 0, .6); }
+  @keyframes in { from { opacity: 0; transform: translateX(-1.5em); } to { opacity: 1; transform: none; } }
+  @keyframes out { to { opacity: 0; transform: scale(.95); } }
+</style>
+</head>
+<body>
+<div id="list"></div>
+<script src="/engine.js"></script>
+<script src="/web/overlay.js"></script>
+<script>
+  "use strict";
+  const O = Overlay;
+  const se = Engine.connect();
+  se.onconnect = () => backlog(); // before Emotes, which chains onto it
+  const emotes = new O.Emotes(se);
+  const list = document.getElementById("list");
+  const P = O.params(se, {
+    max_messages: 14, fade_after: 0, hide_commands: true, hide_users: "nightbot,streamelements,streamlabs",
+    show_badges: true, font_size: 22, bg: [0.05, 0.06, 0.1, 0.55], text_color: "#e6e9f5", font: "",
+  }, apply);
+
+  function apply() {
+    const r = document.documentElement.style;
+    r.setProperty("--size", `${Math.max(10, Math.min(60, Number(P.font_size) || 22))}px`);
+    r.setProperty("--bg", O.cssColor(P.bg) || "rgba(13,15,26,.55)");
+    r.setProperty("--fg", O.cssColor(P.text_color) || "#e6e9f5");
+    if (P.font) r.setProperty("--font", P.font);
+    trim();
+  }
+  apply();
+
+  const hidden = () => new Set(String(P.hide_users || "").toLowerCase().split(",").map(s => s.trim()).filter(Boolean));
+  const safeColor = c => (/^#[0-9a-f]{6}$/i.test(c || "") ? c : "");
+  // readable default colors for users without one
+  const PALETTE = ["#ff6b6b", "#ffd166", "#06d6a0", "#4cc9f0", "#c77dff", "#f28482", "#90be6d", "#f9844a"];
+  const colorFor = name => PALETTE[[...String(name)].reduce((a, c) => (a * 31 + c.charCodeAt(0)) >>> 0, 7) % PALETTE.length];
+
+  function remove(el) {
+    if (!el || el.classList.contains("gone")) return;
+    el.classList.add("gone");
+    setTimeout(() => el.remove(), 360);
+  }
+
+  function trim() {
+    const live = [...list.children].filter(c => !c.classList.contains("gone"));
+    const max = Math.max(1, Number(P.max_messages) || 14);
+    for (let i = 0; i < live.length - max; i++) live[i].remove();
+  }
+
+  function add(m, animate = true) {
+    if (!m || !m.id) return;
+    const text = String(m.text || "");
+    if (P.hide_commands && text.startsWith("!")) return;
+    if (hidden().has(String(m.user || "").toLowerCase())) return;
+    if (list.querySelector(`[data-id="${CSS.escape(m.id)}"]`)) return;
+    const el = O.h("div", "msg");
+    if (!animate) el.style.animation = "none";
+    el.dataset.id = m.id;
+    el.dataset.user = String(m.user_id || "");
+    el.dataset.name = String(m.user || "").toLowerCase();
+    if (P.show_badges) el.appendChild(O.badgeNodes(m.badges, emotes));
+    const who = O.h("span", "who", m.user || "?");
+    who.style.color = safeColor(m.color) || colorFor(m.user || "");
+    el.appendChild(who);
+    const body = O.h("span", "text");
+    body.appendChild(O.renderFragments(m.fragments && m.fragments.length ? m.fragments : [{ type: "text", text }], emotes));
+    el.appendChild(body);
+    list.appendChild(el);
+    trim();
+    const fade = Number(P.fade_after) || 0;
+    if (fade > 0) setTimeout(() => remove(el), fade * 1000);
+  }
+
+  async function backlog() {
+    try {
+      const recent = await se.query("chat.recent");
+      list.textContent = "";
+      for (const m of recent || []) add(m, false);
+    } catch (e) {
+      console.warn("chat.recent:", e);
+    }
+  }
+
+  se.on("chat.message", e => add(e.payload));
+  se.on("chat.delete", e => remove(list.querySelector(`[data-id="${CSS.escape(String(e.payload.message_id || ""))}"]`)));
+  se.on("chat.purge", e => {
+    const id = String(e.payload.user_id || ""), name = String(e.payload.user || "").toLowerCase();
+    for (const el of [...list.children]) if ((id && el.dataset.user === id) || (name && el.dataset.name === name)) remove(el);
+  });
+  se.on("chat.clear", () => [...list.children].forEach(remove));
+</script>
+</body>
+</html>

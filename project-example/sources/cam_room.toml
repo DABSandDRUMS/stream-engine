@@ -1,0 +1,16 @@
+# Sonix USB camera (/dev/video6): room view, 1080p30 MJPEG decoded on the CPU (libjpeg-turbo).
+label = "Room"
+device = "usb-Sonix_Technology_Co.__Ltd._USB_Camera_*-video-index0"
+format = "mjpeg"
+size = [1920, 1080]
+fps = 30
+
+# UVC controls (names as in `v4l2-ctl -L`). Keep the frame rate fixed in low light.
+[controls]
+exposure_dynamic_framerate = false
+white_balance_automatic = true
+focus_automatic_continuous = true
+# power_line_frequency = "60_hz"   # match the mains frequency to avoid flicker under LED lights
+
+[color]
+saturation = 1.0

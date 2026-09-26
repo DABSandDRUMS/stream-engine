@@ -1,0 +1,19 @@
+# Generic LED strobe / blinder.
+# The output limiter caps the hardware strobe rate at [safety] max_flash_hz via the `hz` mapping below.
+name = "Generic LED Strobe"
+manufacturer = "Generic"
+kind = "strobe"
+beam = 110.0
+
+# Dimmer + strobe rate: 0-9 = steady (no strobe), 10-255 = 1 → 25 flashes/s.
+[modes.2ch]
+channels = [
+  "dimmer",
+  { role = "strobe", range = [10, 255], hz = [1.0, 25.0], open = 0 },
+]
+
+# Strobe-only units: 0-9 = off, 10-255 = 1 → 25 flashes/s at full output.
+[modes.1ch]
+channels = [
+  { role = "strobe", range = [10, 255], hz = [1.0, 25.0], open = 0 },
+]

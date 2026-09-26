@@ -1,0 +1,6 @@
+# Follows the live stream palette (palette.accent): changes with the Omarchy theme / scene colours.
+kind = "color"
+label = "Stream accent"
+
+[set]
+all = { color = "stream:accent" }

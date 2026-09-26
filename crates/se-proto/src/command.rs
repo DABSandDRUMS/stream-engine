@@ -82,12 +82,17 @@ pub struct Command {
     /// Override priority; defaults from `origin`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<u16>,
+    /// Override layer key (e.g. `cuelist:<name>`, `timeline:<name>`): overrides with the same
+    /// key replace each other and are released together. Defaults from origin/actor.
+    /// Ignored for chat-priority commands (their key is always `chat:<actor>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
     pub op: Op,
 }
 
 impl Command {
     pub fn new(origin: Origin, op: Op) -> Self {
-        Command { id: next_id(), ts: 0, origin, actor: None, causal: None, priority: None, op }
+        Command { id: next_id(), ts: 0, origin, actor: None, causal: None, priority: None, key: None, op }
     }
     pub fn priority(&self) -> u16 {
         self.priority.unwrap_or_else(|| self.origin.default_priority())
@@ -102,6 +107,10 @@ impl Command {
     }
     pub fn with_priority(mut self, p: Option<u16>) -> Self {
         self.priority = p;
+        self
+    }
+    pub fn with_key(mut self, key: impl Into<String>) -> Self {
+        self.key = Some(key.into());
         self
     }
 }
@@ -189,8 +198,27 @@ pub enum Op {
 }
 
 impl Op {
-    /// Short display form (for traces and logs).
+    /// Actions that carry secrets (`youtube.key.set`, `relay.secret.set`, `*.token.set`): their
+    /// args must never reach logs, traces, sessions, or the audit table (§19).
+    pub fn is_secret(&self) -> bool {
+        matches!(self, Op::Action { name, .. } if name.ends_with(".key.set") || name.ends_with(".secret.set") || name.ends_with(".token.set"))
+    }
+
+    /// Copy safe for persistence: secret-carrying args replaced by `{redacted: true}`.
+    pub fn redacted(&self) -> Op {
+        match self {
+            Op::Action { name, .. } if self.is_secret() => Op::Action { name: name.clone(), args: Value::map().with("redacted", true) },
+            other => other.clone(),
+        }
+    }
+
+    /// Short display form (for traces and logs). Secret args are never shown.
     pub fn describe(&self) -> String {
+        if self.is_secret()
+            && let Op::Action { name, .. } = self
+        {
+            return format!("{name} (redacted)");
+        }
         match self {
             Op::Set { address, value } => format!("set {address} {value}"),
             Op::SetBase { address, value } => format!("set_base {address} {value}"),
@@ -428,6 +456,15 @@ mod tests {
         assert_eq!(Op::parse("set a.b [1, 2]").unwrap(), Op::Set { address: "a.b".into(), value: Value::parse_text("[1, 2]") });
         assert!(Op::parse("").is_err());
         assert!(Op::parse("$(boom) x").is_err());
+    }
+
+    #[test]
+    fn secrets_redacted() {
+        let op = Op::parse("youtube.key.set AIzaSECRET").unwrap();
+        assert!(op.is_secret());
+        assert!(!op.describe().contains("SECRET"));
+        assert!(!serde_json::to_string(&op.redacted()).unwrap().contains("SECRET"));
+        assert!(!Op::parse("preset.fire hype").unwrap().is_secret());
     }
 
     #[test]

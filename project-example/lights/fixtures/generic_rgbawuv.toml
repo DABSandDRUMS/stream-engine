@@ -1,0 +1,20 @@
+# Generic hex-colour LED PAR: red, green, blue, amber, white, UV.
+name = "Generic RGBAW+UV PAR"
+manufacturer = "Generic"
+kind = "par"
+beam = 25.0
+
+[modes.6ch]
+channels = ["red", "green", "blue", "amber", "white", "uv"]
+
+[modes.7ch]
+channels = ["dimmer", "red", "green", "blue", "amber", "white", "uv"]
+
+# 0-9 strobe = open, 10-255 = slow → fast. Program 0 = manual (DMX colour).
+[modes.10ch]
+channels = [
+  "dimmer", "red", "green", "blue", "amber", "white", "uv",
+  { role = "strobe", range = [10, 255], hz = [1.0, 20.0], open = 0 },
+  { role = "raw", name = "program", default = 0 },
+  { role = "raw", name = "speed", default = 0 },
+]

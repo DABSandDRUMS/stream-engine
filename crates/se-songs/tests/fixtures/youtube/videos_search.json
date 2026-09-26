@@ -1,0 +1,171 @@
+{
+  "kind": "youtube#videoListResponse",
+  "etag": "list-etag",
+  "items": [
+    {
+      "kind": "youtube#video",
+      "etag": "etag-fJ9rUzIMcZQ",
+      "id": "fJ9rUzIMcZQ",
+      "snippet": {
+        "publishedAt": "2009-10-25T06:57:33Z",
+        "channelId": "UCiMhD4jzUqG-IgPzUmmytRQ",
+        "title": "Queen – Bohemian Rhapsody (Official Video Remastered)",
+        "description": "Queen – Bohemian Rhapsody (Official Video Remastered) — official channel upload.",
+        "thumbnails": {
+          "default": {
+            "url": "https://i.ytimg.com/vi/fJ9rUzIMcZQ/default.jpg",
+            "width": 120,
+            "height": 90
+          },
+          "medium": {
+            "url": "https://i.ytimg.com/vi/fJ9rUzIMcZQ/mqdefault.jpg",
+            "width": 320,
+            "height": 180
+          },
+          "high": {
+            "url": "https://i.ytimg.com/vi/fJ9rUzIMcZQ/hqdefault.jpg",
+            "width": 480,
+            "height": 360
+          }
+        },
+        "channelTitle": "Queen Official",
+        "categoryId": "10",
+        "liveBroadcastContent": "none",
+        "localized": {
+          "title": "Queen – Bohemian Rhapsody (Official Video Remastered)",
+          "description": "Queen – Bohemian Rhapsody (Official Video Remastered) — official channel upload."
+        },
+        "tags": [
+          "queen",
+          "bohemian rhapsody",
+          "freddie mercury"
+        ]
+      },
+      "contentDetails": {
+        "duration": "PT5M59S",
+        "dimension": "2d",
+        "definition": "hd",
+        "caption": "false",
+        "licensedContent": true,
+        "contentRating": {},
+        "projection": "rectangular"
+      },
+      "status": {
+        "uploadStatus": "processed",
+        "privacyStatus": "public",
+        "license": "youtube",
+        "embeddable": true,
+        "publicStatsViewable": true,
+        "madeForKids": false
+      }
+    },
+    {
+      "kind": "youtube#video",
+      "etag": "etag-NoEmbed0001",
+      "id": "NoEmbed0001",
+      "snippet": {
+        "publishedAt": "2009-10-25T06:57:33Z",
+        "channelId": "UCiMhD4jzUqG-IgPzUmmytRQ",
+        "title": "Bohemian Rhapsody (Live Aid 1985)",
+        "description": "Bohemian Rhapsody (Live Aid 1985) — official channel upload.",
+        "thumbnails": {
+          "default": {
+            "url": "https://i.ytimg.com/vi/NoEmbed0001/default.jpg",
+            "width": 120,
+            "height": 90
+          },
+          "medium": {
+            "url": "https://i.ytimg.com/vi/NoEmbed0001/mqdefault.jpg",
+            "width": 320,
+            "height": 180
+          },
+          "high": {
+            "url": "https://i.ytimg.com/vi/NoEmbed0001/hqdefault.jpg",
+            "width": 480,
+            "height": 360
+          }
+        },
+        "channelTitle": "Queen Official",
+        "categoryId": "10",
+        "liveBroadcastContent": "none",
+        "localized": {
+          "title": "Bohemian Rhapsody (Live Aid 1985)",
+          "description": "Bohemian Rhapsody (Live Aid 1985) — official channel upload."
+        }
+      },
+      "contentDetails": {
+        "duration": "PT6M2S",
+        "dimension": "2d",
+        "definition": "hd",
+        "caption": "false",
+        "licensedContent": true,
+        "contentRating": {},
+        "projection": "rectangular"
+      },
+      "status": {
+        "uploadStatus": "processed",
+        "privacyStatus": "public",
+        "license": "youtube",
+        "embeddable": false,
+        "publicStatsViewable": true,
+        "madeForKids": false
+      }
+    },
+    {
+      "kind": "youtube#video",
+      "etag": "etag-yk3prd8GER4",
+      "id": "yk3prd8GER4",
+      "snippet": {
+        "publishedAt": "2009-10-25T06:57:33Z",
+        "channelId": "UCFswsOXQBV2XJ6N_Qr5Nx6Q",
+        "title": "Bohemian Rhapsody - Panic! At The Disco (Suicide Squad OST)",
+        "description": "Bohemian Rhapsody - Panic! At The Disco (Suicide Squad OST) — official channel upload.",
+        "thumbnails": {
+          "default": {
+            "url": "https://i.ytimg.com/vi/yk3prd8GER4/default.jpg",
+            "width": 120,
+            "height": 90
+          },
+          "medium": {
+            "url": "https://i.ytimg.com/vi/yk3prd8GER4/mqdefault.jpg",
+            "width": 320,
+            "height": 180
+          },
+          "high": {
+            "url": "https://i.ytimg.com/vi/yk3prd8GER4/hqdefault.jpg",
+            "width": 480,
+            "height": 360
+          }
+        },
+        "channelTitle": "Fueled By Ramen",
+        "categoryId": "10",
+        "liveBroadcastContent": "none",
+        "localized": {
+          "title": "Bohemian Rhapsody - Panic! At The Disco (Suicide Squad OST)",
+          "description": "Bohemian Rhapsody - Panic! At The Disco (Suicide Squad OST) — official channel upload."
+        }
+      },
+      "contentDetails": {
+        "duration": "PT6M5S",
+        "dimension": "2d",
+        "definition": "hd",
+        "caption": "false",
+        "licensedContent": true,
+        "contentRating": {},
+        "projection": "rectangular"
+      },
+      "status": {
+        "uploadStatus": "processed",
+        "privacyStatus": "public",
+        "license": "youtube",
+        "embeddable": true,
+        "publicStatsViewable": true,
+        "madeForKids": false
+      }
+    }
+  ],
+  "pageInfo": {
+    "totalResults": 3,
+    "resultsPerPage": 3
+  }
+}

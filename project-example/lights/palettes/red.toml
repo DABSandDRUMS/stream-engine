@@ -1,0 +1,5 @@
+kind = "color"
+label = "Red"
+
+[set]
+all = { color = "#ff0000" }

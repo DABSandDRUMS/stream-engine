@@ -1,0 +1,14 @@
+# Band-mix kicks (live onset detection on the Studio 24c input) punch the zoom.
+[[rule]]
+name = "kick punch"
+when = "band.kick"
+if = "event.velocity >= 0.5"
+do = ["trigger fx.zoom_pulse"]
+
+# A detected drop in the band mix fires the chorus look.
+[[rule]]
+name = "band drop"
+when = "band.drop"
+if = "mode == 'live'"
+do = ["preset.fire chorus_blast"]
+cooldown = { global = "30s" }

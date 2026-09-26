@@ -1,0 +1,22 @@
+# Generic RGB LED PAR (the typical cheap 3/4/7-channel PAR).
+name = "Generic RGB PAR"
+manufacturer = "Generic"
+kind = "par"
+beam = 25.0
+
+# Colour only; the engine adds a virtual dimmer that scales the emitters.
+[modes.3ch]
+channels = ["red", "green", "blue"]
+
+[modes.4ch]
+channels = ["dimmer", "red", "green", "blue"]
+
+# 0-9 on the strobe channel = no strobe, 10-255 = slow → fast (≈1-20 Hz).
+# The program channel must stay at 0 (manual / DMX colour); speed only matters for built-in programs.
+[modes.7ch]
+channels = [
+  "dimmer", "red", "green", "blue",
+  { role = "strobe", range = [10, 255], hz = [1.0, 20.0], open = 0 },
+  { role = "raw", name = "program", default = 0 },
+  { role = "raw", name = "speed", default = 0 },
+]

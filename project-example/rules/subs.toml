@@ -9,4 +9,4 @@ cooldown = { global = "10s" }
 name = "raid"
 when = "twitch.raid"
 if = "event.viewers >= 10"
-do = ["preset.fire hype", "bot.say 'Welcome raiders from {from}!'"]
+do = ["preset.fire hype", "bot.say 'Welcome raiders from {from}!'", "twitch.shoutout user={from_login}"]

@@ -1,0 +1,20 @@
+[package]
+name = "se-frames"
+description = "frames.sock: zero-copy canvas frame protocol (dmabuf / shm fallback), server, client library, validating test client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+libc.workspace = true
+crossbeam-channel.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+# Only the `se-frames-client --import` path uses Vulkan (dmabuf import validation).
+ash = "0.38"
+
+[dev-dependencies]
+tempfile.workspace = true
+se-alloc.workspace = true

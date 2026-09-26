@@ -1,0 +1,15 @@
+# {{label}} — GPU particles: `sim.wgsl` (compute) updates the particle buffer every frame,
+# `draw.wgsl` (vertex + fragment) renders one quad per particle. The engine prepends the
+# generated header plus the particles prelude (Particle struct, se_particles, SE_PARTICLE_COUNT,
+# se_hash). Fire it with `stream do patch.{{id}}.trigger`.
+kind        = "particles"
+layer       = "overlay"
+label       = "{{label}}"
+description = "Sparks rising from the bottom while the trigger envelope is up"
+particles   = { count = 4096, sim = "sim.wgsl", draw = "draw.wgsl" }
+params.rate    = { type = "float", default = 0.6, range = [0.0, 4.0], description = "Share of the pool spawned per second at full envelope" }
+params.speed   = { type = "float", default = 0.5, range = [0.05, 2.0] }
+params.size    = { type = "float", default = 0.006, range = [0.001, 0.05] }
+params.gravity = { type = "float", default = -0.15, range = [-2.0, 2.0] }
+trigger = { attack = "100ms", hold = "3s", release = "1s", retrigger = "stack" }
+budget  = { gpu_ms = 0.5 }

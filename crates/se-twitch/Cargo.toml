@@ -1,0 +1,43 @@
+[package]
+name = "se-twitch"
+description = "Twitch: OAuth device flow, EventSub WebSocket, Helix (chat, rewards, moderation, polls, predictions, ads, markers), emotes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+se-proto.workspace = true
+se-core.workspace = true
+se-hub.workspace = true
+se-store.workspace = true
+se-clock.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+futures-util.workspace = true
+parking_lot.workspace = true
+tokio-tungstenite = { workspace = true, features = ["native-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["native-tls", "json", "form", "query"] }
+axum = { version = "0.8", optional = true }
+
+[features]
+# Local stand-in for id.twitch.tv + Helix and the Twitch CLI RPC forwarder (smoke runs, e2e test).
+mock = ["dep:axum"]
+
+[dev-dependencies]
+se-clock.workspace = true
+
+[[example]]
+name = "mock_twitch"
+required-features = ["mock"]
+
+[[test]]
+name = "mock_e2e"
+required-features = ["mock"]
+
+[[test]]
+name = "mock_auth"
+required-features = ["mock"]

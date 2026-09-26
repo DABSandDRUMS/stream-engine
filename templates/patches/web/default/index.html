@@ -1,0 +1,61 @@
+<!doctype html>
+<!-- {{label}}: web patch. The page background stays transparent (the engine composites it). -->
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; width: 100%; height: 100%; background: transparent; overflow: hidden; }
+  body { font-family: "Inter", "Noto Sans", sans-serif; }
+  #banner {
+    position: absolute; left: 50%; top: 12%; transform: translate(-50%, -40px) scale(0.9);
+    opacity: 0; transition: opacity 300ms ease, transform 400ms cubic-bezier(.2, 1.4, .4, 1);
+    padding: 0.6em 1.4em; border-radius: 0.6em; color: #fff; font-size: 4vh; font-weight: 700;
+    text-shadow: 0 2px 8px rgba(0, 0, 0, .5); box-shadow: 0 10px 40px rgba(0, 0, 0, .35);
+    white-space: nowrap;
+  }
+  #banner.show { opacity: 1; transform: translate(-50%, 0) scale(1); }
+  #banner small { display: block; font-size: 0.55em; font-weight: 500; opacity: .85; }
+  #bar { position: absolute; left: 0; bottom: 0; height: 0.6vh; width: 0; }
+</style>
+</head>
+<body>
+<div id="banner"><span id="title"></span><small id="who"></small></div>
+<div id="bar"></div>
+<script src="/engine.js"></script>
+<script>
+  // Engine.connect() reads the scoped token from ?token=… and reconnects on its own.
+  const se = Engine.connect();
+  const id = se.patch.id;
+  const banner = document.getElementById("banner");
+  const bar = document.getElementById("bar");
+  let hideTimer = null;
+
+  function css(c) {
+    // params of type color arrive as [r, g, b, a] (0–1)
+    if (!Array.isArray(c)) return "#7aa2f7";
+    const [r, g, b, a = 1] = c.map(x => Math.round(Math.max(0, Math.min(1, x)) * 255));
+    return `rgba(${r}, ${g}, ${b}, ${a / 255})`;
+  }
+
+  function show(payload) {
+    const p = se.patch.params;
+    document.getElementById("title").textContent = p.title ?? "Thank you!";
+    const who = payload && (payload.user || payload.from || payload.name);
+    const amount = payload && (payload.amount || payload.bits || payload.viewers);
+    document.getElementById("who").textContent = [who, amount].filter(Boolean).join(" · ");
+    banner.style.background = css(p.color);
+    banner.classList.add("show");
+    clearTimeout(hideTimer);
+    hideTimer = setTimeout(() => banner.classList.remove("show"), (p.duration ?? 5) * 1000);
+  }
+
+  se.on(`patch.${id}.trigger`, e => show(e.payload));
+
+  // band level as a live meter (signals arrive at up to the requested rate)
+  se.signals("band.level", v => {
+    bar.style.width = `${Math.min(100, (v["band.level"] || 0) * 140)}%`;
+    bar.style.background = css(se.patch.params.color);
+  }, 30);
+</script>
+</body>
+</html>

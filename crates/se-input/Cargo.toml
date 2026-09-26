@@ -1,0 +1,37 @@
+[package]
+name = "se-input"
+description = "Control surfaces: Stream Deck (hidraw), MIDI (ALSA sequencer, 14-bit/NRPN, MCU/HUI, feedback, learn), voice push-to-talk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+se-proto.workspace = true
+se-core.workspace = true
+se-hub.workspace = true
+se-store.workspace = true
+se-clock.workspace = true
+se-ui-kit.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+toml_edit.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+crossbeam-channel.workspace = true
+arc-swap.workspace = true
+notify.workspace = true
+libc.workspace = true
+alsa = "0.12"
+
+ab_glyph = "0.2"
+jpeg-encoder = "0.7"
+base64 = "0.23"
+whisper-rs = { version = "0.16", features = ["tracing_backend"] }
+ureq = "3"
+sha1_smol = "1"
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,25 @@
+[package]
+name = "se-dsp"
+description = "Real-time audio DSP: effect library, wet/dry/bypass slots, sampler, wasm dsp patch host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Host `dsp` WebAssembly patches (wasmtime, AOT at load).
+wasm = ["dep:wasmtime", "dep:libc"]
+
+[dependencies]
+wasmtime = { version = "49", optional = true, default-features = false, features = ["cranelift", "runtime", "std"] }
+# Thread CPU time for the wasm watchdog (tells a runaway guest from a preempted thread).
+libc = { workspace = true, optional = true }
+
+[dev-dependencies]
+se-alloc.workspace = true
+wat = "1"
+
+[[bench]]
+name = "wasm"
+harness = false
+required-features = ["wasm"]

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <title>stream-engine</title>
+  <rect x="4" y="4" width="120" height="120" rx="26" fill="#1f1f28"/>
+  <rect x="4" y="4" width="120" height="120" rx="26" fill="none" stroke="#dcd7ba" stroke-opacity="0.18" stroke-width="2"/>
+  <g fill="none" stroke="#dcd7ba" stroke-width="7" stroke-linecap="round">
+    <path d="M40 40 a34 34 0 0 0 0 48"/>
+    <path d="M88 40 a34 34 0 0 1 0 48"/>
+    <path d="M27 28 a50 50 0 0 0 0 72" stroke-opacity="0.55"/>
+    <path d="M101 28 a50 50 0 0 1 0 72" stroke-opacity="0.55"/>
+  </g>
+  <circle cx="64" cy="64" r="15" fill="#e82424"/>
+</svg>

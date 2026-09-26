@@ -1,0 +1,29 @@
+# stream-engine shortcuts (PLAN §15.7). Only overrides live here: delete a line to restore
+# the default. Chords: "Ctrl+K", "Ctrl+Shift+Z", "Shift+1", "F5", "Ctrl+.", "hold Ctrl+Esc".
+# A list binds several chords; [] unbinds. Rebinding in Settings rewrites this file and keeps
+# comments. Global binds (Take, Panic, Clean, BRB when the UI isn't focused) live in Hyprland
+# (~/.config/hypr/bindings.lua → `stream` CLI).
+#
+# action            default               what it does
+# palette           Ctrl+K                Command palette
+# mode.toggle       Tab                   Toggle Show/Build mode
+# scene.preview.N   1 … 9                 Scene N to preview
+# take              Enter                 Take (preview to program)
+# scene.program.N   Shift+1 … Shift+9     Scene N direct to program
+# pad.N             F1 … F12              Preset pad N (current page)
+# undo              Ctrl+Z                Undo
+# redo              Ctrl+Shift+Z          Redo
+# clean             Ctrl+.                Clean (clear chat effects)
+# panic             hold Ctrl+Esc         Panic (always hold-to-confirm)
+# layout.next       Ctrl+L                Switch to the next layout
+# search            Ctrl+F                Search library / chat
+# zoom.in           Ctrl+= / Ctrl+Plus    Zoom in
+# zoom.out          Ctrl+-                Zoom out
+# escape            Esc                   Cancel / close
+#
+# Examples (ids with dots need quotes):
+#   take = ["Enter", "Space"]
+#   "scene.program.1" = "Ctrl+1"
+#   "zoom.in" = []
+
+[keys]

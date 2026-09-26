@@ -1,0 +1,13 @@
+# Fast free-running colour chase at full (hype / chorus presets).
+label = "Fast chase"
+priority = 300
+release = "0.5s"
+
+[[cue]]
+id = "1"
+label = "Chase fast"
+fade = "0.2s"
+effects = { chase_fast = {} }
+
+[cue.set]
+all = { intensity = 1.0 }

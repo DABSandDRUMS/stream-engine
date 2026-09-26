@@ -1,0 +1,11 @@
+# Dimmer strobe: 2.5 flashes/s, 25 % on-time, every head together.
+# Deliberately below the limiter's 3 flashes/s cap; the limiter clamps it anyway if rate is raised.
+label = "Strobe"
+kind = "dimmer_square"
+targets = ["all"]
+unit = "hz"
+rate = 2.5
+size = 1.0
+spread = 0.0
+order = "x"
+duty = 0.25

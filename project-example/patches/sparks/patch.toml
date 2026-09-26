@@ -1,0 +1,13 @@
+# Sparks: GPU particles rising from the bottom while triggered (overlay layer, all canvases).
+# Fire it from a preset (`fx = [{ name = "patch.sparks" }]`) or `stream do patch.sparks.trigger`.
+kind        = "particles"
+layer       = "overlay"
+label       = "Sparks"
+description = "Palette-colored sparks rising from the bottom edge while the trigger envelope is up"
+particles   = { count = 8192, sim = "sim.wgsl", draw = "draw.wgsl" }
+params.rate    = { type = "float", default = 0.35, range = [0.0, 4.0], description = "Share of the pool spawned per second at full envelope" }
+params.speed   = { type = "float", default = 0.6, range = [0.05, 2.0], description = "Launch speed" }
+params.size    = { type = "float", default = 0.005, range = [0.001, 0.05], description = "Spark size (fraction of layer height)" }
+params.gravity = { type = "float", default = 0.25, range = [-2.0, 2.0], description = "Downward pull (negative floats up)" }
+trigger = { attack = "100ms", hold = "3s", release = "1s", retrigger = "stack" }
+budget  = { gpu_ms = 0.5 }

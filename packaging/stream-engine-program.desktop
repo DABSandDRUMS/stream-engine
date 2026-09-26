@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=stream-engine Program
+GenericName=Confidence Monitor
+Comment=Borderless view of exactly what goes out on the stream
+Exec=stream-engine ui --program
+Icon=stream-engine
+Terminal=false
+Categories=AudioVideo;Video;
+Keywords=stream;program;confidence;monitor;
+StartupWMClass=stream-engine.program
+StartupNotify=true

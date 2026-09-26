@@ -1,0 +1,22 @@
+# Ring modulator: a `dsp` patch (WebAssembly, block ABI v1; source in src/, rebuild with ./build.sh).
+#
+# Params reach the module in manifest (alphabetical) order as f32 slots:
+# depth = slot 0, freq = slot 1, sync = slot 2, tremolo = slot 3.
+#
+# The trigger envelope is applied by the engine to the effect's wet signal, so the patch is
+# inaudible until fired and fades in/out with attack/release. The module itself ignores `env`
+# (using it too would square the envelope) and restarts its carrier at phase 0 on every
+# trigger, so each hit sounds the same.
+kind = "dsp"
+entry = "main.wasm"
+layer = "audio-effect"
+label = "Ring mod"
+description = "Multiplies the audio with a sine carrier for metallic, robotic tones. Optional beat-locked carrier and a 16th-note tremolo gate."
+
+params.depth = { type = "float", default = 1.0, range = [0.0, 1.0], description = "Ring-mod amount: 0 = input unchanged, 1 = input × carrier" }
+params.freq = { type = "float", default = 440.0, range = [20.0, 2000.0], unit = "Hz", description = "Carrier frequency (with sync: rounded to a whole multiple of the beat rate)" }
+params.sync = { type = "bool", default = false, description = "Lock the carrier to the beat clock: frequency = n × bpm/60, phase follows beat.phase" }
+params.tremolo = { type = "float", default = 0.0, range = [0.0, 1.0], description = "Depth of a beat-synced 16th-note gate on the output" }
+
+trigger = { attack = "20ms", hold = "4s", release = "300ms" }
+budget = { cpu_ms = 0.3 }

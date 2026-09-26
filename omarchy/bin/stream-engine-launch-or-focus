@@ -1,0 +1,33 @@
+#!/bin/bash
+# Focus the stream-engine UI window if it is open, otherwise launch it.
+#
+#   stream-engine-launch-or-focus                  main window (app-id `stream-engine`)
+#   stream-engine-launch-or-focus --program        confidence window (app-id `stream-engine.program`)
+#   stream-engine-launch-or-focus --layout build   extra arguments go to `stream-engine ui`
+#
+# Matches the Wayland app-id exactly: `omarchy-launch-or-focus` also matches window titles as a
+# word regex, and every stream-engine window is titled "stream-engine" (so is a terminal sitting
+# in a directory of that name), which would focus the wrong window.
+set -uo pipefail
+
+app_id=stream-engine
+for arg in "$@"; do
+  [[ $arg == --program ]] && app_id=stream-engine.program
+done
+
+address=""
+if command -v hyprctl >/dev/null && command -v jq >/dev/null; then
+  address=$(hyprctl clients -j 2>/dev/null |
+    jq -r --arg id "$app_id" 'first(.[] | select(.class == $id) | .address) // empty' 2>/dev/null)
+fi
+
+if [[ -n $address ]]; then
+  hyprctl dispatch "hl.dsp.focus({ window = \"address:$address\" })" >/dev/null 2>&1 ||
+    hyprctl dispatch focuswindow "address:$address" >/dev/null
+  exit
+fi
+
+if command -v uwsm-app >/dev/null; then
+  exec setsid uwsm-app -- stream-engine ui "$@"
+fi
+exec setsid stream-engine ui "$@"

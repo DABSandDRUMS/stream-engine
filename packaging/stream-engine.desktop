@@ -1,0 +1,21 @@
+[Desktop Entry]
+Type=Application
+Name=stream-engine
+GenericName=Live Stream Production
+Comment=Operate the live stream: scenes, effects, lights, audio, chat
+Exec=stream-engine ui
+Icon=stream-engine
+Terminal=false
+Categories=AudioVideo;Video;
+Keywords=stream;live;broadcast;obs;twitch;scene;
+StartupWMClass=stream-engine
+StartupNotify=true
+Actions=program;build;
+
+[Desktop Action program]
+Name=Confidence Monitor (program)
+Exec=stream-engine ui --program
+
+[Desktop Action build]
+Name=Build Mode
+Exec=stream-engine ui --layout build

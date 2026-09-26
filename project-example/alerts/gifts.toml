@@ -1,0 +1,32 @@
+# Gift bombs: `twitch.gift` + its gifted subs become ONE alert ({count} recipients listed
+# live on the alert as they arrive).
+[[alert]]
+name = "gift"
+when = "twitch.gift"
+title = "{user} gifted {count} subs!"
+message = "Welcome to the crew!"
+sound = "alert_gift"
+duration = "7s"
+priority = 60
+
+[[alert.variation]]
+name = "single"
+if = "event.count == 1"
+title = "{user} gifted a sub!"
+duration = "5s"
+priority = 45
+
+[[alert.variation]]
+name = "bomb"
+if = "event.count >= 50"
+title = "{user} DROPPED {count} GIFT SUBS!"
+duration = "12s"
+priority = 95
+do = ["preset.fire hype"]
+
+[[alert.variation]]
+name = "big"
+if = "event.count >= 10"
+title = "{user} gifted {count} subs!!"
+duration = "9s"
+priority = 80

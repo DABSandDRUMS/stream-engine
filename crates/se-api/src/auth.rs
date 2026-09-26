@@ -31,7 +31,10 @@ impl Scope {
             }
             Scope::Mod => match op {
                 Op::Clean => true,
-                Op::Action { name, .. } => ["queue.", "mod.", "alerts.", "bot.say"].iter().any(|p| name.starts_with(p)),
+                Op::Action { name, .. } => {
+                    ["queue.", "mod.", "alerts.", "giveaway.", "bot.say"].iter().any(|p| name.starts_with(p))
+                        || matches!(name.as_str(), "tts.skip" | "tts.clear")
+                }
                 _ => false,
             },
         }
@@ -39,7 +42,7 @@ impl Scope {
 
     pub fn may_query(&self, name: &str) -> bool {
         match self {
-            Scope::Mod => ["queue", "mod", "alerts", "presets", "chat"].iter().any(|p| name == *p || name.starts_with(&format!("{p}."))),
+            Scope::Mod => ["queue", "mod", "alerts", "presets", "chat", "tts", "giveaway"].iter().any(|p| name == *p || name.starts_with(&format!("{p}."))),
             _ => true,
         }
     }
@@ -107,6 +110,10 @@ mod tests {
         assert!(Scope::Mod.allows(&Op::Action { name: "queue.skip".into(), args: Value::Null }));
         assert!(!Scope::Mod.allows(&Op::Action { name: "lights.cue".into(), args: Value::Null }));
         assert!(!Scope::Mod.allows(&Op::SceneGo { scene: "x".into() }));
+        let act = |n: &str| Op::Action { name: n.into(), args: Value::Null };
+        assert!(Scope::Mod.allows(&act("tts.skip")) && Scope::Mod.allows(&act("tts.clear")) && Scope::Mod.allows(&act("giveaway.draw")));
+        assert!(!Scope::Mod.allows(&act("tts.say")), "mods may skip TTS, not speak through it");
+        assert!(Scope::Mod.may_query("giveaway") && !Scope::Mod.may_query("sources"));
         assert!(!Scope::ReadOnly.allows(&Op::Clean));
     }
 

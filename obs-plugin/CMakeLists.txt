@@ -1,0 +1,65 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+cmake_minimum_required(VERSION 3.22)
+project(stream-engine-obs VERSION 0.1.0 LANGUAGES C)
+
+option(SE_OBS_BUILD_PLUGIN "Build the OBS module (needs libobs + obs-frontend-api)" ON)
+option(SE_OBS_BUILD_TESTS "Build the protocol tests (fake frames/control servers)" ON)
+option(SE_OBS_BUILD_TOOLS "Build se-fake-frames, a stand-in frames.sock server (needs gbm, EGL, GLESv2)" OFF)
+option(SE_OBS_WERROR "Treat warnings as errors" OFF)
+
+include(GNUInstallDirs)
+set(CMAKE_C_STANDARD 17)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS ON)
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE RelWithDebInfo)
+endif()
+add_compile_options(-Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers)
+if(SE_OBS_WERROR)
+  add_compile_options(-Werror)
+endif()
+
+find_package(Threads REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(JANSSON REQUIRED IMPORTED_TARGET jansson)
+
+# OBS-independent socket/protocol code (tested without OBS).
+add_library(se-obs-proto STATIC src/frames-client.c src/control-client.c)
+set_target_properties(se-obs-proto PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(se-obs-proto PUBLIC src)
+target_link_libraries(se-obs-proto PUBLIC Threads::Threads PkgConfig::JANSSON)
+
+if(SE_OBS_BUILD_PLUGIN)
+  find_package(libobs REQUIRED)
+  find_package(obs-frontend-api REQUIRED)
+  pkg_check_modules(EGL REQUIRED IMPORTED_TARGET egl)
+
+  add_library(stream-engine MODULE src/plugin-main.c src/canvas-source.c src/fallback.c src/gl-fence.c)
+  set_target_properties(stream-engine PROPERTIES PREFIX "" C_VISIBILITY_PRESET hidden)
+  target_link_libraries(stream-engine PRIVATE se-obs-proto OBS::libobs OBS::obs-frontend-api PkgConfig::EGL)
+
+  install(TARGETS stream-engine LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/obs-plugins)
+  install(DIRECTORY data/ DESTINATION ${CMAKE_INSTALL_DATADIR}/obs/obs-plugins/stream-engine)
+endif()
+
+if(SE_OBS_BUILD_TESTS)
+  enable_testing()
+  add_executable(test-frames tests/test-frames.c tests/fake-server.c)
+  target_link_libraries(test-frames PRIVATE se-obs-proto)
+  add_test(NAME frames-client COMMAND test-frames)
+  set_tests_properties(frames-client PROPERTIES TIMEOUT 60)
+
+  add_executable(test-control tests/test-control.c)
+  target_link_libraries(test-control PRIVATE se-obs-proto)
+  add_test(NAME control-client COMMAND test-control)
+  set_tests_properties(control-client PROPERTIES TIMEOUT 60)
+endif()
+
+if(SE_OBS_BUILD_TOOLS)
+  pkg_check_modules(GBM REQUIRED IMPORTED_TARGET gbm)
+  pkg_check_modules(TOOL_EGL REQUIRED IMPORTED_TARGET egl)
+  pkg_check_modules(GLES REQUIRED IMPORTED_TARGET glesv2)
+  add_executable(se-fake-frames tools/fake-frames.c tests/fake-server.c)
+  target_include_directories(se-fake-frames PRIVATE src tests)
+  target_link_libraries(se-fake-frames PRIVATE PkgConfig::GBM PkgConfig::TOOL_EGL PkgConfig::GLES Threads::Threads m)
+endif()

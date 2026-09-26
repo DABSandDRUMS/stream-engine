@@ -1,0 +1,198 @@
+<!doctype html>
+<!-- Alert box: renders the engine's alert queue. Test in a browser:
+     http://127.0.0.1:<http>/patches/alertbox/index.html?token=<token>  then  `stream sim cheer bits=1500` -->
+<html>
+<head>
+<meta charset="utf-8">
+<title>alertbox</title>
+<style>
+  :root { --accent: #7aa2f7; --fg: #fff; --bg: rgba(18, 20, 31, .88); --scale: 1; --font: "Inter", "Noto Sans", sans-serif; }
+  html, body { margin: 0; width: 100%; height: 100%; background: transparent; overflow: hidden; }
+  body { font-family: var(--font); color: var(--fg); display: flex; justify-content: center; }
+  body.top { align-items: flex-start; }
+  body.center { align-items: center; }
+  body.bottom { align-items: flex-end; }
+  #stage { position: relative; transform: scale(var(--scale)); transform-origin: center; padding: 3vh 2vw; }
+  .card {
+    position: relative; display: flex; align-items: center; gap: 2.4vh; min-width: 44vw; max-width: 92vw;
+    padding: 2.6vh 3.6vh; border-radius: 2.2vh; background: var(--bg);
+    box-shadow: 0 1.5vh 5vh rgba(0, 0, 0, .45), inset 0 0 0 .35vh color-mix(in srgb, var(--accent) 70%, transparent);
+    overflow: hidden;
+  }
+  .card::before {
+    content: ""; position: absolute; inset: -40%; z-index: 0; opacity: .35;
+    background: conic-gradient(from 0deg, transparent, var(--accent), transparent 30%);
+    animation: spin 3.5s linear infinite;
+  }
+  .card > * { position: relative; z-index: 1; }
+  .icon { font-size: 11vh; line-height: 1; filter: drop-shadow(0 .6vh 1.2vh rgba(0, 0, 0, .5)); animation: bob 1.6s ease-in-out infinite; }
+  .icon img { height: 13vh; width: auto; display: block; }
+  .body { display: flex; flex-direction: column; gap: 1vh; min-width: 0; }
+  .title { font-size: 6vh; font-weight: 800; letter-spacing: .02em; line-height: 1.1; text-shadow: 0 .4vh 1.2vh rgba(0, 0, 0, .5); }
+  .title .hl { color: var(--accent); }
+  .message { font-size: 4.2vh; font-weight: 500; opacity: .95; line-height: 1.25; overflow-wrap: anywhere; max-height: 16vh; overflow: hidden; }
+  .message .emote { height: 1.35em; vertical-align: middle; margin: 0 .08em; }
+  .message .emote.zw { margin-left: -1.4em; }
+  .recipients { font-size: 3vh; opacity: .8; display: flex; flex-wrap: wrap; gap: .4vh 1.2vh; max-height: 10vh; overflow: hidden; }
+  .recipients span { animation: pop-in .35s cubic-bezier(.2, 1.6, .4, 1) both; }
+  .card.has-amount .body { padding-right: 17vh; }
+  .amount { position: absolute; top: 1.4vh; right: 2vh; font-size: 3vh; font-weight: 800; padding: .3vh 1.2vh; border-radius: 1vh; background: var(--accent); color: #111; }
+  .bar { position: absolute; left: 0; bottom: 0; height: .6vh; background: var(--accent); width: 100%; transform-origin: left; }
+
+  .in.pop { animation: pop-in .6s cubic-bezier(.2, 1.5, .4, 1) both; }
+  .in.slide { animation: slide-in .55s cubic-bezier(.2, 1.1, .3, 1) both; }
+  .in.fade { animation: fade-in .5s ease both; }
+  .out { animation: fade-out .45s ease both; }
+  .update { animation: nudge .4s ease; }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes bob { 50% { transform: translateY(-.8vh) rotate(-4deg); } }
+  @keyframes pop-in { from { opacity: 0; transform: scale(.4) translateY(4vh); } to { opacity: 1; transform: none; } }
+  @keyframes slide-in { from { opacity: 0; transform: translateX(-30vw); } to { opacity: 1; transform: none; } }
+  @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes fade-out { to { opacity: 0; transform: translateY(-3vh) scale(.96); } }
+  @keyframes nudge { 40% { transform: scale(1.04); } }
+  @keyframes shrink { from { transform: scaleX(1); } to { transform: scaleX(0); } }
+</style>
+</head>
+<body class="center">
+<div id="stage"></div>
+<script src="/engine.js"></script>
+<script src="/web/overlay.js"></script>
+<script>
+  "use strict";
+  const O = Overlay;
+  const se = Engine.connect();
+  const emotes = new O.Emotes(se);
+  const stage = document.getElementById("stage");
+  const ICONS = { follow: "💜", sub: "⭐", resub: "⭐", gift: "🎁", cheer: "💎", raid: "🚀", tip: "💸", redeem: "✨" };
+  const P = O.params(se, { accent: "#7aa2f7", text_color: "#ffffff", card_bg: [0.07, 0.08, 0.12, 0.88], position: "center", scale: 1.0, style: "pop", show_icon: true, font: "" }, apply);
+  let shown = null; // {id, el, timer}
+
+  function apply() {
+    const r = document.documentElement.style;
+    r.setProperty("--accent", O.cssColor(P.accent) || "#7aa2f7");
+    r.setProperty("--fg", O.cssColor(P.text_color) || "#fff");
+    r.setProperty("--bg", O.cssColor(P.card_bg) || "rgba(18,20,31,.88)");
+    r.setProperty("--scale", String(Math.max(0.5, Math.min(2, Number(P.scale) || 1))));
+    if (P.font) r.setProperty("--font", P.font);
+    document.body.className = ["top", "center", "bottom"].includes(P.position) ? P.position : "center";
+  }
+  apply();
+
+  // Highlight the viewer's name inside the title.
+  function titleNode(title, user) {
+    const el = O.h("div", "title");
+    const i = user ? title.indexOf(user) : -1;
+    if (i < 0) {
+      el.appendChild(O.renderText(title, emotes));
+      return el;
+    }
+    el.appendChild(document.createTextNode(title.slice(0, i)));
+    el.appendChild(O.h("span", "hl", user));
+    el.appendChild(O.renderText(title.slice(i + user.length), emotes));
+    return el;
+  }
+
+  function iconNode(a) {
+    const wrap = O.h("div", "icon");
+    const src = a.image ? (/^https?:|^\//.test(a.image) ? a.image : `/assets/${a.image}`) : "";
+    const im = src && O.img(src, "", a.kind);
+    if (im) wrap.appendChild(im);
+    else wrap.textContent = ICONS[a.kind] || ICONS[(a.event || "").split(".").pop()] || "🔔";
+    return wrap;
+  }
+
+  function recipientsNode(list) {
+    const el = O.h("div", "recipients");
+    const max = 14;
+    for (const n of list.slice(0, max)) el.appendChild(O.h("span", "", n));
+    if (list.length > max) el.appendChild(O.h("span", "", `+${list.length - max} more`));
+    return el;
+  }
+
+  function amountText(a) {
+    if (!a.amount) return "";
+    if (a.event === "tip") return O.fmtMoney(a.amount, a.currency);
+    if (a.event === "twitch.cheer") return `${O.fmtNum(a.amount)} bits`;
+    if (a.event === "twitch.raid") return `${O.fmtNum(a.amount)} viewers`;
+    if (a.event === "twitch.gift") return `×${O.fmtNum(a.amount)}`;
+    if (a.event === "twitch.resub" || a.event === "twitch.sub") return a.amount > 1 ? `${a.amount} months` : "";
+    return "";
+  }
+
+  function build(a) {
+    const card = O.h("div", "card in " + (["pop", "slide", "fade"].includes(P.style) ? P.style : "pop"));
+    card.dataset.id = a.id;
+    if (P.show_icon) card.appendChild(iconNode(a));
+    const body = O.h("div", "body");
+    body.appendChild(titleNode(a.title || "", a.user || ""));
+    const msg = O.h("div", "message");
+    if (a.message) msg.appendChild(O.renderText(a.message, emotes));
+    body.appendChild(msg);
+    if (a.recipients && a.recipients.length) body.appendChild(recipientsNode(a.recipients));
+    card.appendChild(body);
+    const amt = amountText(a);
+    if (amt) {
+      card.classList.add("has-amount");
+      card.appendChild(O.h("div", "amount", amt));
+    }
+    const bar = O.h("div", "bar");
+    bar.style.animation = `shrink ${Math.max(0.5, (a.duration || 6000) / 1000)}s linear both`;
+    card.appendChild(bar);
+    return card;
+  }
+
+  function show(a, remainingMs) {
+    hideNow();
+    const el = build(a);
+    stage.appendChild(el);
+    // safety net if the hide event is missed (disconnect): the engine's duration + 2 s
+    const ms = (remainingMs != null ? remainingMs : a.duration || 6000) + 2000;
+    shown = { id: a.id, el, timer: setTimeout(() => hide(a.id), ms) };
+  }
+
+  function update(a) {
+    if (!shown || shown.id !== a.id) return;
+    const body = shown.el.querySelector(".body");
+    const msg = body.querySelector(".message");
+    msg.textContent = "";
+    if (a.message) msg.appendChild(O.renderText(a.message, emotes));
+    const old = body.querySelector(".recipients");
+    if (old) old.remove();
+    if (a.recipients && a.recipients.length) body.appendChild(recipientsNode(a.recipients));
+    shown.el.classList.remove("update");
+    void shown.el.offsetWidth;
+    shown.el.classList.add("update");
+  }
+
+  function hideNow() {
+    if (!shown) return;
+    clearTimeout(shown.timer);
+    shown.el.remove();
+    shown = null;
+  }
+
+  function hide(id) {
+    if (!shown || (id != null && shown.id !== id)) return;
+    const s = shown;
+    shown = null;
+    clearTimeout(s.timer);
+    s.el.classList.remove("in", "pop", "slide", "fade");
+    s.el.classList.add("out");
+    setTimeout(() => s.el.remove(), 500);
+  }
+
+  se.on("alert.show", e => {
+    if (!shown || shown.id !== e.payload.id) show(e.payload);
+  });
+  se.on("alert.update", e => update(e.payload));
+  se.on("alert.hide", e => hide(e.payload && e.payload.id));
+  // (re)connect mid-alert: pick up what's on screen now
+  se.state("alerts.current", (_, v) => {
+    if (v && v.id != null && (!shown || shown.id !== v.id)) show(v, v.remaining_ms);
+    else if (!v && shown) hide(shown.id);
+  });
+</script>
+</body>
+</html>

@@ -22,6 +22,31 @@ se-patch = { path = "crates/se-patch" }
 se-app = { path = "crates/se-app" }
 se-ui-kit = { path = "crates/se-ui-kit" }
 se-ui = { path = "crates/se-ui" }
+se-alloc = { path = "crates/se-alloc" }
+se-dsp = { path = "crates/se-dsp" }
+se-analysis = { path = "crates/se-analysis" }
+se-audio = { path = "crates/se-audio" }
+se-audio-taps = { path = "crates/se-audio-taps" }
+se-input = { path = "crates/se-input" }
+se-timeline = { path = "crates/se-timeline" }
+se-bot = { path = "crates/se-bot" }
+se-alerts = { path = "crates/se-alerts" }
+se-dmx = { path = "crates/se-dmx" }
+se-devices = { path = "crates/se-devices" }
+se-video-in = { path = "crates/se-video-in" }
+se-render = { path = "crates/se-render" }
+se-web = { path = "crates/se-web" }
+se-vector = { path = "crates/se-vector" }
+se-frames = { path = "crates/se-frames" }
+se-extras = { path = "crates/se-extras" }
+se-tts = { path = "crates/se-tts" }
+se-tiktok = { path = "crates/se-tiktok" }
+se-clips = { path = "crates/se-clips" }
+se-obs = { path = "crates/se-obs" }
+se-mixer = { path = "crates/se-mixer" }
+se-songs = { path = "crates/se-songs" }
+se-twitch = { path = "crates/se-twitch" }
+cef = { version = "=154.0.0", default-features = false } # CEF 154.0.23 (cef-rs 154.0.0+154.0.23)
 
 anyhow = "1"
 thiserror = "2"
@@ -50,6 +75,7 @@ egui = "0.36"
 tempfile = "3"
 triple_buffer = "9"
 rtrb = "0.4"
+mlua = { version = "0.12", features = ["luajit"] }
 
 [profile.release]
 debug = 1

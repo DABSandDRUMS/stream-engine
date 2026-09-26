@@ -1,4 +1,6 @@
 /target/
+/target-*/
+**/target/
 node_modules/
 .wrangler/
 .dev.vars
@@ -7,4 +9,3 @@ node_modules/
 *.db-shm
 sessions/
 .backups/
-/target-*/

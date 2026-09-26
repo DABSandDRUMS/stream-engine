@@ -99,7 +99,10 @@ enum Cmd {
         name: String,
         args: Option<String>,
     },
-    /// Stream events/changes: `stream watch --events 'twitch.*' --state 'show.*'`
+    /// Stream events/changes: `stream watch --events 'twitch.*' --state 'show.*'`.
+    /// With `--json`, one object per line: `{"event":{…}}`, `{"state":{"addr":value,…}}`,
+    /// `{"signals":{"name":x,…}}`, `{"log":{"level","target","msg","ts"}}`. `--events=` (empty
+    /// pattern) subscribes to no events.
     Watch {
         #[arg(long, default_value = "**")]
         events: Vec<String>,
@@ -141,6 +144,24 @@ fn print_value(v: &Value, json: bool) {
             other => println!("{}", serde_json::to_string_pretty(other).unwrap_or_default()),
         }
     }
+}
+
+/// One `stream --json watch` output line (see `Cmd::Watch`); `None` for messages watch ignores.
+fn watch_json(msg: &ServerMsg) -> Result<Option<serde_json::Value>> {
+    use serde_json::{Map, json, to_value};
+    Ok(Some(match msg {
+        ServerMsg::Event { event } => json!({ "event": to_value(event)? }),
+        ServerMsg::State { changes } => {
+            let mut m = Map::with_capacity(changes.len());
+            for (a, v) in changes {
+                m.insert(a.clone(), to_value(v)?);
+            }
+            json!({ "state": m })
+        }
+        ServerMsg::Signals { values, .. } => json!({ "signals": values.iter().map(|(n, v)| (n.clone(), json!(v))).collect::<Map<_, _>>() }),
+        ServerMsg::Log { level, target, msg, ts } => json!({ "log": { "level": level, "target": target, "msg": msg, "ts": to_value(ts)? } }),
+        _ => return Ok(None),
+    }))
 }
 
 fn run_op(c: &mut Conn, op: Op, actor: Option<Actor>, trace: bool) -> Result<()> {
@@ -262,14 +283,17 @@ fn main() -> Result<()> {
             c.set_timeout(None);
             c.subscribe(Subscription { events, state, signals, signal_hz: Some(10.0), logs, trace: false })?;
             loop {
-                match c.recv()? {
+                let msg = c.recv()?;
+                if cli.json {
+                    if let Some(line) = watch_json(&msg)? {
+                        println!("{line}");
+                    }
+                    continue;
+                }
+                match msg {
                     ServerMsg::Event { event } => {
-                        if cli.json {
-                            println!("{}", serde_json::to_string(&event)?);
-                        } else {
-                            let who = event.actor.as_ref().map(|a| format!(" by {}", a.name)).unwrap_or_default();
-                            println!("event {}{who} {}", event.ty, if event.payload.is_null() { String::new() } else { event.payload.to_string() });
-                        }
+                        let who = event.actor.as_ref().map(|a| format!(" by {}", a.name)).unwrap_or_default();
+                        println!("event {}{who} {}", event.ty, if event.payload.is_null() { String::new() } else { event.payload.to_string() });
                     }
                     ServerMsg::State { changes } => {
                         for (a, v) in changes {

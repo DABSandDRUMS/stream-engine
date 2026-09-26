@@ -1,0 +1,106 @@
+# Song request commands (§13, §12.3). They map to the song queue's `queue.*` actions;
+# the queue replies in chat itself (added / rejected / position).
+# Numbers like `#12` or `3` passed through a lone {1} arrive as integers.
+
+[[command]]
+name = "!sr"
+aliases = ["!songrequest"]
+action = "queue.request"
+args = { user = "{user}", text = "{args}" }
+min_args = 1
+usage = "@{user} usage: !sr <song name or YouTube link>"
+cooldown = { per_user = "10s" }
+
+[[command]]
+name = "!song"
+aliases = ["!np"]
+reply = "Now playing: {song} (requested by {queue.now.user})"
+cooldown = { global = "10s" }
+
+[[command]]
+name = "!queue"
+reply = "Song queue ({queue.length} waiting): {queue.url}"
+cooldown = { global = "15s" }
+sub.open = { role = "mod", action = "queue.open" }
+sub.close = { role = "mod", action = "queue.close" }
+sub.pause = { role = "mod", action = "queue.pause" }
+sub.resume = { role = "mod", action = "queue.resume" }
+
+# Remove your own most recent request.
+[[command]]
+name = "!wrongsong"
+action = "queue.remove"
+args = { user = "{user}", last = true }
+
+[[command]]
+name = "!voteskip"
+action = "queue.voteskip"
+args = { user = "{user}" }
+cooldown = { per_user = "30s" }
+
+# --- moderators ---------------------------------------------------------------------
+
+[[command]]
+name = "!skip"
+role = "mod"
+action = "queue.skip"
+
+# `!remove 3` removes position 3; `!remove @user` removes their requests.
+[[command]]
+name = "!remove"
+role = "mod"
+action = "queue.remove"
+args = { index = "{1}" }
+min_args = 1
+usage = "Usage: !remove <position> (or !wrongsong for your own)"
+
+[[command]]
+name = "!removeuser"
+role = "mod"
+action = "queue.remove"
+args = { user = "{touser}" }
+min_args = 1
+
+[[command]]
+name = "!approve"
+role = "mod"
+action = "queue.approve"
+args = { id = "{1}" }
+min_args = 1
+usage = "Usage: !approve #id"
+
+[[command]]
+name = "!reject"
+role = "mod"
+action = "queue.reject"
+args = { id = "{1}" }
+min_args = 1
+usage = "Usage: !reject #id"
+
+[[command]]
+name = "!srban"
+role = "mod"
+action = "queue.ban_user"
+args = { user = "{touser}" }
+min_args = 1
+usage = "Usage: !srban @user"
+
+[[command]]
+name = "!unsrban"
+role = "mod"
+action = "queue.unban_user"
+args = { user = "{touser}" }
+min_args = 1
+
+# No id = the song that's playing.
+[[command]]
+name = "!songban"
+role = "mod"
+action = "queue.ban_song"
+args = { id = "{1}" }
+
+[[timer]]
+name = "requests"
+every = "20m"
+min_chat_lines = 10
+reply = "Song requests are open: !sr <song or link> · queue: {queue.url}"

@@ -91,28 +91,63 @@ struct se_goodbye {
 - Frames are paced by the engine's 60 fps clock; clients sample the newest.
 - A client that stops reading for > 2 s is disconnected.
 - Staleness: the OBS plugin treats a canvas as stale when no `se_frame` arrived for
-  `stale_ms` (default 500 ms) and reports it; OBS then shows the last frame or the fallback scene.
+  `stale_ms` (default 500 ms), or immediately after `se_goodbye`, and reports it; OBS then shows
+  the last frame or switches to the fallback scene (`docs/obs.md`).
+- `se_canvas` follows **every** hello, also after a reconnect with an unchanged generation;
+  clients treat each `se_canvas` as a new import set.
+- `offsets[0]`/`strides[0]`/`modifier` apply to every buffer of the canvas. The OBS plugin imports
+  `DRM_FORMAT_ABGR8888` (preferred), `XBGR8888`, `ARGB8888`, `XRGB8888`; if the fourcc is
+  unsupported or `gs_texture_create_from_dmabuf` fails it reconnects **without** the dmabuf flag
+  and expects memfds (the shm fallback happens automatically).
+- The OBS plugin releases a dmabuf buffer only after the GPU finished the draws that sampled it (GL
+  fence, usually within one frame of switching to a newer frame); frames superseded before they
+  were shown are released immediately, shm buffers right after the upload. In practice a plugin
+  client holds 1–2 buffers, so 4 buffers per canvas never stall.
+- Clients drop the connection on protocol errors (bad magic/version, truncated `SCM_RIGHTS`,
+  buffer index out of range, fence count mismatch) and reconnect with backoff (100 ms → 2 s).
+- Clients look for the sockets in `$SE_RUNTIME_DIR` when set (dev instances).
 
 ## obs.sock (JSON lines, UTF-8, one object per line)
+
+One plugin connection at a time: while a connection is alive (a line within 5 s) a second one gets
+`{"t":"error",…}` and is closed; a connection silent for 10 s is dropped. Every message with
+`obs_ns` also carries `mono_ns`: OBS's `os_gettime_ns()` and `CLOCK_MONOTONIC` sampled together
+(§3.2 clock mapping). Unknown `t` values are ignored in both directions.
 
 ### Plugin → engine
 
 ```json
-{"t":"hello","obs":"32.2.2","plugin":"0.1.0","canvases":["wide","tall"]}
-{"t":"status","streaming":true,"recording":false,"kbps":6000,"dropped":0,"total":123456,"lag_ms":1.2,"fps":60.0,"obs_ns":123,"mono_ns":456,"stale":{"wide":false,"tall":false}}
-{"t":"event","name":"stream_started"}            // stream_started|stream_stopped|record_started|record_stopped|scene_fallback|scene_restored
-{"t":"record_path","path":"/home/u/Videos/2026-09-25 20-00-00.mkv","canvas":"wide"}
-{"t":"reply","id":7,"ok":true,"error":null}
+{"t":"hello","obs":"32.2.2","plugin":"0.1.0","canvases":["wide","tall"],"pid":1234,"config":{…last engine config…}}
+{"t":"status","streaming":true,"recording":false,"rec_paused":false,"kbps":6000.0,"dropped":0,"total":123456,"congestion":0.0,
+ "rec_kbps":0.0,"lag_ms":0.0,"fps":60.0,"render_ms":0.4,"lagged":0,"rendered":1000,"skipped":0,"encoded":1000,
+ "obs_ns":123,"mono_ns":456,"stream_start_ns":100,"record_start_ns":0,"record_path":"","record_dir":"/home/u/Videos",
+ "scene":"Scene","stale":{"wide":false,"tall":false},"sources":{"wide":1,"tall":1,"preview":0,"atlas":0},
+ "feeds":{"wide":{"connected":true,"frames":600,"superseded":0,"fence_timeouts":0,"width":1920,"height":1080,"dmabuf":true,"goodbye":false,"age_ms":8}},
+ "fallback":false,
+ "outputs":[{"name":"simple_stream","id":"rtmp_output","kind":"stream","active":true,"kbps":6000.0,"dropped":0,"total":3600,"congestion":0.0,"canvas":"wide"}]}
+{"t":"event","name":"stream_started","obs_ns":123,"mono_ns":456}   // stream_started|stream_stopped|record_started|record_stopped (+ "path")|record_paused|record_unpaused
+{"t":"event","name":"scene_fallback","canvas":"Main","scene":"Technical Difficulties","from":"Scene","canvases":["wide"],"reason":"stale","obs_ns":…,"mono_ns":…}
+{"t":"event","name":"scene_restored","canvas":"Main","scene":"Technical Difficulties","to":"Scene","canvases":["wide"],"reason":"fresh","obs_ns":…,"mono_ns":…}   // reason fresh|manual|operator
+{"t":"record_path","path":"/home/u/Videos/2026-09-25 20-00-00.mkv","canvas":"wide","output":"simple_file_output","start_obs_ns":120,"obs_ns":123,"mono_ns":456,
+ "tracks":[{"index":0,"mixer":1,"name":"Track 1","sources":["se-program"],"devices":["se-program"]}]}
+{"t":"record_end","path":"…","canvas":"wide","output":"simple_file_output","end_obs_ns":130,"obs_ns":131,"mono_ns":464}
+{"t":"reply","id":7,"ok":true,"error":null,"result":"starting"}
 ```
 
-`status` is sent once per second. `obs_ns` is OBS's `os_gettime_ns()` and `mono_ns` is
-`CLOCK_MONOTONIC` sampled together, for the clock mapping (§3.2).
+`status` is sent once per second and immediately when a feed's staleness or the number of sources
+changes. `lag_ms` = skipped (encoder-lag) frames in the last interval × frame interval.
+`stream_start_ns`/`record_start_ns`/`start_obs_ns` are the OBS-clock time of the first frame of the
+stream / file (0 = inactive). A `record_path` is sent for every file (including splits, and again
+after a reconnect for files still being written); `canvas` is `wide`/`tall` from the
+`stream-engine` source found in the recorded OBS canvas (else the OBS canvas name).
 
 ### Engine → plugin
 
 ```json
-{"t":"cmd","id":7,"op":"stream.start"}   // stream.start|stream.stop|record.start|record.stop|fallback.on|fallback.off
-{"t":"config","stale_ms":500,"fallback_scene":"Technical Difficulties"}
+{"t":"config","stale_ms":500,"fallback_mode":"live","fallback_scene":"Technical Difficulties","fallback_text":"…"}   // after hello and on change
+{"t":"cmd","id":7,"op":"stream.start"}   // stream.start|stream.stop|record.start|record.stop|fallback.on|fallback.off|fallback.setup|setup
+{"t":"error","error":"another OBS instance is already connected to this engine"}
 ```
 
-The plugin executes `cmd` through the OBS frontend API and answers with `reply`.
+The plugin executes `cmd` on OBS's UI thread through the frontend API and answers with `reply`.
+`fallback_mode`: `off` (manual only), `live` (only while an output is active), `always`.

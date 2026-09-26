@@ -1,0 +1,21 @@
+[package]
+name = "se-vector"
+description = "GPU renderer for script-patch 2D draw lists (vello compute renderer, parley text, asset images)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+se-hub.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+rtrb.workspace = true
+wgpu = "30.0.1"
+# vello's released 0.10 targets wgpu 29; main (pinned) targets wgpu 30.
+vello = { git = "https://github.com/linebender/vello", rev = "a9f11bbe752c391a2e420657d65cbd1fc97f4fae", default-features = false, features = ["wgpu"] }
+parley = "0.11.1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+pollster = "0.4"

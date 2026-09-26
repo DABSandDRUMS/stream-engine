@@ -196,6 +196,29 @@ pub fn source_line(layout: &Layout, compiled_line: usize) -> Option<usize> {
     compiled_line.checked_sub(layout.header_lines())
 }
 
+/// Size of one `Particle` in the `se_particles` storage buffer (bytes).
+pub const PARTICLE_BYTES: usize = 48;
+
+/// Prelude for `particles` patches, prepended after [`Layout::header`]: the `Particle`
+/// struct, the `se_particles` storage buffer at `@group(0) @binding(4)` (read-write for
+/// `sim.wgsl`, read-only for `draw.wgsl`), `SE_PARTICLE_COUNT`, and `se_hash(n) -> 0..1`.
+///
+/// Entry points: `sim.wgsl` → `@compute @workgroup_size(64) fn sim(@builtin(global_invocation_id) id: vec3<u32>)`
+/// (dispatched `ceil(count / 64)`); `draw.wgsl` → `@vertex fn vs(@builtin(vertex_index) v: u32,
+/// @builtin(instance_index) i: u32) -> SeVsOut` (6 vertices per particle) and
+/// `@fragment fn fs(in: SeVsOut) -> @location(0) vec4<f32>` (premultiplied alpha).
+pub fn particles_prelude(read_write: bool, count: u32) -> String {
+    let access = if read_write { "read_write" } else { "read" };
+    format!(
+        "// ---- particles prelude (generated) ----\n\
+struct Particle {{ pos: vec2<f32>, vel: vec2<f32>, color: vec4<f32>, life: f32, size: f32, seed: f32, age: f32 }};\n\
+@group(0) @binding(4) var<storage, {access}> se_particles: array<Particle>;\n\
+const SE_PARTICLE_COUNT: u32 = {count}u;\n\
+fn se_hash(n: u32) -> f32 {{ var x = n; x = x ^ (x >> 16u); x = x * 0x7feb352du; x = x ^ (x >> 15u); x = x * 0x846ca68bu; x = x ^ (x >> 16u); return f32(x) / 4294967295.0; }}\n\
+// ---- end of particles prelude ----\n"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

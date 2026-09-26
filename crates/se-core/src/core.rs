@@ -18,6 +18,9 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, HashMap};
 
+#[path = "timeline.rs"]
+pub mod timeline;
+
 const MS: Ts = 1_000_000;
 const MAX_EVENTS_PER_TICK: usize = 5000;
 const MAX_CHAIN_DEPTH: u32 = 16;
@@ -55,6 +58,12 @@ pub enum Input {
     Remove {
         prefix: String,
     },
+    /// Timecode observation (MTC/LTC input, or a signal-derived media/scrub position recorded
+    /// by the core itself) for the timelines following `source` (§2.7).
+    Timecode {
+        source: String,
+        obs: se_clock::timecode::TcObs,
+    },
     #[serde(skip)]
     Config {
         config: Box<Config>,
@@ -66,7 +75,13 @@ impl Input {
     pub fn is_replayable(&self) -> bool {
         matches!(
             self,
-            Input::Command { .. } | Input::Event { .. } | Input::Publish { .. } | Input::Declare { .. } | Input::DeclareTrigger { .. } | Input::Remove { .. }
+            Input::Command { .. }
+                | Input::Event { .. }
+                | Input::Publish { .. }
+                | Input::Declare { .. }
+                | Input::DeclareTrigger { .. }
+                | Input::Remove { .. }
+                | Input::Timecode { .. }
         )
     }
 }
@@ -109,6 +124,8 @@ pub struct RuntimeState {
     pub disabled_bindings: Vec<String>,
     pub transition_history: Vec<String>,
     pub rng: u64,
+    #[serde(default)]
+    pub timelines: Vec<timeline::PersistedTimeline>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -246,6 +263,10 @@ pub struct Core {
     time_sig: usize,
     /// Wall-clock-free tick bookkeeping for `time.*` signals.
     pub history_every: u64,
+    /// Policy pipeline for chat-, bits-, and points-originated activity (§12.1).
+    policy: crate::policy::Policy,
+    /// Timelines and the timecode sources they chase (§2.7).
+    timelines: timeline::Timelines,
 }
 
 struct EvalScope<'a> {
@@ -390,6 +411,8 @@ impl Core {
             beat_sig: 0,
             time_sig: 0,
             history_every: (hz / 60).max(1),
+            policy: crate::policy::Policy::default(),
+            timelines: timeline::Timelines::default(),
         };
         c.declare_builtins();
         c.apply_config(config);
@@ -481,11 +504,13 @@ impl Core {
             self.apply_input(i);
         }
         self.run_scheduled(now);
+        self.tick_policy(now);
         self.process_events();
         self.tick_presets(now);
         self.tick_triggers(now);
         self.tick_transition(now);
         self.tick_signals(now);
+        self.tick_timelines(now);
         self.tick_bindings();
         self.process_events();
         self.refresh_caps();
@@ -531,6 +556,12 @@ impl Core {
         self.beat_sig = self.signals.ensure("beat.phase");
         self.signals.ensure("beat.bpm");
         self.time_sig = self.signals.ensure("time.seconds");
+        let pending = Meta { ty: se_proto::ValueType::List, default: Value::List(Vec::new()), ..Default::default() };
+        self.state.declare(
+            crate::policy::PENDING,
+            pending.readonly().owner("policy").describe("Held chat/bits/points activity waiting for a mod (veto window, approvals)"),
+        );
+        self.state.declare(crate::policy::PENDING_COUNT, Meta::int(0, [0.0, 1e6]).readonly().owner("policy"));
     }
 
     /// Apply a new configuration (initial load and hot reload). Runtime state is kept.
@@ -571,7 +602,7 @@ impl Core {
         // project base params
         for (a, v) in &config.project.params {
             let i = self.state.ensure(a, v);
-            if &self.state.param(i).base != v {
+            if &self.state.param(i).base != v || !self.state.param(i).base_explicit {
                 self.state.set_base(i, v.clone());
             }
         }
@@ -643,11 +674,16 @@ impl Core {
             }
         }
         self.caps_gen = u64::MAX;
+        for e in self.policy.configure(&config) {
+            self.log("error", e);
+        }
 
+        let timeline_errors = self.configure_timelines(&config);
         for e in &config.errors {
             self.outbox.push(Output::Log { level: "error", msg: format!("{}: {}", e.file, e.msg) });
         }
         self.config = config;
+        self.config.errors.extend(timeline_errors);
         self.apply_scene_layer();
         let _ = now;
     }
@@ -680,8 +716,12 @@ impl Core {
                 }
                 let id = cmd.id;
                 self.trace.add(id, cmd.causal, self.now(), "command", format!("{} ({})", cmd.op.describe(), cmd.origin.as_str()));
-                let ctx = Ctx { parent: Some(id), actor: cmd.actor.clone(), priority: cmd.priority, ..Default::default() };
+                let key = cmd.key.clone().filter(|_| cmd.priority() > PRIORITY_CHAT);
+                let ctx = Ctx { parent: Some(id), actor: cmd.actor.clone(), priority: cmd.priority, key, ..Default::default() };
                 let res = self.exec(&cmd.op, cmd.origin, &ctx);
+                if res.is_ok() {
+                    self.timelines_capture(&cmd);
+                }
                 if let Err(e) = &res {
                     self.trace.add(next_id(), Some(id), self.now(), "error", e.clone());
                 }
@@ -709,7 +749,7 @@ impl Core {
             }
             Input::Publish { address, value } => {
                 let i = self.state.ensure(&address, &value);
-                if self.state.param(i).base != value {
+                if self.state.param(i).base != value || !self.state.param(i).base_explicit {
                     self.state.set_base(i, value);
                 }
             }
@@ -720,6 +760,7 @@ impl Core {
                 self.trigger_specs.retain(|k, _| !(k == &prefix || k.starts_with(&dotted)));
                 self.rebind_triggers();
             }
+            Input::Timecode { source, obs } => self.timelines.observe(&source, &obs),
             Input::Config { config } => self.apply_config(*config),
         }
     }
@@ -733,6 +774,7 @@ impl Core {
 
     fn process_events(&mut self) {
         let mut n = 0;
+        let mut fx = Vec::new();
         while let Some((mut ev, ctx)) = self.events.pop_front() {
             n += 1;
             if n > MAX_EVENTS_PER_TICK {
@@ -743,23 +785,79 @@ impl Core {
             if ev.ts == 0 {
                 ev.ts = self.now();
             }
-            let label = match &ev.actor {
-                Some(a) => format!("{} by {}", ev.ty, a.name),
-                None => ev.ty.clone(),
-            };
-            self.trace.add(ev.id, ev.causal.or(ctx.parent), self.now(), "event", label);
-            self.outbox.push(Output::Event(ev.clone()));
-            if ctx.depth > MAX_CHAIN_DEPTH {
-                self.trace.add(next_id(), Some(ev.id), self.now(), "error", "rule chain too deep (loop?)".into());
-                continue;
+            // policy (§12.1) screens every event before it is published or rules see it
+            let mode = self.mode_str().to_string();
+            self.policy.screen(ev, self.now(), &mode, &mut fx);
+            for e in fx.drain(..) {
+                self.apply_policy(e, &ctx);
             }
-            self.run_rules(&ev, ctx.depth);
+        }
+    }
+
+    /// Publish an event and run its rules.
+    fn deliver(&mut self, ev: Event, ctx: &Ctx) {
+        let label = match &ev.actor {
+            Some(a) => format!("{} by {}", ev.ty, a.name),
+            None => ev.ty.clone(),
+        };
+        self.trace.add(ev.id, ev.causal.or(ctx.parent), self.now(), "event", label);
+        self.outbox.push(Output::Event(ev.clone()));
+        if ctx.depth > MAX_CHAIN_DEPTH {
+            self.trace.add(next_id(), Some(ev.id), self.now(), "error", "rule chain too deep (loop?)".into());
+            return;
+        }
+        self.run_rules(&ev, ctx.depth);
+    }
+
+    fn apply_policy(&mut self, e: crate::policy::Effect, ctx: &Ctx) {
+        use crate::policy::Effect;
+        match e {
+            Effect::Deliver(ev) => self.deliver(ev, ctx),
+            Effect::Emit(ev) => self.events.push_back((ev, Ctx { depth: ctx.depth, parent: ctx.parent, ..Default::default() })),
+            Effect::Run { commands, actor, event } => {
+                let id = next_id();
+                let who = actor.as_ref().map(|a| a.name.clone()).unwrap_or_default();
+                self.trace.add(id, event.as_ref().map(|e| e.id).or(ctx.parent), self.now(), "policy", format!("run for {who}"));
+                let c = Ctx { key: None, priority: Some(PRIORITY_CHAT), parent: Some(id), actor, depth: ctx.depth + 1, event };
+                self.run_list(&commands, Origin::Rule, c);
+            }
+            Effect::Action { name, args, actor } => {
+                let mut c = Command::new(Origin::System, Op::Action { name, args });
+                c.actor = actor;
+                c.causal = ctx.parent;
+                c.ts = self.now();
+                self.outbox.push(Output::Action(c));
+            }
+            Effect::SetMode(m) => {
+                let c = Ctx { parent: ctx.parent, depth: ctx.depth, ..Default::default() };
+                if let Err(e) = self.set_mode(&m, Origin::System, &c) {
+                    self.log("error", format!("policy: {e}"));
+                }
+            }
+            Effect::Pending => {
+                self.set_sys(crate::policy::PENDING, self.policy.pending_value());
+                self.set_sys(crate::policy::PENDING_COUNT, Value::Int(self.policy.pending_len() as i64));
+            }
+        }
+    }
+
+    fn tick_policy(&mut self, now: Ts) {
+        if !self.policy.due(now) {
+            return;
+        }
+        let mode = self.mode_str().to_string();
+        let mut fx = Vec::new();
+        self.policy.tick(now, &mode, &mut fx);
+        for e in fx {
+            self.apply_policy(e, &Ctx::default());
         }
     }
 
     fn event_priority(ev: &Event) -> Option<u16> {
         match &ev.actor {
             Some(a) if a.platform != "local" && a.top_role() < Role::Owner => Some(PRIORITY_CHAT),
+            // platform events (stream online/offline, ad breaks) may change modes and scenes
+            None if crate::policy::is_platform_event(&ev.ty) => None,
             _ if matches!(ev.origin, Origin::Chat | Origin::Twitch | Origin::Relay) => Some(PRIORITY_CHAT),
             _ => None,
         }
@@ -770,6 +868,7 @@ impl Core {
         let mode = self.mode_str().to_string();
         let scene = self.state.get(addr::PROGRAM).and_then(Value::as_str).unwrap_or("").to_string();
         let mut fired: Vec<(usize, Id)> = Vec::new();
+        let viewer = Self::event_priority(ev) == Some(PRIORITY_CHAT);
         for (ri, r) in self.rules.iter().enumerate() {
             if !r.enabled || !address::matches(&r.def.when, &ev.ty) {
                 continue;
@@ -790,6 +889,12 @@ impl Core {
             {
                 continue;
             }
+            if viewer
+                && let Some(min) = r.def.role
+                && !crate::policy::role_allows(ev.actor.as_ref(), min)
+            {
+                continue;
+            }
             if let Some(c) = &r.cond {
                 let scope = EvalScope { core: self, event: Some(ev) };
                 if !c.eval_bool(&scope) {
@@ -803,15 +908,28 @@ impl Core {
             }
         }
         for (ri, id) in fired {
-            let (name, cmds, prio) = {
+            let (name, cmds, prio, approval) = {
                 let r = &mut self.rules[ri];
                 r.last = Some(now);
                 if let Some(a) = &ev.actor {
                     r.per_actor.insert(a.id.clone(), now);
                 }
-                (r.def.name.clone(), r.def.commands.clone(), r.def.priority)
+                (r.def.name.clone(), r.def.commands.clone(), r.def.priority, r.def.approval)
             };
             self.trace.add(id, Some(ev.id), now, "rule", name.clone());
+            if approval && viewer && !crate::policy::role_allows(ev.actor.as_ref(), Role::Mod) {
+                // viewer-triggered firing waits for a mod (§12.1 approval queue)
+                let pid = crate::policy::hold_id(ev.id ^ (ri as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+                let mut fx = Vec::new();
+                if let Err(e) = self.policy.hold_commands(pid, &format!("rule {name}"), cmds, ev.actor.clone(), Some(ev.clone()), None, now, &mut fx) {
+                    self.trace.add(next_id(), Some(id), now, "error", e);
+                }
+                let c = Ctx { parent: Some(id), depth: depth + 1, ..Default::default() };
+                for e in fx {
+                    self.apply_policy(e, &c);
+                }
+                continue;
+            }
             let ep = Self::event_priority(ev);
             let priority = match (prio, ep) {
                 (Some(p), Some(c)) => Some(p.min(c)),
@@ -908,6 +1026,13 @@ impl Core {
 
     fn exec(&mut self, op: &Op, origin: Origin, ctx: &Ctx) -> Result<(), String> {
         let now = self.now();
+        // chat effects only run in the policy's effect modes (§12.1); the simulator is exempt
+        if prio_is_chat(self.priority_for(origin, ctx))
+            && !ctx.event.as_ref().is_some_and(|e| e.origin == Origin::Sim)
+            && self.policy.effect_paused(op, self.mode_str())
+        {
+            return Err(format!("chat effects are paused in mode `{}`", self.mode_str()));
+        }
         match op {
             Op::Set { address, value } => {
                 self.check_writable(address, origin)?;
@@ -1070,8 +1195,11 @@ impl Core {
 
     fn chat_clamp(&self, address: &str, v: Value) -> Value {
         match self.chat_caps.iter().find(|(p, _)| address::matches(p, address)) {
-            Some((_, [lo, hi])) => match v.as_f64() {
-                Some(x) if !matches!(v, Value::Bool(_)) => Value::Float(x.clamp(*lo, *hi)),
+            Some((_, [lo, hi])) => match (&v, v.as_f64()) {
+                // booleans are capped as 0/1 (`[0, 0]` = chat may only turn it off)
+                (Value::Bool(_), Some(x)) => Value::Bool(x.clamp(*lo, *hi) >= 0.5),
+                (Value::Int(_), Some(x)) => Value::Int(x.clamp(*lo, *hi).round() as i64),
+                (_, Some(x)) => Value::Float(x.clamp(*lo, *hi)),
                 _ => v,
             },
             None => v,
@@ -1286,7 +1414,7 @@ impl Core {
         if let Some(m) = &def.mix
             && !chat
         {
-            let args = Value::map().with("snapshot", m.snapshot.clone()).with("fade", m.fade.map(|f| f.ms() as i64).unwrap_or(0));
+            let args = Value::map().with("snapshot", m.snapshot.clone()).with("fade", m.fade.map(|f| Value::Int(f.ms() as i64)).unwrap_or(Value::Null));
             self.exec_traced(&Op::Action { name: "mixer.snapshot.recall".into(), args }, origin, &pctx);
         }
         if let Some(s) = &def.scene
@@ -1317,7 +1445,7 @@ impl Core {
             payload: payload.clone(),
             trace,
             fx: fx_addrs,
-            lights: def.lights.clone(),
+            lights: held_lights(def),
             actor: ctx.actor.clone(),
         });
         self.set_sys(&format!("preset.{}.active", def.name), Value::Bool(true));
@@ -1535,6 +1663,7 @@ impl Core {
             t.release(None, now);
         }
         self.scheduled.clear();
+        self.timelines_panic();
         self.set_sys(addr::PANIC, Value::Bool(true));
         if self.config.presets.contains_key("panic") {
             let _ = self.fire_preset("panic", &Value::Null, Origin::System, &Ctx { parent: ctx.parent, ..Default::default() });
@@ -1579,12 +1708,45 @@ impl Core {
 
     // ---- actions ---------------------------------------------------------------------
 
+    /// `policy.run {key, role, cooldown, approval, filter, event, do}`: a viewer's ad-hoc action
+    /// (chatbot command) through the policy gate.
+    fn policy_run(&mut self, args: &Value, origin: Origin, ctx: &Ctx) -> Result<(), String> {
+        let key = args.get_path("key").and_then(Value::as_str).ok_or("policy.run needs a `key`")?.to_string();
+        let spec = crate::policy::GateSpec::from_args(args)?;
+        let commands: Vec<String> = match args.get_path("do") {
+            Some(Value::Str(s)) => vec![s.clone()],
+            Some(Value::List(l)) => l.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
+            _ => return Err("policy.run needs `do`".into()),
+        };
+        for c in &commands {
+            Op::parse(c).map_err(|e| format!("`{c}`: {e}"))?;
+        }
+        let event = args.get_path("event").filter(|v| v.as_map().is_some()).map(|p| {
+            let mut e = Event::new("policy.run", origin, p.clone());
+            e.actor = ctx.actor.clone();
+            e.causal = ctx.parent;
+            e.ts = self.now();
+            e
+        });
+        let id = crate::policy::hold_id(ctx.parent.unwrap_or_else(next_id));
+        let mut fx = Vec::new();
+        let res = self.policy.run_gated(id, &key, &spec, commands, ctx.actor.clone(), event, self.now(), &mut fx);
+        for e in fx {
+            self.apply_policy(e, ctx);
+        }
+        res
+    }
+
     fn action(&mut self, name: &str, args: &Value, origin: Origin, ctx: &Ctx) -> Result<(), String> {
         let pos = |i: usize| args.get_path("args").and_then(|a| a.as_list()).and_then(|l| l.get(i)).cloned();
         let arg = |k: &str, i: usize| args.get_path(k).cloned().or_else(|| pos(i));
         let prio = self.priority_for(origin, ctx);
         if prio <= PRIORITY_CHAT && (name.starts_with("mixer.") || name.starts_with("obs.") || name.starts_with("rule.")) {
             return Err(format!("chat cannot run `{name}`"));
+        }
+        // viewers' own commands may not moderate or drive the channel (§12.3, §19)
+        if matches!(origin, Origin::Chat | Origin::Relay) {
+            crate::policy::chat_action_allowed(name, ctx.actor.as_ref())?;
         }
         if let Some(preset) = name.strip_prefix("sim.") {
             let evs = crate::sim::events(preset, args, &mut self.rng)?;
@@ -1596,6 +1758,20 @@ impl Core {
             return Ok(());
         }
         match name {
+            n if timeline::is_transport(n) => self.timeline_action(n, args),
+            "policy.run" => self.policy_run(args, origin, ctx),
+            "mod.approve" | "mod.reject" => {
+                let id = arg("id", 0).map(|v| v.to_string()).ok_or("needs the pending item's `id`")?;
+                let reason = args.get_path("reason").and_then(Value::as_str).map(String::from);
+                let by = ctx.actor.as_ref().map(|a| a.name.clone()).unwrap_or_else(|| origin.as_str().to_string());
+                let mode = self.mode_str().to_string();
+                let mut fx = Vec::new();
+                self.policy.resolve(&id, name == "mod.approve", &by, reason.as_deref(), &mode, &mut fx)?;
+                for e in fx {
+                    self.apply_policy(e, ctx);
+                }
+                Ok(())
+            }
             "signal.set" => {
                 let n = arg("name", 0).and_then(|v| v.as_str().map(String::from)).ok_or("signal.set needs a name")?;
                 let v = arg("value", 1).and_then(|v| v.as_f32()).ok_or("signal.set needs a value")?;
@@ -1639,7 +1815,8 @@ impl Core {
                 self.exec(&Op::SceneGo { scene: names[j].clone() }, origin, ctx)
             }
             _ => {
-                let mut c = Command::new(origin, Op::Action { name: name.into(), args: args.clone() });
+                let args = if origin == Origin::Timeline { timeline::playback_args(name, args, prio) } else { args.clone() };
+                let mut c = Command::new(origin, Op::Action { name: name.into(), args });
                 c.actor = ctx.actor.clone();
                 c.causal = ctx.parent;
                 c.priority = Some(prio);
@@ -1696,18 +1873,40 @@ impl Core {
             let Some(sig) = b.signal else { continue };
             let raw = self.signals.value(sig) as f64;
             let out = b.shape(raw, dt);
-            for k in 0..b.targets.len() {
-                let t = b.targets[k];
-                let v = if b.def.takeover.is_some() {
+            if b.def.takeover.is_some() {
+                // Physical controls act like a hand on the control: only movement writes, as a
+                // manual override the rest of the system (mixer readback, presets, UI) can see
+                // and replace. Pickup compares against the value without this control.
+                if !b.moved(out) {
+                    continue;
+                }
+                for k in 0..b.targets.len() {
+                    let t = b.targets[k];
                     let cur = self.state.value(t).as_f64();
-                    match b.takeover(out, cur) {
-                        Some(v) => v,
-                        None => continue,
+                    if let Some(v) = b.takeover(out, cur) {
+                        let key = format!("binding:{}", b.def.name);
+                        self.state.put_override(
+                            t,
+                            Override {
+                                key,
+                                priority: PRIORITY_MANUAL,
+                                value: Value::Float(v),
+                                seq: 0,
+                                expires: None,
+                                anim: None,
+                                origin: Origin::Binding,
+                                causal: None,
+                            },
+                        );
+                        let now = self.now();
+                        self.state.refresh(t, now);
+                        self.runtime_dirty = true;
                     }
-                } else {
-                    out
-                };
-                mods.entry(t).or_default().push(Mod { source: b.def.name.clone(), mode: b.def.mode, value: v });
+                }
+                continue;
+            }
+            for k in 0..b.targets.len() {
+                mods.entry(b.targets[k]).or_default().push(Mod { source: b.def.name.clone(), mode: b.def.mode, value: out });
             }
         }
         self.bindings = bindings;
@@ -1779,6 +1978,7 @@ impl Core {
             disabled_bindings: self.bindings.iter().filter(|b| !b.def.enabled).map(|b| b.def.name.clone()).collect(),
             transition_history: self.transition_history.clone(),
             rng: self.rng.state(),
+            timelines: self.timelines_persist(),
         }
     }
 
@@ -1814,7 +2014,7 @@ impl Core {
                 payload: p.payload.clone(),
                 trace: next_id(),
                 fx,
-                lights: def.lights.clone(),
+                lights: held_lights(&def),
                 actor: None,
             });
             self.set_sys(&format!("preset.{}.active", p.name), Value::Bool(true));
@@ -1831,7 +2031,10 @@ impl Core {
         if rs.rng != 0 {
             self.rng.set_state(rs.rng);
         }
+        self.timelines_restore(&rs.timelines);
         self.apply_scene_layer();
+        let mode = self.mode_str().to_string();
+        self.policy.restored(&mode, now);
         self.events.push_back((
             Event::new("engine.restored", Origin::System, Value::map().with("mode", rs.mode.clone()).with("scene", rs.program.clone())),
             Ctx::default(),
@@ -1892,6 +2095,9 @@ impl Core {
                             .with("active", b.active)
                             .with("output", b.output)
                             .with("targets", b.targets.len())
+                            .with("file", b.def.file.clone())
+                            .with("mode", format!("{:?}", b.def.mode).to_lowercase())
+                            .with("scope", b.def.scope.clone().map(Value::Str).unwrap_or_default())
                     })
                     .collect(),
             ),
@@ -1976,6 +2182,7 @@ impl Core {
                         .collect(),
                 )
             }
+            "timelines" | "timeline" => self.query_timelines(name, args)?,
             "sim.presets" => Value::List(crate::sim::PRESETS.iter().map(|(n, a)| Value::map().with("name", *n).with("args", *a)).collect()),
             "undo" => Value::map().with("undo", self.undo.len()).with("redo", self.redo.len()),
             "scene" => {
@@ -2069,4 +2276,11 @@ pub fn declare_scene(st: &mut StateTree, s: &SceneDef) {
             set(st, format!("{p}.z.{canvas}"), Meta::int(0, [-1000.0, 1000.0]).owner("scene"), Value::Int(n.z as i64));
         }
     }
+}
+
+/// The light cue a running preset owns (and releases when it ends). One-shot presets
+/// (no hold/toggle/set) fire their cue and let it run its own course, so ending the
+/// preset must not switch the look off again.
+fn held_lights(def: &PresetDef) -> Option<crate::config::LightsRef> {
+    def.lights.clone().filter(|l| l.hold.is_some() || def.hold.is_some() || def.toggle || !def.set.is_empty())
 }

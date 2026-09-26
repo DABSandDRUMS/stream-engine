@@ -401,6 +401,10 @@ pub struct RuleDef {
     /// Stop evaluating later rules for this event when this one fires.
     #[serde(rename = "final")]
     pub is_final: bool,
+    /// Policy (§12.1) for viewer-triggered firings: minimum role of the event's actor.
+    pub role: Option<se_proto::Role>,
+    /// Policy: viewer-triggered firings wait in the approval queue for a mod.
+    pub approval: bool,
     /// Source file (set by the loader).
     #[serde(skip)]
     pub file: String,
@@ -419,6 +423,8 @@ impl Default for RuleDef {
             enabled: true,
             priority: None,
             is_final: false,
+            role: None,
+            approval: false,
             file: String::new(),
         }
     }
@@ -619,6 +625,23 @@ impl Config {
                 }
             }
             other => {
+                // Controller mappings (§7 `controllers/faders.toml`) carry `[[binding]]` entries
+                // that are ordinary bindings (takeover, curves, scope) owned by the core.
+                if other == "controllers"
+                    && let Some(toml::Value::Array(arr)) = f.table.get("binding")
+                {
+                    for (i, t) in arr.iter().filter_map(|v| v.as_table()).enumerate() {
+                        let mut b: BindingDef = parse(t)?;
+                        if b.name.is_empty() {
+                            b.name = format!("{}#{}", f.name, i + 1);
+                        }
+                        b.file = f.path.clone();
+                        if b.target.is_empty() || b.signal.is_empty() {
+                            return Err(format!("binding `{}` needs `target` and `signal`", b.name));
+                        }
+                        self.bindings.push(b);
+                    }
+                }
                 self.other.entry(other.to_string()).or_default().insert(f.name.clone(), f.table.clone());
             }
         }
@@ -667,6 +690,9 @@ impl Config {
                 "rules" => self.rules.extend(prev.rules.iter().filter(|r| &r.file == path).cloned()),
                 "bindings" => self.bindings.extend(prev.bindings.iter().filter(|b| &b.file == path).cloned()),
                 other => {
+                    if other == "controllers" {
+                        self.bindings.extend(prev.bindings.iter().filter(|b| &b.file == path).cloned());
+                    }
                     if let Some(t) = prev.other.get(other).and_then(|m| m.get(name)) {
                         self.other.entry(other.into()).or_default().insert(name.into(), t.clone());
                     }
@@ -745,6 +771,20 @@ lights = { cue = "warm_duo" }
         assert_eq!(c.rules[0].cooldown.global, Some(Dur(10_000)));
         assert_eq!(c.presets["hype"].fx[0].hold, Some(Dur(8000)));
         assert_eq!(c.presets["hype"].conflict, Conflict::Replace);
+    }
+
+    #[test]
+    fn controller_files_contribute_bindings() {
+        let c = Config::build(&[file(
+            "controllers",
+            "faders",
+            "[[binding]]\ntarget = \"mixer.16r.ch.3.fader\"\nsignal = \"midi.xtouch.fader.3\"\ncurve = \"fader_taper\"\ntakeover = \"pickup\"\nfeedback = true\n[page.show]\nkeys = []",
+        )]);
+        assert!(c.errors.is_empty(), "{:?}", c.errors);
+        assert_eq!(c.bindings.len(), 1);
+        assert_eq!(c.bindings[0].takeover, Some(Takeover::Pickup));
+        assert_eq!(c.bindings[0].file, "controllers/faders.toml");
+        assert!(c.other["controllers"]["faders"].contains_key("page"));
     }
 
     #[test]

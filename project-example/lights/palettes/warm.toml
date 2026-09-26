@@ -1,0 +1,6 @@
+# Cues reference palettes, so editing this updates every cue that uses it.
+kind = "color"
+label = "Warm"
+
+[set]
+all = { color = "#ffb070" }

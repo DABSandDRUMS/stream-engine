@@ -39,6 +39,31 @@ pub enum Layer {
     AudioSource,
 }
 
+impl Kind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Kind::Shader => "shader",
+            Kind::Particles => "particles",
+            Kind::Script => "script",
+            Kind::Web => "web",
+            Kind::Dsp => "dsp",
+        }
+    }
+}
+
+impl Layer {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Layer::Source => "source",
+            Layer::Overlay => "overlay",
+            Layer::Effect => "effect",
+            Layer::Transition => "transition",
+            Layer::AudioEffect => "audio-effect",
+            Layer::AudioSource => "audio-source",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct ParamSpec {
     #[serde(rename = "type", default = "float_ty")]
@@ -122,6 +147,10 @@ pub struct Budget {
     pub cpu_ms: Option<f64>,
     /// Per-frame GPU budget for shaders (ms); exceeding it repeatedly disables the patch.
     pub gpu_ms: Option<f64>,
+    /// Scripts: VM instructions allowed in one callback.
+    pub instructions: Option<u64>,
+    /// Scripts: Lua heap cap (MB).
+    pub memory_mb: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Default)]
@@ -158,6 +187,9 @@ struct Raw {
     /// Render size for source/overlay layers (defaults to the canvas size).
     #[serde(default)]
     size: Option<[u32; 2]>,
+    /// Frame rate for `web` pages (CEF windowless frame rate, 1–120; default 60).
+    #[serde(default)]
+    fps: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -176,6 +208,7 @@ pub struct Manifest {
     pub label: String,
     pub description: String,
     pub size: Option<[u32; 2]>,
+    pub fps: Option<u32>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -184,6 +217,20 @@ pub enum ManifestError {
     Io(PathBuf, std::io::Error),
     #[error("{0}: {1}")]
     Parse(PathBuf, String),
+}
+
+impl ManifestError {
+    /// `patch.toml:<line>: message` (line 0 when unknown), as shown in `patch.<id>.error`.
+    pub fn located(&self) -> String {
+        let name = |p: &Path| p.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "patch.toml".into());
+        match self {
+            ManifestError::Io(p, e) => format!("{}:0: {e}", name(p)),
+            ManifestError::Parse(p, m) => match m.strip_prefix("line ").and_then(|r| r.split_once(": ")) {
+                Some((n, rest)) if n.parse::<u32>().is_ok() => format!("{}:{n}: {rest}", name(p)),
+                _ => format!("{}:0: {m}", name(p)),
+            },
+        }
+    }
 }
 
 fn default_entry(kind: Kind) -> &'static str {
@@ -205,7 +252,13 @@ impl Manifest {
 
     pub fn parse(dir: &Path, src: &str) -> Result<Manifest, ManifestError> {
         let path = dir.join("patch.toml");
-        let raw: Raw = toml::from_str(src).map_err(|e| ManifestError::Parse(path.clone(), e.message().to_string()))?;
+        let raw: Raw = toml::from_str(src).map_err(|e| {
+            let msg = e.message().trim().to_string();
+            match e.span() {
+                Some(s) => ManifestError::Parse(path.clone(), format!("line {}: {msg}", src[..s.start.min(src.len())].matches('\n').count() + 1)),
+                None => ManifestError::Parse(path.clone(), msg),
+            }
+        })?;
         let id = dir.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
         if !se_proto::address::is_valid(&id, false) || id.contains('.') {
             return Err(ManifestError::Parse(path, format!("patch folder name `{id}` must be a single address segment")));
@@ -227,6 +280,16 @@ impl Manifest {
         if entry.contains("..") || entry.starts_with('/') {
             return Err(ManifestError::Parse(path, "entry must be inside the patch folder".into()));
         }
+        if let Some(f) = raw.fps
+            && !(1..=120).contains(&f)
+        {
+            return Err(ManifestError::Parse(path, format!("fps = {f} is outside 1–120")));
+        }
+        if let Some([w, h]) = raw.size
+            && (w == 0 || h == 0 || w > 8192 || h > 8192)
+        {
+            return Err(ManifestError::Parse(path, format!("size = [{w}, {h}] must be 1–8192 per side")));
+        }
         Ok(Manifest {
             label: raw.label.unwrap_or_else(|| id.clone()),
             description: raw.description.unwrap_or_default(),
@@ -242,6 +305,7 @@ impl Manifest {
             signals: raw.signals,
             particles: raw.particles,
             size: raw.size,
+            fps: raw.fps,
         })
     }
 

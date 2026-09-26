@@ -1,0 +1,13 @@
+# Beat-synced colour chase at full: follows the beat clock (beat.phase / beat.bpm).
+label = "Beat chase"
+priority = 300
+release = "1s"
+
+[[cue]]
+id = "1"
+label = "Chase on the beat"
+fade = "0.5s"
+effects = { chase = {} }
+
+[cue.set]
+all = { intensity = 1.0 }

@@ -1,0 +1,12 @@
+# Blackout: pulls the grand master to 0 (intensity is HTP, so only the master can take everything out).
+# Releasing this list (lights.release, or another look) restores the master.
+label = "Blackout"
+priority = 900
+
+[[cue]]
+id = "1"
+label = "Blackout"
+fade = "0.3s"
+
+[cue.addresses]
+"lights.master" = 0.0

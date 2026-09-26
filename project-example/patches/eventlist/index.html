@@ -1,0 +1,104 @@
+<!doctype html>
+<!-- Event list: starts from the `stats.recent` query, then follows live events. -->
+<html>
+<head>
+<meta charset="utf-8">
+<title>eventlist</title>
+<style>
+  :root { --accent: #bb9af7; --bg: rgba(13, 15, 26, .7); --fg: #fff; --font: "Inter", "Noto Sans", sans-serif; }
+  html, body { margin: 0; width: 100%; height: 100%; background: transparent; overflow: hidden; }
+  body { font-family: var(--font); color: var(--fg); font-size: 4.2vh; }
+  #list { display: flex; flex-direction: column; gap: 1vh; padding: 1vh; }
+  .ev { display: flex; align-items: center; gap: .6em; background: var(--bg); border-radius: .6em; padding: .45em .7em; border-left: .3em solid var(--accent); animation: in .45s cubic-bezier(.2, 1.3, .4, 1) both; }
+  .ev.gone { animation: out .35s ease both; }
+  .ico { font-size: 1.2em; }
+  .who { font-weight: 800; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+  .what { opacity: .85; white-space: nowrap; font-weight: 600; color: var(--accent); }
+  @keyframes in { from { opacity: 0; transform: translateY(-1em); } to { opacity: 1; transform: none; } }
+  @keyframes out { to { opacity: 0; transform: scale(.95); } }
+</style>
+</head>
+<body>
+<div id="list"></div>
+<script src="/engine.js"></script>
+<script src="/web/overlay.js"></script>
+<script>
+  "use strict";
+  const O = Overlay;
+  const se = Engine.connect();
+  const list = document.getElementById("list");
+  const P = O.params(se, { max_items: 8, kinds: "follow,sub,gift,cheer,raid,tip", accent: "#bb9af7", bg: [0.05, 0.06, 0.1, 0.7], text_color: "#ffffff", font: "" }, apply);
+  const ICON = { follow: "💜", sub: "⭐", gift: "🎁", cheer: "💎", raid: "🚀", tip: "💸" };
+
+  function apply() {
+    const r = document.documentElement.style;
+    r.setProperty("--accent", O.cssColor(P.accent) || "#bb9af7");
+    r.setProperty("--bg", O.cssColor(P.bg) || "rgba(13,15,26,.7)");
+    r.setProperty("--fg", O.cssColor(P.text_color) || "#fff");
+    if (P.font) r.setProperty("--font", P.font);
+  }
+  apply();
+
+  const kinds = () => new Set(String(P.kinds || "").split(",").map(s => s.trim()).filter(Boolean));
+
+  function what(ev) {
+    switch (ev.kind) {
+      case "follow": return "followed";
+      case "sub": return ev.months > 1 ? `${ev.months} months` : ev.tier > 1 ? `tier ${ev.tier}` : "subscribed";
+      case "gift": return `gifted ${O.fmtNum(ev.amount)}`;
+      case "cheer": return `${O.fmtNum(ev.amount)} bits`;
+      case "raid": return `raid ×${O.fmtNum(ev.amount)}`;
+      case "tip": return O.fmtMoney(ev.amount, ev.currency);
+      default: return ev.kind;
+    }
+  }
+
+  function add(ev, animate = true) {
+    if (!kinds().has(ev.kind) || (ev.kind === "sub" && ev.gift)) return;
+    const el = O.h("div", "ev");
+    if (!animate) el.style.animation = "none";
+    el.dataset.user = String(ev.user_id || "");
+    el.dataset.name = String(ev.user || "").toLowerCase();
+    el.appendChild(O.h("span", "ico", ICON[ev.kind] || "🔔"));
+    el.appendChild(O.h("span", "who", ev.user || "Anonymous"));
+    el.appendChild(O.h("span", "what", what(ev)));
+    list.prepend(el);
+    const max = Math.max(1, Number(P.max_items) || 8);
+    while (list.children.length > max) list.lastChild.remove();
+  }
+
+  // live events → the same shape as `stats.recent` rows
+  const MAP = {
+    "twitch.follow": p => ({ kind: "follow" }),
+    "twitch.sub": p => ({ kind: "sub", tier: Number(p.tier) || 1, months: Number(p.months) || 1, gift: !!p.is_gift }),
+    "twitch.resub": p => ({ kind: "sub", tier: Number(p.tier) || 1, months: Number(p.months) || 1, gift: !!p.is_gift }),
+    "twitch.gift": p => ({ kind: "gift", amount: Number(p.count) || 1 }),
+    "twitch.cheer": p => ({ kind: "cheer", amount: Number(p.bits) || 0 }),
+    "twitch.raid": p => ({ kind: "raid", amount: Number(p.viewers) || 0 }),
+    tip: p => ({ kind: "tip", amount: Number(p.amount) || 0, currency: p.currency }),
+  };
+  for (const ty of Object.keys(MAP)) {
+    se.on(ty, e => {
+      const p = e.payload || {};
+      const priv = ty === "tip" && p.is_public === false;
+      add({ ...MAP[ty](p), user: priv ? "Anonymous" : p.user || (e.actor && e.actor.name), user_id: e.actor && e.actor.id });
+    });
+  }
+
+  se.on("chat.purge", e => {
+    const id = String(e.payload.user_id || ""), name = String(e.payload.user || "").toLowerCase();
+    for (const el of [...list.children]) if ((id && el.dataset.user === id) || (name && el.dataset.name === name)) el.remove();
+  });
+
+  se.onconnect = async () => {
+    try {
+      const rows = await se.query("stats.recent", { n: 60 });
+      list.textContent = "";
+      for (const r of (rows || []).slice().reverse()) add(r, false);
+    } catch (e) {
+      console.warn("stats.recent:", e);
+    }
+  };
+</script>
+</body>
+</html>

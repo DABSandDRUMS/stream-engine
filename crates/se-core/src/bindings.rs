@@ -49,6 +49,7 @@ pub struct BindingRt {
     picked: bool,
     last_in: Option<f64>,
     last_out: Option<f64>,
+    last_moved: Option<f64>,
     pub active: bool,
     /// Last shaped output (for scopes and the UI).
     pub output: f64,
@@ -79,9 +80,17 @@ impl BindingRt {
             picked: false,
             last_in: None,
             last_out: None,
+            last_moved: None,
             active: false,
             output: 0.0,
         })
+    }
+
+    /// True when the shaped control output changed since the last call (first call only
+    /// records the position). Used by takeover bindings, which write on movement only.
+    pub fn moved(&mut self, out: f64) -> bool {
+        let prev = self.last_moved.replace(out);
+        prev.is_some_and(|p| (p - out).abs() > 1e-6)
     }
 
     /// Reset smoothing/takeover when the binding leaves scope.
@@ -91,6 +100,7 @@ impl BindingRt {
         self.picked = false;
         self.last_in = None;
         self.last_out = None;
+        self.last_moved = None;
     }
 
     /// Shape one raw signal sample. `dt` in seconds.

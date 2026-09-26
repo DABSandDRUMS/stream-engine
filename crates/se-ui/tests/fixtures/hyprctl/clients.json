@@ -1,0 +1,182 @@
+[
+    {
+        "address": "0x5a1b2c3d4e50",
+        "mapped": true,
+        "hidden": false,
+        "visible": true,
+        "acceptsInput": true,
+        "at": [
+            10,
+            40
+        ],
+        "size": [
+            2732,
+            1070
+        ],
+        "workspace": {
+            "id": 1,
+            "name": "1"
+        },
+        "floating": false,
+        "monitor": 0,
+        "class": "stream-engine",
+        "title": "stream-engine",
+        "initialClass": "stream-engine",
+        "initialTitle": "stream-engine",
+        "pid": 41210,
+        "xwayland": false,
+        "pinned": false,
+        "pinFullscreened": false,
+        "fullscreen": 0,
+        "fullscreenClient": 0,
+        "fullscreenHandler": "default",
+        "allowedOverFullscreen": true,
+        "grouped": [],
+        "tags": [
+            "default-opacity*"
+        ],
+        "swallowing": "0x0",
+        "focusHistoryID": 0,
+        "inhibitingIdle": false,
+        "xdgTag": "",
+        "xdgDescription": "",
+        "contentType": "none",
+        "tearingHint": false,
+        "stableId": "18000000"
+    },
+    {
+        "address": "0x5a1b2c3d4f10",
+        "mapped": true,
+        "hidden": false,
+        "visible": true,
+        "acceptsInput": true,
+        "at": [
+            2752,
+            0
+        ],
+        "size": [
+            2752,
+            1152
+        ],
+        "workspace": {
+            "id": 2,
+            "name": "2"
+        },
+        "floating": false,
+        "monitor": 1,
+        "class": "stream-engine.program",
+        "title": "stream-engine \u2014 program",
+        "initialClass": "stream-engine.program",
+        "initialTitle": "stream-engine \u2014 program",
+        "pid": 41210,
+        "xwayland": false,
+        "pinned": false,
+        "pinFullscreened": false,
+        "fullscreen": 2,
+        "fullscreenClient": 2,
+        "fullscreenHandler": "default",
+        "allowedOverFullscreen": true,
+        "grouped": [],
+        "tags": [
+            "default-opacity*"
+        ],
+        "swallowing": "0x0",
+        "focusHistoryID": 1,
+        "inhibitingIdle": false,
+        "xdgTag": "",
+        "xdgDescription": "",
+        "contentType": "none",
+        "tearingHint": false,
+        "stableId": "18000001"
+    },
+    {
+        "address": "0x5a1b2c3d5020",
+        "mapped": true,
+        "hidden": false,
+        "visible": true,
+        "acceptsInput": true,
+        "at": [
+            2762,
+            40
+        ],
+        "size": [
+            2732,
+            1070
+        ],
+        "workspace": {
+            "id": 2,
+            "name": "2"
+        },
+        "floating": false,
+        "monitor": 1,
+        "class": "stream-engine.multiview",
+        "title": "stream-engine \u2014 multiview",
+        "initialClass": "stream-engine.multiview",
+        "initialTitle": "stream-engine \u2014 multiview",
+        "pid": 41210,
+        "xwayland": false,
+        "pinned": false,
+        "pinFullscreened": false,
+        "fullscreen": 0,
+        "fullscreenClient": 0,
+        "fullscreenHandler": "default",
+        "allowedOverFullscreen": true,
+        "grouped": [],
+        "tags": [
+            "default-opacity*"
+        ],
+        "swallowing": "0x0",
+        "focusHistoryID": 2,
+        "inhibitingIdle": false,
+        "xdgTag": "",
+        "xdgDescription": "",
+        "contentType": "none",
+        "tearingHint": false,
+        "stableId": "18000002"
+    },
+    {
+        "address": "0x5a1b2c3d5130",
+        "mapped": true,
+        "hidden": false,
+        "visible": true,
+        "acceptsInput": true,
+        "at": [
+            10,
+            40
+        ],
+        "size": [
+            1361,
+            1070
+        ],
+        "workspace": {
+            "id": 1,
+            "name": "1"
+        },
+        "floating": false,
+        "monitor": 0,
+        "class": "foot",
+        "title": "~",
+        "initialClass": "foot",
+        "initialTitle": "~",
+        "pid": 39011,
+        "xwayland": false,
+        "pinned": false,
+        "pinFullscreened": false,
+        "fullscreen": 0,
+        "fullscreenClient": 0,
+        "fullscreenHandler": "default",
+        "allowedOverFullscreen": true,
+        "grouped": [],
+        "tags": [
+            "default-opacity*"
+        ],
+        "swallowing": "0x0",
+        "focusHistoryID": 3,
+        "inhibitingIdle": false,
+        "xdgTag": "",
+        "xdgDescription": "",
+        "contentType": "none",
+        "tearingHint": false,
+        "stableId": "18000003"
+    }
+]

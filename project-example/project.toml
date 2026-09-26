@@ -23,9 +23,265 @@ rate = "0.05hz"
 # Chat-originated overrides expire after this long.
 chat_ttl = "30s"
 # Hard caps applied after every other layer.
-caps = { "lights.*.intensity" = [0.0, 1.0] }
-# Caps for chat-originated values only.
-chat_caps = { "fx.*.amount" = [0.0, 0.6] }
+# Mixer outputs: main and aux (monitor) masters never above ≈ +5.6 dB (console fader position 0.87);
+# an output above its cap is pulled down, also when it was raised on the console.
+caps = { "lights.*.intensity" = [0.0, 1.0], "mixer.16r.main.fader" = [0.0, 0.87], "mixer.16r.aux.*.fader" = [0.0, 0.87] }
+# Caps for chat-originated values only (`*` matches one address segment).
+# Lights: chat can dim to at most half, never strobe, and never lower the grand master or black out the stream.
+chat_caps = { "fx.*.amount" = [0.0, 0.6], "lights.*.intensity" = [0.0, 0.5], "lights.group.*.intensity" = [0.0, 0.5], "lights.*.strobe" = [0.0, 0.0], "lights.group.*.strobe" = [0.0, 0.0], "lights.master" = [1.0, 1.0], "lights.blackout" = [0.0, 0.0] }
+
+# Devices this show needs (preflight fails when one is missing). Match on any of:
+# identity (udev by-id/by-path name, globs ok), usb = "vendor:product", serial, port (ID_PATH),
+# name (glob). `stream query devices` lists what is connected and each identity.
+[devices.expected]
+vc42_1 = { kind = "camera", label = "VC42 HDMI 1 (kit)", identity = "pci-0000:05:00.0-video-index0" }
+vc42_2 = { kind = "camera", label = "VC42 HDMI 2 (wide)", identity = "pci-0000:05:00.0-video-index1" }
+vc42_3 = { kind = "camera", label = "VC42 HDMI 3", identity = "pci-0000:05:00.0-video-index2" }
+vc42_4 = { kind = "camera", label = "VC42 HDMI 4 (kick)", identity = "pci-0000:05:00.0-video-index3" }
+msi_capture = { kind = "camera", label = "MSI Streaming Boost capture", usb = "0db0:9098" }
+room_cam = { kind = "camera", label = "Sonix USB camera (room)", usb = "0c45:636b" }
+studio24c = { kind = "audio_node", label = "Studio 24c input (16R main mix)", identity = "alsa_input.usb-PreSonus_Studio_24c_*" }
+studio24c_midi = { kind = "midi", label = "Studio 24c MIDI", usb = "194f:0109", optional = true }
+dmx = { kind = "serial", label = "ENTTEC DMX USB PRO", identity = "usb-ENTTEC_DMX_USB_PRO_*" }
+deck = { kind = "hid", label = "Stream Deck Original V2", usb = "0fd9:006d" }
+xtouch = { kind = "midi", label = "X-TOUCH MINI", usb = "1397:00b3" }
+fbv = { kind = "midi", label = "FBV Express Mk II", usb = "0e41:5055" }
+
+# Goals (§14.1): progress is kept in the runtime DB across streams; edit targets here or in
+# the UI (Views → Alerts). `counts` = follows | subs | sub_points | bits | tips | gifts | raids,
+# or a custom `when = "event.pattern"` + optional `if` + `add = "expression"`.
+[goals.subs]
+label = "Sub goal"
+counts = "subs"
+target = 50
+
+[goals.bits]
+label = "Bits for a new cymbal"
+counts = "bits"
+target = 25000
+
+[goals.followers]
+label = "Follower goal"
+counts = "follows"
+target = 100
+
+# Stats (§14.1): `stats.*` labels, top chatters, credits.
+[stats]
+# Simulator events count too (marked; purge them from Views → Alerts after testing).
+count_simulated = true
+ignore_chatters = ["nightbot", "streamelements", "streamlabs", "moobot", "fossabot"]
+exclude_broadcaster = true
+
+# Chatbot (§14.3).
+[bot]
+# Where !addcom and "new command" in the UI write.
+custom_file = "commands/custom.toml"
+mods_bypass_cooldowns = true
+
+# Overlay placement (layer = "overlay" patches are drawn over every canvas; web pages are
+# fit into `rect`). Omit a canvas from `canvases` to keep an overlay off it.
+[overlays.alertbox]
+canvases = ["wide", "tall"]
+rect.wide = [0.25, 0.04, 0.5, 0.42]
+rect.tall = [0.05, 0.08, 0.9, 0.3]
+z = 30
+
+[overlays.chatbox]
+canvases = ["wide"]
+rect.wide = [0.755, 0.34, 0.235, 0.62]
+when = "mode == 'live' || mode == 'rehearsal'"
+z = 20
+
+[overlays.goals]
+canvases = ["wide"]
+rect.wide = [0.01, 0.015, 0.3, 0.1]
+when = "mode != 'offline'"
+z = 10
+
+[overlays.labels]
+canvases = ["wide"]
+rect.wide = [0.0, 0.955, 1.0, 0.045]
+when = "mode == 'live' || mode == 'brb' || mode == 'rehearsal'"
+z = 10
+
+[overlays.eventlist]
+canvases = ["wide"]
+rect.wide = [0.01, 0.4, 0.2, 0.45]
+when = "mode == 'brb'"
+z = 10
+
+[overlays.countdown]
+canvases = ["wide", "tall"]
+when = "mode == 'preshow'"
+z = 40
+
+[overlays.credits]
+canvases = ["wide", "tall"]
+when = "mode == 'outro'"
+z = 50
+
+# Clips (§18): hype markers during the show, clip job after it (docs/clips.md).
+[clips]
+auto_process = true        # queue the clip job when the session closes
+encoder = "auto"           # NVENC, libx264 when OBS holds every NVENC session
+tall_source = "auto"       # tall canvas recording when present, else a 9:16 crop of the wide one
+tall_crop_center = 0.5
+# Optional hooks (argv; JSON on stdin → JSON on stdout), off by default:
+# rank_command = ["~/bin/rank-clips"]     # e.g. an LLM pass: {candidates:[…]} → {clips:[{key, score, in, out, title}]}
+# upload_command = ["~/bin/upload-clip"]  # {id, wide, tall, captions, title, …} → {url}
+
+[clips.hype]
+threshold = 1.0            # live-adjustable: clips.hype.threshold
+preroll_min = "10s"
+preroll_max = "30s"
+clip_votes = 3             # unique `!clip` voters that force a marker
+
+[clips.audio]
+drop = ["music", "program"]   # tracks carrying these roles stay out of clips
+transcribe = ["mic", "band"]  # first role with a track is transcribed for captions
+
+# Voice push-to-talk (§10.1, docs/controllers.md): hold a `ptt` deck key / MIDI button or bind
+# `stream voice.ptt start|stop`. Whisper runs locally; the model downloads once to
+# ~/.local/share/stream-engine/models/whisper/. Risky intents wait for "confirm".
+[voice]
+enabled = true
+device = "default"          # ALSA capture PCM (PipeWire default source)
+model = "base.en"           # tiny.en | base.en | small.en | /path/to/ggml-model.bin
+max_seconds = 12
+confirm = ["panic", "mode", "clean"]
+
+# Giveaways (§14.1): chat-entry giveaways with weighted entries; run them from the Giveaway view
+# or `giveaway.open|close|draw|reset`. A viewer's weight = best role weight + sub_month_bonus ×
+# months subscribed, capped at max_weight.
+[giveaway]
+keyword = "!join"
+platforms = ["twitch"]      # add "tiktok" to accept TikTok chat entries
+weights = { everyone = 1.0, follower = 1.0, sub = 2.0, vip = 2.0, mod = 1.0 }
+sub_month_bonus = 0.05
+max_weight = 5.0
+exclude_roles = ["owner"]
+exclude_users = ["nightbot", "streamelements", "streamlabs", "moobot", "fossabot", "sery_bot"]
+announce = true
+announce_open = "Giveaway open: {title}! Type {keyword} in chat to enter."
+announce_winner = "Congratulations @{user}, you won {title}! ({chance} chance)"
+
+# Song requests (§13, docs/song-requests.md). The queue policy (who may request, limits,
+# blocklists, approval, vote-skip) is edited in the UI (Views → Song requests) and kept in the
+# runtime DB; the YouTube API key lives in the keyring (`stream do youtube.key.set <key>`).
+[songs]
+region = "US"               # country for region-restriction checks and search results
+daily_quota = 10000         # YouTube Data API units per Pacific day (Google default)
+link_reserve = 200          # units kept for link lookups once text search stops
+cache_days = 7              # re-check cached video metadata older than this
+crossfade = "400ms"         # visual crossfade between the player's two slots
+
+# Chat replies can be reworded or silenced (""); placeholders: {user} {title} {duration}
+# {pos} {id} {reason} {votes} {needed}.
+[songs.messages]
+# added = "@{user} queued \"{title}\" (#{pos})"
+# now_playing = "Now playing: {title} (requested by {user})"
+
+# Cloudflare relay (§14.6, docs/relay.md): public queue page + Ko-fi tips. Outbound only; the
+# shared secret is in the keyring (`stream do relay.secret.set <secret>`).
+[relay]
+# url = "wss://relay.example.com/link"
+# queue_url = "https://relay.example.com/queue"   # default: derived from url
+
+# Text to speech (§14.4): Kokoro-82M on the CPU; download the voices with `stream do tts.model.fetch`.
+# Alerts speak policy-filtered text after the veto window; first matching voice rule wins.
+[tts]
+enabled = true
+voice = "af_heart"
+speed = 1.0
+volume = 0.9
+max_chars = 300
+
+[[tts.voices]]
+when = "kind == 'tip' || (kind == 'twitch.cheer' && amount >= 1000) || tier >= 2"
+voice = "am_michael"
+
+# TikTok LIVE events (best effort, unofficial; docs/tiktok.md). Off unless enabled.
+[tiktok]
+enabled = false
+# unique_id = "yourname"     # your @handle
+
+# Remote mod console (§12.3, §19) at https://<relay domain>/mod: Twitch login verified against the
+# channel's moderator list; mods get queue, moderation, alerts, TTS skip, and giveaways only.
+[remote_mod]
+enabled = false
+allow_users = []            # logins/ids; empty = every channel moderator
+deny_users = []
+rate_per_min = 60
+
+# Backups and retention (§17.4).
+[retention]
+sessions_days = 90          # session logs older than this are deleted (newest `sessions_keep` always kept)
+sessions_keep = 10
+
+[retention.backups]
+keep = 14                   # daily runtime DB backups in ~/.local/share/stream-engine/backups
+interval = "24h"
+
+[retention.recordings]
+# dir = "~/Videos"          # default: OBS's recording folder
+budget_gb = 200
+warn_ratio = 0.9
+min_free_gb = 20
+auto_delete = false         # true: delete the oldest over-budget recordings after grace_hours
+grace_hours = 24
+
+# Timecode (§2.7, docs/timelines.md): where `source = "mtc"` / `"ltc"` timelines listen, and how
+# timecode out (`[timecode_out]` in a timeline file) is generated.
+[timecode]
+mtc_in = "studio24c"        # MIDI input (controllers/*.toml id or ALSA name glob, e.g. "*24c*")
+ltc_in = "input.ltc.0"      # audio tap: channel 0 of [audio.inputs.ltc]
+ltc_level = -12.0           # LTC out level, dBFS
+ltc_latency = "0ms"         # audio output latency compensation for LTC out
+mtc_latency = "0ms"         # receiver latency compensation for MTC out
 
 # Base values for any address (the UI writes here too).
 [params]
+
+# PreSonus StudioLive 16R over UCNET (docs/mixer.md). Found by discovery/LAN probe; set `host`
+# to skip discovery. Faders are console positions 0–1 (≈0.72 = 0 dB).
+[mixer]
+# host = "10.0.0.187"
+name = "16r"
+rate_hz = 50
+writable = ["**"]
+panic_snapshot = "safe"   # store it once: stream mixer.snapshot.store snapshot=safe
+touch_release = true
+
+# mic.talking (0/1) from the vocal mic's input meter, for ducking bindings.
+[mixer.talk]
+channel = "VocalMic"
+threshold_db = -38
+attack = "40ms"
+hold = "600ms"
+
+# Twitch (§11, docs/twitch.md). Paste the Client ID of your app from dev.twitch.tv/console
+# (Category "Other", Client Type "Public", OAuth redirect http://localhost), then authorize in
+# the Twitch panel (or `stream twitch.auth.start`) with the device code. Tokens go to the keyring.
+[twitch]
+client_id = ""
+bot = false                   # true: authorize a second account for chat replies
+chat_as = "broadcaster"       # or "bot"
+emotes = ["7tv", "bttv", "ffz"]
+latency = "2.5s"              # viewer-side latency estimate for chat → screen alignment
+ad_warning = "60s"            # twitch.ad.upcoming this long before a scheduled ad
+
+# Policy for chat-, bits-, and points-originated actions (§12.1, docs/twitch.md#policy).
+[policy]
+effect_modes = ["live", "rehearsal"]   # chat effects only run in these modes
+follower_min_age = "10m"               # follow age before a viewer counts as a follower
+blocklist = []                         # words (`word`, `word*`, `*word*`); homoglyph/leet/spacing-proof
+max_len = 300                          # user text is cut to this many characters
+approval_ttl = "10m"                   # unanswered approvals are rejected (and refunded)
+ad_break_mode = true                   # twitch.ad_break → mode ad_break and back
+
+[policy.veto]
+ms = "3s"          # large alerts with user text wait this long for a mod (mod.reject kills the text)
+min_bits = 100
+min_tip = 5.0
+resub = true
+redeem = true

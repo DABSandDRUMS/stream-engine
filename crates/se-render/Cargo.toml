@@ -1,0 +1,37 @@
+[package]
+name = "se-render"
+description = "Compositor: wgpu render graph, sources, scenes, transitions, effects, overlays, canvases, dmabuf export (frames.sock), preview atlas"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+se-proto.workspace = true
+se-core.workspace = true
+se-expr.workspace = true
+se-hub.workspace = true
+se-clock.workspace = true
+se-patch.workspace = true
+se-alloc.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+toml.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+crossbeam-channel.workspace = true
+arc-swap.workspace = true
+parking_lot.workspace = true
+notify.workspace = true
+libc.workspace = true
+wgpu = "30.0.1"
+naga = { version = "30.0.1", features = ["wgsl-in"] }
+ash = "0.38"
+bytemuck = { version = "1.25", features = ["derive"] }
+pollster = "0.4"
+se-frames.workspace = true
+se-vector.workspace = true
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+[dev-dependencies]
+tempfile.workspace = true

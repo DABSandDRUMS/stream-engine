@@ -1,0 +1,15 @@
+# Generic CMY wash (subtractive colour mixing with variable CTO and zoom).
+name = "Generic CMY Wash"
+manufacturer = "Generic"
+kind = "wash"
+beam = 25.0
+
+[modes.6ch]
+channels = [
+  "dimmer",
+  "cyan",
+  "magenta",
+  "yellow",
+  "cto",
+  { role = "zoom", deg = [10.0, 50.0] },
+]

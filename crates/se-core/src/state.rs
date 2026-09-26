@@ -92,6 +92,9 @@ pub struct Param {
     pub published: Value,
     /// Declared with metadata (vs implicitly created by a set).
     pub declared: bool,
+    /// The base was set explicitly (project params, UI edit, adapter publish) rather than being
+    /// a placeholder from implicit creation; a later declaration keeps explicit bases.
+    pub base_explicit: bool,
 }
 
 /// Addressable state with layered resolution.
@@ -136,7 +139,9 @@ impl StateTree {
         if let Some(i) = self.id(addr) {
             let p = &mut self.params[i];
             if !p.declared || p.meta != meta {
-                if !p.declared || p.base == p.meta.default {
+                if !p.declared {
+                    p.base = if p.base_explicit { meta.coerce(&p.base) } else { meta.default.clone() };
+                } else if p.base == p.meta.default {
                     p.base = meta.default.clone();
                 }
                 p.meta = meta;
@@ -172,6 +177,7 @@ impl StateTree {
             published: resolved.clone(),
             resolved,
             declared,
+            base_explicit: false,
         });
         self.index.insert(addr.to_string(), i);
         self.live.push(false);
@@ -220,6 +226,7 @@ impl StateTree {
     }
 
     pub fn set_base(&mut self, i: usize, v: Value) -> Value {
+        self.params[i].base_explicit = true;
         let old = std::mem::replace(&mut self.params[i].base, v);
         self.mark(i);
         old
@@ -525,6 +532,18 @@ mod tests {
         t.put_override(a, ov("manual", 300, 2.0));
         resolve(&mut t, 0);
         assert_eq!(t.value(a), &Value::Float(2.0));
+    }
+
+    #[test]
+    fn declare_keeps_explicit_base_but_replaces_placeholder() {
+        let mut t = StateTree::default();
+        let a = t.ensure("source.cam.ctrl.brightness", &Value::Int(0));
+        t.set_base(a, Value::Int(40));
+        let b = t.ensure("fx.rgb_split.amount", &Value::Float(0.0));
+        t.declare("source.cam.ctrl.brightness", Meta::int(0, [0.0, 100.0]));
+        t.declare("fx.rgb_split.amount", Meta::float(0.3, [0.0, 1.0]));
+        assert_eq!(t.param(a).base, Value::Int(40), "explicit project value survives declaration");
+        assert_eq!(t.param(b).base, Value::Float(0.3), "placeholder replaced by the declared default");
     }
 
     #[test]

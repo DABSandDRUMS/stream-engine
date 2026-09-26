@@ -1,0 +1,23 @@
+post_install() {
+  cat <<'EOF'
+==> stream-engine: first-time setup (as your user, not root):
+      stream-engine new ~/stream-project
+      mkdir -p ~/.config/stream-engine
+      echo 'project = "'"$HOME"'/stream-project"' > ~/.config/stream-engine/engine.toml
+      systemctl --user enable --now stream-engine
+    Device access (Stream Deck, ENTTEC DMX USB PRO → /dev/dmx-usb-pro) comes from
+    /usr/lib/udev/rules.d/70-stream-engine.rules; pacman's udev hook already reloaded and
+    re-triggered attached devices.
+    Omarchy extras (bar widget, menu, font hook, keybinds) are opt-in:
+      /usr/share/stream-engine/omarchy/install.sh --help
+    Details: /usr/share/doc/stream-engine/desktop-integration.md
+EOF
+}
+
+post_upgrade() {
+  cat <<'EOF'
+==> stream-engine: restart the engine to run the new version:
+      systemctl --user restart stream-engine
+    Re-run /usr/share/stream-engine/omarchy/install.sh to update installed Omarchy extras.
+EOF
+}

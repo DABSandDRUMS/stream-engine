@@ -1,0 +1,27 @@
+[package]
+name = "se-alerts"
+description = "Alert routing + queue (§14.2), gift-bomb combining, veto, pause/replay, deletion sync, stats, goals, credits, chat feed for overlays"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+se-proto.workspace = true
+se-core.workspace = true
+se-expr.workspace = true
+se-hub.workspace = true
+se-store.workspace = true
+se-clock.workspace = true
+se-bot.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+toml_edit.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+rusqlite.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,20 @@
+# Generic RGBW LED PAR.
+name = "Generic RGBW PAR"
+manufacturer = "Generic"
+kind = "par"
+beam = 25.0
+
+[modes.4ch]
+channels = ["red", "green", "blue", "white"]
+
+[modes.5ch]
+channels = ["dimmer", "red", "green", "blue", "white"]
+
+# 0-9 strobe = open, 10-255 = slow → fast. Program 0 = manual (DMX colour).
+[modes.8ch]
+channels = [
+  "dimmer", "red", "green", "blue", "white",
+  { role = "strobe", range = [10, 255], hz = [1.0, 20.0], open = 0 },
+  { role = "raw", name = "program", default = 0 },
+  { role = "raw", name = "speed", default = 0 },
+]

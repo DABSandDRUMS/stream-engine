@@ -1,0 +1,112 @@
+<!doctype html>
+<!-- Labels: `stats.*` values, e.g. ?fields=latest.follow.user=Latest follower&layout=ticker -->
+<html>
+<head>
+<meta charset="utf-8">
+<title>labels</title>
+<style>
+  :root { --accent: #7aa2f7; --bg: rgba(13, 15, 26, .75); --fg: #fff; --font: "Inter", "Noto Sans", sans-serif; }
+  html, body { margin: 0; width: 100%; height: 100%; background: transparent; overflow: hidden; }
+  body { font-family: var(--font); color: var(--fg); display: flex; align-items: center; }
+  #bar { width: 100%; height: 100%; background: var(--bg); display: flex; align-items: center; justify-content: space-evenly; gap: 3vw; padding: 0 2vw; box-sizing: border-box; font-size: 50vh; }
+  .item { display: flex; align-items: baseline; gap: .5em; white-space: nowrap; min-width: 0; }
+  .item .k { font-weight: 600; opacity: .75; font-size: .8em; text-transform: uppercase; letter-spacing: .06em; }
+  .item .v { font-weight: 800; color: var(--accent); overflow: hidden; text-overflow: ellipsis; }
+  .item .v.changed { animation: flash 1s ease; }
+  body.ticker #bar { justify-content: center; }
+  body.ticker .item { display: none; }
+  body.ticker .item.on { display: flex; animation: rise .5s cubic-bezier(.2, 1.2, .4, 1) both; }
+  @keyframes flash { 30% { color: #fff; text-shadow: 0 0 1em var(--accent); } }
+  @keyframes rise { from { opacity: 0; transform: translateY(60%); } to { opacity: 1; transform: none; } }
+</style>
+</head>
+<body>
+<div id="bar"></div>
+<script src="/engine.js"></script>
+<script src="/web/overlay.js"></script>
+<script>
+  "use strict";
+  const O = Overlay;
+  const se = Engine.connect();
+  const DEFAULT_FIELDS = "latest.follow.user=Latest follower, latest.sub.user=Latest sub, latest.tip.user=Latest tip, top.cheer.session.user=Top cheer today, top.cheer.alltime.user=Top cheer ever, latest.raid.user=Last raid";
+  const P = O.params(se, { fields: DEFAULT_FIELDS, layout: "row", interval: 6, accent: "#7aa2f7", bg: [0.05, 0.06, 0.1, 0.75], text_color: "#ffffff", font: "" }, () => { apply(); build(); });
+  const stats = new Map();
+  const bar = document.getElementById("bar");
+  let items = [];
+  let tick = 0;
+
+  function apply() {
+    const r = document.documentElement.style;
+    r.setProperty("--accent", O.cssColor(P.accent) || "#7aa2f7");
+    r.setProperty("--bg", O.cssColor(P.bg) || "rgba(13,15,26,.75)");
+    r.setProperty("--fg", O.cssColor(P.text_color) || "#fff");
+    if (P.font) r.setProperty("--font", P.font);
+    document.body.className = P.layout === "ticker" ? "ticker" : "row";
+  }
+
+  // `top.cheer.session.user` → value plus its `.amount` sibling, formatted per kind.
+  function valueOf(path) {
+    const v = stats.get(`stats.${path}`);
+    if (v == null || v === "" || v === 0) return "—";
+    if (!path.endsWith(".user")) return O.fmtNum(v);
+    const base = path.slice(0, -".user".length);
+    const kind = base.split(".")[1];
+    const amount = stats.get(`stats.${base}.amount`) ?? stats.get(`stats.${base}.count`) ?? stats.get(`stats.${base}.viewers`);
+    if (!amount) return String(v);
+    if (kind === "tip") return `${v} (${O.fmtMoney(amount, stats.get(`stats.${base}.currency`))})`;
+    if (kind === "cheer") return `${v} (${O.fmtNum(amount)} bits)`;
+    if (kind === "gift") return `${v} (${O.fmtNum(amount)} gifts)`;
+    if (kind === "raid") return `${v} (${O.fmtNum(amount)})`;
+    return String(v);
+  }
+
+  function build() {
+    bar.textContent = "";
+    items = String(P.fields || DEFAULT_FIELDS).split(",").map(s => s.trim()).filter(Boolean).map(spec => {
+      const [path, label] = spec.split("=").map(s => s.trim());
+      const el = O.h("div", "item");
+      el.appendChild(O.h("span", "k", label || path));
+      el.appendChild(O.h("span", "v", valueOf(path)));
+      bar.appendChild(el);
+      return { path, el };
+    });
+    rotate();
+  }
+
+  function refresh(changed) {
+    for (const it of items) {
+      const v = it.el.querySelector(".v");
+      const next = valueOf(it.path);
+      if (v.textContent !== next) {
+        v.textContent = next;
+        if (changed) {
+          v.classList.remove("changed");
+          void v.offsetWidth;
+          v.classList.add("changed");
+        }
+      }
+    }
+  }
+
+  function rotate() {
+    if (P.layout !== "ticker" || !items.length) return;
+    items.forEach((it, i) => it.el.classList.toggle("on", i === tick % items.length));
+  }
+
+  apply();
+  build();
+  (function loop() {
+    tick++;
+    rotate();
+    setTimeout(loop, Math.max(2, Number(P.interval) || 6) * 1000);
+  })();
+
+  let first = true;
+  se.state("stats.**", (addr, v) => {
+    stats.set(addr, v);
+    refresh(!first);
+  });
+  se.onconnect = () => setTimeout(() => (first = false), 1500);
+</script>
+</body>
+</html>

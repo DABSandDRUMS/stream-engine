@@ -1,0 +1,23 @@
+# One-shot accent flash (sub alerts): snap to the stream accent colour, hold 150 ms,
+# fade out over 0.6 s, then release itself.
+label = "Accent flash"
+priority = 500
+autorelease = true
+release = "0s"
+
+[[cue]]
+id = "1"
+label = "Flash"
+fade = "0s"
+follow = "0.15s"
+
+[cue.set]
+all = { intensity = 1.0, color = "stream:accent" }
+
+[[cue]]
+id = "2"
+label = "Decay"
+fade_out = "0.6s"
+
+[cue.set]
+all = { intensity = 0.0 }

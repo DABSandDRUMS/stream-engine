@@ -1,0 +1,21 @@
+# VC42 HDMI 2 (/dev/video1): high corner wide of the whole kit.
+# The AVMatrix VC42 inputs are identified by PCI path + input index, so they keep their
+# names across reboots. YUYV is uploaded as-is and converted on the GPU.
+label = "Wide (HDMI 2)"
+device = "pci-0000:05:00.0-video-index1"
+format = "yuyv"
+size = [1920, 1080]
+fps = 60
+
+# Capture-card picture controls (0-255, default 128; hue default 0).
+[controls]
+brightness = 128
+contrast = 128
+saturation = 128
+
+# GPU color correction to match the cameras to each other (renderer).
+[color]
+brightness = 0.0
+contrast = 1.0
+saturation = 1.0
+# lut = "assets/luts/cam_wide.cube"

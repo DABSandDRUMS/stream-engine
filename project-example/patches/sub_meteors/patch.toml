@@ -1,0 +1,12 @@
+# Meteors rain down when someone subscribes (PLAN §6.2/§6.4).
+# Fire it: `stream do patch.sub_meteors.trigger tier=2`, or from a rule:
+#   when = "twitch.sub"  do = ["patch.sub_meteors.trigger tier={event.tier}"]
+kind        = "script"
+entry       = "main.lua"
+layer       = "overlay"
+label       = "Sub meteors"
+description = "Meteor shower scaled by sub tier; flashes the lights in the accent color"
+params.count = { type = "int",   default = 40,  range = [1, 400], description = "Meteors per tier" }
+params.speed = { type = "float", default = 1.0, range = [0.1, 4.0], description = "Extra fall speed" }
+trigger = { attack = "100ms", hold = "4s", release = "1s", retrigger = "stack" }
+budget  = { cpu_ms = 1.0 }

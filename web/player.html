@@ -1,0 +1,49 @@
+<!doctype html>
+<!--
+  stream-engine YouTube player (PLAN §13.3). Loaded by the `youtube` web source (CEF) as
+  /web/player.html?token=<patch token>. Two official IFrame API players: the active one is
+  visible, the other preloads the next song. All control goes through engine.js:
+    engine → page: state `song.player` (desired per-slot state) and `song.volume`
+    page → engine: named query `song.player` {ev: hello|state|progress|ended|error|heartbeat}
+  Nothing is ever drawn over the player (YouTube player terms).
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>stream-engine player</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        background: #000;
+        overflow: hidden;
+      }
+      .slot {
+        position: absolute;
+        inset: 0;
+        opacity: 0;
+        transition-property: opacity;
+        transition-timing-function: linear;
+        transition-duration: var(--xfade, 400ms);
+        pointer-events: none;
+      }
+      .slot.active {
+        opacity: 1;
+      }
+      .slot iframe {
+        width: 100%;
+        height: 100%;
+        border: 0;
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="slot-a" class="slot active"><div id="player-a"></div></div>
+    <div id="slot-b" class="slot"><div id="player-b"></div></div>
+    <script src="/engine.js"></script>
+    <script src="/web/player.js"></script>
+  </body>
+</html>

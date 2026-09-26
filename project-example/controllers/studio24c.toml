@@ -1,0 +1,12 @@
+# PreSonus Studio 24c 5-pin MIDI in/out (e-drum module, external gear, MIDI timecode).
+# E-drum notes become `drums.<pad>` events with `velocity` (0–1); the General MIDI drum map is
+# used, with overrides below. Timelines reads MTC from and sends MTC to this port by its id
+# (`studio24c`).
+kind = "midi"
+match = "Studio 24c*"
+
+[drums]
+gm = true
+channel = 10
+# Module-specific pads (note = pad name), e.g. an extra cymbal trigger:
+# 57 = "crash_right"
