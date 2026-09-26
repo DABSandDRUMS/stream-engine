@@ -10,12 +10,11 @@ Handoff document for building a custom, all-in-one live-stream production engine
 
 1. **One machine.** All hardware is attached to this machine; the verified inventory is in §28.1:
    - RTX 3070, two ultrawide monitors
-   - AVMatrix 4× HDMI capture, a USB camera, and a USB HDMI capture
-   - PreSonus Studio 24c
+   - AVMatrix 4× HDMI capture, MSI USB HDMI capture, a USB camera (6 cameras total)
+   - PreSonus Studio 24c, which carries the StudioLive 16R's main stereo mix into the machine
+   - PreSonus StudioLive 16R on the LAN (network control added in M8, §8.7)
    - ENTTEC DMX USB PRO
    - Stream Deck, X-TOUCH MINI, Line 6 FBV Express
-
-   The StudioLive 16R is part of the design but was not detected on USB or the LAN (§8.7, §28.3).
 2. **One application, one UI.** Everything lives in this app:
    - compositing, overlays, and effects
    - lights, the audio mix, and hardware mixer control
@@ -51,7 +50,9 @@ Handoff document for building a custom, all-in-one live-stream production engine
 | **Signal** | Continuous value sampled over time: `music.bass`, `mic.level`, `beat.phase`, `midi.fader.3`, `lfo.slow`. |
 | **Rule** | `when <event> if <condition> do <actions>`. |
 | **Binding** | A parameter driven by a signal: `param ← signal`, with shaping (gain, gate, attack/release, curve, range, auto-normalize) and a scope. |
-| **Timeline** | Timed cues bound to a media item (YouTube video ID, song ISRC, local file): "at 1:12.4 fire `preset.chorus_blast`". |
+| **Timeline** | Tracks of cues and automation lanes placed on a time axis, run by a timecode source (§2.7). |
+| **Timecode source** | What drives a timeline's clock: internal show clock, media position (YouTube/local file), MIDI Timecode (MTC), SMPTE LTC audio, or manual/jog. |
+| **Cue list** | An ordered lighting cue stack with fades, delays, follows, and tracking; run by a playback (§9.2). |
 | **Preset** | Named bundle of actions: scene change, transition, effects, light cue, mix changes, sound, patch trigger, durations. |
 | **Mode** | Global show state (`offline`, `preshow`, `live`, `brb`, `ad_break`, `outro`, `rehearsal`) that gates rules. |
 | **Source** | Something that produces pixels (and possibly audio): camera, web page, media file, patch, network stream. |
@@ -148,13 +149,32 @@ flowchart LR
 - `takeover` (for physical controls): `jump | pickup | scale` (§10.2).
 - `scope`: always, a scene, a preset while active, a mode, or an expression.
 
-### 2.7 Timelines
-- Keyed by media identity: `yt:<videoId>`, `isrc:<code>`, `file:<hash>`.
-- Cues: `{at, do}` where `do` is any command list. Cue timing uses `song.position`:
-  - For the YouTube player: reported time, smoothed and interpolated.
-  - For local files: exact.
-- **Record mode:** play the song, tap a key at the moments you want, and taps become cues. Edit them in the UI afterwards.
-- For library songs with offline analysis (§8.4), cues can snap to the beat grid.
+### 2.7 Timelines and timecode
+Timelines are how anything (lights, video, audio, mixer, patches) gets **sequenced**. They are generic: they carry commands and parameter automation for any address, not just lights.
+
+- **Structure:** a timeline has tracks.
+  - **Cue tracks:** `{at, do}`, where `do` is any command list (fire preset, go cue, scene take, trigger patch, …).
+  - **Automation lanes:** keyframes with curves for any address (e.g. a light group's intensity, an effect amount, a mixer send).
+  - **Region tracks:** start/stop a cue list, effect, or preset for a time span.
+- **Timecode sources** (a timeline is bound to one):
+
+  | Source | Use |
+  |---|---|
+  | `internal` | Show clock started/stopped/located from the UI, deck, or rules |
+  | `media:<id>` | `yt:<videoId>`, `isrc:<code>`, `file:<hash>`: follows song position (YouTube: reported time, smoothed and interpolated; local files: exact) |
+  | `mtc` | MIDI Timecode (quarter-frame + full-frame messages) in from any MIDI port (e.g. the Studio 24c DIN input) |
+  | `ltc` | SMPTE LTC decoded from any audio input channel |
+  | `manual` | Jog/scrub from the UI or X-TOUCH encoders |
+
+- **Frame rates:** 24, 25, 29.97 drop-frame, 30.
+- **Chase behavior:**
+  - lock with a jitter tolerance
+  - freewheel for a configurable time on dropout
+  - on a jump, apply the **tracked state** at the new time (lights, params) rather than firing every skipped cue
+- **Timecode out:** MTC out on any MIDI port and LTC out on any audio output channel, generated from any timecode source, so external gear can follow our clock.
+- **Record mode:** run the timecode, tap keys or move controls; taps become cues and control moves become automation keyframes. Edit them in the UI afterwards.
+- **Beat grid:** for library songs with offline analysis (§8.4), cues and keyframes can snap to beats and bars.
+- **Multiple timelines** can run at once, each on its own source, with priorities through the normal resolver (§2.1).
 
 ### 2.8 Presets and modes
 - A preset is a named list of commands with timing (`hold`, `release`), a conflict policy for when it's already active (`stack | replace | queue | reject`), and a priority.
@@ -214,8 +234,12 @@ flowchart LR
     alerts/*.toml       # alert routing, variations, queue policy (§14.2)
     mixes/*.toml        # hardware mixer snapshots (§8.7)
     controllers/*.toml  # MIDI/deck mappings, pages (§10)
-    fixtures/*.toml     # DMX fixture profiles
-    rig.toml            # patched fixtures, universes, outputs
+    lights/
+      fixtures/*.toml   # DMX fixture profiles (library)
+      rig.toml          # patch (fixture → universe/address), groups, stage layout, outputs
+      palettes/*.toml   # color / position / beam / intensity palettes
+      cuelists/*.toml   # cue lists (cues, fades, delays, follows)
+      effects/*.toml    # waveform effects over groups
     rewards/*.toml      # channel point rewards we own
     layouts/*.toml      # UI layouts (§15.3)
     patches/<id>/       # §6
@@ -343,7 +367,7 @@ A small native OBS module; our only code inside OBS.
   - accepts `stream.start` / `stream.stop` / `record.start` / `record.stop` through the OBS frontend API, so "Go live" in our UI starts OBS (optional; stream keys stay in OBS)
 - **Fallback:** a "technical difficulties" scene the plugin (or OBS) switches to if our feed goes stale.
 - **Audio into OBS:**
-  - **Day one:** our engine publishes separate PipeWire nodes (`se-mic`, `se-drums`, `se-game`, `se-music`, `se-sfx`, `se-program`); OBS captures them, the program mix feeds the stream, and the separate tracks go to the recording.
+  - **Day one:** our engine publishes separate PipeWire nodes (`se-band`, `se-music`, `se-sfx`, `se-tts`, `se-game`, `se-program`; later `se-drums`/`se-mic` stems); OBS captures them, the program mix feeds the stream, and the separate tracks go to the recording.
   - **Later option:** the plugin exposes audio sources fed from our rings with shared timestamps, for tighter A/V sync.
 - **Recording** (configured in OBS): wide and tall canvases plus multitrack audio.
   - **Verified:** 10 concurrent 1080p60 `h264_nvenc` encodes ran successfully on this RTX 3070 / driver 610.57, so the 4 needed (2 streams + 2 recordings) fit.
@@ -541,13 +565,16 @@ cues = [
 
 ### 8.1 Graph (PipeWire, our own nodes)
 - **Inputs:**
-  - **Studio 24c** (today's interface: 2 in / 2 out, 24-bit up to 192 kHz, plus 5-pin MIDI in/out): mic and one more input
-  - **16R USB channels** when connected (USB class-compliant 18×18): drum mics and more
+  - **Studio 24c stereo input = the StudioLive 16R's main mix** (all the 16R's channels summed: drums, mics, instruments). This is the room/band audio. 2 in / 2 out, 24-bit up to 192 kHz, plus 5-pin MIDI in/out.
+  - **16R individual channels** (later): per-channel audio through the 16R's USB multichannel, and per-channel meters over UCNET (§8.7).
   - e-drum MIDI (if used)
   - game/desktop
   - the YouTube player (CEF audio handler → our node)
   - media files, sound effects, TTS
-- **Buses:** `mic`, `drums`, `game`, `music`, `sfx`, `tts` → `program` mix. Each bus is published to OBS (§5). Every input and bus has an **effect chain** (§8.5).
+- **Buses:** `band` (the 16R mix from the 24c), `music`, `sfx`, `tts`, `game`, and later `drums`/`mic` stems → `program` mix. Each bus is published to OBS (§5). Every input and bus has an **effect chain** (§8.5).
+- **Talk detection for ducking:** the 16R mix is summed, so voice detection on it is unreliable with drums playing.
+  - Day one: ducking is triggered manually/by presets.
+  - Once `se-mixer` is connected: `mic.talking` comes from the 16R vocal channel's meter over UCNET (no extra audio cabling), or from the vocal stem if USB multichannel is used.
 - **Mixing:** per-bus gain, mute, and limiter. **Ducking:** `music` ducks under `mic.talking` (and under `tts`), with configurable depth/attack/release.
 - **Clocking:** the main audio interface (Studio 24c now; the 16R if it becomes the interface) is the PipeWire graph driver; other devices (USB camera mic, MSI capture audio) are resampled by PipeWire. Graph rate 48 kHz (PipeWire 1.6.8 here is already fixed to 48000).
 - **A/V alignment:** delay audio to match compositor video latency (camera and CEF paths); per-source offsets are adjustable in the UI.
@@ -622,7 +649,7 @@ Target: within one render frame of analysis latency.
 
 ### 8.7 Hardware mixer: PreSonus StudioLive 16R
 
-**Status on this machine:** not detected. No 16R on USB (the PreSonus device present is a Studio 24c). No UCNET discovery broadcasts on UDP 47809 in a 7 s listen, and no host on 10.0.0.0/24 answering on UCNET TCP 53000. Everything below applies once it's connected (§28.3).
+**Status:** the 16R is on the LAN (owner confirmed); connection and discovery details are handled when M8 starts. The architecture already covers it: `se-mixer` is just another adapter publishing addresses, signals, and events (§2).
 
 - **Control over Ethernet** with PreSonus's UCNET protocol:
   - UDP broadcast discovery
@@ -650,9 +677,24 @@ Target: within one render frame of analysis latency.
 
 ## 9. Lights (DMX)
 
-- **Engine:** universes (512 bytes each), patched fixtures, and fixture profiles (our TOML format: channels, types, ranges, color mixing).
-- **Cues:** static states plus dynamics (fades, chases, pulses, beat-synced), all using the shared **palette** and **beat clock**, so lights and visuals move together.
-- **Bindings:** any fixture parameter can be driven by a signal (e.g. dimmer ← `music.bass`).
+### 9.1 Engine and output
+- **Model:** universes (512 bytes each); a fixture library in our TOML profile format (channels, attributes, ranges, color mixing, virtual dimmers); a patch (fixture → universe/address); **groups**; a 2D stage layout (position of each fixture, used by effects and the visualizer).
+- **Attributes are addresses:** every fixture attribute (`lights.<fixture>.intensity`, `.color`, `.pan`, `.tilt`, `.zoom`, `.gobo`, …) and every group attribute is in the state tree. So rules, bindings, timelines, presets, chat, MIDI, deck, and voice can all control lights with no special path.
+- **Merge:** intensity is highest-takes-precedence (HTP) across playbacks; everything else is latest-takes-precedence (LTP) with playback priority, through the normal resolver (§2.1).
+
+### 9.2 Programming (sequence, preset, arrange)
+- **Programmer:** select fixtures/groups, set values live (UI, X-TOUCH encoders), highlight/locate, then store into a palette, cue, or preset. Programmer values override playback until released.
+- **Palettes:** named color, position, beam, and intensity values per fixture/group. Cues **reference** palettes, so editing a palette updates every cue using it.
+- **Cue lists:**
+  - ordered cues with per-cue (and per-attribute) fade in/out and delay times
+  - `wait`/`follow` for auto-advance
+  - **tracking** (only changed values are stored; unchanged values carry forward)
+  - `go`, `back`, `goto`, `release`
+- **Playbacks:** run cue lists. Each has a priority and a master fader and can be mapped to any control (deck key, X-TOUCH fader/encoder, FBV footswitch, rule, chat reward, voice).
+- **Effects engine:** waveform effects over groups with phase spread across the stage layout: dimmer sine/saw/square, color chases/rainbows, pan/tilt circles, random sparkle. Rate is in Hz or **beats** (beat clock), and size/rate are addressable, so bindings can drive them from audio.
+- **Timecode:** cue lists and effects can be placed on timelines (§2.7) and triggered from any timecode source (internal, song position, MTC, LTC).
+- **Shared palette with video:** light colors can follow the stream palette (§16.2) or a scene's colors.
+- **Visualizer:** a 2D stage view in the Lights panel showing live output per fixture (color and intensity; beam direction for movers).
 - **Outputs** (ours):
   - sACN / E1.31 (UDP multicast)
   - Art-Net (UDP)
@@ -1091,7 +1133,7 @@ It then creates a starter project from `project-example` with working templates 
 
 ### 17.1 Preflight
 A checklist panel (and `stream preflight` in the CLI) with pass/warn/fail for:
-- expected devices present: the 4 AVMatrix HDMI inputs with signal, USB camera, Studio 24c (and 16R once connected), DMX USB PRO, Stream Deck, X-TOUCH MINI, FBV Express
+- expected devices present: the 4 AVMatrix HDMI cameras and the MSI capture camera with live signal, the USB camera, Studio 24c (16R mix present), DMX USB PRO, Stream Deck, X-TOUCH MINI, FBV Express; later the 16R on UCNET
 - OBS plugin connected and receiving frames on both canvases
 - Twitch token valid and EventSub connected; YouTube key valid and quota remaining
 - disk space for recording
@@ -1157,7 +1199,7 @@ A checklist panel (and `stream preflight` in the CLI) with pass/warn/fail for:
 stream-engine/
   crates/
     se-proto/       # addresses, value types, events, commands, wire formats (serde)
-    se-clock/       # master clock, time mappings
+    se-clock/       # master clock, time mappings, timecode sources + MTC/LTC in/out (§2.7)
     se-core/        # state tree, provenance, command processing, rules, bindings, timelines, presets, modes, policy
     se-expr/        # small safe expression language for rules/when-clauses
     se-store/       # project loading + hot reload + toml_edit writes + schema migrations, SQLite, sessions, keyring
@@ -1170,7 +1212,7 @@ stream-engine/
     se-analysis/    # FFT, onsets, beat tracking, voice activity detection, offline song analysis
     se-dsp/         # audio effect library, sampler, effect chains, latency compensation, drum onset triggers
     se-mixer/       # PreSonus UCNET client (StudioLive 16R): discovery, control, meters, snapshots
-    se-dmx/         # fixtures, cues, effects engine, limiter, sACN/Art-Net/serial outputs
+    se-dmx/         # lighting: fixture library, patch, groups, programmer, palettes, cue lists, playbacks, effects engine, HTP/LTP merge, limiter, RDM, sACN/Art-Net/Enttec outputs
     se-input/       # Stream Deck (hidraw), MIDI (ALSA, 14-bit, MCU/HUI, feedback), OSC, voice
     se-twitch/      # OAuth device flow, EventSub, Helix client, emotes (incl. 7TV/BTTV/FFZ)
     se-bot/         # chatbot: commands, templating, timers, counters, quotes
@@ -1197,9 +1239,9 @@ Suggested libraries (verify versions at start): `tokio`, `wgpu` (+ `ash` for dma
 
 ## 21. Performance requirements
 
-- **Frame rate:** 60 fps steady on both canvases with all 4 HDMI cameras + the USB camera, the YouTube source, 3 effects, and 2 overlay patches active. Frame time budget ≤ 8 ms GPU (leaving headroom for NVENC, CEF, and the UI).
+- **Frame rate:** 60 fps steady on both canvases with all 6 cameras (4 AVMatrix HDMI, MSI capture, USB camera), the YouTube source, 3 effects, and 2 overlay patches active. Frame time budget ≤ 8 ms GPU (leaving headroom for NVENC, CEF, and the UI).
 - **VRAM:** the RTX 3070 has 8 GB, shared with OBS (2 canvases + 4 NVENC sessions), CEF, and the desktop. Engine budget ≤ 3 GB, shown live in the perf panel.
-- **Capture bandwidth:** 4 × 1080p60 YUYV ≈ 1 GB/s host→GPU; uploads use staging buffers reused per frame (no per-frame allocation).
+- **Capture bandwidth:** 4 × 1080p60 YUYV (≈1 GB/s) + MSI 720p60 + USB 1080p30 MJPEG, host→GPU; uploads use staging buffers reused per frame (no per-frame allocation).
 - **Output path zero-copy:** no CPU readback of canvas frames; UI previews are shared textures.
 - No shader/pipeline compilation outside load or hot reload.
 - **No per-frame heap allocation** on the render, audio, and DMX threads (enforced in debug builds with an allocation counter).
@@ -1280,12 +1322,12 @@ Each milestone ends with a **live smoke run**: the actual app, real devices, out
 | **M1** | Core foundation | State tree + metadata + provenance, command API, events (causal ids), signals (LFOs), rules + expr, bindings, presets, modes, runtime-state persistence/restore, event log + sessions, simulator, WebSocket/OSC API with auth, `stream` CLI | `stream fire twitch.cheer bits=1000` → rule fires preset → param changes, observable over the API with a trace; `kill -9` the engine → state restored; session replay reproduces it |
 | **M2** | Video path + UI v0 | Device registry, V4L2 + MJPEG sources + camera controls, render graph, scenes/nodes, 2 canvases + preview, Take, morph + one shader transition, one effect at each attachment point incl. conditional, dmabuf export + UI import spike, **OBS plugin** (sources, health, fallback, start/stop), idle inhibitor, `se-ui-kit` with Omarchy theme/font, Show mode (status bar, preview/program, scenes, multiview), perf panel, confidence window | 2+ cameras in OBS at steady 60 fps on both canvases; Take with random transitions works; zero CPU readback on output and previews; UI follows `omarchy theme set` live; fallback scene on stale feed |
 | **M3** | Patches + Build mode | Loader, the four visual kinds (`shader`, `particles`, `script`, `web`; `dsp` comes in M12), input contract, Lua sandbox + budgets, WGSL header gen, CEF web source, templates + "New patch", preview/test routing, last-good-version reload, GPU device-loss recovery; Build mode (library, canvas editor, inspector with provenance, rules editor, trace, simulator, console) | Drop or create a patch → it appears and triggers; broken shader/script keeps the old version live; over-budget script suspended; web patch crash doesn't affect output; a scene built in the canvas editor round-trips to TOML with comments intact |
-| **M4** | Audio | PipeWire graph (Studio 24c as driver; realtime scheduling set up), buses → OBS nodes, ducking, effect chains + built-in DSP library, live analysis → signals/events, binding shaping incl. auto-normalize, signal scopes, Mix strip | Bass drives an effect param with the same feel across quiet/loud songs; kick events fire rules; music ducks under the mic; a preset fires a tempo-synced stutter on the music bus with no clicks; PipeWire data loop confirmed `SCHED_FIFO`; no xruns in a 4 h soak |
+| **M4** | Audio | PipeWire graph (Studio 24c as driver; realtime scheduling set up), `band` bus from the 24c (16R mix), buses → OBS nodes, ducking (manual/preset first), effect chains + built-in DSP library, live analysis → signals/events, binding shaping incl. auto-normalize, signal scopes, Mix strip | Bass from the band mix drives an effect param with the same feel across quiet/loud songs; kick events fire rules; a preset ducks music; a preset fires a tempo-synced stutter on the music bus with no clicks; PipeWire data loop confirmed `SCHED_FIFO`; no xruns in a 4 h soak |
 | **M5** | Twitch + policy + alerts + bot | OAuth device flow, EventSub, chat send, rewards from files, fulfill/refund, policy pipeline, moderation actions, AutoMod queue, veto window, deletion sync, alert queue + alert/goal/label/chat-box templates with emotes, chatbot (commands, timers, counters, quotes), ad-break mode, preflight panel, right-rail tabs | A real cheer/sub/redeem fires presets with correct gating; a rejected redeem is refunded; a 50-gift bomb produces one combined alert; deleted messages vanish from the chat box; an ad break switches mode and back |
 | **M6** | Song requests + relay | YouTube lookup + cache + quota ledger, queue + policy UI, player page + web source (CPU paint path), audio routing, gapless preload, chat commands, **Cloudflare relay** (public `/queue` page, engine link), **Ko-fi tips** → `tip` events | `!sr <link or text>` → validated, queued, plays in the scene with audio on the music bus; the public queue page updates live; a Ko-fi test payment fires a tip alert; errors auto-skip; quota exhaustion degrades gracefully |
-| **M7** | Lights | Fixture profiles, rig patch, RDM discovery attempt, cues, dynamics, palette + beat sync, bindings, limiter, Enttec DMX USB PRO output (sACN/Art-Net kept), Lights view | Preset drives lights and visuals in sync to the beat; limiter provably caps flash rate |
+| **M7** | Lights | Fixture profiles + library, patch, groups, stage layout, RDM discovery attempt, programmer, palettes, cue lists with tracking/fades/follows, playbacks with HTP/LTP merge, effects engine (beat-synced), palette sharing with video, visualizer, limiter, Enttec DMX USB PRO output (sACN/Art-Net kept), Lights view | A cue list with fades and follows runs from a deck key and from an X-TOUCH fader; a beat-synced color chase follows the band mix tempo; editing a palette updates every cue using it; limiter provably caps flash rate |
 | **M8** | Control surfaces + mixer | Stream Deck Original V2 (pages, rendered keys, feedback, page editor), X-TOUCH MINI in MC mode (encoders with LED-ring feedback, buttons with LEDs, fader with pickup), FBV Express (footswitch presets, expression pedal as a signal), OSC, voice push-to-talk + grammar, **`se-mixer` UCNET adapter** once the 16R is connected (control, meters, two-way sync, snapshots), Mixer + Controllers views | Same preset fireable from deck, MIDI, footswitch, voice, keybind, and chat; X-TOUCH encoder rings follow state changes made elsewhere; the X-TOUCH fader picks up without jumps; with the 16R: moving a fader in UC Surface updates our state and the encoder ring, and a preset crossfades a mix snapshot |
-| **M9** | Timelines | Media-keyed timelines, record mode, timeline editor, offline analysis for library songs (beat grid, sections) | Nightly-song chorus cue fires on time from the YouTube player position |
+| **M9** | Timelines + timecode | Generic timelines (cue tracks, automation lanes, region tracks), timecode sources (internal, media position, MTC in, LTC in, manual), MTC/LTC out, chase/freewheel/track-on-jump, record mode, timeline editor, offline analysis for library songs (beat grid, sections) | Nightly-song chorus cue fires on time from the YouTube player position; a lighting cue list + automation lane follow incoming MTC and survive a locate jump with correct tracked state; LTC out is readable by an external decoder |
 | **M10** | Clips | Hype detector patch, markers + Twitch stream markers, OBS recording mapping, post-stream job, session review + clip review queue | After a stream, a review queue has ranked wide + tall clips with captions and without the music track |
 | **M11** | Extras | Omarchy polish (bar widget, menu entries, keybind/rule examples, PKGBUILD), first-run wizard, TTS (Kokoro), giveaways, credits, remote mod access via the relay, TikTok events (best-effort) | Fresh machine → install package → wizard → working starter project live on stream |
 | **M12** | Live instrument FX (optional; needs the 16R's multichannel USB) | Multichannel drum inputs via the 16R, `drums` bus, per-drum onset triggers (+ e-drum MIDI via the 24c DIN port), low-latency monitor path, sampler layering, `dsp` wasm patches | Snare hits fire visuals/lights reliably with no false triggers from bleed; processed drums on stream; if monitoring, measured round trip ≤ 10 ms |
@@ -1322,7 +1364,7 @@ Each milestone ends with a **live smoke run**: the actual app, real devices, out
 - **Kernel:** fully preemptible (`CONFIG_PREEMPT=y`, 1000 Hz).
 - **PipeWire:** not realtime today (RTKit missing) → setup step (§28.4).
 - **Idle:** the Omarchy idle monitor respects inhibitors, and `omarchy toggle idle` exists (§16.3).
-- **Capture:** the AVMatrix VC42 delivers ≈60 fps on HDMI 1, 2, and 4; HDMI 3 is at ≈1 fps (no live source); the MSI capture shows "No Signal"; the USB camera runs 1080p30 MJPEG (25 fps in low light due to auto-exposure).
+- **Capture:** the AVMatrix VC42 delivered ≈60 fps on HDMI 1, 2, and 4 at probe time. HDMI 3 and the MSI capture had no picture then; the owner confirms cameras are connected to all inputs, so all 6 are expected live (preflight checks it, §17.1). The USB camera runs 1080p30 MJPEG (25 fps in low light due to auto-exposure).
 - **Twitch scopes:** `channel.ad_break.begin` needs `channel:read:ads` (or `channel:manage:ads`); `channel.chat.message` needs `user:read:chat` with a user token.
 - **CEF:** shared-texture OSR on NVIDIA is broken upstream (issue #4237 / PR #4238), so we use the CPU paint path (§4.2).
 - **YouTube:** embeds serve ads unless signed in with Premium and cookies allowed (§13.3).
@@ -1346,11 +1388,11 @@ Each milestone ends with a **live smoke run**: the actual app, real devices, out
 | CPU / RAM / disk | AMD Ryzen 9 7900X (12C/24T), 30 GiB RAM, 400 GB free on `/home` |
 | GPU | NVIDIA GeForce RTX 3070, 8 GB, driver 610.57 (nvidia-open), Vulkan 1.4; NVENC H.264/HEVC. AMD Raphael iGPU present, unused |
 | Monitors | DP-1 MSI MAG341CQ 3440×1440 @ 100 Hz; DP-2 WEH WC34DX9019 3440×1440 @ 60 Hz; both scale 1.25 |
-| HDMI capture | AVMatrix VC42 4-port PCIe (in-tree `hws` driver), YUYV 1080p60: `/dev/video0` HDMI 1 = kit, front view toward the throne; `/dev/video1` HDMI 2 = high corner wide of the whole kit; `/dev/video2` HDMI 3 = no live source (≈1 fps); `/dev/video3` HDMI 4 = low kick-pedal cam. No audio from the VC42 |
-| USB capture | MSI "Streaming Boost" UVC capture (`/dev/video4`), 1280×720@60 MJPEG/YUYV + stereo 48 kHz audio; currently "No Signal" |
+| HDMI capture | AVMatrix VC42 4-port PCIe (in-tree `hws` driver), YUYV 1080p60, cameras on all 4 inputs: `/dev/video0` HDMI 1 = kit, front view toward the throne; `/dev/video1` HDMI 2 = high corner wide of the whole kit; `/dev/video2` HDMI 3 = camera (no picture at probe time); `/dev/video3` HDMI 4 = low kick-pedal cam. No audio from the VC42 |
+| USB capture | MSI "Streaming Boost" UVC capture (`/dev/video4`) with a camera attached, 1280×720@60 MJPEG/YUYV + stereo 48 kHz audio (no picture at probe time) |
 | USB camera | Sonix USB Camera (`/dev/video6`), 1080p30 MJPEG, mono mic; room view |
-| Audio interface | PreSonus Studio 24c (2×2, 5-pin MIDI I/O). Also motherboard audio, NVIDIA HDMI audio |
-| Mixer | PreSonus StudioLive 16R: **not detected** (USB or LAN) |
+| Audio interface | PreSonus Studio 24c (2×2, 5-pin MIDI I/O): its stereo input carries the 16R main mix. Also motherboard audio, NVIDIA HDMI audio |
+| Mixer | PreSonus StudioLive 16R on the LAN (owner confirmed); UCNET connection in M8 |
 | DMX | ENTTEC DMX USB PRO, `/dev/ttyUSB0` |
 | Control surfaces | Elgato Stream Deck Original V2 (15 keys); Behringer X-TOUCH MINI; Line 6 FBV Express Mk II |
 | Network | Wired `eno1` 10.0.0.14/24 (Intel I225-V 2.5 GbE); Tailscale also present |
@@ -1365,13 +1407,10 @@ Each milestone ends with a **live smoke run**: the actual app, real devices, out
 - [ ] YouTube account signed into the CEF profile (Premium = ad-free player).
 - [ ] Keyring available on the machine (Secret Service).
 
-### 28.3 Hardware facts the owner must supply
-These can't be detected from the machine; they are facts, not design decisions:
-1. **StudioLive 16R:** where is it? It isn't on USB or this LAN. Connect its USB (multichannel audio) and Ethernet (control) to this machine/network, or confirm it stays on the other machine.
-2. **Domain name** to use in Cloudflare for the relay.
-3. **DMX fixture list** (model, DMX mode, start address) for any fixture that doesn't answer RDM.
-4. **HDMI 3 and the MSI capture:** what's meant to be plugged into them.
-5. **Studio 24c inputs:** which mic or instrument is on input 1 and input 2.
+### 28.3 Owner info needed later (not needed for the foundation)
+1. **DMX fixture list** (model, DMX mode, start address), before M7; RDM discovery is attempted first.
+2. **Domain name** for the Cloudflare relay, before M6.
+3. **16R network details**, if discovery doesn't find it, when M8 starts.
 
 ### 28.4 Machine setup steps
 - [x] 2026-09-25: installed `realtime-privileges` and `espeak-ng`; added the user to `realtime` (rtprio 98, memlock unlimited, nice -11).
