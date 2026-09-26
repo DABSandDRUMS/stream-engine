@@ -1,15 +1,15 @@
-//! Build-mode canvas editor (§15.5): edits node rect/crop/radius of the preview scene on the
-//! wide and/or tall canvas. Drags preview live through a UI override (`set`), and commit once
+//! The composite-view editor (§15.5): drag, resize, crop and round the layers of a scene on the
+//! main and/or vertical video. Drags preview live through a UI override (`set`), and commit once
 //! on release with `set_base` (persisted to `scenes/<scene>.toml` by the engine, comments kept),
 //! then release the override.
 
 use crate::app::App;
 use crate::frames::Canvas;
 use crate::views::monitor;
-use egui::{RichText, Vec2};
+use egui::Vec2;
 use se_proto::{Op, Value};
 use se_ui_kit::canvas::{self as kc, CanvasEdit, CanvasNode, CanvasOpts};
-use se_ui_kit::widgets::{self, LedState, icon};
+use se_ui_kit::widgets;
 use std::collections::{BTreeSet, HashMap};
 use std::time::Instant;
 
@@ -45,10 +45,10 @@ impl Default for CanvasState {
             scene: None,
             pick: Pick::Both,
             snap: true,
-            grid: Some(1.0 / 48.0),
-            safe: true,
-            tiktok: true,
-            labels: true,
+            grid: None,
+            safe: false,
+            tiktok: false,
+            labels: false,
             selected: None,
             drafts: HashMap::new(),
             drag_start: HashMap::new(),
@@ -81,7 +81,7 @@ pub fn editor_nodes(app: &App, scene: &str, canvas: &str) -> Vec<CanvasNode> {
         let radius = app.m.f(&format!("{p}.radius.{canvas}")) as f32;
         let mut n = CanvasNode {
             id: id.clone(),
-            label: app.build.node_src(scene, &id).filter(|s| *s != id).map(|s| format!("{id} ({s})")).unwrap_or_else(|| id.clone()),
+            label: crate::views::composition::source_label(app, app.build.node_src(scene, &id).unwrap_or(&id)),
             rect,
             crop,
             radius,
@@ -162,90 +162,64 @@ fn apply_edit(app: &mut App, scene: &str, canvas: &str, e: CanvasEdit) {
     }
 }
 
-fn toolbar(app: &mut App, ui: &mut egui::Ui, scene: &str) {
+/// Editing options above the composite view: which screen(s), snapping, and a "Guides" menu.
+pub fn toolbar(app: &mut App, ui: &mut egui::Ui) {
     let t = app.t.clone();
-    ui.horizontal_wrapped(|ui| {
-        widgets::section(ui, &t, icon::SCENE, "Canvas editor");
-        let scenes: Vec<String> = app.m.q_list("scenes").iter().filter_map(|s| s.get_path("name").and_then(Value::as_str).map(String::from)).collect();
-        egui::ComboBox::from_id_salt("canvas-scene").selected_text(if scene.is_empty() { "(no scene)".to_string() } else { scene.to_string() }).show_ui(
-            ui,
-            |ui| {
-                if ui.selectable_label(app.build.canvas.scene.is_none(), "follow preview").clicked() {
-                    app.build.canvas.scene = None;
-                }
-                for s in scenes {
-                    if ui.selectable_label(app.build.canvas.scene.as_deref() == Some(&s), &s).clicked() {
-                        app.build.canvas.scene = Some(s.clone());
-                        // edits apply to preview: bring the edited scene there
-                        app.m.command(Op::SceneGo { scene: s });
-                    }
-                }
-            },
-        );
-        for (p, l) in [(Pick::Wide, "wide"), (Pick::Tall, "tall"), (Pick::Both, "both")] {
-            if ui.selectable_label(app.build.canvas.pick == p, l).clicked() {
-                app.build.canvas.pick = p;
-            }
-        }
-        ui.separator();
-        ui.checkbox(&mut app.build.canvas.snap, "snap").on_hover_text("Snap to edges, centers, other nodes and the grid (hold Ctrl to disable)");
-        let grid_txt = match app.build.canvas.grid {
-            None => "grid off".to_string(),
-            Some(g) => format!("grid 1/{:.0}", 1.0 / g),
+    ui.horizontal(|ui| {
+        let mut i = match app.build.canvas.pick {
+            Pick::Wide => 0,
+            Pick::Tall => 1,
+            Pick::Both => 2,
         };
-        egui::ComboBox::from_id_salt("canvas-grid").selected_text(grid_txt).show_ui(ui, |ui| {
-            for g in [None, Some(1.0 / 12.0), Some(1.0 / 24.0), Some(1.0 / 48.0), Some(1.0 / 96.0)] {
-                let l = g.map(|g: f32| format!("1/{:.0}", 1.0 / g)).unwrap_or_else(|| "off".into());
-                if ui.selectable_label(app.build.canvas.grid == g, l).clicked() {
-                    app.build.canvas.grid = g;
-                }
-            }
-        });
-        ui.checkbox(&mut app.build.canvas.safe, "safe areas");
-        ui.checkbox(&mut app.build.canvas.tiktok, "TikTok guides").on_hover_text("TikTok UI overlay guides on the tall canvas");
-        ui.checkbox(&mut app.build.canvas.labels, "labels");
-        if app.m.str("show.scene.program") == scene && !scene.is_empty() {
-            ui.label(RichText::new(format!("{} on PROGRAM — edits are live", icon::LIVE)).strong().color(t.tally_program()));
+        if widgets::segmented(ui, &t, &mut i, &["Main", "Vertical", "Both"]) {
+            app.build.canvas.pick = [Pick::Wide, Pick::Tall, Pick::Both][i];
         }
+        ui.add_space(se_ui_kit::theme::spacing::M);
+        let tip = "Snap to edges, centers and other layers (hold Ctrl to place freely)";
+        widgets::toggle(ui, &t, &mut app.build.canvas.snap).on_hover_text(tip);
+        ui.label(egui::RichText::new("Snap").color(t.text_dim)).on_hover_text(tip);
+        ui.add_space(se_ui_kit::theme::spacing::S);
+        let r = widgets::button_ex(ui, &t, Some(se_ui_kit::widgets::icon::GRID), "Guides  \u{f078}", widgets::Kind::Secondary, widgets::Size::Small, 0.0, true);
+        egui::Popup::menu(&r).show(|ui| {
+            ui.set_min_width(240.0);
+            for (label, v) in [
+                ("Safe areas (TV and phone)", &mut app.build.canvas.safe),
+                ("TikTok button areas", &mut app.build.canvas.tiktok),
+                ("Layer names", &mut app.build.canvas.labels),
+            ] {
+                ui.horizontal(|ui| {
+                    widgets::toggle(ui, &t, v);
+                    ui.label(label);
+                });
+            }
+            let mut g = match app.build.canvas.grid {
+                None => 0,
+                Some(x) if x > 1.0 / 30.0 => 1,
+                _ => 2,
+            };
+            ui.horizontal(|ui| {
+                ui.label("Grid");
+                if widgets::segmented(ui, &t, &mut g, &["Off", "Coarse", "Fine"]) {
+                    app.build.canvas.grid = [None, Some(1.0 / 24.0), Some(1.0 / 48.0)][g];
+                }
+            });
+        });
     });
 }
 
-fn align_bar(app: &mut App, ui: &mut egui::Ui, scene: &str, canvas: &str) {
-    let Some(sel) = app.build.canvas.selected.clone() else { return };
-    let nodes = editor_nodes(app, scene, canvas);
-    let Some(node) = nodes.iter().find(|n| n.id == sel).cloned() else { return };
-    let [cw, ch] = monitor::canvas_size(canvas);
-    let mut new_rect = None;
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(format!("{sel} on {canvas}")).small().strong());
-        for (a, l) in [
-            (kc::Align::Left, "⇤"),
-            (kc::Align::HCenter, "↔"),
-            (kc::Align::Right, "⇥"),
-            (kc::Align::Top, "⤒"),
-            (kc::Align::VCenter, "↕"),
-            (kc::Align::Bottom, "⤓"),
-        ] {
-            if ui.small_button(l).on_hover_text(format!("align {a:?} to the canvas")).clicked() {
-                new_rect = kc::align(&[node.rect], a).into_iter().next();
-            }
-        }
-        if ui.small_button("fill").clicked() {
-            new_rect = Some(kc::fill_canvas());
-        }
-        if ui.small_button("16:9").on_hover_text("match a 16:9 source").clicked() {
-            new_rect = Some(kc::fit_aspect(node.rect, 16.0 / 9.0, [cw, ch]));
-        }
-        if ui.small_button("9:16").clicked() {
-            new_rect = Some(kc::fit_aspect(node.rect, 9.0 / 16.0, [cw, ch]));
-        }
-        let px = kc::rect_px(node.rect, [cw, ch]);
-        ui.label(RichText::new(format!("{:.0},{:.0}  {:.0}×{:.0}px  r{:.0}", px[0], px[1], px[2], px[3], node.radius)).small().monospace());
-    });
-    if let Some(r) = new_rect {
-        let e = CanvasEdit { node: sel, kind: kc::EditKind::Move, rect: r, crop: node.crop, radius: node.radius, finished: true };
-        apply_edit(app, scene, canvas, e);
-    }
+/// Replace a layer's rectangle on `canvas` (quick placements from the layer panel).
+pub fn apply_rect(app: &mut App, scene: &str, canvas: &str, node: &str, rect: [f32; 4]) {
+    let Some(n) = editor_nodes(app, scene, canvas).into_iter().find(|n| n.id == node) else { return };
+    let e = CanvasEdit { node: node.to_string(), kind: kc::EditKind::Move, rect, crop: n.crop, radius: n.radius, finished: true };
+    apply_edit(app, scene, canvas, e);
+}
+
+/// Replace a layer's crop / corner radius on `canvas`. `finished = false` previews live while a
+/// slider is dragged; `true` saves.
+pub fn apply_shape(app: &mut App, scene: &str, canvas: &str, node: &str, crop: [f32; 4], radius: f32, finished: bool) {
+    let Some(n) = editor_nodes(app, scene, canvas).into_iter().find(|n| n.id == node) else { return };
+    let e = CanvasEdit { node: node.to_string(), kind: kc::EditKind::Move, rect: n.rect, crop, radius, finished };
+    apply_edit(app, scene, canvas, e);
 }
 
 fn editor(app: &mut App, ui: &mut egui::Ui, scene: &str, canvas: &str, size: Vec2) {
@@ -275,7 +249,7 @@ fn editor(app: &mut App, ui: &mut egui::Ui, scene: &str, canvas: &str, size: Vec
         safe_area: app.build.canvas.safe,
         tiktok_guides: app.build.canvas.tiktok && canvas == "tall",
         show_labels: app.build.canvas.labels,
-        tally: Some(if live { LedState::Active } else { LedState::Armed }),
+        tally: None,
         background: None,
         live,
         transparent: true,
@@ -295,43 +269,36 @@ fn editor(app: &mut App, ui: &mut egui::Ui, scene: &str, canvas: &str, size: Vec
     }
 }
 
-pub fn ui(app: &mut App, ui: &mut egui::Ui) {
-    let t = app.t.clone();
-    let scene = app.build.canvas.scene.clone().unwrap_or_else(|| app.m.str("show.scene.preview").to_string());
-    toolbar(app, ui, &scene);
-    if scene.is_empty() {
-        ui.label(RichText::new("no preview scene — pick a scene above or press a number key").color(t.fg_dim));
-        return;
-    }
-    let avail = ui.available_size() - Vec2::new(0.0, 30.0);
-    let gap = 12.0;
+/// The composite view(s) of `scene`, sized to fit `avail`.
+pub fn editors(app: &mut App, ui: &mut egui::Ui, scene: &str, avail: Vec2) {
+    let gap = se_ui_kit::theme::spacing::L;
     match app.build.canvas.pick {
         Pick::Wide => {
             let w = avail.x.min(avail.y * 16.0 / 9.0).max(160.0);
-            editor(app, ui, &scene, "wide", Vec2::new(w, w * 9.0 / 16.0));
-            align_bar(app, ui, &scene, "wide");
+            editor(app, ui, scene, "wide", Vec2::new(w, w * 9.0 / 16.0));
         }
         Pick::Tall => {
             let h = avail.y.min(avail.x * 16.0 / 9.0).max(160.0);
-            editor(app, ui, &scene, "tall", Vec2::new(h * 9.0 / 16.0, h));
-            align_bar(app, ui, &scene, "tall");
+            ui.horizontal(|ui| {
+                ui.add_space(((avail.x - h * 9.0 / 16.0) / 2.0).max(0.0));
+                editor(app, ui, scene, "tall", Vec2::new(h * 9.0 / 16.0, h));
+            });
         }
         Pick::Both => {
-            // wide + tall of equal height side by side: w_wide = h·16/9, w_tall = h·9/16
+            // main + vertical of equal height side by side: w_main = h·16/9, w_vert = h·9/16
             let h = ((avail.x - gap) / (16.0 / 9.0 + 9.0 / 16.0)).min(avail.y).max(120.0);
             ui.horizontal_top(|ui| {
-                ui.vertical(|ui| {
-                    editor(app, ui, &scene, "wide", Vec2::new(h * 16.0 / 9.0, h));
-                    align_bar(app, ui, &scene, "wide");
-                });
-                ui.add_space(gap);
-                ui.vertical(|ui| {
-                    editor(app, ui, &scene, "tall", Vec2::new(h * 9.0 / 16.0, h));
-                    align_bar(app, ui, &scene, "tall");
-                });
+                ui.spacing_mut().item_spacing.x = gap;
+                editor(app, ui, scene, "wide", Vec2::new(h * 16.0 / 9.0, h));
+                editor(app, ui, scene, "tall", Vec2::new(h * 9.0 / 16.0, h));
             });
         }
     }
+}
+
+/// The canvas the layer panel edits: the one shown, or the main one when both are.
+pub fn edit_canvas(app: &App) -> &'static str {
+    if app.build.canvas.pick == Pick::Tall { "tall" } else { "wide" }
 }
 
 #[cfg(test)]

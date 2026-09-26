@@ -4,8 +4,9 @@
 
 use crate::app::App;
 use crate::frames::{Canvas, FrameTexture};
-use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
+use egui::{Color32, CornerRadius, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
 use se_proto::Value;
+use se_ui_kit::theme::{font_bold, font_medium, radius, type_scale};
 use se_ui_kit::widgets::{LedState, led_color};
 
 /// A presented frame older than this is flagged stale on the monitor.
@@ -42,7 +43,8 @@ fn uv_of(r: [f32; 4]) -> Rect {
     Rect::from_min_size(Pos2::new(r[0], r[1]), Vec2::new(r[2], r[3]))
 }
 
-/// One monitor: texture when available, schematic otherwise, tally border and label.
+/// One monitor: texture when available, the scene's layout otherwise, a tally outline, and a
+/// badge (`label`, e.g. "ON AIR") with the scene name.
 #[allow(clippy::too_many_arguments)]
 pub fn monitor(app: &mut App, ui: &mut egui::Ui, canvas: Canvas, scene: &str, label: &str, size: Vec2, tally: LedState, hz: f32) -> egui::Response {
     let t = app.t.clone();
@@ -51,45 +53,69 @@ pub fn monitor(app: &mut App, ui: &mut egui::Ui, canvas: Canvas, scene: &str, la
         return resp;
     }
     let tex = texture(app, canvas, hz);
-    let p = ui.painter_at(rect);
-    p.rect_filled(rect, CornerRadius::same(3), Color32::BLACK);
+    let p = ui.painter_at(rect.expand(4.0));
+    let r = CornerRadius::same(radius::TILE);
+    p.rect_filled(rect, r, Color32::from_rgb(6, 7, 9));
     let canvas_name = match canvas {
         Canvas::Tall => "tall",
         _ => "wide",
     };
     match &tex {
         Some(ft) => {
-            p.image(ft.id, rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+            let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+            p.add(egui::Shape::Rect(egui::epaint::RectShape::filled(rect, r, Color32::WHITE).with_texture(ft.id, uv)));
         }
         None => schematic(app, &p, rect, scene, canvas_name),
     }
     let c = led_color(&t, tally);
-    p.rect_stroke(rect, CornerRadius::same(3), Stroke::new(3.0, c), StrokeKind::Inside);
-    let title = if scene.is_empty() { label.to_string() } else { format!("{label} · {scene}") };
-    let galley = p.layout_no_wrap(title, FontId::proportional(12.0), c);
-    let bg = Rect::from_min_size(rect.left_top() + Vec2::new(4.0, 4.0), galley.size() + Vec2::new(8.0, 4.0));
-    p.rect_filled(bg, CornerRadius::same(3), Color32::from_black_alpha(150));
-    p.galley(bg.min + Vec2::new(4.0, 2.0), galley, c);
+    let lit = matches!(tally, LedState::Active | LedState::Armed);
+    p.rect_stroke(rect, r, Stroke::new(if lit { 3.0 } else { 1.0 }, if lit { c } else { t.border }), StrokeKind::Outside);
+    if !label.is_empty() {
+        let fid = font_bold(type_scale::SMALL);
+        let g = p.layout_no_wrap(label.to_string(), fid, Color32::WHITE);
+        let chip = Rect::from_min_size(rect.left_top() + Vec2::new(10.0, 10.0), Vec2::new(g.size().x + 16.0, 24.0));
+        p.rect_filled(chip, CornerRadius::same(6), if lit { c } else { Color32::from_black_alpha(170) });
+        p.galley(chip.center() - g.size() / 2.0, g, Color32::WHITE);
+        if !scene.is_empty() {
+            let label = app
+                .m
+                .q_list("scenes")
+                .iter()
+                .find(|s| s.get_path("name").and_then(Value::as_str) == Some(scene))
+                .and_then(|s| s.get_path("label").and_then(Value::as_str))
+                .unwrap_or(scene)
+                .to_string();
+            let sg = p.layout_no_wrap(crate::views::live::nice(&label), font_medium(type_scale::SMALL), Color32::WHITE);
+            let sc = Rect::from_min_size(Pos2::new(chip.right() + 6.0, chip.top()), Vec2::new(sg.size().x + 16.0, 24.0));
+            p.rect_filled(sc, CornerRadius::same(6), Color32::from_black_alpha(170));
+            p.galley(sc.center() - sg.size() / 2.0, sg, Color32::WHITE);
+        }
+    }
     match &tex {
         Some(ft) if ft.age.as_millis() > STALE_MS => {
-            badge(&p, rect, &format!("STALE {:.1}s", ft.age.as_secs_f32()), t.yellow);
+            badge(&p, rect, &format!("Frozen for {:.1}s", ft.age.as_secs_f32()), t.yellow);
         }
-        None if app.m.connected => badge(&p, rect, "no frames · schematic", t.fg_dim),
+        None if app.m.connected => badge(&p, rect, "Layout preview (no video yet)", t.text_dim),
         _ => {}
     }
     resp
 }
 
 fn badge(p: &egui::Painter, rect: Rect, text: &str, color: Color32) {
-    let g = p.layout_no_wrap(text.to_string(), FontId::proportional(11.0), color);
-    let r = Rect::from_min_size(rect.right_bottom() - g.size() - Vec2::new(12.0, 8.0), g.size() + Vec2::new(8.0, 4.0));
-    p.rect_filled(r, CornerRadius::same(3), Color32::from_black_alpha(160));
-    p.galley(r.min + Vec2::new(4.0, 2.0), g, color);
+    let g = p.layout_no_wrap(text.to_string(), font_medium(type_scale::SMALL), color);
+    let r = Rect::from_min_size(rect.right_bottom() - g.size() - Vec2::new(26.0, 18.0), g.size() + Vec2::new(16.0, 8.0));
+    p.rect_filled(r, CornerRadius::same(6), Color32::from_black_alpha(170));
+    p.galley(r.min + Vec2::new(8.0, 4.0), g, color);
 }
 
 /// Node boxes of `scene` on `canvas` from the live scene addresses (bindings and edits show),
 /// filled with the node's source tile from the atlas when available.
 pub fn schematic(app: &App, p: &egui::Painter, rect: Rect, scene: &str, canvas: &str) {
+    schematic_ex(app, p, rect, scene, canvas, true);
+}
+
+/// [`schematic`] with or without layer names (thumbnails are too small for them).
+pub fn schematic_ex(app: &App, p: &egui::Painter, rect: Rect, scene: &str, canvas: &str, labels: bool) {
     let t = &app.t;
     let atlas = app.frames.texture(Canvas::Atlas).filter(|f| f.age.as_millis() < DEAD_MS);
     let tiles = if atlas.is_some() { atlas_tiles(app) } else { Vec::new() };
@@ -107,9 +133,15 @@ pub fn schematic(app: &App, p: &egui::Painter, rect: Rect, scene: &str, canvas: 
                 p.add(egui::Shape::Rect(egui::epaint::RectShape::filled(r, radius, Color32::WHITE.gamma_multiply(n.opacity)).with_texture(a.id, uv)));
             }
             _ => {
-                p.rect_filled(r, radius, t.bg_light.gamma_multiply(0.4 + 0.6 * n.opacity));
-                p.rect_stroke(r, radius, Stroke::new(1.0, t.muted), StrokeKind::Inside);
-                p.text(r.center(), Align2::CENTER_CENTER, &n.id, FontId::proportional(11.0), t.fg_dim);
+                p.rect_filled(r, radius, se_ui_kit::theme::mix(t.surface_hi, Color32::BLACK, 0.2 * (1.0 - n.opacity)));
+                p.rect_stroke(r, radius, Stroke::new(1.0, t.border), StrokeKind::Inside);
+                if labels {
+                    let name = crate::views::composition::source_label(app, &n.src);
+                    let g = p.layout(name, font_medium(type_scale::SMALL), t.text_dim, (r.width() - 8.0).max(10.0));
+                    if g.size().x <= r.width() - 4.0 && g.size().y <= r.height() - 4.0 {
+                        p.galley(r.center() - g.size() / 2.0, g, t.text_dim);
+                    }
+                }
             }
         }
     }
@@ -218,7 +250,7 @@ pub fn multiview(app: &mut App, ui: &mut egui::Ui, tile_h: f32) {
     };
     let (pgm, pvw) = (on("show.scene.program"), on("show.scene.preview"));
     if tiles.is_empty() {
-        let msg = if atlas.is_some() { "atlas has no tiles yet" } else { "multiview: waiting for the engine's preview atlas (render.atlas.layout)" };
+        let msg = if atlas.is_some() { "No cameras or sources to show yet." } else { "Waiting for video from the engine…" };
         ui.label(egui::RichText::new(msg).color(t.fg_dim));
         return;
     }
@@ -236,7 +268,8 @@ pub fn multiview(app: &mut App, ui: &mut egui::Ui, tile_h: f32) {
                     None
                 };
                 let tex = atlas.as_ref().map(|a| (a.id, uv_of(*r)));
-                if se_ui_kit::widgets::thumbnail(ui, &t, size, tex, src, tally).clicked() {
+                let name = crate::views::composition::source_label(app, src);
+                if se_ui_kit::widgets::thumbnail(ui, &t, size, tex, &name, tally).on_hover_text(&name).clicked() {
                     clicked = Some(src.clone());
                 }
             }
@@ -250,8 +283,8 @@ pub fn multiview(app: &mut App, ui: &mut egui::Ui, tile_h: f32) {
 /// Scene thumbnail: the scene's wide layout drawn with atlas tiles (or boxes).
 pub fn scene_thumb(app: &App, ui: &egui::Ui, rect: Rect, scene: &str) {
     let p = ui.painter_at(rect);
-    p.rect_filled(rect, CornerRadius::same(4), app.t.bg_darker);
-    schematic(app, &p, rect.shrink(2.0), scene, "wide");
+    p.rect_filled(rect, CornerRadius::same(radius::TILE), Color32::from_rgb(6, 7, 9));
+    schematic_ex(app, &p, rect.shrink(3.0), scene, "wide", false);
 }
 
 #[cfg(test)]

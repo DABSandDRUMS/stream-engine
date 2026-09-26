@@ -47,6 +47,11 @@ Missing data never breaks a view: it shows an explanatory empty state.
 | `twitch.auth.{status (none\|pending\|authorized\|expired\|error), login, user_code, verification_uri, expires_in_s, error, missing_scopes}` and the same under `twitch.auth.bot.*` | `twitch.auth.start|cancel|logout {account: broadcaster\|bot}` |
 | query `secrets.status` → `[{name,label,set}]` | `secrets.set {name,value}`, `secrets.delete {name}` (keyring; event `secrets.changed {name}`) |
 | query `api.info` → `{socket,http,ws,osc,token_set,devices:[{name,scope}]}` (the token itself is never served; the UI copies it via `stream token`) | `api.token.rotate`, `api.device.add {name,token,scope}`, `api.device.remove {name}` |
+| layouts (`layouts/*.toml`, via `project.read`) | Screens: switch layout; "Show the program on the TV" writes `[confidence] enabled` with `project.write {path: layouts/<name>.toml, text}` |
+| Devices: queries `devices`, `sources`; `source.<name>.{signal,capturing,fps,dropped,cpu,position,duration,paused}`, `source.<name>.ctrl.<c>`; `health.{devices,sources}`, `mixer.16r.connected`; camera pictures from the atlas (`render.atlas.layout`) | `devices.rescan`, `devices.rename {id,label}`, `devices.expect {identity}`, `devices.forget {id}`, `source.assign {source,identity}`, `source.reopen|restart|save_controls {source}`, `set`/`release` on `source.<name>.ctrl.<c>` and `source.<name>.paused` |
+| Backups: query `retention`, `health.{backup,recordings}`, `retention.recordings.{used_gb,budget_gb}` | `retention.backup_now|scan|prune_sessions|prune_recordings` |
+| Accounts & app, mods helping: `remote_mod.{enabled,active}` | `project.write {path: project.toml, set: {remote_mod.enabled}}` |
+| Recordings: queries `sessions`, `clips {status: ready}`, `clips.session {session}` (one reply per stream); `clips.pending`, `clips.job.{state,stage,progress,session,queue}` | `clips.process {session}`, `clips.approve|reject|upload {id}`, `clips.retrim {id,in,out}` |
 
 ## Engine actions/queries added for the UI (se-app)
 

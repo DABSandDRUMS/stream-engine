@@ -1,24 +1,41 @@
-//! Chatbot (§14.3): commands, timers, counters, quotes, and a chat tester.
+//! Chat commands (§14.3): what viewers can type in chat (!discord → a reply), timed messages,
+//! counters, quotes, and a place to try a command as a viewer would. Everything is plain words;
+//! file names, extra commands and actions sit under "Details".
 //! Data: queries `bot.commands`, `bot.timers`, `bot.counters`, `bot.quotes`, `bot.files`;
 //! commands: `bot.command.save|delete`, `bot.timer.save|delete`, `bot.counter.set|delete`,
 //! `bot.quote.add|edit|delete`, `sim.chat`. Files are written comment-preserving.
 
 use crate::app::App;
-use egui::RichText;
+use crate::views::live::nice;
+use crate::views::rules::{Words, capitalize, friendly_text};
+use egui::{Align, Layout, RichText, Vec2};
 use se_proto::{Op, Value};
-use se_ui_kit::widgets::{self, LedState, icon};
+use se_ui_kit::Theme;
+use se_ui_kit::theme::{font_mono, font_semibold, spacing, type_scale};
+use se_ui_kit::widgets::{self, Kind, LedState, Size, icon};
 
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
-enum Tab {
-    #[default]
-    Commands,
-    Timers,
-    Counters,
-    Quotes,
-    Test,
-}
+const TABS: [&str; 5] = ["Commands", "Timed messages", "Counters", "Quotes", "Try it"];
 
-const ROLES: [&str; 6] = ["everyone", "follower", "sub", "vip", "mod", "owner"];
+/// (role, who can use it).
+const ROLES: [(&str, &str); 6] = [
+    ("everyone", "Everyone"),
+    ("follower", "Followers and up"),
+    ("sub", "Subscribers and up"),
+    ("vip", "VIPs and up"),
+    ("mod", "Moderators"),
+    ("owner", "Only you"),
+];
+
+/// Placeholders a reply can use: (text, what it becomes).
+const PLACEHOLDERS: [(&str, &str); 7] = [
+    ("{user}", "their name"),
+    ("{touser}", "who they mention"),
+    ("{args}", "what they typed after"),
+    ("{count}", "a counter"),
+    ("{uptime}", "time on air"),
+    ("{song}", "current song"),
+    ("{random:a|b|c}", "a random pick"),
+];
 
 /// Editable copy of a command or timer (strings as typed).
 #[derive(Clone, Default, PartialEq)]
@@ -40,6 +57,8 @@ struct Draft {
     cmds: String,
     action: String,
     args: String,
+    /// `bot.commands` behavior (`reply`, `builtin <name>`, `action <name>`, `do`).
+    behavior: String,
     // timers
     every: String,
     min_lines: String,
@@ -47,7 +66,7 @@ struct Draft {
 
 #[derive(Clone, Default)]
 struct Form {
-    tab: Tab,
+    tab: usize,
     filter: String,
     cmd: Option<Draft>,
     timer: Option<Draft>,
@@ -91,6 +110,11 @@ fn dur(ms: i64) -> String {
     }
 }
 
+/// "20 min", "45 s" for sentences.
+fn dur_words(ms: i64) -> String {
+    if ms >= 60_000 && ms % 60_000 == 0 { format!("{} min", ms / 60_000) } else { format!("{} s", ms / 1000) }
+}
+
 fn csv(s: &str) -> Value {
     let v: Vec<Value> = s.split(',').map(str::trim).filter(|x| !x.is_empty()).map(|x| Value::Str(x.into())).collect();
     if v.is_empty() { Value::Null } else { Value::List(v) }
@@ -103,6 +127,20 @@ fn opt(s: &str) -> Value {
 fn lines(s: &str) -> Value {
     let v: Vec<Value> = s.lines().map(str::trim).filter(|x| !x.is_empty()).map(|x| Value::Str(x.into())).collect();
     if v.is_empty() { Value::Null } else { Value::List(v) }
+}
+
+fn clip(s: &str, n: usize) -> String {
+    let s = s.replace('\n', " ");
+    if s.chars().count() <= n { s } else { format!("{}…", s.chars().take(n).collect::<String>()) }
+}
+
+fn role_words(role: &str) -> &'static str {
+    ROLES.iter().find(|(r, _)| *r == role).map_or("Everyone", |(_, w)| *w)
+}
+
+/// Mode names: `brb` → `BRB`, `ad_break` → `Ad break`.
+fn pretty(m: &str) -> String {
+    if !m.is_empty() && m.len() <= 3 && m.chars().all(|c| c.is_ascii_alphabetic()) { m.to_ascii_uppercase() } else { nice(m) }
 }
 
 impl Draft {
@@ -131,6 +169,7 @@ impl Draft {
             cmds: list(c, "do").join("\n"),
             action: s(c, "action").into(),
             args: args.unwrap_or_default(),
+            behavior: s(c, "behavior").into(),
             ..Default::default()
         }
     }
@@ -163,12 +202,12 @@ impl Draft {
         } else {
             match Value::parse_text(self.args.trim()) {
                 v @ Value::Map(_) => v,
-                _ => return Err("args must be an inline table: { key = \"{user}\" }".into()),
+                _ => return Err("The action's settings (Details) need to look like { text = \"{args}\" }.".into()),
             }
         };
         let min_args = match self.min_args.trim() {
             "" | "0" => Value::Null,
-            n => Value::Int(n.parse::<i64>().map_err(|_| "min args must be a number")?),
+            n => Value::Int(n.parse::<i64>().map_err(|_| "“Words needed after it” must be a number.")?),
         };
         Ok(Value::map()
             .with("name", self.name.trim())
@@ -187,7 +226,8 @@ impl Draft {
     }
 
     fn timer_fields(&self) -> Result<Value, String> {
-        let n: i64 = if self.min_lines.trim().is_empty() { 0 } else { self.min_lines.trim().parse().map_err(|_| "min chat lines must be a number")? };
+        let n: i64 =
+            if self.min_lines.trim().is_empty() { 0 } else { self.min_lines.trim().parse().map_err(|_| "The number of chat messages must be a number.")? };
         Ok(Value::map()
             .with("name", opt(&self.name))
             .with("every", self.every.trim())
@@ -204,6 +244,88 @@ fn toml_literal(v: &Value) -> String {
         Value::Str(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
         other => other.to_string(),
     }
+}
+
+/// What a command does, in words.
+fn does(c: &Value, words: &Words) -> String {
+    let desc = s(c, "description");
+    let behavior = s(c, "behavior");
+    let (kind, rest) = behavior.split_once(' ').unwrap_or((behavior, ""));
+    match kind {
+        "reply" => clip(&friendly_text(s(c, "reply")), 70),
+        _ if !desc.is_empty() => clip(&friendly_text(desc), 70),
+        "builtin" => match rest {
+            "addcom" => "Adds a new command from chat".into(),
+            "editcom" => "Changes a command from chat".into(),
+            "delcom" => "Removes a command from chat".into(),
+            "commands" => "Lists the commands".into(),
+            "quote" => "Shows a saved quote".into(),
+            "addquote" => "Saves a quote".into(),
+            "delquote" => "Removes a quote".into(),
+            "setcounter" => "Sets a counter".into(),
+            other => format!("Built in: {}", nice(other)),
+        },
+        "action" => match rest {
+            "alerts.veto" => "Cancels the alert on screen".into(),
+            "alerts.skip" => "Skips the current alert".into(),
+            "tts.skip" => "Skips the voice message".into(),
+            "tts.clear" => "Clears waiting voice messages".into(),
+            "queue.request" => "Requests a song".into(),
+            "queue.skip" => "Skips the song".into(),
+            _ => "Does something in Stream Engine".into(),
+        },
+        "do" => words.command(&list(c, "do").join("; ")),
+        _ => String::new(),
+    }
+}
+
+fn chip(ui: &mut egui::Ui, t: &Theme, label: &str, on: bool) -> egui::Response {
+    widgets::chip(ui, t, "", label, on)
+}
+
+/// Center `body` in a column at most `max_w` wide (wide screens).
+fn centered(ui: &mut egui::Ui, max_w: f32, body: impl FnOnce(&mut egui::Ui)) {
+    let avail = ui.available_width();
+    let h = ui.available_height();
+    let w = avail.min(max_w);
+    ui.horizontal_top(|ui| {
+        ui.add_space(((avail - w) / 2.0 - ui.spacing().item_spacing.x).max(0.0));
+        ui.allocate_ui_with_layout(Vec2::new(w, h), Layout::top_down(Align::Min), |ui| {
+            ui.set_width(w);
+            body(ui);
+        });
+    });
+}
+
+fn toggle_csv(csv: &mut String, item: &str) {
+    let mut items: Vec<String> = csv.split(',').map(str::trim).filter(|x| !x.is_empty()).map(String::from).collect();
+    match items.iter().position(|x| x == item) {
+        Some(i) => {
+            items.remove(i);
+        }
+        None => items.push(item.to_string()),
+    }
+    *csv = items.join(", ");
+}
+
+/// Mode chips over a comma-separated list (none picked = any mode).
+fn mode_chips(ui: &mut egui::Ui, t: &Theme, csv: &mut String, modes: &[String]) {
+    let chosen: Vec<String> = csv.split(',').map(str::trim).filter(|x| !x.is_empty()).map(String::from).collect();
+    let mut flip = None;
+    ui.horizontal_wrapped(|ui| {
+        for m in modes.iter().chain(chosen.iter().filter(|c| !modes.contains(c))) {
+            if chip(ui, t, &pretty(m), chosen.contains(m)).clicked() {
+                flip = Some(m.clone());
+            }
+        }
+    });
+    if let Some(m) = flip {
+        toggle_csv(csv, &m);
+    }
+}
+
+fn label(ui: &mut egui::Ui, t: &Theme, text: &str) {
+    ui.label(RichText::new(text).color(t.text_dim));
 }
 
 pub fn ui(app: &mut App, ui: &mut egui::Ui) {
@@ -225,33 +347,76 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     let custom = s(&files_v, "custom_file").to_string();
     let errors: Vec<Value> = files_v.get_path("errors").and_then(Value::as_list).map(<[Value]>::to_vec).unwrap_or_default();
 
-    ui.horizontal(|ui| {
-        widgets::section(ui, &t, icon::BOT, "Chatbot");
-        let health = app.m.get("health.bot").cloned().unwrap_or_default();
-        let led = match s(&health, "status") {
-            "pass" => LedState::Healthy,
-            "fail" => LedState::Error,
-            "" => LedState::Idle,
-            _ => LedState::Armed,
-        };
-        widgets::pill(ui, &t, icon::CHECK, s(&health, "detail"), led);
-        ui.separator();
-        for (tab, label) in [(Tab::Commands, "Commands"), (Tab::Timers, "Timers"), (Tab::Counters, "Counters"), (Tab::Quotes, "Quotes"), (Tab::Test, "Test")] {
-            ui.selectable_value(&mut form.tab, tab, label);
-        }
-    });
-    for e in &errors {
-        ui.label(RichText::new(format!("{} {}: {}", icon::WARN, s(e, "file"), s(e, "msg"))).color(t.bright_red));
-    }
-    ui.add_space(6.0);
-    match form.tab {
-        Tab::Commands => commands(app, ui, &mut form, &files, &custom),
-        Tab::Timers => timers(app, ui, &mut form, &files, &custom),
-        Tab::Counters => counters(app, ui, &mut form),
-        Tab::Quotes => quotes(app, ui, &mut form),
-        Tab::Test => test(app, ui, &mut form),
-    }
+    centered(ui, 2400.0, |ui| tab_body(app, ui, &t, &mut form, &files, &custom, &errors));
     ui.data_mut(|d| d.insert_temp(id, form));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tab_body(app: &mut App, ui: &mut egui::Ui, t: &Theme, form: &mut Form, files: &[String], custom: &str, errors: &[Value]) {
+    let t = t.clone();
+    ui.horizontal(|ui| {
+        widgets::segmented(ui, &t, &mut form.tab, &TABS);
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let health = app.m.get("health.bot").cloned().unwrap_or_default();
+            let (led, text) = match s(&health, "status") {
+                "pass" => (LedState::Healthy, "Chat bot: Working"),
+                "fail" => (LedState::Error, "Chat bot: Not connected"),
+                "" => (LedState::Idle, "Chat bot: Off"),
+                _ => (LedState::Armed, "Chat bot: Needs a look"),
+            };
+            widgets::pill(ui, &t, if led == LedState::Healthy { icon::CHECK } else { icon::WARN }, text, led).on_hover_text(s(&health, "detail"));
+        });
+    });
+    for e in errors {
+        ui.add_space(spacing::S);
+        widgets::callout(
+            ui,
+            &t,
+            widgets::Tone::Warn,
+            icon::WARN,
+            "Some commands didn't load",
+            &format!("A command file has a mistake, so the bot skips it until it's fixed: {}", s(e, "msg")),
+            None,
+        );
+    }
+    ui.add_space(spacing::L);
+    match form.tab {
+        0 => commands(app, ui, &t, form, files, custom),
+        1 => timers(app, ui, &t, form, files, custom),
+        2 => counters(app, ui, &t, form),
+        3 => quotes(app, ui, &t, form),
+        _ => test(app, ui, &t, form),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Side {
+    List,
+    Editor,
+}
+
+/// List on the left, editor on the right (stacked when narrow). `body` draws one side per call.
+fn columns(ui: &mut egui::Ui, mut body: impl FnMut(&mut egui::Ui, Side)) {
+    let avail = ui.available_size();
+    if avail.x < 820.0 {
+        egui::ScrollArea::vertical().id_salt("bot-narrow").auto_shrink([false, false]).show(ui, |ui| {
+            body(ui, Side::List);
+            ui.add_space(spacing::L);
+            body(ui, Side::Editor);
+        });
+        return;
+    }
+    let total = avail.x.min(2400.0);
+    let list_w = (total * 0.36).clamp(380.0, 760.0);
+    let ed_w = total - list_w - spacing::L;
+    ui.horizontal_top(|ui| {
+        ui.add_space(((avail.x - total) / 2.0 - ui.spacing().item_spacing.x).max(0.0));
+        ui.allocate_ui_with_layout(Vec2::new(list_w, avail.y), Layout::top_down(Align::Min), |ui| body(ui, Side::List));
+        ui.add_space(spacing::L - ui.spacing().item_spacing.x);
+        ui.allocate_ui_with_layout(Vec2::new(ed_w, avail.y), Layout::top_down(Align::Min), |ui| {
+            egui::ScrollArea::vertical().id_salt("bot-editor").auto_shrink([false, false]).show(ui, |ui| body(ui, Side::Editor));
+        });
+    });
 }
 
 fn file_picker(ui: &mut egui::Ui, salt: &str, file: &mut String, files: &[String], custom: &str) {
@@ -265,370 +430,540 @@ fn file_picker(ui: &mut egui::Ui, salt: &str, file: &mut String, files: &[String
     });
 }
 
-fn commands(app: &mut App, ui: &mut egui::Ui, form: &mut Form, files: &[String], custom: &str) {
-    let t = app.t.clone();
+// ---- commands ------------------------------------------------------------------------------------
+
+fn commands(app: &mut App, ui: &mut egui::Ui, t: &Theme, form: &mut Form, files: &[String], custom: &str) {
     let cmds: Vec<Value> = app.m.q_list("bot.commands").to_vec();
-    ui.columns(2, |cols| {
-        let ui = &mut cols[0];
-        ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut form.filter).hint_text(format!("{} filter", icon::SEARCH)).desired_width(200.0));
-            if ui.button(format!("{} New command", icon::PLAY)).clicked() {
-                form.cmd = Some(Draft { enabled: true, role: "everyone".into(), file: custom.to_string(), name: "!".into(), ..Default::default() });
-            }
-        });
-        let q = form.filter.to_lowercase();
-        egui::ScrollArea::vertical().id_salt("bot-cmds").auto_shrink([false, false]).show(ui, |ui| {
-            egui::Grid::new("bot-cmd-grid").striped(true).num_columns(4).spacing([10.0, 4.0]).show(ui, |ui| {
-                for h in ["command", "does", "who", "file"] {
-                    ui.label(RichText::new(h).small().color(t.fg_dim));
-                }
-                ui.end_row();
-                for c in &cmds {
-                    let name = s(c, "name");
-                    if !q.is_empty() && !name.contains(&q) && !s(c, "reply").to_lowercase().contains(&q) {
-                        continue;
-                    }
-                    let selected = form.cmd.as_ref().and_then(|d| d.at.clone()) == Some((s(c, "file").into(), i(c, "index")));
-                    let enabled = c.get_path("enabled").is_none_or(Value::truthy);
-                    let label = RichText::new(name).strong().color(if enabled { t.fg } else { t.fg_dim });
-                    if ui.selectable_label(selected, label).clicked() {
-                        form.cmd = Some(Draft::from_command(c));
-                    }
-                    let does = match s(c, "behavior") {
-                        "reply" => s(c, "reply").chars().take(48).collect::<String>(),
-                        b => b.to_string(),
-                    };
-                    ui.label(RichText::new(does).color(t.fg_dim));
-                    ui.label(s(c, "role"));
-                    ui.label(RichText::new(s(c, "file").trim_start_matches("commands/")).small().color(t.fg_dim));
-                    ui.end_row();
-                }
-            });
-        });
-
-        let ui = &mut cols[1];
-        let Some(d) = form.cmd.as_mut() else {
-            ui.label(RichText::new("Select a command to edit, or create one. Placeholders: {user} {touser} {args} {1}…{9} {count} {uptime} {song} {random:a|b|c} and any state address like {goals.subs.current}.").color(t.fg_dim));
-            return;
-        };
-        let title = if d.at.is_some() { format!("Edit {}", d.name) } else { "New command".to_string() };
-        let mut save = false;
-        let mut delete = false;
-        let mut close = false;
-        widgets::card(ui, &t, icon::BOT, &title, if d.enabled { LedState::Active } else { LedState::Idle }, |ui| {
-            egui::Grid::new("bot-cmd-edit").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
-                ui.label("File");
-                if d.at.is_some() {
-                    ui.label(RichText::new(&d.file).monospace());
-                } else {
-                    file_picker(ui, "bot-cmd-file", &mut d.file, files, custom);
-                }
-                ui.end_row();
-                ui.label("Name");
-                ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(200.0));
-                ui.end_row();
-                ui.label("Aliases");
-                ui.add(egui::TextEdit::singleline(&mut d.aliases).hint_text("!dc, !disc").desired_width(260.0));
-                ui.end_row();
-                ui.label("Reply");
-                ui.add(egui::TextEdit::multiline(&mut d.reply).desired_rows(3).desired_width(f32::INFINITY));
-                ui.end_row();
-                ui.label("Who");
-                egui::ComboBox::from_id_salt("bot-cmd-role").selected_text(format!("{}+", if d.role.is_empty() { "everyone" } else { &d.role })).show_ui(ui, |ui| {
-                    for r in ROLES {
-                        ui.selectable_value(&mut d.role, r.to_string(), format!("{r}+"));
-                    }
-                });
-                ui.end_row();
-                ui.label("Cooldown");
-                ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut d.cd_global).hint_text("global e.g. 30s").desired_width(110.0));
-                    ui.add(egui::TextEdit::singleline(&mut d.cd_user).hint_text("per user e.g. 2m").desired_width(110.0));
-                });
-                ui.end_row();
-                ui.label("Modes");
-                ui.add(egui::TextEdit::singleline(&mut d.modes).hint_text("any (or: live, rehearsal)").desired_width(260.0));
-                ui.end_row();
-                ui.label("Enabled");
-                ui.checkbox(&mut d.enabled, "");
-                ui.end_row();
-                ui.label("Needs args");
-                ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut d.min_args).hint_text("0").desired_width(40.0));
-                    ui.add(egui::TextEdit::singleline(&mut d.usage).hint_text("usage reply when missing").desired_width(240.0));
-                });
-                ui.end_row();
-                ui.label("Runs");
-                ui.add(egui::TextEdit::multiline(&mut d.cmds).hint_text("one command per line, e.g. preset.fire hype").desired_rows(2).desired_width(f32::INFINITY));
-                ui.end_row();
-                ui.label("Action");
-                ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut d.action).hint_text("e.g. queue.request").desired_width(140.0));
-                    ui.add(egui::TextEdit::singleline(&mut d.args).hint_text("{ text = \"{args}\" }").desired_width(220.0));
-                });
-                ui.end_row();
-                ui.label("Notes");
-                ui.add(egui::TextEdit::singleline(&mut d.description).desired_width(f32::INFINITY));
-                ui.end_row();
-            });
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                save = ui.button(RichText::new(format!("{} Save", icon::CHECK)).strong()).clicked();
-                close = ui.button("Close").clicked();
-                if d.at.is_some() {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        delete = widgets::hold_button(ui, &t, "Delete", t.bright_red, 0.6);
-                    });
-                }
-            });
-        });
-        if save {
-            match d.command_fields() {
-                Ok(fields) => {
-                    let mut args = Value::map().with("fields", fields).with("file", d.file.clone());
-                    if let Some((_, idx)) = &d.at {
-                        args = args.with("index", *idx);
-                    }
-                    let is_new = d.at.is_none();
-                    act(app, "bot.command.save", args);
-                    if is_new {
-                        form.cmd = None;
-                    }
-                }
-                Err(e) => app.m.toast(e, true),
-            }
-        } else if delete {
-            if let Some((file, idx)) = d.at.clone() {
-                act(app, "bot.command.delete", Value::map().with("file", file).with("index", idx));
-            }
-            form.cmd = None;
-        } else if close {
-            form.cmd = None;
-        }
-    });
-}
-
-fn timers(app: &mut App, ui: &mut egui::Ui, form: &mut Form, files: &[String], custom: &str) {
-    let t = app.t.clone();
-    let timers: Vec<Value> = app.m.q_list("bot.timers").to_vec();
-    ui.columns(2, |cols| {
-        let ui = &mut cols[0];
-        if ui.button(format!("{} New timer", icon::PLAY)).clicked() {
-            form.timer = Some(Draft {
-                enabled: true,
-                every: "20m".into(),
-                min_lines: "10".into(),
-                modes: "live".into(),
-                file: custom.to_string(),
-                ..Default::default()
-            });
-        }
-        let mode = app.m.str("show.mode").to_string();
-        egui::Grid::new("bot-timers").striped(true).num_columns(5).spacing([10.0, 4.0]).show(ui, |ui| {
-            for h in ["timer", "every", "chat lines", "next", "message"] {
-                ui.label(RichText::new(h).small().color(t.fg_dim));
-            }
-            ui.end_row();
-            for tm in &timers {
-                let selected = form.timer.as_ref().and_then(|d| d.at.clone()) == Some((s(tm, "file").into(), i(tm, "index")));
-                let modes = list(tm, "modes");
-                let in_mode = modes.is_empty() || modes.contains(&mode);
-                ui.horizontal(|ui| {
-                    widgets::led(
-                        ui,
-                        &t,
-                        if !tm.get_path("enabled").is_none_or(Value::truthy) {
-                            LedState::Idle
-                        } else if in_mode {
-                            LedState::Active
-                        } else {
-                            LedState::Armed
-                        },
+    let modes: Vec<String> = app.m.q_list("modes").iter().filter_map(|v| v.as_str().map(String::from)).collect();
+    let words = Words::new(app);
+    let height = ui.available_height();
+    let mut new = false;
+    let (mut save, mut delete, mut close, mut close_x) = (false, false, false, false);
+    columns(ui, |ui, side| match side {
+        Side::List => {
+            widgets::titled(
+                ui,
+                t,
+                "Your commands",
+                &format!("{} commands viewers can type", cmds.len()),
+                |ui| new = widgets::button_ex(ui, t, Some(icon::PLUS), "New command", Kind::Primary, Size::Medium, 0.0, true).clicked(),
+                |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.add(
+                        se_ui_kit::widgets::field(&mut form.filter)
+                            .hint_text(format!("{}  Find a command", icon::SEARCH))
+                            .margin(egui::Margin::symmetric(10, 7))
+                            .desired_width(f32::INFINITY),
                     );
-                    if ui.selectable_label(selected, s(tm, "name")).clicked() {
-                        form.timer = Some(Draft::from_timer(tm));
+                    ui.add_space(spacing::S);
+                    if cmds.is_empty() {
+                        widgets::empty_state(
+                            ui,
+                            t,
+                            icon::CHAT,
+                            "No commands yet",
+                            "A command is something viewers type, like !discord, and the bot answers.",
+                            None,
+                        );
+                        return;
                     }
-                });
-                ui.label(dur(i(tm, "every_ms")));
-                ui.label(format!("{} / {}", i(tm, "lines"), i(tm, "min_chat_lines")));
-                ui.label(match tm.get_path("next_in_ms").and_then(Value::as_i64) {
-                    Some(ms) => format!("{}:{:02}", ms / 60_000, ms / 1000 % 60),
-                    None => format!("waits for {}", list(tm, "modes").join("/")),
-                });
-                ui.label(RichText::new(s(tm, "reply").chars().take(50).collect::<String>()).color(t.fg_dim));
-                ui.end_row();
-            }
-        });
-
-        let ui = &mut cols[1];
-        let Some(d) = form.timer.as_mut() else {
-            ui.label(
-                RichText::new("Timers post a message every interval, once enough chat lines have passed, only in their modes (default: live).").color(t.fg_dim),
+                    let q = form.filter.to_lowercase();
+                    egui::ScrollArea::vertical().id_salt("bot-cmds").auto_shrink([false, true]).max_height((height - 140.0).max(120.0)).show(ui, |ui| {
+                        // your own replies first, then the built-in ones
+                        let mut last = None;
+                        for c in cmds.iter().filter(|c| s(c, "behavior") == "reply").chain(cmds.iter().filter(|c| s(c, "behavior") != "reply")) {
+                            let reply = s(c, "behavior") == "reply";
+                            if last != Some(reply) {
+                                if last.is_some() {
+                                    ui.add_space(spacing::S);
+                                }
+                                let n = cmds.iter().filter(|c| (s(c, "behavior") == "reply") == reply).count();
+                                widgets::section(ui, t, "", &if reply { format!("Answers ({n})") } else { format!("Built in ({n})") });
+                                last = Some(reply);
+                            }
+                            let name = s(c, "name");
+                            if !q.is_empty() && !name.to_lowercase().contains(&q) && !s(c, "reply").to_lowercase().contains(&q) {
+                                continue;
+                            }
+                            let selected = form.cmd.as_ref().and_then(|d| d.at.clone()) == Some((s(c, "file").into(), i(c, "index")));
+                            let enabled = c.get_path("enabled").is_none_or(Value::truthy);
+                            let trailing = match (enabled, s(c, "role")) {
+                                (false, _) => "Off".to_string(),
+                                (true, "" | "everyone") => String::new(),
+                                (true, r) => role_words(r).to_string(),
+                            };
+                            let glyph = if reply { icon::CHAT } else { icon::BOLT };
+                            let sub = does(c, &words);
+                            let sub = if trailing.is_empty() { sub } else { clip(&sub, 52) };
+                            if widgets::list_row(ui, t, glyph, name, &sub, &trailing, selected).clicked() {
+                                form.cmd = Some(Draft::from_command(c));
+                            }
+                        }
+                    });
+                },
             );
-            return;
-        };
-        let (mut save, mut delete, mut close) = (false, false, false);
-        widgets::card(
-            ui,
-            &t,
-            icon::TIMELINE,
-            if d.at.is_some() { "Edit timer" } else { "New timer" },
-            if d.enabled { LedState::Active } else { LedState::Idle },
-            |ui| {
-                egui::Grid::new("bot-timer-edit").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
-                    ui.label("File");
-                    if d.at.is_some() {
-                        ui.label(RichText::new(&d.file).monospace());
-                    } else {
-                        file_picker(ui, "bot-timer-file", &mut d.file, files, custom);
-                    }
-                    ui.end_row();
-                    ui.label("Name");
-                    ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(200.0));
-                    ui.end_row();
-                    ui.label("Every");
-                    ui.add(egui::TextEdit::singleline(&mut d.every).hint_text("20m (min 1m)").desired_width(100.0));
-                    ui.end_row();
-                    ui.label("Min chat lines");
-                    ui.add(egui::TextEdit::singleline(&mut d.min_lines).desired_width(60.0));
-                    ui.end_row();
-                    ui.label("Modes");
-                    ui.add(egui::TextEdit::singleline(&mut d.modes).desired_width(200.0));
-                    ui.end_row();
-                    ui.label("Message");
-                    ui.add(egui::TextEdit::multiline(&mut d.reply).desired_rows(3).desired_width(f32::INFINITY));
-                    ui.end_row();
-                    ui.label("Runs");
-                    ui.add(egui::TextEdit::multiline(&mut d.cmds).hint_text("optional commands, one per line").desired_rows(2).desired_width(f32::INFINITY));
-                    ui.end_row();
-                    ui.label("Enabled");
-                    ui.checkbox(&mut d.enabled, "");
-                    ui.end_row();
+        }
+        Side::Editor => {
+            let Some(d) = form.cmd.as_mut() else {
+                widgets::panel(ui, t, |ui| {
+                    ui.set_width(ui.available_width());
+                    new |= widgets::empty_state(
+                        ui,
+                        t,
+                        icon::CHAT,
+                        "Pick a command to change it",
+                        "Or make a new one, like !discord that answers with your invite link.",
+                        None,
+                    );
                 });
-                ui.horizontal(|ui| {
-                    save = ui.button(RichText::new(format!("{} Save", icon::CHECK)).strong()).clicked();
-                    close = ui.button("Close").clicked();
-                    if d.at.is_some() {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            delete = widgets::hold_button(ui, &t, "Delete", t.bright_red, 0.6);
+                return;
+            };
+            let title = if d.at.is_some() { d.name.clone() } else { "New command".to_string() };
+            let can_save = !d.name.trim().is_empty();
+            let mut save_top = false;
+            widgets::titled(
+                ui,
+                t,
+                &title,
+                "What viewers type, and what the bot does.",
+                |ui| {
+                    close_x = widgets::icon_button(ui, t, icon::CROSS, "Close").clicked();
+                    save_top = widgets::button_ex(ui, t, Some(icon::CHECK), "Save", Kind::Primary, Size::Medium, 0.0, can_save).clicked();
+                },
+                |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        label(ui, t, "Command");
+                        ui.add(se_ui_kit::widgets::field(&mut d.name).font(font_semibold(type_scale::LARGE)).hint_text("!discord").desired_width(220.0));
+                        ui.add_space(spacing::M);
+                        widgets::toggle(ui, t, &mut d.enabled).on_hover_text("Off: the bot ignores it");
+                        label(ui, t, if d.enabled { "On" } else { "Off" });
+                    });
+                    ui.horizontal(|ui| {
+                        label(ui, t, "Also works as");
+                        ui.add(se_ui_kit::widgets::field(&mut d.aliases).hint_text("!dc, !disc").desired_width(ui.available_width() - 8.0));
+                    });
+                    ui.add_space(spacing::M);
+                    let builtin = d.behavior.starts_with("builtin") || d.behavior.starts_with("action");
+                    if builtin && d.reply.is_empty() {
+                        widgets::hint(ui, t, "This command is built in. You can still change who can use it and how often.");
+                    } else {
+                        widgets::section(ui, t, "", "The bot answers");
+                        ui.add(
+                            egui::TextEdit::multiline(&mut d.reply)
+                                .hint_text("Join the Discord: https://discord.gg/…")
+                                .desired_rows(3)
+                                .desired_width(f32::INFINITY),
+                        );
+                        ui.horizontal_wrapped(|ui| {
+                            label(ui, t, "Insert");
+                            for (ph, what) in PLACEHOLDERS {
+                                if widgets::chip(ui, t, "", &capitalize(what), false)
+                                    .on_hover_text(format!("Becomes {what} when it's used. Types {ph}."))
+                                    .clicked()
+                                {
+                                    d.reply.push_str(ph);
+                                }
+                            }
                         });
                     }
-                });
-            },
-        );
-        if save {
-            match d.timer_fields() {
-                Ok(fields) => {
-                    let mut args = Value::map().with("fields", fields).with("file", d.file.clone());
-                    if let Some((_, idx)) = &d.at {
-                        args = args.with("index", *idx);
+                    ui.add_space(spacing::M);
+                    widgets::section(ui, t, "", "Who and how often");
+                    ui.horizontal(|ui| {
+                        label(ui, t, "Who can use it");
+                        egui::ComboBox::from_id_salt("bot-cmd-role").width(200.0).selected_text(role_words(&d.role)).show_ui(ui, |ui| {
+                            for (r, w) in ROLES {
+                                ui.selectable_value(&mut d.role, r.to_string(), w);
+                            }
+                        });
+                    });
+                    ui.horizontal(|ui| {
+                        label(ui, t, "Wait between uses");
+                        ui.add(se_ui_kit::widgets::field(&mut d.cd_global).hint_text("30s").desired_width(70.0));
+                        ui.add_space(spacing::M);
+                        label(ui, t, "Same viewer waits");
+                        ui.add(se_ui_kit::widgets::field(&mut d.cd_user).hint_text("2m").desired_width(70.0));
+                    });
+                    widgets::hint(ui, t, "Times like 30s or 2m. Leave empty for no wait.");
+                    ui.add_space(spacing::S);
+                    label(ui, t, "Only during these show modes (none picked: always)");
+                    mode_chips(ui, t, &mut d.modes, &modes);
+                    ui.add_space(spacing::M);
+                    widgets::section(ui, t, "", "If they leave something out");
+                    ui.horizontal(|ui| {
+                        label(ui, t, "Words needed after it");
+                        ui.add(se_ui_kit::widgets::field(&mut d.min_args).hint_text("0").desired_width(40.0));
+                        label(ui, t, "then answer");
+                        ui.add(se_ui_kit::widgets::field(&mut d.usage).hint_text("Try: !so @name").desired_width(ui.available_width() - 8.0));
+                    });
+                    ui.add_space(spacing::M);
+                    ui.horizontal(|ui| {
+                        label(ui, t, "Notes (just for you)");
+                        ui.add(se_ui_kit::widgets::field(&mut d.description).desired_width(ui.available_width() - 8.0));
+                    });
+                    ui.add_space(spacing::S);
+                    widgets::details(ui, t, "bot-cmd-details", "Details", |ui| {
+                        ui.horizontal(|ui| {
+                            label(ui, t, "Saved in");
+                            if d.at.is_some() {
+                                ui.label(RichText::new(&d.file).font(font_mono(type_scale::SMALL + 0.5)).color(t.fg));
+                            } else {
+                                file_picker(ui, "bot-cmd-file", &mut d.file, files, custom);
+                            }
+                        });
+                        label(ui, t, "Also runs (one command per line)");
+                        ui.add(
+                            egui::TextEdit::multiline(&mut d.cmds)
+                                .hint_text("preset.fire hype")
+                                .font(font_mono(type_scale::BODY - 1.0))
+                                .desired_rows(2)
+                                .desired_width(f32::INFINITY),
+                        );
+                        ui.horizontal(|ui| {
+                            label(ui, t, "Action");
+                            ui.add(
+                                se_ui_kit::widgets::field(&mut d.action)
+                                    .hint_text("queue.request")
+                                    .font(font_mono(type_scale::BODY - 1.0))
+                                    .desired_width(160.0),
+                            );
+                            ui.add(
+                                se_ui_kit::widgets::field(&mut d.args)
+                                    .hint_text("{ text = \"{args}\" }")
+                                    .font(font_mono(type_scale::BODY - 1.0))
+                                    .desired_width(ui.available_width() - 8.0),
+                            );
+                        });
+                    });
+                    ui.add_space(spacing::M);
+                    if d.at.is_some() {
+                        ui.horizontal(|ui| {
+                            delete = widgets::hold_button(ui, t, "Delete command", t.bright_red, 0.6);
+                            widgets::hint(ui, t, "Press and hold to delete.");
+                        });
                     }
-                    let is_new = d.at.is_none();
-                    act(app, "bot.timer.save", args);
-                    if is_new {
-                        form.timer = None;
-                    }
-                }
-                Err(e) => app.m.toast(e, true),
-            }
-        } else if delete {
-            if let Some((file, idx)) = d.at.clone() {
-                act(app, "bot.timer.delete", Value::map().with("file", file).with("index", idx));
-            }
-            form.timer = None;
-        } else if close {
-            form.timer = None;
+                },
+            );
+            save |= save_top;
         }
     });
+    close |= close_x;
+    if new {
+        form.cmd =
+            Some(Draft { enabled: true, role: "everyone".into(), file: custom.to_string(), name: "!".into(), behavior: "reply".into(), ..Default::default() });
+    }
+    let Some(d) = form.cmd.clone() else { return };
+    if save {
+        match d.command_fields() {
+            Ok(fields) => {
+                let mut args = Value::map().with("fields", fields).with("file", d.file.clone());
+                if let Some((_, idx)) = &d.at {
+                    args = args.with("index", *idx);
+                }
+                act(app, "bot.command.save", args);
+                app.m.toast(format!("Saved {}.", d.name.trim()), false);
+                if d.at.is_none() {
+                    form.cmd = None;
+                }
+            }
+            Err(e) => app.m.toast(e, true),
+        }
+    } else if delete {
+        if let Some((file, idx)) = d.at.clone() {
+            act(app, "bot.command.delete", Value::map().with("file", file).with("index", idx));
+        }
+        form.cmd = None;
+    } else if close {
+        form.cmd = None;
+    }
 }
 
-fn counters(app: &mut App, ui: &mut egui::Ui, form: &mut Form) {
-    let t = app.t.clone();
+// ---- timed messages ------------------------------------------------------------------------------
+
+fn timers(app: &mut App, ui: &mut egui::Ui, t: &Theme, form: &mut Form, files: &[String], custom: &str) {
+    let timers: Vec<Value> = app.m.q_list("bot.timers").to_vec();
+    let modes: Vec<String> = app.m.q_list("modes").iter().filter_map(|v| v.as_str().map(String::from)).collect();
+    let mode = app.m.str("show.mode").to_string();
+    let mut new = false;
+    let (mut save, mut delete, mut close, mut close_x) = (false, false, false, false);
+    columns(ui, |ui, side| match side {
+        Side::List => {
+            widgets::titled(
+                ui,
+                t,
+                "Timed messages",
+                "The bot posts these every so often while chat is active.",
+                |ui| new = widgets::button_ex(ui, t, Some(icon::PLUS), "New timed message", Kind::Primary, Size::Medium, 0.0, true).clicked(),
+                |ui| {
+                    ui.set_width(ui.available_width());
+                    if timers.is_empty() {
+                        widgets::empty_state(ui, t, icon::CLOCK, "No timed messages yet", "Like a reminder to follow, posted every 20 minutes.", None);
+                        return;
+                    }
+                    for tm in &timers {
+                        let selected = form.timer.as_ref().and_then(|d| d.at.clone()) == Some((s(tm, "file").into(), i(tm, "index")));
+                        let enabled = tm.get_path("enabled").is_none_or(Value::truthy);
+                        let tm_modes = list(tm, "modes");
+                        let in_mode = tm_modes.is_empty() || tm_modes.contains(&mode);
+                        let title = if s(tm, "name").is_empty() { clip(s(tm, "reply"), 40) } else { nice(s(tm, "name")) };
+                        let sub = format!("Every {} · after {} chat messages", dur_words(i(tm, "every_ms")), i(tm, "min_chat_lines"));
+                        let trailing = match (enabled, in_mode, tm.get_path("next_in_ms").and_then(Value::as_i64)) {
+                            (false, ..) => "Off".to_string(),
+                            (true, false, _) | (true, _, None) => format!("waits for {}", tm_modes.iter().map(|m| pretty(m)).collect::<Vec<_>>().join(" / ")),
+                            (true, true, Some(ms)) => format!("next in {}:{:02}", ms / 60_000, ms / 1000 % 60),
+                        };
+                        if widgets::list_row(ui, t, icon::CLOCK, &title, &sub, &trailing, selected).clicked() {
+                            form.timer = Some(Draft::from_timer(tm));
+                        }
+                    }
+                },
+            );
+        }
+        Side::Editor => {
+            let Some(d) = form.timer.as_mut() else {
+                widgets::panel(ui, t, |ui| {
+                    ui.set_width(ui.available_width());
+                    widgets::empty_state(ui, t, icon::CLOCK, "Pick a timed message to change it", "Or make a new one with New timed message.", None);
+                });
+                return;
+            };
+            let title = if d.at.is_some() { "Timed message" } else { "New timed message" };
+            let can_save = !d.every.trim().is_empty();
+            let mut save_top = false;
+            widgets::titled(
+                ui,
+                t,
+                title,
+                "Posted in chat every so often.",
+                |ui| {
+                    close_x = widgets::icon_button(ui, t, icon::CROSS, "Close").clicked();
+                    save_top = widgets::button_ex(ui, t, Some(icon::CHECK), "Save", Kind::Primary, Size::Medium, 0.0, can_save).clicked();
+                },
+                |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        label(ui, t, "Name");
+                        ui.add(se_ui_kit::widgets::field(&mut d.name).hint_text("follow reminder").desired_width(240.0));
+                        ui.add_space(spacing::M);
+                        widgets::toggle(ui, t, &mut d.enabled);
+                        label(ui, t, if d.enabled { "On" } else { "Off" });
+                    });
+                    ui.add_space(spacing::S);
+                    widgets::section(ui, t, "", "Message");
+                    ui.add(egui::TextEdit::multiline(&mut d.reply).hint_text("Enjoying the stream? Hit follow!").desired_rows(3).desired_width(f32::INFINITY));
+                    ui.add_space(spacing::M);
+                    widgets::section(ui, t, "", "When");
+                    ui.horizontal(|ui| {
+                        label(ui, t, "Every");
+                        ui.add(se_ui_kit::widgets::field(&mut d.every).hint_text("20m").desired_width(70.0));
+                        label(ui, t, "once at least");
+                        ui.add(se_ui_kit::widgets::field(&mut d.min_lines).hint_text("10").desired_width(50.0));
+                        label(ui, t, "chat messages have passed");
+                    });
+                    widgets::hint(ui, t, "At least 1 minute apart. Chat messages keep it from posting into an empty chat.");
+                    ui.add_space(spacing::S);
+                    label(ui, t, "Only during these show modes (none picked: always)");
+                    mode_chips(ui, t, &mut d.modes, &modes);
+                    ui.add_space(spacing::S);
+                    widgets::details(ui, t, "bot-timer-details", "Details", |ui| {
+                        ui.horizontal(|ui| {
+                            label(ui, t, "Saved in");
+                            if d.at.is_some() {
+                                ui.label(RichText::new(&d.file).font(font_mono(type_scale::SMALL + 0.5)).color(t.fg));
+                            } else {
+                                file_picker(ui, "bot-timer-file", &mut d.file, files, custom);
+                            }
+                        });
+                        label(ui, t, "Also runs (one command per line)");
+                        ui.add(egui::TextEdit::multiline(&mut d.cmds).font(font_mono(type_scale::BODY - 1.0)).desired_rows(2).desired_width(f32::INFINITY));
+                    });
+                    ui.add_space(spacing::M);
+                    if d.at.is_some() {
+                        ui.horizontal(|ui| {
+                            delete = widgets::hold_button(ui, t, "Delete timed message", t.bright_red, 0.6);
+                            widgets::hint(ui, t, "Press and hold to delete.");
+                        });
+                    }
+                },
+            );
+            save |= save_top;
+        }
+    });
+    close |= close_x;
+    if new {
+        form.timer =
+            Some(Draft { enabled: true, every: "20m".into(), min_lines: "10".into(), modes: "live".into(), file: custom.to_string(), ..Default::default() });
+    }
+    let Some(d) = form.timer.clone() else { return };
+    if save {
+        match d.timer_fields() {
+            Ok(fields) => {
+                let mut args = Value::map().with("fields", fields).with("file", d.file.clone());
+                if let Some((_, idx)) = &d.at {
+                    args = args.with("index", *idx);
+                }
+                act(app, "bot.timer.save", args);
+                app.m.toast("Timed message saved.", false);
+                if d.at.is_none() {
+                    form.timer = None;
+                }
+            }
+            Err(e) => app.m.toast(e, true),
+        }
+    } else if delete {
+        if let Some((file, idx)) = d.at.clone() {
+            act(app, "bot.timer.delete", Value::map().with("file", file).with("index", idx));
+        }
+        form.timer = None;
+    } else if close {
+        form.timer = None;
+    }
+}
+
+// ---- counters ------------------------------------------------------------------------------------
+
+fn counters(app: &mut App, ui: &mut egui::Ui, t: &Theme, form: &mut Form) {
     let counters: Vec<Value> = app.m.q_list("bot.counters").to_vec();
-    ui.label(
-        RichText::new("Counters back {count} in replies (per command) and `!setcounter`; each is also state `bot.counter.<name>` for rules and overlays.")
-            .color(t.fg_dim),
-    );
-    ui.add_space(4.0);
-    egui::Grid::new("bot-counters").striped(true).num_columns(3).spacing([12.0, 4.0]).show(ui, |ui| {
-        for c in &counters {
-            let name = s(c, "name").to_string();
-            let v = i(c, "value");
-            ui.label(RichText::new(&name).strong());
-            ui.label(RichText::new(v.to_string()).monospace().size(16.0));
+    egui::ScrollArea::vertical().id_salt("bot-counters").auto_shrink([false, false]).show(ui, |ui| centered(ui, 1100.0, |ui| {
+        widgets::titled(ui, t, "Counters", "Numbers your commands can show, like drumsticks thrown.", |_| {}, |ui| {
+            ui.set_width(ui.available_width());
+            if counters.is_empty() {
+                widgets::empty_state(ui, t, icon::PLUS, "No counters yet", "Add one below, then show it in a command's answer with Insert → A counter.", None);
+            }
+            for (n, c) in counters.iter().enumerate() {
+                let name = s(c, "name").to_string();
+                let v = i(c, "value");
+                egui::Frame::new()
+                    .fill(t.surface_hi)
+                    .corner_radius(egui::CornerRadius::same(se_ui_kit::theme::radius::CONTROL))
+                    .inner_margin(egui::Margin::symmetric(14, 8))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.add_sized([220.0, 28.0], egui::Label::new(RichText::new(nice(&name)).font(font_semibold(type_scale::BODY + 1.0)).color(t.fg)).truncate());
+                            ui.add_sized([90.0, 28.0], egui::Label::new(RichText::new(v.to_string()).font(font_mono(type_scale::HEADING)).color(t.fg)));
+                            if widgets::button(ui, t, "−1", Kind::Secondary).clicked() {
+                                act(app, "bot.counter.set", Value::map().with("name", name.clone()).with("value", v - 1));
+                            }
+                            if widgets::button(ui, t, "+1", Kind::Secondary).clicked() {
+                                act(app, "bot.counter.set", Value::map().with("name", name.clone()).with("value", v + 1));
+                            }
+                            if widgets::button(ui, t, "Reset", Kind::Ghost).clicked() {
+                                act(app, "bot.counter.set", Value::map().with("name", name.clone()).with("value", 0));
+                            }
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.push_id(("counter", n), |ui| {
+                                    if widgets::hold_button(ui, t, "Delete", t.bright_red, 0.5) {
+                                        act(app, "bot.counter.delete", Value::map().with("name", name.clone()));
+                                    }
+                                });
+                            });
+                        });
+                    });
+                ui.add_space(spacing::XS);
+            }
+            ui.add_space(spacing::M);
+            widgets::section(ui, t, "", "Add a counter");
             ui.horizontal(|ui| {
-                if ui.small_button("−1").clicked() {
-                    act(app, "bot.counter.set", Value::map().with("name", name.clone()).with("value", v - 1));
-                }
-                if ui.small_button("+1").clicked() {
-                    act(app, "bot.counter.set", Value::map().with("name", name.clone()).with("value", v + 1));
-                }
-                if ui.small_button("reset").clicked() {
-                    act(app, "bot.counter.set", Value::map().with("name", name.clone()).with("value", 0));
-                }
-                if widgets::hold_button(ui, &t, "Delete", t.bright_red, 0.5) {
-                    act(app, "bot.counter.delete", Value::map().with("name", name.clone()));
+                ui.add(se_ui_kit::widgets::field(&mut form.counter_name).hint_text("Name, like drumsticks").margin(egui::Margin::symmetric(10, 7)).desired_width(220.0));
+                ui.add(se_ui_kit::widgets::field(&mut form.counter_value).hint_text("Starts at 0").margin(egui::Margin::symmetric(10, 7)).desired_width(100.0));
+                let v = if form.counter_value.trim().is_empty() { Ok(0) } else { form.counter_value.trim().parse::<i64>() };
+                if widgets::button_ex(ui, t, Some(icon::PLUS), "Add counter", Kind::Primary, Size::Medium, 0.0, !form.counter_name.trim().is_empty() && v.is_ok()).clicked() {
+                    act(app, "bot.counter.set", Value::map().with("name", form.counter_name.trim()).with("value", v.unwrap_or(0)));
+                    form.counter_name.clear();
+                    form.counter_value.clear();
                 }
             });
-            ui.end_row();
-        }
-    });
-    ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        ui.add(egui::TextEdit::singleline(&mut form.counter_name).hint_text("counter name").desired_width(160.0));
-        ui.add(egui::TextEdit::singleline(&mut form.counter_value).hint_text("value").desired_width(70.0));
-        let v = form.counter_value.trim().parse::<i64>();
-        if ui.add_enabled(!form.counter_name.trim().is_empty() && v.is_ok(), egui::Button::new("Set")).clicked() {
-            act(app, "bot.counter.set", Value::map().with("name", form.counter_name.trim()).with("value", v.unwrap_or(0)));
-            form.counter_name.clear();
-            form.counter_value.clear();
-        }
-    });
+            ui.add_space(spacing::S);
+            widgets::details(ui, t, "bot-counter-details", "Details", |ui| {
+                widgets::hint(ui, t, "Mods can set a counter from chat with !setcounter. Each counter is also the setting bot.counter.<name>, so reactions and overlays can use it.");
+            });
+        });
+    }));
 }
 
-fn quotes(app: &mut App, ui: &mut egui::Ui, form: &mut Form) {
-    let t = app.t.clone();
+// ---- quotes --------------------------------------------------------------------------------------
+
+fn quotes(app: &mut App, ui: &mut egui::Ui, t: &Theme, form: &mut Form) {
     let quotes: Vec<Value> = app.m.q_list("bot.quotes").to_vec();
-    ui.horizontal(|ui| {
-        ui.add(egui::TextEdit::singleline(&mut form.quote_text).hint_text("new quote").desired_width(ui.available_width() - 80.0));
-        if ui.add_enabled(!form.quote_text.trim().is_empty(), egui::Button::new(format!("{} Add", icon::PLAY))).clicked() {
-            act(app, "bot.quote.add", Value::map().with("text", form.quote_text.trim()).with("by", "ui"));
-            form.quote_text.clear();
-        }
-    });
-    ui.add_space(4.0);
     egui::ScrollArea::vertical().id_salt("bot-quotes").auto_shrink([false, false]).show(ui, |ui| {
-        egui::Grid::new("bot-quotes-grid").striped(true).num_columns(4).spacing([10.0, 4.0]).show(ui, |ui| {
-            for q in quotes.iter().rev() {
-                let qid = i(q, "id");
-                ui.label(RichText::new(format!("#{qid}")).color(t.fg_dim));
-                match &mut form.quote_edit {
-                    Some((eid, text)) if *eid == qid => {
-                        ui.add(egui::TextEdit::singleline(text).desired_width(420.0));
-                    }
-                    _ => {
-                        ui.label(s(q, "text"));
-                    }
-                }
-                ui.label(RichText::new(format!("{} · {}", s(q, "added_by"), crate_date(i(q, "created_at")))).small().color(t.fg_dim));
-                ui.horizontal(|ui| {
-                    let editing = form.quote_edit.as_ref().is_some_and(|(e, _)| *e == qid);
-                    if editing {
-                        if ui.small_button(icon::CHECK).clicked()
-                            && let Some((_, text)) = form.quote_edit.take()
+        centered(ui, 1200.0, |ui| {
+            widgets::titled(
+                ui,
+                t,
+                "Quotes",
+                "Funny moments to bring back. Viewers show one with !quote.",
+                |_| {},
+                |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            se_ui_kit::widgets::field(&mut form.quote_text)
+                                .hint_text("Something worth remembering…")
+                                .margin(egui::Margin::symmetric(10, 7))
+                                .desired_width(ui.available_width() - 150.0),
+                        );
+                        if widgets::button_ex(ui, t, Some(icon::PLUS), "Add quote", Kind::Primary, Size::Medium, 0.0, !form.quote_text.trim().is_empty())
+                            .clicked()
                         {
-                            act(app, "bot.quote.edit", Value::map().with("id", qid).with("text", text));
+                            act(app, "bot.quote.add", Value::map().with("text", form.quote_text.trim()).with("by", "ui"));
+                            form.quote_text.clear();
                         }
-                    } else if ui.small_button("edit").clicked() {
-                        form.quote_edit = Some((qid, s(q, "text").to_string()));
+                    });
+                    ui.add_space(spacing::M);
+                    if quotes.is_empty() {
+                        widgets::empty_state(ui, t, icon::CHAT, "No quotes yet", "Add one above, or let viewers save them with !addquote.", None);
+                        return;
                     }
-                    if widgets::hold_button(ui, &t, "Delete", t.bright_red, 0.5) {
-                        act(app, "bot.quote.delete", Value::map().with("id", qid));
+                    for q in quotes.iter().rev() {
+                        let qid = i(q, "id");
+                        egui::Frame::new()
+                            .fill(t.surface_hi)
+                            .corner_radius(egui::CornerRadius::same(se_ui_kit::theme::radius::CONTROL))
+                            .inner_margin(egui::Margin::symmetric(14, 10))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(format!("#{qid}")).font(font_mono(type_scale::SMALL + 0.5)).color(t.text_faint));
+                                    let editing = form.quote_edit.as_ref().is_some_and(|(e, _)| *e == qid);
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        ui.push_id(("quote", qid), |ui| {
+                                            if widgets::hold_button(ui, t, "Delete", t.bright_red, 0.5) {
+                                                act(app, "bot.quote.delete", Value::map().with("id", qid));
+                                            }
+                                        });
+                                        if editing {
+                                            if widgets::button_ex(ui, t, Some(icon::CHECK), "Save", Kind::Primary, Size::Small, 0.0, true).clicked()
+                                                && let Some((_, text)) = form.quote_edit.take()
+                                            {
+                                                act(app, "bot.quote.edit", Value::map().with("id", qid).with("text", text));
+                                            }
+                                        } else if widgets::button_ex(ui, t, Some(icon::EDIT), "Edit", Kind::Ghost, Size::Small, 0.0, true).clicked() {
+                                            form.quote_edit = Some((qid, s(q, "text").to_string()));
+                                        }
+                                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| match &mut form.quote_edit {
+                                            Some((eid, text)) if *eid == qid => {
+                                                ui.add(se_ui_kit::widgets::field(text).desired_width(ui.available_width()));
+                                            }
+                                            _ => {
+                                                ui.add(egui::Label::new(RichText::new(format!("“{}”", s(q, "text"))).color(t.fg)).wrap());
+                                            }
+                                        });
+                                    });
+                                });
+                                let by = match s(q, "added_by") {
+                                    "" | "ui" => "you".to_string(),
+                                    who => who.to_string(),
+                                };
+                                ui.label(
+                                    RichText::new(format!("Added by {by} on {}", crate_date(i(q, "created_at")))).size(type_scale::SMALL).color(t.text_dim),
+                                );
+                            });
+                        ui.add_space(spacing::XS);
                     }
-                });
-                ui.end_row();
-            }
-        });
+                },
+            );
+        })
     });
 }
 
@@ -645,40 +980,72 @@ fn crate_date(unix: i64) -> String {
     format!("{:04}-{m:02}-{d:02}", yoe + era * 400 + i64::from(m <= 2))
 }
 
-fn test(app: &mut App, ui: &mut egui::Ui, form: &mut Form) {
-    let t = app.t.clone();
-    ui.label(
-        RichText::new("Sends a simulated chat line through the real pipeline (policy, cooldowns, replies). Replies go to Twitch chat when connected.")
-            .color(t.fg_dim),
-    );
-    ui.horizontal(|ui| {
-        egui::ComboBox::from_id_salt("bot-test-role").selected_text(form.test_role.clone()).show_ui(ui, |ui| {
-            for r in ROLES {
-                ui.selectable_value(&mut form.test_role, r.to_string(), r);
-            }
-        });
-        let r = ui.add(egui::TextEdit::singleline(&mut form.test_msg).hint_text("!discord").desired_width(ui.available_width() - 80.0));
-        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-        if (ui.button(format!("{} Send", icon::SIM)).clicked() || enter) && !form.test_msg.trim().is_empty() {
-            act(app, "sim.chat", Value::map().with("message", form.test_msg.trim()).with("role", form.test_role.clone()).with("user", "tester"));
-            form.test_msg.clear();
-        }
-    });
-    ui.add_space(6.0);
-    widgets::section(ui, &t, icon::CHAT, "Chat and bot replies");
-    egui::ScrollArea::vertical().id_salt("bot-test-log").stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
-        for e in app.m.events.iter().filter(|e| e.ty == "twitch.chat" || e.ty == "bot.said") {
-            ui.horizontal_wrapped(|ui| {
-                if e.ty == "bot.said" {
-                    ui.label(RichText::new(format!("{} bot", icon::BOT)).strong().color(t.green));
-                    ui.label(s(&e.payload, "text"));
-                    ui.label(RichText::new(s(&e.payload, "source")).small().color(t.fg_dim));
-                } else {
-                    let who = e.actor.as_ref().map(|a| a.name.as_str()).unwrap_or("?");
-                    ui.label(RichText::new(who).strong().color(t.accent));
-                    ui.label(s(&e.payload, "message"));
+// ---- try it --------------------------------------------------------------------------------------
+
+fn test(app: &mut App, ui: &mut egui::Ui, t: &Theme, form: &mut Form) {
+    let height = ui.available_height();
+    widgets::titled(
+        ui,
+        t,
+        "Try a command",
+        "Type like a viewer would. The bot answers in your Twitch chat when it's connected.",
+        |_| {},
+        |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                label(ui, t, "Pretend to be");
+                egui::ComboBox::from_id_salt("bot-test-role").width(180.0).selected_text(role_words(&form.test_role)).show_ui(ui, |ui| {
+                    for (r, w) in ROLES {
+                        ui.selectable_value(&mut form.test_role, r.to_string(), w);
+                    }
+                });
+                let r = ui.add(
+                    se_ui_kit::widgets::field(&mut form.test_msg)
+                        .hint_text("!discord")
+                        .margin(egui::Margin::symmetric(10, 7))
+                        .desired_width(ui.available_width() - 110.0),
+                );
+                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let send = widgets::button_ex(ui, t, Some(icon::PLAY), "Send", Kind::Primary, Size::Medium, 0.0, !form.test_msg.trim().is_empty()).clicked();
+                if (send || enter) && !form.test_msg.trim().is_empty() {
+                    act(app, "sim.chat", Value::map().with("message", form.test_msg.trim()).with("role", form.test_role.clone()).with("user", "tester"));
+                    form.test_msg.clear();
                 }
             });
-        }
-    });
+            ui.add_space(spacing::M);
+            widgets::section(ui, t, "", "Chat and bot answers");
+            egui::Frame::new()
+                .fill(t.bg)
+                .stroke(egui::Stroke::new(1.0, t.border))
+                .corner_radius(egui::CornerRadius::same(se_ui_kit::theme::radius::CONTROL))
+                .inner_margin(egui::Margin::same(12))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    egui::ScrollArea::vertical()
+                        .id_salt("bot-test-log")
+                        .stick_to_bottom(true)
+                        .auto_shrink([false, false])
+                        .max_height((height - 220.0).max(160.0))
+                        .show(ui, |ui| {
+                            let mut any = false;
+                            for e in app.m.events.iter().filter(|e| e.ty == "twitch.chat" || e.ty == "bot.said") {
+                                any = true;
+                                ui.horizontal_wrapped(|ui| {
+                                    if e.ty == "bot.said" {
+                                        ui.label(RichText::new(format!("{}  Bot", icon::BOT)).font(font_semibold(type_scale::BODY)).color(t.green));
+                                        ui.label(RichText::new(s(&e.payload, "text")).color(t.fg));
+                                    } else {
+                                        let who = e.actor.as_ref().map(|a| a.name.as_str()).unwrap_or("someone");
+                                        ui.label(RichText::new(who).font(font_semibold(type_scale::BODY)).color(t.accent));
+                                        ui.label(RichText::new(s(&e.payload, "message")).color(t.fg));
+                                    }
+                                });
+                            }
+                            if !any {
+                                widgets::hint(ui, t, "Nothing yet. Send a command above and the answer shows up here.");
+                            }
+                        });
+                });
+        },
+    );
 }

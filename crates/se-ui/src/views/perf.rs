@@ -1,15 +1,22 @@
-//! Performance view (§15.6, §21): per-pass GPU timings, frame times, dropped/late frames,
-//! VRAM, audio xruns/DSP load, OBS encoder health, and the UI's own cost (frames transport,
-//! zero-readback counters, preview rates under GPU pressure).
+//! Settings → Performance (§15.6, §21): a plain-words summary first ("Video: smooth · Sound: no
+//! glitches · OBS: 0 dropped frames"), then the detail — per-pass GPU timings, frame times,
+//! dropped/late frames, VRAM, audio xruns/DSP load, OBS encoder health, and this window's own cost
+//! (frames transport, zero-readback counters, preview rates under GPU pressure).
 
 use crate::app::App;
 use crate::frames::Transport;
-use egui::{RichText, Vec2};
+use egui::{Color32, CornerRadius, Rect, RichText, Ui, Vec2};
 use se_proto::Value;
-use se_ui_kit::widgets::{self, LedState, icon};
+use se_ui_kit::Theme;
+use se_ui_kit::theme::{font_mono, font_semibold, mix, radius, spacing, type_scale};
+use se_ui_kit::widgets;
 use std::collections::VecDeque;
 
 const HIST: usize = 300;
+/// Engine GPU budget per frame (ms).
+const GPU_BUDGET: f64 = 8.0;
+/// Widest the page gets on very large screens.
+const MAX_WIDTH: f32 = 2400.0;
 
 #[derive(Default)]
 pub struct PerfState {
@@ -39,12 +46,7 @@ pub fn sample(app: &mut App, ui_frame_ms: f32) {
     push(&mut app.perf.ui_ms, ui_frame_ms);
 }
 
-fn kv(ui: &mut egui::Ui, k: &str, v: String) {
-    ui.label(RichText::new(k).small());
-    ui.label(RichText::new(v).monospace());
-    ui.end_row();
-}
-
+/// A value for the detail tables (`—` when the engine doesn't report it).
 fn opt(app: &App, a: &str, unit: &str) -> String {
     match app.m.get(a) {
         Some(Value::Float(f)) => format!("{f:.2}{unit}"),
@@ -53,9 +55,26 @@ fn opt(app: &App, a: &str, unit: &str) -> String {
     }
 }
 
-fn bar(ui: &mut egui::Ui, t: &se_ui_kit::Theme, label: &str, v: f64, max: f64, unit: &str) {
+/// Fixed-width, left-aligned label column for the detail rows.
+fn key_label(ui: &mut Ui, t: &Theme, k: &str) {
+    ui.allocate_ui_with_layout(Vec2::new(170.0, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+        ui.set_min_width(170.0);
+        ui.add(egui::Label::new(RichText::new(k).size(type_scale::SMALL + 0.5).color(t.text_dim)).truncate());
+    });
+}
+
+/// Label/value row with a mono value.
+fn kv(ui: &mut Ui, t: &Theme, k: &str, v: &str) {
     ui.horizontal(|ui| {
-        ui.add_sized([150.0, 16.0], egui::Label::new(RichText::new(label).small().monospace()));
+        key_label(ui, t, k);
+        ui.label(RichText::new(v).font(font_mono(type_scale::SMALL + 0.5)).color(t.fg));
+    });
+}
+
+/// Label, horizontal bar (green → yellow → red as it fills), value.
+fn bar(ui: &mut Ui, t: &Theme, label: &str, v: f64, max: f64, text: &str) {
+    ui.horizontal(|ui| {
+        key_label(ui, t, label);
         let frac = if max > 0.0 { (v / max).clamp(0.0, 1.0) as f32 } else { 0.0 };
         let fill = if frac > 0.9 {
             t.bright_red
@@ -64,183 +83,359 @@ fn bar(ui: &mut egui::Ui, t: &se_ui_kit::Theme, label: &str, v: f64, max: f64, u
         } else {
             t.green
         };
-        ui.add(egui::ProgressBar::new(frac).desired_width(220.0).fill(fill).text(format!("{v:.2}{unit}")));
+        let w = (ui.available_width() - 100.0).max(80.0);
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(w, 8.0), egui::Sense::hover());
+        let r = CornerRadius::same(radius::PILL);
+        ui.painter().rect_filled(rect, r, t.inset);
+        if frac > 0.0 {
+            ui.painter().rect_filled(Rect::from_min_size(rect.min, Vec2::new((rect.width() * frac).max(8.0), rect.height())), r, fill);
+        }
+        ui.label(RichText::new(text).font(font_mono(type_scale::SMALL)).color(t.fg));
     });
 }
 
-pub fn ui(app: &mut App, ui: &mut egui::Ui) {
-    let t = app.t.clone();
-    widgets::section(ui, &t, icon::PERF, "Performance");
-    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        ui.columns(2, |cols| {
-            render(app, &mut cols[0]);
-            right(app, &mut cols[1]);
-        });
-        ui.separator();
-        other(app, ui);
-    });
+/// Small caption above a chart.
+fn caption(ui: &mut Ui, t: &Theme, text: &str) {
+    ui.label(RichText::new(text).size(type_scale::SMALL).color(t.text_dim));
 }
 
-fn render(app: &mut App, ui: &mut egui::Ui) {
-    let t = app.t.clone();
-    widgets::card(ui, &t, icon::GPU, "Render (engine)", if app.m.f("perf.gpu_ms") > 8.0 { LedState::Armed } else { LedState::Healthy }, |ui| {
-        let gpu: Vec<f32> = app.perf.gpu.iter().copied().collect();
-        let frame: Vec<f32> = app.perf.frame.iter().copied().collect();
-        ui.label(RichText::new("GPU ms (budget 8 ms)").small());
-        widgets::scope(ui, &t, Vec2::new(ui.available_width(), 60.0), &gpu, Some((0.0, 16.0)), Some(t.accent));
-        ui.label(RichText::new("CPU frame build ms").small());
-        widgets::scope(ui, &t, Vec2::new(ui.available_width(), 40.0), &frame, Some((0.0, 16.0)), Some(t.cyan));
-        egui::Grid::new("render-kv").num_columns(2).show(ui, |ui| {
-            kv(ui, "gpu", opt(app, "perf.gpu_ms", " ms"));
-            kv(ui, "frame", opt(app, "perf.frame_ms", " ms"));
-            kv(ui, "fps", opt(app, "perf.fps", ""));
-            kv(ui, "dropped", opt(app, "perf.dropped", ""));
-            kv(ui, "late", opt(app, "perf.late", ""));
-        });
-        let vram = app.m.f("perf.vram_mb");
-        let budget = app.m.get("perf.vram_budget_mb").and_then(Value::as_f64).unwrap_or(3072.0);
-        if app.m.has("perf.vram_mb") {
-            bar(ui, &t, "VRAM (engine budget)", vram, budget, " MB");
-        }
-        ui.label(RichText::new("passes").small().strong());
-        let mut passes: Vec<(String, f64)> = app
-            .m
-            .under("perf.pass")
-            .filter_map(|(a, v)| Some((a.strip_prefix("perf.pass.")?.trim_end_matches("_ms").trim_end_matches(".gpu_ms").to_string(), v.as_f64()?)))
-            .collect();
-        passes.sort_by(|a, b| b.1.total_cmp(&a.1));
-        if passes.is_empty() {
-            ui.label(RichText::new("no per-pass timings (renderer not running)").small().color(t.fg_dim));
-        }
-        for (n, ms) in passes {
-            bar(ui, &t, &n, ms, 8.0, " ms");
-        }
-    });
+// ---- summary -------------------------------------------------------------------------------------
+
+struct Stat {
+    title: &'static str,
+    value: String,
+    line: String,
+    color: Color32,
 }
 
-fn right(app: &mut App, ui: &mut egui::Ui) {
-    let t = app.t.clone();
-    let xr = app.m.f("perf.audio.xruns");
-    widgets::card(ui, &t, icon::MIX, "Audio", if xr > 0.0 { LedState::Armed } else { LedState::Healthy }, |ui| {
-        if !app.m.has("perf.audio.load") && !app.m.has("perf.audio.xruns") {
-            ui.label(RichText::new("audio engine not running").small().color(t.fg_dim));
-            return;
-        }
-        bar(ui, &t, "DSP load", app.m.f("perf.audio.load") * 100.0, 100.0, " %");
-        egui::Grid::new("audio-kv").num_columns(2).show(ui, |ui| {
-            kv(ui, "xruns", opt(app, "perf.audio.xruns", ""));
-            kv(ui, "callback", opt(app, "perf.audio.dsp_ms", " ms"));
-            kv(ui, "quantum", opt(app, "perf.audio.quantum", ""));
-            kv(ui, "rate", opt(app, "perf.audio.rate", " Hz"));
-            kv(ui, "latency", opt(app, "perf.audio.latency_ms", " ms"));
-        });
-    });
-    let obs_ok = app.m.b("obs.link");
-    widgets::card(
-        ui,
-        &t,
-        icon::REC,
-        "OBS encoder",
-        if !obs_ok {
-            LedState::Idle
-        } else if app.m.f("obs.stream.dropped") > 0.0 {
-            LedState::Armed
+fn stats(app: &App, t: &Theme) -> [Stat; 4] {
+    let m = &app.m;
+    let gpu = m.f("perf.gpu_ms");
+    let video = if !m.has("perf.gpu_ms") {
+        Stat { title: "Video", value: "Not running".into(), line: "The picture engine isn't reporting.".into(), color: t.text_dim }
+    } else {
+        let fps = m.f("perf.fps");
+        let (value, color) = if gpu > 11.0 {
+            ("Struggling", t.bright_red)
+        } else if gpu > GPU_BUDGET {
+            ("Working hard", t.yellow)
         } else {
-            LedState::Healthy
-        },
-        |ui| {
-            if !app.m.has("obs.link") {
-                ui.label(RichText::new("OBS link not running").small().color(t.fg_dim));
-                return;
-            }
-            egui::Grid::new("obs-kv").num_columns(2).show(ui, |ui| {
-                kv(ui, "plugin", if obs_ok { "connected".into() } else { "disconnected".into() });
-                kv(ui, "render fps", opt(app, "obs.fps", ""));
-                kv(ui, "render ms", opt(app, "obs.render.ms", " ms"));
-                kv(ui, "render lagged", opt(app, "obs.render.lagged", ""));
-                kv(ui, "encoder skipped", opt(app, "obs.encode.skipped", ""));
-                kv(ui, "stream kbps", opt(app, "obs.stream.kbps", ""));
-                kv(ui, "stream dropped", opt(app, "obs.stream.dropped", ""));
-                kv(ui, "congestion", opt(app, "obs.stream.congestion", ""));
-                kv(ui, "lag", opt(app, "obs.stream.lag_ms", " ms"));
+            ("Smooth", t.green)
+        };
+        Stat { title: "Video", value: value.into(), line: format!("{fps:.0} frames a second"), color }
+    };
+    let sound = if !m.has("perf.audio.load") && !m.has("perf.audio.xruns") {
+        Stat { title: "Sound", value: "Not running".into(), line: "The sound engine isn't reporting.".into(), color: t.text_dim }
+    } else {
+        let xr = m.f("perf.audio.xruns") as i64;
+        let load = m.f("perf.audio.load") * 100.0;
+        let (value, color) = if xr == 0 { ("No glitches".to_string(), t.green) } else { (format!("{xr} glitches"), t.yellow) };
+        Stat { title: "Sound", value, line: format!("{load:.0}% busy"), color }
+    };
+    let obs = if !m.has("obs.link") {
+        Stat { title: "OBS", value: "Not linked".into(), line: "Stream Engine isn't talking to OBS.".into(), color: t.text_dim }
+    } else if !m.b("obs.link") {
+        Stat { title: "OBS", value: "Not open".into(), line: "Open OBS and it connects by itself.".into(), color: t.yellow }
+    } else {
+        let dropped = m.f("obs.stream.dropped") as i64;
+        let kbps = m.f("obs.stream.kbps");
+        let line = if kbps > 0.0 { format!("Sending {:.1} Mbps", kbps / 1000.0) } else { "Not streaming right now".into() };
+        let color = if dropped > 0 { t.yellow } else { t.green };
+        Stat { title: "OBS", value: format!("{dropped} dropped frames"), line, color }
+    };
+    let ui_ms = app.perf.ui_ms.iter().rev().take(20).copied().fold(0.0f32, f32::max);
+    let pressure = app.gpu_pressure();
+    let (value, color) = match (ui_ms > 25.0, pressure) {
+        (_, 2) => ("Saving power", t.yellow),
+        (true, _) => ("A bit slow", t.yellow),
+        _ => ("Smooth", t.green),
+    };
+    let win = Stat { title: "This window", value: value.into(), line: format!("Previews at {:.0} a second", app.preview_hz()), color };
+    [video, sound, obs, win]
+}
+
+fn summary(app: &App, ui: &mut Ui, t: &Theme) {
+    let s = stats(app, t);
+    let headline = s.iter().map(|x| format!("{}: {}", x.title, x.value.to_lowercase())).collect::<Vec<_>>().join(" · ");
+    // the same list (and counts) as the top bar's health pill, plus frames OBS dropped
+    let mut warns = crate::views::status::warnings(app);
+    let dropped = app.m.f("obs.stream.dropped") as i64;
+    if dropped > 0 {
+        warns.push(crate::views::status::Warning { text: format!("OBS dropped {dropped} frames while sending."), fail: false, open: None, setup: false });
+    }
+    let fails = warns.iter().filter(|w| w.fail && !w.setup).count();
+    let checks = warns.iter().filter(|w| !w.fail && !w.setup).count();
+    let setup = warns.iter().filter(|w| w.setup).count();
+    let head = if fails > 0 {
+        if fails == 1 { "1 problem needs a look".to_string() } else { format!("{fails} problems need a look") }
+    } else if checks > 0 {
+        if checks == 1 { "1 thing to check".to_string() } else { format!("{checks} things to check") }
+    } else {
+        "Stream Engine is running smoothly".to_string()
+    };
+    widgets::panel(ui, t, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(RichText::new(head).font(font_semibold(type_scale::HEADING)).color(t.fg));
+        if !headline.is_empty() {
+            ui.label(RichText::new(headline).color(t.text_dim));
+        }
+        if setup > 0 {
+            ui.label(
+                RichText::new(if setup == 1 { "1 thing left to set up.".to_string() } else { format!("{setup} things left to set up.") }).color(t.text_dim),
+            );
+        }
+        ui.add_space(spacing::XS);
+        for w in warns.iter().take(10) {
+            let (ic, c) = match (w.setup, w.fail) {
+                (true, _) => (se_ui_kit::widgets::icon::INFO, t.accent),
+                (false, true) => (se_ui_kit::widgets::icon::WARN, t.bright_red),
+                (false, false) => (se_ui_kit::widgets::icon::WARN, t.yellow),
+            };
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(ic).color(c));
+                ui.add(egui::Label::new(RichText::new(&w.text).color(t.fg)).truncate()).on_hover_text(&w.text);
             });
-            let mut ids: Vec<String> =
-                app.m.under("obs.output").filter_map(|(a, _)| a.strip_prefix("obs.output.")?.strip_suffix(".label").map(String::from)).collect();
-            ids.dedup();
-            for id in ids {
-                let p = format!("obs.output.{id}");
-                ui.label(
-                    RichText::new(format!(
-                        "{} {} ({}, {}): {:.0} kbps, {} dropped / {}",
-                        if app.m.b(&format!("{p}.active")) { "●" } else { "○" },
-                        app.m.str(&format!("{p}.label")),
-                        app.m.str(&format!("{p}.kind")),
-                        app.m.str(&format!("{p}.canvas")),
-                        app.m.f(&format!("{p}.kbps")),
-                        app.m.f(&format!("{p}.dropped")),
-                        app.m.f(&format!("{p}.total")),
-                    ))
-                    .small()
-                    .monospace(),
-                );
+        }
+        ui.add_space(spacing::M);
+        let gap = spacing::M;
+        let n = s.len() as f32;
+        let w = ((ui.available_width() - gap * (n - 1.0)) / n).floor();
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            for x in &s {
+                egui::Frame::new().fill(t.surface_hi).corner_radius(radius::CONTROL).inner_margin(egui::Margin::symmetric(14, 12)).show(ui, |ui| {
+                    ui.vertical(|ui| {
+                        ui.set_width(w - 28.0);
+                        ui.spacing_mut().item_spacing.y = 4.0;
+                        ui.label(RichText::new(x.title).size(type_scale::SMALL + 0.5).color(t.text_dim));
+                        ui.horizontal(|ui| {
+                            let (r, _) = ui.allocate_exact_size(Vec2::splat(12.0), egui::Sense::hover());
+                            ui.painter().circle_filled(r.center(), 5.0, x.color);
+                            ui.label(RichText::new(&x.value).font(font_semibold(type_scale::LARGE)).color(t.fg));
+                        });
+                        ui.add(egui::Label::new(RichText::new(&x.line).size(type_scale::SMALL).color(t.text_dim)).truncate());
+                    });
+                });
+            }
+        });
+    });
+}
+
+// ---- detail --------------------------------------------------------------------------------------
+
+pub fn ui(app: &mut App, ui: &mut Ui) {
+    let t = app.t.clone();
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        ui.set_max_width(ui.available_width().min(MAX_WIDTH));
+        summary(app, ui, &t);
+        ui.add_space(spacing::L);
+        let gaps = ui.spacing().item_spacing;
+        ui.spacing_mut().item_spacing.x = spacing::L;
+        let n = if ui.available_width() >= 2200.0 { 3 } else { 2 };
+        ui.columns(n, |cols| {
+            for c in cols.iter_mut() {
+                c.spacing_mut().item_spacing = gaps;
+            }
+            render(app, &mut cols[0], &t);
+            audio(app, &mut cols[1], &t);
+            obs(app, &mut cols[1], &t);
+            ui_card(app, &mut cols[if n == 3 { 2 } else { 0 }], &t);
+        });
+        ui.spacing_mut().item_spacing = gaps;
+        other(app, ui, &t);
+        ui.add_space(spacing::XL);
+    });
+}
+
+fn render(app: &mut App, ui: &mut Ui, t: &Theme) {
+    widgets::titled(
+        ui,
+        t,
+        "Video engine",
+        &format!("GPU time per frame; the budget is {GPU_BUDGET:.0} ms."),
+        |_| {},
+        |ui| {
+            ui.set_width(ui.available_width());
+            let gpu: Vec<f32> = app.perf.gpu.iter().copied().collect();
+            let frame: Vec<f32> = app.perf.frame.iter().copied().collect();
+            caption(ui, t, "GPU ms");
+            widgets::scope(ui, t, Vec2::new(ui.available_width(), 64.0), &gpu, Some((0.0, 16.0)), Some(t.accent));
+            ui.add_space(spacing::XS);
+            caption(ui, t, "CPU frame build ms");
+            widgets::scope(ui, t, Vec2::new(ui.available_width(), 40.0), &frame, Some((0.0, 16.0)), Some(t.cyan));
+            ui.add_space(spacing::S);
+            kv(ui, t, "GPU", &opt(app, "perf.gpu_ms", " ms"));
+            kv(ui, t, "Frame build", &opt(app, "perf.frame_ms", " ms"));
+            kv(ui, t, "Frames a second", &opt(app, "perf.fps", ""));
+            kv(ui, t, "Dropped", &opt(app, "perf.dropped", ""));
+            kv(ui, t, "Late", &opt(app, "perf.late", ""));
+            if app.m.has("perf.vram_mb") {
+                let budget = app.m.get("perf.vram_budget_mb").and_then(Value::as_f64).unwrap_or(3072.0);
+                let mb = app.m.f("perf.vram_mb");
+                bar(ui, t, "Video memory", mb, budget, &format!("{:.1} GB of {:.1} GB", mb / 1000.0, budget / 1000.0));
+            }
+            ui.add_space(spacing::S);
+            caption(ui, t, "Passes");
+            let mut passes: Vec<(String, f64)> = app
+                .m
+                .under("perf.pass")
+                .filter_map(|(a, v)| Some((a.strip_prefix("perf.pass.")?.trim_end_matches("_ms").trim_end_matches(".gpu_ms").to_string(), v.as_f64()?)))
+                .collect();
+            passes.sort_by(|a, b| b.1.total_cmp(&a.1));
+            if passes.is_empty() {
+                widgets::hint(ui, t, "No per-pass timings (the video engine isn't running).");
+            }
+            for (n, ms) in passes {
+                bar(ui, t, &n, ms, GPU_BUDGET, &format!("{ms:.2} ms"));
             }
         },
     );
-    ui_card(app, ui);
+    ui.add_space(spacing::L);
 }
 
-fn ui_card(app: &mut App, ui: &mut egui::Ui) {
-    let t = app.t.clone();
+fn audio(app: &mut App, ui: &mut Ui, t: &Theme) {
+    widgets::titled(
+        ui,
+        t,
+        "Sound engine",
+        "Glitches (xruns) are clicks or drop-outs in the sound.",
+        |_| {},
+        |ui| {
+            ui.set_width(ui.available_width());
+            if !app.m.has("perf.audio.load") && !app.m.has("perf.audio.xruns") {
+                widgets::hint(ui, t, "The sound engine isn't running.");
+                return;
+            }
+            let pct = app.m.f("perf.audio.load") * 100.0;
+            bar(ui, t, "Busy", pct, 100.0, &format!("{pct:.0}%"));
+            kv(ui, t, "Glitches (xruns)", &opt(app, "perf.audio.xruns", ""));
+            kv(ui, t, "Callback", &opt(app, "perf.audio.dsp_ms", " ms"));
+            kv(ui, t, "Buffer (quantum)", &opt(app, "perf.audio.quantum", ""));
+            kv(ui, t, "Sample rate", &opt(app, "perf.audio.rate", " Hz"));
+            kv(ui, t, "Latency", &opt(app, "perf.audio.latency_ms", " ms"));
+        },
+    );
+    ui.add_space(spacing::L);
+}
+
+fn obs(app: &mut App, ui: &mut Ui, t: &Theme) {
+    widgets::titled(
+        ui,
+        t,
+        "OBS",
+        "What OBS reports about drawing, encoding and sending your stream.",
+        |ui| {
+            if app.m.has("obs.link") {
+                let on = app.m.b("obs.link");
+                widgets::badge(ui, t, if on { "Working" } else { "Not connected" }, if on { t.green } else { t.yellow });
+            }
+        },
+        |ui| {
+            ui.set_width(ui.available_width());
+            if !app.m.has("obs.link") {
+                widgets::hint(ui, t, "The OBS link isn't running.");
+                return;
+            }
+            kv(ui, t, "Render fps", &opt(app, "obs.fps", ""));
+            kv(ui, t, "Render time", &opt(app, "obs.render.ms", " ms"));
+            kv(ui, t, "Render lagged", &opt(app, "obs.render.lagged", ""));
+            kv(ui, t, "Encoder skipped", &opt(app, "obs.encode.skipped", ""));
+            kv(ui, t, "Stream kbps", &opt(app, "obs.stream.kbps", ""));
+            kv(ui, t, "Stream dropped", &opt(app, "obs.stream.dropped", ""));
+            kv(ui, t, "Congestion", &opt(app, "obs.stream.congestion", ""));
+            kv(ui, t, "Lag", &opt(app, "obs.stream.lag_ms", " ms"));
+            let mut ids: Vec<String> =
+                app.m.under("obs.output").filter_map(|(a, _)| a.strip_prefix("obs.output.")?.strip_suffix(".label").map(String::from)).collect();
+            ids.dedup();
+            if !ids.is_empty() {
+                ui.add_space(spacing::S);
+                caption(ui, t, "Outputs");
+            }
+            for id in ids {
+                let p = format!("obs.output.{id}");
+                let active = app.m.b(&format!("{p}.active"));
+                ui.horizontal(|ui| {
+                    let (r, _) = ui.allocate_exact_size(Vec2::splat(10.0), egui::Sense::hover());
+                    ui.painter().circle_filled(r.center(), 4.0, if active { t.green } else { t.text_faint });
+                    ui.label(RichText::new(app.m.str(&format!("{p}.label"))).color(t.fg));
+                    ui.label(
+                        RichText::new(format!(
+                            "{} · {} · {:.0} kbps · {} dropped of {}",
+                            app.m.str(&format!("{p}.kind")),
+                            app.m.str(&format!("{p}.canvas")),
+                            app.m.f(&format!("{p}.kbps")),
+                            app.m.f(&format!("{p}.dropped")),
+                            app.m.f(&format!("{p}.total")),
+                        ))
+                        .font(font_mono(type_scale::SMALL))
+                        .color(t.text_dim),
+                    );
+                });
+            }
+        },
+    );
+    ui.add_space(spacing::L);
+}
+
+fn ui_card(app: &mut App, ui: &mut Ui, t: &Theme) {
     let st = app.frames.stats();
-    widgets::card(ui, &t, icon::SCENE, "UI (this window)", if st.connected { LedState::Healthy } else { LedState::Idle }, |ui| {
-        let ms: Vec<f32> = app.perf.ui_ms.iter().copied().collect();
-        ui.label(RichText::new("UI frame ms (CPU)").small());
-        widgets::scope(ui, &t, Vec2::new(ui.available_width(), 36.0), &ms, Some((0.0, 20.0)), Some(t.magenta));
-        let (pv, pg, at) = (app.preview_hz(), app.program_hz(), app.atlas_hz());
-        ui.label(RichText::new(format!("GPU pressure level {} → preview {pv:.0} Hz, program {pg:.0} Hz, multiview {at:.0} Hz", app.gpu_pressure())).small());
-        ui.label(
-            RichText::new(format!("frames.sock {} ({})", if st.connected { "connected" } else { "not connected" }, st.socket.display())).small().monospace(),
-        );
-        egui::Grid::new("frames-kv").num_columns(6).striped(true).show(ui, |ui| {
-            for h in ["canvas", "transport", "size", "gen", "presented", "age"] {
-                ui.label(RichText::new(h).small().strong());
-            }
-            ui.end_row();
-            for (i, c) in st.canvases.iter().enumerate() {
-                ui.label(RichText::new(crate::frames::Canvas::from_index(i).map(|c| c.name()).unwrap_or("?")).small());
-                ui.label(
-                    RichText::new(match c.transport {
-                        Transport::Dmabuf => "dmabuf",
-                        Transport::Shm => "shm",
-                        Transport::None => "—",
-                    })
-                    .small()
-                    .color(if c.transport == Transport::Dmabuf { t.green } else { t.fg_dim }),
-                );
-                ui.label(RichText::new(format!("{}×{}", c.width, c.height)).small().monospace());
-                ui.label(RichText::new(format!("{}", c.generation)).small().monospace());
-                ui.label(RichText::new(format!("{}", c.frames_presented)).small().monospace());
-                ui.label(RichText::new(c.age_ms.map(|a| format!("{a:.0} ms")).unwrap_or_else(|| "—".into())).small().monospace());
+    widgets::titled(
+        ui,
+        t,
+        "This window",
+        "How much work the Stream Engine window itself does.",
+        |_| {},
+        |ui| {
+            ui.set_width(ui.available_width());
+            let ms: Vec<f32> = app.perf.ui_ms.iter().copied().collect();
+            caption(ui, t, "Window frame ms (CPU)");
+            widgets::scope(ui, t, Vec2::new(ui.available_width(), 40.0), &ms, Some((0.0, 20.0)), Some(t.magenta));
+            ui.add_space(spacing::S);
+            let (pv, pg, at) = (app.preview_hz(), app.program_hz(), app.atlas_hz());
+            kv(ui, t, "GPU pressure level", &app.gpu_pressure().to_string());
+            kv(ui, t, "Refresh rates", &format!("preview {pv:.0} Hz · program {pg:.0} Hz · multiview {at:.0} Hz"));
+            kv(ui, t, "Video link", &format!("{} ({})", if st.connected { "connected" } else { "not connected" }, st.socket.display()));
+            ui.add_space(spacing::S);
+            egui::Grid::new("frames-kv").num_columns(6).spacing([16.0, 4.0]).show(ui, |ui| {
+                for h in ["Canvas", "Transport", "Size", "Gen", "Shown", "Age"] {
+                    ui.label(RichText::new(h).size(type_scale::SMALL).color(t.text_dim));
+                }
                 ui.end_row();
+                let cell = |ui: &mut Ui, s: String, c: Color32| {
+                    ui.label(RichText::new(s).font(font_mono(type_scale::SMALL)).color(c));
+                };
+                for (i, c) in st.canvases.iter().enumerate() {
+                    cell(ui, crate::frames::Canvas::from_index(i).map(|c| c.name()).unwrap_or("?").to_string(), t.fg);
+                    let (tr, col) = match c.transport {
+                        Transport::Dmabuf => ("dmabuf", t.green),
+                        Transport::Shm => ("shm", t.yellow),
+                        Transport::None => ("—", t.text_dim),
+                    };
+                    cell(ui, tr.to_string(), col);
+                    cell(ui, format!("{}×{}", c.width, c.height), t.fg);
+                    cell(ui, c.generation.to_string(), t.fg);
+                    cell(ui, c.frames_presented.to_string(), t.fg);
+                    cell(ui, c.age_ms.map(|a| format!("{a:.0} ms")).unwrap_or_else(|| "—".into()), t.fg);
+                    ui.end_row();
+                }
+            });
+            ui.add_space(spacing::S);
+            kv(ui, t, "dmabuf buffers imported", &st.dmabuf_imports.to_string());
+            kv(ui, t, "dmabuf frames shown", &st.dmabuf_frames_presented.to_string());
+            kv(ui, t, "shm frames shown", &st.shm_frames_presented.to_string());
+            kv(ui, t, "shm bytes uploaded", &st.shm_bytes_uploaded.to_string());
+            kv(ui, t, "GPU→CPU readback", "0 bytes (no readback path exists)");
+            kv(ui, t, "Releases sent", &st.releases_sent.to_string());
+            kv(ui, t, "Reconnects", &st.reconnects.to_string());
+            if let Some(e) = &st.last_error {
+                ui.label(RichText::new(e).size(type_scale::SMALL).color(t.yellow));
             }
-        });
-        egui::Grid::new("frames-totals").num_columns(2).show(ui, |ui| {
-            kv(ui, "dmabuf buffers imported", st.dmabuf_imports.to_string());
-            kv(ui, "dmabuf frames presented", st.dmabuf_frames_presented.to_string());
-            kv(ui, "shm frames presented", st.shm_frames_presented.to_string());
-            kv(ui, "shm bytes uploaded", st.shm_bytes_uploaded.to_string());
-            kv(ui, "GPU→CPU readback bytes", "0 (no readback path exists)".into());
-            kv(ui, "releases sent", st.releases_sent.to_string());
-            kv(ui, "reconnects", st.reconnects.to_string());
-        });
-        if let Some(e) = &st.last_error {
-            ui.label(RichText::new(e).small().color(t.yellow));
-        }
-    });
+        },
+    );
+    ui.add_space(spacing::L);
 }
 
-fn other(app: &mut App, ui: &mut egui::Ui) {
-    let t = app.t.clone();
+fn other(app: &mut App, ui: &mut Ui, t: &Theme) {
     let known = ["perf.gpu_ms", "perf.frame_ms", "perf.fps", "perf.dropped", "perf.late", "perf.vram_mb", "perf.vram_budget_mb"];
     let rows: Vec<(String, String)> = app
         .m
@@ -251,10 +446,27 @@ fn other(app: &mut App, ui: &mut egui::Ui) {
     if rows.is_empty() {
         return;
     }
-    widgets::section(ui, &t, icon::PERF, "Threads and other counters");
-    egui::Grid::new("perf-other").striped(true).num_columns(2).show(ui, |ui| {
-        for (a, v) in rows {
-            kv(ui, &a, v);
-        }
-    });
+    widgets::titled(
+        ui,
+        t,
+        "Threads and other counters",
+        "Everything else the engine measures.",
+        |_| {},
+        |ui| {
+            ui.set_width(ui.available_width());
+            let half = rows.len().div_ceil(2);
+            ui.columns(2, |cols| {
+                for (i, (a, v)) in rows.iter().enumerate() {
+                    let col = &mut cols[usize::from(i >= half)];
+                    col.horizontal(|ui| {
+                        ui.label(RichText::new(a.trim_start_matches("perf.")).font(font_mono(type_scale::SMALL)).color(t.text_dim));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.add_space(spacing::XL);
+                            ui.label(RichText::new(v).font(font_mono(type_scale::SMALL)).color(mix(t.fg, t.text_dim, 0.2)));
+                        });
+                    });
+                }
+            });
+        },
+    );
 }

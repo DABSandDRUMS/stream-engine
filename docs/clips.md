@@ -82,11 +82,11 @@ track info, `[clips.audio] tracks = ["mic", "music", "band"]` names the streams 
 
 ## Review
 
-**Views → Session review**: the review queue (every clip waiting for a decision), then per
-session the markers timeline (hype windows, peaks, manual presses), the recordings, and clip
-cards: wide + tall thumbnails (click to play with `xdg-open`), reasons, captions, music flag,
-in/out editor (**retrim** re-cuts both canvases; the transcript is extended when needed),
-**approve**, **reject**, **upload**.
+**Recordings** page: *Clips to review* (every clip waiting for a decision, as video cards), and
+*Past streams* (one card per stream with its length, markers and clips; open one for its markers
+timeline, recordings and clips). Clip cards: wide + vertical thumbnails (click to play with
+`xdg-open`), reasons, captions, music flag, **Keep** (approve), **Skip** (reject), **Upload**, and
+**Trim** (re-cuts both canvases; the transcript is extended when needed).
 
 CLI:
 

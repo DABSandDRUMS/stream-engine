@@ -1,6 +1,6 @@
 # Theme colour: every head takes the stream accent colour (follows the Omarchy/stream palette live).
 # Colour only (LTP): combine with any intensity source (another cue, a fader, the programmer).
-label = "Theme colour"
+label = "Theme color"
 priority = 150
 release = "1s"
 

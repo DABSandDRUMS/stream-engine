@@ -81,7 +81,8 @@ How it is secured:
    `allow_users` when that list is non-empty.
 3. Every command is checked again by the engine against `[remote_mod] actions` and the API's
    mod scope, runs as the moderator (`Origin::Relay`, actor role Mod), and is rate-limited
-   (`rate_per_min`). Active moderators show in **Backups & retention** (`remote_mod.active`).
+   (`rate_per_min`). Active moderators show in **Settings → Accounts & app** (`remote_mod.active`), where
+   the console can also be switched on (`[remote_mod] enabled`).
 4. The console session is an HMAC-signed, HttpOnly, SameSite=Strict cookie (12 h by default,
    `MOD_SESSION_HOURS`), keyed from the relay's shared secret.
 
@@ -106,8 +107,8 @@ linked to it (`[relay] url = "ws://127.0.0.1:8787/link"`), then
 Backups are deferred while on air (unless two intervals overdue). Sessions containing a `.keep`
 file (the clip pipeline adds it while clips are pending review) and the running session are never
 deleted. Over-budget recordings are only **announced** (preflight warning + desktop notification
-listing the oldest files); they are deleted by *Delete these recordings* in **Backups &
-retention** (`retention.prune_recordings`), or — with `auto_delete = true` — after the warning has
+listing the oldest files); they are deleted by *Clean up old recordings* (press and hold) in
+**Settings → Backups** (`retention.prune_recordings`), or — with `auto_delete = true` — after the warning has
 stood for `grace_hours`. Nothing is deleted while OBS records or the show is on air.
 
 Restore a runtime DB backup (engine stopped):

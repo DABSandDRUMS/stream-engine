@@ -158,10 +158,7 @@ impl Panel {
                 let h = (ui.available_height() - 8.0).clamp(60.0, 400.0);
                 views::monitor::multiview(app, ui, h)
             }
-            Panel::Scenes => {
-                views::show::scenes(app, ui);
-                views::show::transition_row(app, ui);
-            }
+            Panel::Scenes => views::live::scenes_panel(app, ui),
             Panel::Presets => views::show::pads(app, ui),
             Panel::Active => views::show::active(app, ui),
             Panel::Events => views::rail::events(app, ui),
@@ -170,7 +167,7 @@ impl Panel {
             Panel::Mod => views::rail::moderation(app, ui),
             Panel::Mix => views::mix::strip(app, ui),
             Panel::Library => views::build::library(app, ui),
-            Panel::Canvas => views::canvas::ui(app, ui),
+            Panel::Canvas => views::composition::ui(app, ui),
             Panel::Inspector => views::inspector::ui(app, ui),
             Panel::Modulate => views::modulate::ui(app, ui),
             Panel::Rules => views::rules::ui(app, ui),
@@ -191,11 +188,6 @@ impl Panel {
             Panel::Mod => Some(RailTab::Mod),
             _ => None,
         }
-    }
-
-    /// Lives in the Build-mode dock (bottom area).
-    pub fn is_dock_tab(self) -> bool {
-        matches!(self, Panel::Rules | Panel::Modulate | Panel::Scopes | Panel::Trace | Panel::Simulator | Panel::Console | Panel::View(_))
     }
 }
 

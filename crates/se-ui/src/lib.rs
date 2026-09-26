@@ -1,7 +1,6 @@
 //! `se-ui`: the stream-engine window, a pure client of the engine API (§3.1, §15).
 
 pub mod app;
-pub mod dock;
 pub mod editor;
 pub mod frames;
 pub mod layout;

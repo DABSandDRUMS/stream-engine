@@ -1,14 +1,18 @@
-//! Modulate (§15.5): create or edit a binding for an address — pick a signal, shape it
-//! (gain/offset/gate/attack/release/curve/range/auto-normalize/mode/scope) with a live transfer
-//! curve and the shaped output over the signal's recent history (computed with the core's own
-//! shaping code), then save to `bindings/<name>.toml` through `project.write`.
+//! Signal links (§15.5, Settings → Troubleshooting): every binding in a list, and an editor to
+//! create or change one — pick a signal, shape it (strength/shift/gate/rise/fall/curve/range/auto
+//! level/combine/only-when) with a live transfer curve and the shaped output over the signal's
+//! recent history (computed with the core's own shaping code), then save to
+//! `bindings/<name>.toml` through `project.write`.
 
 use crate::app::App;
-use egui::{RichText, Vec2};
+use crate::views::live::nice;
+use egui::{Align, Layout, RichText, Ui, Vec2};
 use se_core::bindings::{BindingRt, apply_curve};
 use se_core::config::{BindMode, BindingDef, Curve, Dur};
 use se_proto::{Meta, Value};
-use se_ui_kit::widgets::{self, icon};
+use se_ui_kit::Theme;
+use se_ui_kit::theme::{font_mono, font_semibold, spacing, type_scale};
+use se_ui_kit::widgets::{self, Kind, Size, icon};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Draft {
@@ -226,11 +230,37 @@ impl ModulateState {
     }
 }
 
-pub fn ui(app: &mut App, ui: &mut egui::Ui) {
+/// Display name of a link: `bass_zoom#1` → "Bass zoom", `bass_zoom#2` → "Bass zoom (2)".
+fn link_name(name: &str) -> String {
+    match name.rsplit_once('#') {
+        Some((base, "1")) => nice(base),
+        Some((base, n)) => format!("{} ({n})", nice(base)),
+        None => nice(name),
+    }
+}
+
+/// Plain words for a curve (the file keeps [`curve_name`]).
+fn curve_words(c: Curve) -> &'static str {
+    match c {
+        Curve::Linear => "Straight",
+        Curve::Exp => "Slow start",
+        Curve::Log => "Fast start",
+        Curve::Smoothstep => "Soft S-curve",
+        Curve::FaderTaper => "Like a fader",
+    }
+}
+
+/// Form row: dim label on the left (with the file key as tooltip), control on the right.
+fn row(ui: &mut Ui, t: &Theme, label: &str, key: &str, add: impl FnOnce(&mut Ui)) {
+    ui.label(RichText::new(label).color(t.text_dim)).on_hover_text(key);
+    ui.horizontal(add);
+    ui.end_row();
+}
+
+pub fn ui(app: &mut App, ui: &mut Ui) {
     let t = app.t.clone();
-    widgets::section(ui, &t, icon::BINDING, "Modulate");
     if app.build.modulate.draft.is_none() {
-        ui.label(RichText::new("click ~ next to a parameter in the inspector, or a binding in the library").color(t.fg_dim));
+        list(app, ui, &t);
         return;
     }
     // definitions of existing bindings (shaping details) and the file they live in
@@ -250,148 +280,220 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     signals.sort();
     let mut save = false;
     let mut cancel = false;
-    {
-        let st = &mut app.build.modulate;
-        let Some(d) = st.draft.as_mut() else { return };
-        egui::Grid::new("modulate").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
-            ui.label("target");
-            ui.label(RichText::new(&d.target).monospace().color(t.modulated()));
-            ui.end_row();
-            ui.label("name");
-            ui.add_enabled(d.existing.is_none(), egui::TextEdit::singleline(&mut d.name).desired_width(200.0));
-            ui.end_row();
-            ui.label("signal");
-            ui.vertical(|ui| {
-                egui::ComboBox::from_id_salt("mod-signal")
-                    .width(240.0)
-                    .selected_text(if d.signal.is_empty() { "pick a signal…" } else { d.signal.as_str() })
-                    .show_ui(ui, |ui| {
-                        ui.add(egui::TextEdit::singleline(&mut st.signal_filter).hint_text("filter (band.*, music.*, midi.*)"));
-                        let f = st.signal_filter.to_lowercase();
-                        for s in signals.iter().filter(|s| f.is_empty() || s.to_lowercase().contains(&f)).take(200) {
-                            if ui.selectable_label(d.signal == *s, s).clicked() {
-                                d.signal = s.clone();
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        let form_w = (ui.available_width() * 0.5).clamp(420.0, 640.0);
+        ui.horizontal_top(|ui| {
+            ui.allocate_ui_with_layout(Vec2::new(form_w, 10.0), Layout::top_down(Align::Min), |ui| {
+                ui.set_width(form_w);
+                let st = &mut app.build.modulate;
+                let Some(d) = st.draft.as_mut() else { return };
+                let title = if d.existing.is_some() { link_name(&d.name) } else { "New link".to_string() };
+                ui.label(RichText::new(title).font(font_semibold(type_scale::LARGE)).color(t.fg));
+                widgets::hint(ui, &t, "Make a setting follow a live signal, e.g. zoom that pulses with the kick drum.");
+                ui.add_space(spacing::M);
+                egui::Grid::new("modulate").num_columns(2).spacing([16.0, 10.0]).min_col_width(130.0).show(ui, |ui| {
+                    row(ui, &t, "Setting", "target", |ui| {
+                        if d.existing.is_none() {
+                            // a new link's name follows the setting until you type your own
+                            let auto = Draft::new(&d.target, &Meta::default()).name;
+                            let r = ui.add(
+                                se_ui_kit::widgets::field(&mut d.target)
+                                    .font(font_mono(type_scale::SMALL + 0.5))
+                                    .hint_text("scene.duo.node.cam.zoom")
+                                    .desired_width(300.0),
+                            );
+                            if r.changed() && d.name == auto {
+                                d.name = Draft::new(&d.target, &Meta::default()).name;
                             }
+                        } else {
+                            ui.label(RichText::new(&d.target).font(font_mono(type_scale::SMALL + 0.5)).color(t.modulated()));
                         }
                     });
-            });
-            ui.end_row();
-            ui.label("gain / offset");
-            ui.horizontal(|ui| {
-                ui.add(egui::DragValue::new(&mut d.gain).speed(0.01).range(-20.0..=20.0));
-                ui.add(egui::DragValue::new(&mut d.offset).speed(0.01).range(-10.0..=10.0));
-                ui.checkbox(&mut d.invert, "invert");
-            });
-            ui.end_row();
-            ui.label("gate");
-            ui.horizontal(|ui| {
-                let mut on = d.gate.is_some();
-                if ui.checkbox(&mut on, "").changed() {
-                    d.gate = on.then_some(0.1);
+                    row(ui, &t, "Name", "name", |ui| {
+                        ui.add_enabled(d.existing.is_none(), se_ui_kit::widgets::field(&mut d.name).desired_width(240.0));
+                    });
+                    row(ui, &t, "Follows", "signal", |ui| {
+                        egui::ComboBox::from_id_salt("mod-signal")
+                            .width(260.0)
+                            .selected_text(if d.signal.is_empty() { "Pick a signal…" } else { d.signal.as_str() })
+                            .show_ui(ui, |ui| {
+                                ui.add(se_ui_kit::widgets::field(&mut st.signal_filter).hint_text("Search (band, music, midi…)"));
+                                let f = st.signal_filter.to_lowercase();
+                                for s in signals.iter().filter(|s| f.is_empty() || s.to_lowercase().contains(&f)).take(200) {
+                                    if ui.selectable_label(d.signal == *s, s).clicked() {
+                                        d.signal = s.clone();
+                                    }
+                                }
+                            });
+                    });
+                    row(ui, &t, "Strength", "gain", |ui| {
+                        ui.add(egui::DragValue::new(&mut d.gain).speed(0.01).range(-20.0..=20.0).prefix("× "));
+                    });
+                    row(ui, &t, "Shift", "offset", |ui| {
+                        ui.add(egui::DragValue::new(&mut d.offset).speed(0.01).range(-10.0..=10.0));
+                    });
+                    row(ui, &t, "Upside down", "invert", |ui| {
+                        widgets::toggle(ui, &t, &mut d.invert);
+                    });
+                    row(ui, &t, "Ignore below", "gate", |ui| {
+                        let mut on = d.gate.is_some();
+                        if widgets::toggle(ui, &t, &mut on).changed() {
+                            d.gate = on.then_some(0.1);
+                        }
+                        if let Some(g) = d.gate.as_mut() {
+                            ui.add(egui::Slider::new(g, 0.0..=1.0).max_decimals(3));
+                        }
+                    });
+                    row(ui, &t, "Rise / fall time", "attack / release", |ui| {
+                        ui.add(egui::DragValue::new(&mut d.attack_ms).range(0.0..=5000.0).speed(1.0).suffix(" ms"));
+                        ui.label(RichText::new("/").color(t.text_faint));
+                        ui.add(egui::DragValue::new(&mut d.release_ms).range(0.0..=10000.0).speed(2.0).suffix(" ms"));
+                    });
+                    row(ui, &t, "Curve", "curve", |ui| {
+                        egui::ComboBox::from_id_salt("mod-curve").selected_text(curve_words(d.curve)).show_ui(ui, |ui| {
+                            for c in [Curve::Linear, Curve::Exp, Curve::Log, Curve::Smoothstep, Curve::FaderTaper] {
+                                ui.selectable_value(&mut d.curve, c, curve_words(c));
+                            }
+                        });
+                    });
+                    row(ui, &t, "Output range", "range", |ui| {
+                        let mut on = d.range.is_some();
+                        if widgets::toggle(ui, &t, &mut on).changed() {
+                            d.range = on.then_some([0.0, 1.0]);
+                        }
+                        if let Some(r) = d.range.as_mut() {
+                            ui.add(egui::DragValue::new(&mut r[0]).speed(0.01));
+                            ui.label(RichText::new("to").color(t.text_faint));
+                            ui.add(egui::DragValue::new(&mut r[1]).speed(0.01));
+                        }
+                    });
+                    row(ui, &t, "Auto level", "auto_normalize", |ui| {
+                        let mut on = d.auto_normalize.is_some();
+                        if widgets::toggle(ui, &t, &mut on).on_hover_text("Same feel on quiet and loud songs").changed() {
+                            d.auto_normalize = on.then_some(10.0);
+                        }
+                        if let Some(w) = d.auto_normalize.as_mut() {
+                            ui.add(egui::DragValue::new(w).range(1.0..=120.0).suffix(" s window"));
+                        }
+                    });
+                    row(ui, &t, "Combine", "mode", |ui| {
+                        let modes = [BindMode::Add, BindMode::Multiply, BindMode::Replace];
+                        let mut i = modes.iter().position(|m| *m == d.mode).unwrap_or(0);
+                        if widgets::segmented(ui, &t, &mut i, &["Add", "Multiply", "Replace"]) {
+                            d.mode = modes[i];
+                        }
+                    });
+                    row(ui, &t, "Only when", "scope", |ui| {
+                        ui.add(se_ui_kit::widgets::field(&mut d.scope).hint_text("always · scene.duo · preset.hype · mode.live").desired_width(300.0));
+                    });
+                });
+                ui.add_space(spacing::M);
+                let err = BindingRt::new(d.def()).err();
+                if let Some(e) = &err {
+                    ui.label(RichText::new(format!("{} {e}", icon::WARN)).size(type_scale::SMALL + 0.5).color(t.bright_red));
+                    ui.add_space(spacing::XS);
                 }
-                if let Some(g) = d.gate.as_mut() {
-                    ui.add(egui::Slider::new(g, 0.0..=1.0).max_decimals(3));
-                }
+                ui.horizontal(|ui| {
+                    let ok = !d.signal.is_empty() && !d.target.is_empty() && !d.name.trim().is_empty() && err.is_none();
+                    if widgets::button_ex(ui, &t, Some(icon::CHECK), "Save link", Kind::Primary, Size::Medium, 0.0, ok).clicked() {
+                        save = true;
+                    }
+                    if widgets::button(ui, &t, "Close", Kind::Ghost).clicked() {
+                        cancel = true;
+                    }
+                });
+                let dest = match &d.existing {
+                    Some((_, Some(f))) => f.clone(),
+                    _ => format!("bindings/{}.toml", sanitize(&d.name)),
+                };
+                widgets::hint(ui, &t, &format!("Saved in {dest}"));
             });
-            ui.end_row();
-            ui.label("attack / release");
-            ui.horizontal(|ui| {
-                ui.add(egui::DragValue::new(&mut d.attack_ms).range(0.0..=5000.0).speed(1.0).suffix(" ms"));
-                ui.add(egui::DragValue::new(&mut d.release_ms).range(0.0..=10000.0).speed(2.0).suffix(" ms"));
+            ui.add_space(spacing::XL);
+            // live preview
+            ui.vertical(|ui| {
+                let d = app.build.modulate.draft.clone().unwrap_or_else(|| Draft::new("", &Meta::default()));
+                let hist: Vec<f32> = app.m.signals.get(&d.signal).map(|h| h.iter().copied().collect()).unwrap_or_default();
+                let shaped = d.simulate(&hist, 1.0 / 30.0);
+                let out_range = d.range.map(|[a, b]| [a.min(b) as f32, a.max(b) as f32]).unwrap_or([0.0, 1.0]);
+                widgets::section(ui, &t, "", "What it does");
+                widgets::hint(ui, &t, "Left: signal in → setting out. Right: the signal (faint) and what the setting does with it.");
+                ui.add_space(spacing::S);
+                ui.horizontal_top(|ui| {
+                    let f = |x: f64| d.transfer(x);
+                    se_ui_kit::curve::transfer_curve(ui, &t, Vec2::new(170.0, 150.0), &f, d.range.unwrap_or([0.0, 1.0]), hist.last().map(|v| *v as f64));
+                    ui.vertical(|ui| {
+                        se_ui_kit::curve::dual_scope(ui, &t, Vec2::new((ui.available_width() - 8.0).max(160.0), 150.0), &hist, &shaped, out_range);
+                        let now = match (hist.last(), shaped.last()) {
+                            _ if d.signal.is_empty() => "Pick a signal to see it move.".to_string(),
+                            (Some(v), Some(o)) => format!("{} is {v:.3} → the setting gets {o:.3}", d.signal),
+                            _ => format!("Waiting for {}…", d.signal),
+                        };
+                        ui.label(RichText::new(now).font(font_mono(type_scale::SMALL)).color(t.text_dim));
+                    });
+                });
             });
-            ui.end_row();
-            ui.label("curve");
-            egui::ComboBox::from_id_salt("mod-curve").selected_text(curve_name(d.curve)).show_ui(ui, |ui| {
-                for c in [Curve::Linear, Curve::Exp, Curve::Log, Curve::Smoothstep, Curve::FaderTaper] {
-                    ui.selectable_value(&mut d.curve, c, curve_name(c));
-                }
-            });
-            ui.end_row();
-            ui.label("range");
-            ui.horizontal(|ui| {
-                let mut on = d.range.is_some();
-                if ui.checkbox(&mut on, "").changed() {
-                    d.range = on.then_some([0.0, 1.0]);
-                }
-                if let Some(r) = d.range.as_mut() {
-                    ui.add(egui::DragValue::new(&mut r[0]).speed(0.01));
-                    ui.label("…");
-                    ui.add(egui::DragValue::new(&mut r[1]).speed(0.01));
-                }
-            });
-            ui.end_row();
-            ui.label("auto-normalize");
-            ui.horizontal(|ui| {
-                let mut on = d.auto_normalize.is_some();
-                if ui.checkbox(&mut on, "").on_hover_text("adaptive gain: same feel on quiet and loud songs").changed() {
-                    d.auto_normalize = on.then_some(10.0);
-                }
-                if let Some(w) = d.auto_normalize.as_mut() {
-                    ui.add(egui::DragValue::new(w).range(1.0..=120.0).suffix(" s window"));
-                }
-            });
-            ui.end_row();
-            ui.label("mode");
-            ui.horizontal(|ui| {
-                for m in [BindMode::Add, BindMode::Multiply, BindMode::Replace] {
-                    ui.selectable_value(&mut d.mode, m, mode_name(m));
-                }
-            });
-            ui.end_row();
-            ui.label("scope");
-            ui.add(egui::TextEdit::singleline(&mut d.scope).hint_text("always · scene.duo · preset.hype · mode.live · expression").desired_width(240.0));
-            ui.end_row();
-        });
-        ui.horizontal(|ui| {
-            let ok = !d.signal.is_empty() && !d.target.is_empty() && !d.name.trim().is_empty() && BindingRt::new(d.def()).is_ok();
-            if ui.add_enabled(ok, egui::Button::new(RichText::new(format!("{} save binding", icon::CHECK)).strong())).clicked() {
-                save = true;
-            }
-            if ui.button("close").clicked() {
-                cancel = true;
-            }
-            if let Err(e) = BindingRt::new(d.def()) {
-                ui.label(RichText::new(e).color(t.bright_red));
-            }
-            let dest = match &d.existing {
-                Some((_, Some(f))) => f.clone(),
-                _ => format!("bindings/{}.toml", sanitize(&d.name)),
-            };
-            ui.label(RichText::new(format!("→ {dest}")).small().color(t.fg_dim));
-        });
-    }
-    // live preview
-    let d = app.build.modulate.draft.clone().unwrap_or_else(|| Draft::new("", &Meta::default()));
-    let hist: Vec<f32> = app.m.signals.get(&d.signal).map(|h| h.iter().copied().collect()).unwrap_or_default();
-    let shaped = d.simulate(&hist, 1.0 / 30.0);
-    let out_range = d.range.map(|[a, b]| [a.min(b) as f32, a.max(b) as f32]).unwrap_or([0.0, 1.0]);
-    ui.horizontal(|ui| {
-        let f = |x: f64| d.transfer(x);
-        se_ui_kit::curve::transfer_curve(ui, &t, Vec2::new(160.0, 120.0), &f, d.range.unwrap_or([0.0, 1.0]), hist.last().map(|v| *v as f64));
-        ui.vertical(|ui| {
-            ui.label(
-                RichText::new(format!(
-                    "{} (raw) → shaped {}",
-                    if d.signal.is_empty() { "—" } else { &d.signal },
-                    shaped.last().map(|v| format!("{v:.3}")).unwrap_or_default()
-                ))
-                .small(),
-            );
-            se_ui_kit::curve::dual_scope(ui, &t, Vec2::new((ui.available_width() - 8.0).max(160.0), 104.0), &hist, &shaped, out_range);
         });
     });
-    if save {
-        let file_text = match app.build.modulate.draft.as_ref().and_then(|d| d.existing.as_ref()).and_then(|(_, f)| f.clone()) {
+    if save && let Some(d) = app.build.modulate.draft.clone() {
+        let file_text = match d.existing.as_ref().and_then(|(_, f)| f.clone()) {
             Some(f) => app.m.q(&format!("project.read:{f}")).and_then(|v| v.get_path("text")).and_then(Value::as_str).map(String::from),
             None => None,
         };
         let args = d.write_args(file_text.as_deref());
         app.m.action("project.write", args);
-        app.m.toast(format!("saved binding {}", d.name), false);
+        app.m.toast(format!("Saved the link {}", link_name(&d.name)), false);
         app.m.refresh_soon();
     }
     if cancel {
         app.build.modulate.draft = None;
+    }
+}
+
+/// Every link, with "New link"; picking one opens it in the editor.
+fn list(app: &mut App, ui: &mut Ui, t: &Theme) {
+    let links = app.m.q_list("bindings").to_vec();
+    if links.is_empty() {
+        if widgets::empty_state(
+            ui,
+            t,
+            icon::LINK,
+            "No signal links yet",
+            "A link makes a setting move with a signal, like zoom that pulses with the bass.",
+            Some("Make a link"),
+        ) {
+            app.build.modulate.draft = Some(Draft::new("", &Meta::default()));
+        }
+        return;
+    }
+    ui.horizontal(|ui| {
+        widgets::hint(ui, t, "Pick a link to change it.");
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if widgets::button_ex(ui, t, Some(icon::PLUS), "New link", Kind::Primary, Size::Medium, 0.0, true).clicked() {
+                app.build.modulate.draft = Some(Draft::new("", &Meta::default()));
+            }
+        });
+    });
+    ui.add_space(spacing::S);
+    let mut open = None;
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        for b in &links {
+            let s = |k: &str| b.get_path(k).and_then(Value::as_str).unwrap_or("");
+            let active = b.get_path("active").is_some_and(Value::truthy);
+            let on = b.get_path("enabled").is_none_or(Value::truthy);
+            let trailing = if !on {
+                "Off"
+            } else if active {
+                "Moving now"
+            } else {
+                "Waiting"
+            };
+            if widgets::list_row(ui, t, icon::LINK, &link_name(s("name")), &format!("{} follows {}", s("target"), s("signal")), trailing, false).clicked() {
+                open = Some(b.clone());
+            }
+        }
+    });
+    if let Some(b) = open {
+        app.build.modulate.edit_existing(&b);
     }
 }
 

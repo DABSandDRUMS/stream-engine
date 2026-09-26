@@ -2116,8 +2116,9 @@ impl Core {
                     .collect(),
             ),
             "transitions" => {
+                // built-ins first; a project file with a built-in's name overrides it (listed once)
                 let mut names: Vec<String> = crate::config::BUILTIN_TRANSITIONS.iter().map(|s| s.to_string()).collect();
-                names.extend(self.config.transitions.keys().cloned());
+                names.extend(self.config.transitions.keys().filter(|k| !crate::config::BUILTIN_TRANSITIONS.contains(&k.as_str())).cloned());
                 Value::from(names)
             }
             "modes" => Value::from(self.config.modes()),

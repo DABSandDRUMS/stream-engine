@@ -1,11 +1,11 @@
-//! Keyboard handling (§15.7): dispatches the rebindable shortcuts, the hold-to-panic chord,
-//! and the Settings section that rebinds keys and saves `layouts/shortcuts.toml`.
+//! Keyboard handling (§15.7): dispatches the rebindable shortcuts and the hold-to-panic chord,
+//! and loads/saves `layouts/shortcuts.toml` (the Settings → Accounts & app card rebinds keys).
 
-use crate::app::{App, Mode};
+use crate::app::{App, Page};
 use crate::shortcuts::{self, Chord, HoldState, HoldTracker, Shortcuts};
 use egui::RichText;
 use se_proto::{Op, Value};
-use se_ui_kit::widgets::{self, LedState, icon};
+use se_ui_kit::widgets::icon;
 
 pub const SHORTCUTS_FILE: &str = "layouts/shortcuts.toml";
 
@@ -83,23 +83,24 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
         app.next_layout();
     }
     if fired(app, "search") {
-        match app.mode {
-            Mode::Build => app.build.library_focus = true,
-            Mode::Show => app.show.rail = crate::views::show::RailTab::Chat,
+        if app.page == Page::Live {
+            app.show.rail = crate::views::show::RailTab::Chat;
+        } else {
+            app.build.library_focus = true;
         }
     }
     if fired(app, "escape") {
         if app.m.b("controllers.learn.active") {
             app.m.action("midi.learn.cancel", Value::Null);
-        } else if app.view.is_some() {
-            app.view = None;
+        } else if app.page != Page::Live && app.selected.is_none() && app.build.canvas.selected.is_none() {
+            app.page = Page::Live;
         } else {
             app.selected = None;
             app.build.canvas.selected = None;
         }
     }
     if fired(app, "mode.toggle") {
-        app.toggle_mode();
+        app.toggle_page();
     }
     if fired(app, "take") {
         app.take();
@@ -160,56 +161,4 @@ pub fn save(app: &mut App) {
     let text = app.keys.map.to_toml(app.keys.file_text.as_deref());
     app.keys.file_text = Some(text.clone());
     app.m.action("project.write", Value::map().with("path", SHORTCUTS_FILE).with("text", text));
-}
-
-pub fn settings_section(app: &mut App, ui: &mut egui::Ui) {
-    let t = app.t.clone();
-    widgets::card(ui, &t, icon::SETTINGS, "Shortcuts", LedState::Idle, |ui| {
-        ui.label(
-            RichText::new(format!("saved to {SHORTCUTS_FILE} (only changes are written). Global keys outside the UI come from Hyprland binds → `stream` CLI."))
-                .small()
-                .color(t.fg_dim),
-        );
-        if let Some(e) = &app.keys.error {
-            ui.label(RichText::new(e).color(t.bright_red));
-        }
-        egui::Grid::new("shortcuts").striped(true).num_columns(3).show(ui, |ui| {
-            for a in shortcuts::ACTIONS {
-                ui.label(a.desc);
-                let label = app.keys.map.label(a.id);
-                let waiting = app.keys.rebinding == Some(a.id);
-                let txt = if waiting {
-                    "press a key… (Esc cancels)".to_string()
-                } else if label.is_empty() {
-                    "—".into()
-                } else {
-                    label
-                };
-                ui.label(RichText::new(txt).monospace().color(if waiting {
-                    t.yellow
-                } else if app.keys.map.is_default(a.id) {
-                    t.fg
-                } else {
-                    t.accent
-                }));
-                ui.horizontal(|ui| {
-                    if ui.small_button("rebind").clicked() {
-                        app.keys.rebinding = Some(a.id);
-                        app.keys.error = None;
-                    }
-                    if !app.keys.map.is_default(a.id) && ui.small_button("reset").clicked() {
-                        match app.keys.map.reset(a.id) {
-                            Ok(()) => save(app),
-                            Err(e) => app.keys.error = Some(e.to_string()),
-                        }
-                    }
-                    if !app.keys.map.chords(a.id).is_empty() && ui.small_button("unbind").clicked() {
-                        app.keys.map.unbind(a.id);
-                        save(app);
-                    }
-                });
-                ui.end_row();
-            }
-        });
-    });
 }

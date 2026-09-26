@@ -809,11 +809,11 @@ zoom.in = []
         let mut text = String::new();
         frame(&ctx, 0.2, Modifiers::NONE, vec![], |ui| {
             ui.memory_mut(|m| m.request_focus(id));
-            ui.add(egui::TextEdit::singleline(&mut text).id(id));
+            ui.add(se_ui_kit::widgets::field(&mut text).id(id));
         });
         let (take, pad) = frame(&ctx, 0.3, Modifiers::NONE, ev, |ui| {
             let fired = (s.fired(ui.ctx(), "take"), s.fired(ui.ctx(), "pad.1"));
-            ui.add(egui::TextEdit::singleline(&mut text).id(id));
+            ui.add(se_ui_kit::widgets::field(&mut text).id(id));
             fired
         });
         assert_eq!((take, pad), (false, true));

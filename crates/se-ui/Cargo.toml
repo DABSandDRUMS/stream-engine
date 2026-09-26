@@ -22,7 +22,6 @@ se-clock.workspace = true
 se-expr.workspace = true
 toml_edit.workspace = true
 libc.workspace = true
-egui_dock = "0.21"
 wgpu = { version = "30", default-features = false, features = ["std", "wgsl", "vulkan"] }
 ash = "0.38"
 # clip thumbnails in session review
@@ -32,3 +31,5 @@ base64 = "0.23"
 
 [dev-dependencies]
 tempfile.workspace = true
+# `examples/screens.rs`: headless screenshots of every page against a running engine
+egui_kittest = { version = "0.36", features = ["wgpu", "eframe", "snapshot"] }

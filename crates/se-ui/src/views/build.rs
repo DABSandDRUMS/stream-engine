@@ -1,5 +1,5 @@
-//! Build mode (§15.5): library (left), canvas editor on the preview (center), inspector
-//! (right), and the dock (rules, timeline, signal scopes, trace, simulator, console, …).
+//! Editing state shared by the Scenes page and the tools (§15.5): scene definitions from the
+//! project, the canvas editor, inspector, bindings, rules, and the project library.
 
 use crate::app::{App, ViewId};
 use crate::panels::Panel;
@@ -9,6 +9,7 @@ use se_proto::Value;
 use se_ui_kit::widgets::{self, LedState, icon};
 use std::collections::{BTreeMap, HashMap};
 
+#[derive(Default)]
 pub struct BuildState {
     pub library_filter: String,
     pub library_focus: bool,
@@ -22,29 +23,7 @@ pub struct BuildState {
     pub modulate: modulate::ModulateState,
     pub rules: rules::RulesEditor,
     pub tools: tools::ToolsState,
-    pub dock_height: f32,
-    pub library_width: f32,
-    pub inspector_width: f32,
-}
-
-impl Default for BuildState {
-    fn default() -> Self {
-        BuildState {
-            library_filter: String::new(),
-            library_focus: false,
-            scene_cfg: BTreeMap::new(),
-            node_src: HashMap::new(),
-            scenes_seq: 0,
-            canvas: Default::default(),
-            inspector: Default::default(),
-            modulate: Default::default(),
-            rules: Default::default(),
-            tools: Default::default(),
-            dock_height: 320.0,
-            library_width: 270.0,
-            inspector_width: 360.0,
-        }
-    }
+    pub comp: crate::views::composition::CompositionState,
 }
 
 impl BuildState {
@@ -80,45 +59,6 @@ pub fn sync(app: &mut App) {
         }
     }
     app.build.scene_cfg = scenes;
-}
-
-pub fn ui(app: &mut App, ui: &mut egui::Ui) {
-    let lw = app.build.library_width;
-    let iw = app.build.inspector_width;
-    let dh = app.build.dock_height;
-    egui::Panel::left("library").resizable(true).default_size(lw).min_size(200.0).show(ui, |ui| {
-        if !app.is_popped_out("library") {
-            library(app, ui);
-        } else {
-            popped(app, ui, "library");
-        }
-    });
-    egui::Panel::right("inspector").resizable(true).default_size(iw).min_size(260.0).show(ui, |ui| {
-        if !app.is_popped_out("inspector") {
-            inspector::ui(app, ui);
-        } else {
-            popped(app, ui, "inspector");
-        }
-    });
-    egui::Panel::bottom("dock").resizable(true).default_size(dh).min_size(120.0).show(ui, |ui| crate::dock::show(app, ui));
-    egui::CentralPanel::default().show(ui, |ui| {
-        if app.is_popped_out("canvas") {
-            popped(app, ui, "canvas");
-        } else {
-            canvas::ui(app, ui);
-        }
-    });
-}
-
-fn popped(app: &mut App, ui: &mut egui::Ui, panel: &str) {
-    let t = app.t.clone();
-    ui.vertical_centered(|ui| {
-        ui.add_space(20.0);
-        ui.label(RichText::new(format!("{panel} is popped out (stream-engine.{panel})")).color(t.fg_dim));
-        if ui.button("dock it back").clicked() {
-            app.dock_back(panel);
-        }
-    });
 }
 
 /// Library kinds, in display order: (kind id, icon, title, `project.files` kind).
@@ -163,7 +103,7 @@ fn matches(filter: &str, s: &str) -> bool {
 pub fn library(app: &mut App, ui: &mut egui::Ui) {
     let t = app.t.clone();
     let hint = format!("{} search library ({})", icon::SEARCH, app.keys_label("search"));
-    let r = ui.add(egui::TextEdit::singleline(&mut app.build.library_filter).hint_text(hint).desired_width(f32::INFINITY));
+    let r = ui.add(se_ui_kit::widgets::field(&mut app.build.library_filter).hint_text(hint).desired_width(f32::INFINITY));
     if std::mem::take(&mut app.build.library_focus) {
         r.request_focus();
     }
@@ -357,7 +297,7 @@ pub fn library(app: &mut App, ui: &mut egui::Ui) {
                 if let Some(v) = view
                     && ui.small_button(format!("{ic} open {title} view")).clicked()
                 {
-                    app.view = Some(v);
+                    app.open_view(v);
                 }
                 if items.is_empty() {
                     ui.label(RichText::new(format!("no {kind} files yet")).small().color(t.fg_dim));
@@ -374,7 +314,7 @@ pub fn library(app: &mut App, ui: &mut egui::Ui) {
                         ui.selectable_label(false, label).on_hover_text(format!("{path}\nclick: open the {title} view (or $EDITOR) · right-click: $EDITOR"));
                     if r.clicked() {
                         match view {
-                            Some(v) => app.view = Some(v),
+                            Some(v) => app.open_view(v),
                             None => app.open_in_editor(&path, None),
                         }
                     }

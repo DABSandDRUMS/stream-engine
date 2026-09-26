@@ -1,5 +1,5 @@
-# Show layout for three displays (PLAN §15.3), the default:
-#   DP-1  (MSI MAG341CQ, 3440×1440 @ 100 Hz)  main window in Show mode
+# Optional layout for three displays (PLAN §15.3). The default is `single` (one window).
+#   DP-1  (MSI MAG341CQ, 3440×1440 @ 100 Hz)  main window (Live page)
 #   DP-2  (WEH WC34DX9019, 3440×1440 @ 60 Hz) multiview pop-out, nothing else
 #   TV    (Philips FTV on HDMI)               fullscreen confidence (program) window
 #
@@ -10,7 +10,7 @@
 # case-insensitive substrings of what `hyprctl monitors all` reports.
 
 name = "show-3disp"
-mode = "show"   # show | build
+page = "live"   # page to open on: live | scenes | lights | sound | automation | community | recordings | settings
 zoom = 1.0      # in-app zoom on top of the Hyprland monitor scale
 # While the TV is off (`tv off`) or unplugged, use show-2disp; switch back when it returns.
 auto_fallback = "show-2disp"
@@ -36,14 +36,9 @@ fallback = ["DP-2"]
 canvases = "both"   # wide | tall | both (side by side)
 fullscreen = true
 
-[dock]
-# Build-mode bottom dock: tab groups left to right, each with a width share.
-# Tabs: rules, timeline, scopes, trace, simulator, console, perf, view.<name>
-groups = [["rules", "timeline", "scopes", "trace", "simulator", "console", "perf"]]
-fractions = [1.0]
-height = 300.0
 
 [show]
-rail_tab = "events"   # events | chat | queue | mod
-rail_width = 360.0
+# Live page
+rail_tab = "chat"     # chat | events | queue | mod
+rail_width = 380.0
 multiview = false     # multiview lives in its own window on DP-2

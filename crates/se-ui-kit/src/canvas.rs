@@ -1080,7 +1080,7 @@ impl View<'_> {
         if opts.live {
             let red = t.tally_program();
             p.rect_stroke(outer, CornerRadius::same(4), Stroke::new(2.0, red), StrokeKind::Inside);
-            let r = chip(p, t, canvas.right_top() + vec2(-6.0, 6.0), Align2::RIGHT_TOP, "LIVE".into(), SMALL_FONT, red);
+            let r = chip(p, t, canvas.right_top() + vec2(-6.0, 6.0), Align2::RIGHT_TOP, "ON AIR".into(), SMALL_FONT, red);
             p.circle_filled(r.left_center() - vec2(8.0, 0.0), 3.5, red);
         }
     }

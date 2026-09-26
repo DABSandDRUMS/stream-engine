@@ -926,134 +926,66 @@ One small service on the owner's domain; the only code we run off this machine.
 ## 15. UI and UX
 
 ### 15.1 Principles
-1. **Show mode vs Build mode.** Show mode is for operating a live stream: fixed layout, big targets, nothing editable by accident. Build mode is for making things. Toggle with `Tab`; the current mode is always visible.
-2. **Nothing reaches program without intent.**
-   - Scene changes go to **Preview** and are sent to **Program** with **Take** (`Enter`), unless "direct" is toggled on.
-   - Edits in Build mode apply to the preview/test output.
-   - Parameter edits that affect program are marked live (red edge).
-3. **Keyboard-first**, matching Omarchy:
-   - a command palette for every command and address
-   - number keys for scenes, `Enter` = Take, `Esc` = cancel
-   - every action has a rebindable shortcut, and shortcuts are shown in tooltips and the palette
-4. **Everything is explainable.** Selecting any value shows its provenance (base → bindings → overrides → clamps). Selecting any change shows its cause chain (event → rule → command) (§15.5).
-5. **Never modal during a show.**
-   - Errors become toasts and badges, never dialogs.
-   - Destructive actions in Show mode need a hold-to-confirm, not a popup.
-   - Everything has undo.
-6. **One visual language.**
-   - Every "thing" (scene, preset, patch, effect, rule) is a card with a kind icon, a color, and state LEDs (idle / armed / active / error).
-   - Tally colors are fixed:
-     - **red** = on program
-     - **amber** = on preview/armed
-     - **green** = healthy
-     - **magenta** = modulated by a binding
-   - Color is never the only signal: icons and text too.
-7. **The UI never costs the stream.**
-   - Previews come from the engine's shared textures (§4.1).
-   - Multiview thumbnails update at 30 fps; hidden panels stop rendering.
-   - If the GPU is tight, the UI degrades first.
-8. **Native to Omarchy.** Theme colors and font follow the active Omarchy theme live (§16.2), and windows are Hyprland-friendly (§16.3).
+1. **One window, organised by what you want to do.** A sidebar of pages (Live, Scenes, Lights, Sound, Automation, Community, Recordings, Settings), each with a few tabs. Nothing opens extra windows unless you ask for it (§15.3). The window is always fully opaque. (Owner direction 2026-09-26: "one window, one UX … non-technical friendly, beautiful … dumbo friendly".)
+2. **Plain words.** The interface speaks streamer, not engine: "quick effect", "look", "reaction", "layer", "On air / Up next". File paths, config keys, engine addresses, template placeholders and acronyms never appear in normal UI; technical detail sits behind a "Details" disclosure or on Settings → Troubleshooting / Performance. Setup instructions are "Show me how" steps with a button that opens the right page.
+3. **Nothing reaches the audience without intent.**
+   - Scene clicks go to **Up next**; **Switch** (`Enter`) puts it on air, unless "direct" is on. Double-click switches right away.
+   - Scene edits apply to Up next; if the scene being edited is on air, a red banner says so.
+4. **Keyboard-first**, matching Omarchy: command palette (`Ctrl+K`), number keys for scenes, `Enter` = Switch, rebindable shortcuts shown in tooltips.
+5. **Everything is explainable** — on demand: "Why did that happen?" (cause chains) and signal links live in Settings → Troubleshooting.
+6. **Never modal during a show.** Toasts and badges, hold-to-confirm for destructive actions (Emergency stop, delete), undo.
+7. **One visual language** (`se-ui-kit`): calm surfaces, one accent, Inter for text, the Omarchy font for numbers and icons; components = cards, list rows, tiles/pads, chips, segmented controls, switches, callouts, empty states. Tally colors: **red** = on air, **amber** = up next/armed, **green** = working, **magenta** = moved by a signal. Color is never the only signal.
+8. **The UI never costs the stream.** Previews come from the engine's shared textures (§4.5); hidden views stop requesting frames; under GPU pressure the UI slows its previews first.
+9. **Native to Omarchy.** Theme colors follow the active Omarchy theme live (§16.2).
 
 ### 15.2 Toolkit
-- `egui` on `wgpu` (via `egui-wgpu`), with docking (`egui_dock` or equivalent), plus our own design-system crate `se-ui-kit`. The kit contains:
-  - theme tokens mapped from Omarchy colors
-  - spacing/typography scale
-  - custom widgets: meters, faders, pads, scene thumbnails, canvas editor handles, signal scopes, timeline, curve editor, cards
+- `egui` on `wgpu` (`egui-wgpu`) plus the design-system crate `se-ui-kit`: theme tokens derived from Omarchy colors (page, chrome, surface, raised, inset, border, text tiers, accent), a spacing/type scale with bundled Inter (4 weights) and Noto Emoji, and the component library (buttons with Kind/Size, fields, switches, chips, segmented controls, tabs, cards, callouts, details, list rows, pads, video frames, meters, faders, scopes, canvas editor, curve editor).
 - egui's default look is not shipped; everything goes through `se-ui-kit`.
+- `cargo run -p se-ui --example screens` renders every page headless (egui_kittest) against the running engine for design review.
 
-### 15.3 Windows, docking, layouts
-- One main window with dockable panels. **Any panel can pop out** into its own window (separate Wayland toplevel with app-id `stream-engine.<panel>`), so Hyprland can tile it on another monitor or workspace.
-- **Named layouts** (`layouts/*.toml`): default `show-3disp` (DP-1 Show mode, DP-2 multiview + Build/dock panels, TV confidence), plus `show-2disp` (used automatically when the TV is off), and `build`. Switch with the palette or a keybind.
-- **Confidence monitor:** a borderless fullscreen `stream-engine.program` window on the **TV** (wide, tall, or both side by side), so the streamer sees exactly what goes out. It follows display hotplug: if the TV is off or unplugged, it moves to DP-2 and returns when the TV reappears.
-- **Scaling:** follows Hyprland monitor scale, plus an in-app zoom.
+### 15.3 Windows and layouts
+- **One main window** by default (`single` layout). Any page tab can still pop out into its own window (app-id `stream-engine.<panel>`) on request.
+- **Named layouts** (`layouts/*.toml`): `single` (default), and the opt-in multi-screen setups `show-3disp` (multiview on DP-2, program window on the TV) and `show-2disp` (used automatically when the TV is off). Chosen in Settings → Accounts & app → Screens.
+- **Program window on the TV** (opt-in toggle): borderless fullscreen `stream-engine.program` showing exactly what goes out; follows hotplug (TV off → DP-2).
+- **Scaling:** follows Hyprland monitor scale, plus an in-app size setting.
 
-### 15.4 Show mode layout (DP-1: MSI MAG341CQ, 3440×1440 @ 100 Hz, scale 1.25 → 2752×1152 logical)
-
+### 15.4 Live page
 ```
-┌──────────────────────────────────────────────────────────────────────────────────────────────┐
-│ ● LIVE 02:14:33 │ Twitch 6.0Mb/s 0 drop │ TikTok 4.5Mb/s │ REC │ mode: LIVE ▾ │ GPU 5.1ms │ ⚠ 1 │ CLEAN  PANIC │
-├───────────────────────────────┬───────────────────────────────┬──────────────┬───────────────┤
-│ PREVIEW (wide)        [amber] │ PROGRAM (wide)          [red] │ PROGRAM tall │ EVENTS │ CHAT │
-│                               │                               │              │ QUEUE  │ MOD  │
-│                               │                               │              │───────────────│
-├───────────────────────────────┴───────────────────────────────┤              │ • raid from X │
-│ SCENES  [1 duo] [2 wide] [3 face] [4 desk] [5 drums] [6 brb]   │              │ • 500 bits Y  │
-│ TRANSITION  random: morph ×3 · glitch · zoomblur   700ms  [TAKE ⏎]            │ • sub Z (T2)  │
-├──────────────────────────────────────────────┬────────────────┴──────────────┤ PENDING (2)   │
-│ PRESETS (= Stream Deck page "show")          │ ACTIVE                        │ ▸ !sr song A  │
-│ [HYPE] [CHILL] [CONFETTI] [BLACKOUT] [DROP]  │ rgb_split  ▮▮▮▯  4s   ✕       │   ✓ approve   │
-│ [SUB BIG] [CHORUS] [STROBE*] [CREDITS]       │ vhs (chat) ▮▯▯▯  12s  ✕       │ NOW PLAYING   │
-├──────────────────────────────────────────────┴───────────────────────────────┤ song B 1:12   │
-│ MULTIVIEW  cam_face │ cam_desk │ cam_drums │ youtube │ patch:aurora                          │
-├───────────────────────────────────────────────────────────────────────────────┴───────────────┤
-│ MIX  mic ▮▮▮▯  drums ▮▮▯  music ▮▯ (ducked)  game ▯  sfx ▯  tts ▯ │ 16R ch1…16 faders+meters │
-└──────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ sidebar ┐┌ ● ON AIR 01:02:03 · Live ▾ · All good ─────── Clear chat effects · Emergency stop (hold) · [Go live] ┐
+│ Live    ││ ON AIR (big composite)            │ UP NEXT (preview)              │ Chat · Activity · Songs · Mod │
+│ Scenes  ││                                   │ Transition ▾  Speed Auto/Fast… │                               │
+│ Lights  ││                                   │ [ Switch to Duo ]              │                               │
+│ Sound   ││ Scenes: thumbnails (1–9)                                           │                               │
+│ …       ││ Quick effects (Stream Deck page)   │ Running now                    │                               │
+│         ││ Cameras & sources (live tiles)                                     │                               │
+│Settings ││ Sound: Band · Music · Game · Sound effects · Read-out voice · Everything (fader, meter, mute)         │
+└─────────┘└────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
+- **Top bar:** on-air state and time, what the show is doing (Starting soon / Live / Be right back …), one health pill ("All good" / "2 problems" / "Finish setting up") with the list and Fix buttons, Clear chat effects, Emergency stop (hold), and the one hero button (Open OBS → Go live → End stream).
+- **On air** is the big composite program output (Main / Vertical / Both); **Up next** beside it with the transition and one Switch button; on wide screens quick effects move up beside them.
+- **Quick effects** mirror the current Stream Deck page (armed/active/cooldown); **Running now** lists everything active with Stop.
+- **Right rail:** Chat (with mod actions), Activity (with the "show this alert?" countdown), Songs, Mod.
 
-- **Status bar** (always visible, both modes): live state + uptime, per-output health, recording, mode picker, GPU frame time, warnings count (opens the warnings list), Clean, Panic (hold).
-- **Scenes:** thumbnails, number keys, click = to preview, double-click = direct take.
-- **Presets:** pad grid mirroring the current Stream Deck page. Pads show state (armed/active/cooldown ring). `*` = chat-disabled or needs confirm.
-- **Active:** everything currently running (effects, presets, chat effects, light cues), with remaining time, intensity, and kill buttons.
-- **Right rail tabs:**
-  - Events (with the veto window countdown)
-  - Chat (with inline mod actions)
-  - Queue (now playing, upcoming, pending approvals)
-  - Mod (AutoMod holds, audit log)
-- **Mix:** our buses plus the 16R channels with meters. Faders follow MIDI and the mixer in real time.
+### 15.5 Scenes page (composition)
+- **Layout:** scene list (new, duplicate, rename, delete, number keys) · the composite view(s) with drag/resize/crop handles, snap and guides · **Layers** (show/hide, order, add a camera or overlay) · right panel: **Selected layer** (quick placements, position/size, rounded corners, opacity, crop, effects on the layer, arrange/remove) and **Scene settings** (name, transitions into this scene with More/Most weighting, speed, effects on the whole scene).
+- **Overlays & effects:** every overlay, animated background, particle effect and video/audio effect as a card: what it is, Working/Off/Has a problem, Test, on/off, Settings as real controls (color pickers, sliders, switches), New from templates; files/errors under Details.
 
-### 15.5 Build mode layout
-
-```
-┌──────────────────────────────────────────── status bar ──────────────────────────────────────────┐
-├──────────────┬────────────────────────────────────────────────────────────┬──────────────────────┤
-│ LIBRARY      │ CANVAS EDITOR   [wide | tall | both]   grid/snap  safe-area │ INSPECTOR            │
-│ ▸ Sources    │                                                            │ node: cam_desk       │
-│ ▸ Scenes     │   drag / resize / crop / radius handles                    │ rect  crop  radius   │
-│ ▸ Patches    │   (edits apply to preview, never program)                  │ camera: exposure …   │
-│ ▸ Effects    │                                                            │ fx chain  [+]        │
-│ ▸ Presets    │                                                            │ ▾ rgb_split.amount   │
-│ ▸ Rules      │                                                            │   0.31 = base 0.20   │
-│ ▸ Bindings   │                                                            │        + ~music.bass │
-│ ▸ Timelines  │                                                            │        (hype, 200)   │
-│ ▸ Lights     │                                                            │   [Modulate] [MIDI]  │
-│ ▸ Mixes      │                                                            │                      │
-│ ▸ Controllers│                                                            │                      │
-│ ▸ Chatbot    │                                                            │                      │
-├──────────────┴────────────────────────────────────────────────────────────┴──────────────────────┤
-│ DOCK: Rules (when/if/do) │ Timeline │ Signal scopes │ Trace │ Simulator │ Console                 │
-└──────────────────────────────────────────────────────────────────────────────────────────────────┘
-```
-
-- **Library:** everything in the project, searchable, with drag-and-drop into scenes, presets, and rules. "New …" for each kind creates from a template.
-- **Canvas editor:** both canvases side by side or one at a time, with snapping, safe areas (TikTok UI overlay guides on `tall`), and alignment tools.
-- **Inspector:** auto-generated from metadata for any selected thing.
-  - Every parameter row shows its **provenance** and has **Modulate** (pick a signal, shape it with a live curve preview) and **MIDI learn**.
-- **Rules editor:** when/if/do blocks with autocomplete for events, addresses, and payload fields, plus a "test" button that fires the event through the simulator.
-- **Timeline:** per media item; waveform, beat grid, cues; record mode.
-- **Signal scopes:** plot any signal live (and its shaped output) to tune bindings.
-- **Trace:** select any state change and see the event → rule → command chain; select any event and see everything it caused.
-- **Simulator:** fire any event with realistic payloads (presets like "gift bomb 50", "raid 300", "1000 bits with message").
-- **Console:** logs, patch errors (click to open the file at the line).
-
-### 15.6 Other views
-- **Devices:** registry, expected vs present, formats, camera controls, stable identities, 16R status.
-- **Lights:** fixture patch, cue list, palette, DMX output monitor.
-- **Controllers:** deck page editor (drag presets onto keys, live key preview), MIDI mappings, MCU banks.
-- **Mixer:** full 16R channel/aux view, snapshots (store, recall, crossfade), MIDI mapping.
-- **Chatbot:** commands, timers, counters, quotes.
-- **Alerts:** routing, variations, queue policy, test buttons.
-- **Session review:** past sessions, markers, clip review queue (§18).
-- **Performance:** per-pass GPU timings, per-thread budgets, dropped/late frames, audio xruns, OBS encoder health.
-- **Settings:** accounts (Twitch/YouTube connect), API/security, shortcuts.
+### 15.6 Other pages
+- **Lights:** Looks (tap a look, cue-list playback cards, effects), Edit a look (lights, brightness, color, position, save), Stage (live top-down visualizer), Setup (patch, groups, output, flash limiter, RDM).
+- **Sound:** Mix (channel strips, effects per channel, "lowered while you talk", sounds & drum pads, Advanced), Mixing desk (the 16R: faders, saved mixes, linked controls), Text to speech.
+- **Automation:** Reactions ("When … → do …" sentences with a guided editor and Test), Buttons & pedals (Stream Deck key grid, MIDI learn, pedals, voice), Chat commands (commands, timed messages, counters, quotes), Timelines.
+- **Community:** Alerts & goals, Song requests, Twitch (connection, stream, channel points, polls, moderation), Giveaways.
+- **Recordings:** clips to review, past streams with markers.
+- **Settings:** Get started (plain checklist, never a takeover), Accounts & app (Twitch, keys, web helper, phones/tablets, screens, appearance, shortcuts), Devices, Backups, Performance, Troubleshooting (test events, why did that happen, messages & errors, live signals, signal links).
 
 ### 15.7 Default shortcuts (all rebindable)
 
 | Key | Action |
 |---|---|
 | `Ctrl+K` | Command palette (commands, addresses, scenes, presets, patches) |
-| `Tab` | Toggle Show/Build |
+| `Tab` | Jump between Live and Scenes |
 | `1`–`9` | Scene → preview |
-| `Enter` | Take (preview → program) |
+| `Enter` | Switch (Up next → On air) |
 | `Shift+1`–`9` | Scene direct to program |
 | `F1`–`F12` | Presets on the current pad page |
 | `Ctrl+Z` / `Ctrl+Shift+Z` | Undo / redo |
@@ -1079,10 +1011,11 @@ Global (works when the UI isn't focused) through Hyprland binds → `stream` CLI
 - **Map a controller:** click a fader/pad in the UI → move the hardware → pick takeover/feedback → done.
 
 ### 15.9 First run
-A setup wizard walks through:
-- devices (name the cameras, confirm the 16R, DMX, deck, MIDI)
-- accounts (Twitch device code, YouTube key)
-- OBS plugin check
+Settings → **Get started** is a plain-language checklist (never a window takeover; the Live page shows a "Finish setting up" banner and the sidebar a count until it's done):
+- Cameras (name them, pick which scene source each feeds)
+- Twitch (app ID with "Show me how" steps, then the device code)
+- OBS (open it, add our video with one click)
+- Optional: song requests (YouTube key), the text-to-speech voice, tips & public song queue (web helper)
 
 It then creates a starter project from `project-example` with working templates for scenes, alerts, the chat box, goals, the song queue, and the chatbot.
 
@@ -1224,7 +1157,7 @@ stream-engine/
     se-api/         # Unix socket + WebSocket JSON + OSC API, auth, HTTP server for web patches/player page
     se-obs/         # engine side of the OBS plugin link (health, timestamps, start/stop)
     se-ui-kit/      # design system: Omarchy theme tokens, typography, custom widgets
-    se-ui/          # egui application (Show/Build modes, panels, layouts)
+    se-ui/          # egui application (pages + tabs, layouts, pop-outs)
     se-app/         # main binary: `daemon` and `ui` subcommands
     se-cli/         # `stream` CLI (API client)
   obs-plugin/       # C OBS module (CMake), GPL-compatible license
@@ -1354,7 +1287,7 @@ Each milestone ends with a **live smoke run**: the actual app, real devices, out
 | TTS | Kokoro-82M via ONNX Runtime; espeak-ng as a separate process | Apache-2.0 model; avoids linking GPL code |
 | MJPEG decode | CPU (`turbojpeg`) | One MJPEG source; a 12-core CPU; no nvJPEG dependency |
 | GPU | Everything on the RTX 3070; the AMD iGPU is unused | Avoids cross-GPU dmabuf paths |
-| Displays | DP-1 (100 Hz) = UI Show mode; DP-2 = multiview + Build/dock panels; TV = confidence/program (fallback DP-2) | Matches the two ultrawides + TV on the machine |
+| Displays | One window by default (owner direction 2026-09-26); opt-in layouts put the multiview on DP-2 and the program window on the TV (fallback DP-2) | Simple by default; the two ultrawides + TV remain usable |
 | Vertical output | Our `tall` canvas feeds Aitum Stream Suite's existing Vertical canvas in OBS | Already configured on this machine |
 
 ---

@@ -1,6 +1,9 @@
 //! Theme tokens mapped from the active Omarchy theme (§16.2), watched live.
+//!
+//! Colors come from Omarchy; everything else (surfaces, text tiers, radii, spacing, type) is
+//! derived here so every screen shares one calm, readable look.
 
-use egui::{Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Stroke, TextStyle, Visuals};
+use egui::{Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Margin, Stroke, TextStyle, Visuals};
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -26,6 +29,24 @@ pub struct Theme {
     pub magenta: Color32,
     pub orange: Color32,
     pub bright_red: Color32,
+    // ---- derived surfaces (opaque) ----
+    /// Sidebar / top bar.
+    pub chrome: Color32,
+    /// Cards and panels on the page.
+    pub surface: Color32,
+    /// Hovered or raised surface, inputs.
+    pub surface_hi: Color32,
+    /// Hairline borders and dividers.
+    pub border: Color32,
+    /// Secondary text.
+    pub text_dim: Color32,
+    /// Hints, placeholders, disabled.
+    pub text_faint: Color32,
+    /// Text on the accent color.
+    pub on_accent: Color32,
+    /// Recessed wells: slider rails, switch tracks, meters, input fields. Contrasts with both
+    /// `surface` and `surface_hi`.
+    pub inset: Color32,
 }
 
 impl Theme {
@@ -43,6 +64,16 @@ impl Theme {
     pub fn modulated(&self) -> Color32 {
         self.magenta
     }
+}
+
+/// Linear mix of two colors (`t` = 0 → `a`, 1 → `b`), opaque.
+pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
+    let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round().clamp(0.0, 255.0) as u8;
+    Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
+}
+
+fn luminance(c: Color32) -> f32 {
+    (0.2126 * c.r() as f32 + 0.7152 * c.g() as f32 + 0.0722 * c.b() as f32) / 255.0
 }
 
 #[derive(Deserialize, Default)]
@@ -91,21 +122,25 @@ impl Theme {
     pub fn parse(src: &str) -> Theme {
         let c: ColorsToml = toml::from_str(src).unwrap_or_default();
         let g = |v: &Option<String>, d: Color32| v.as_deref().and_then(hex).unwrap_or(d);
-        let light = c.mode.as_deref() == Some("light");
         let bg = g(&c.background, Color32::from_rgb(0x1f, 0x1f, 0x28));
         let fg = g(&c.foreground, Color32::from_rgb(0xdc, 0xd7, 0xba));
+        let light = c.mode.as_deref().map(|m| m == "light").unwrap_or(luminance(bg) > 0.5);
+        let accent = g(&c.accent, fg);
+        // Surfaces step from the page background toward the foreground; the chrome (sidebar,
+        // top bar) steps the other way so the page reads as the brightest plane.
+        let away = if light { Color32::WHITE } else { Color32::BLACK };
         Theme {
             light,
             bg,
-            bg_dark: g(&c.dark_background, bg.gamma_multiply(0.8)),
-            bg_darker: g(&c.darker_background, bg.gamma_multiply(0.6)),
-            bg_light: g(&c.lighter_background, bg),
+            bg_dark: g(&c.dark_background, mix(bg, away, 0.25)),
+            bg_darker: g(&c.darker_background, mix(bg, away, 0.45)),
+            bg_light: g(&c.lighter_background, mix(bg, fg, 0.06)),
             fg,
-            fg_dim: g(&c.dark_foreground, fg.gamma_multiply(0.6)),
+            fg_dim: mix(fg, bg, 0.38),
             fg_bright: g(&c.bright_foreground, fg),
-            accent: g(&c.accent, fg),
-            selection: g(&c.selection, bg),
-            muted: g(&c.muted, fg.gamma_multiply(0.4)),
+            accent,
+            selection: g(&c.selection, mix(bg, accent, 0.25)),
+            muted: g(&c.muted, mix(fg, bg, 0.7)),
             red: g(&c.red, Color32::from_rgb(0xc3, 0x40, 0x43)),
             yellow: g(&c.yellow, Color32::from_rgb(0xc0, 0xa3, 0x6e)),
             green: g(&c.green, Color32::from_rgb(0x76, 0x94, 0x6a)),
@@ -114,6 +149,14 @@ impl Theme {
             magenta: g(&c.magenta, Color32::from_rgb(0x95, 0x7f, 0xb8)),
             orange: g(&c.orange, Color32::from_rgb(0xc1, 0x71, 0x58)),
             bright_red: g(&c.bright_red, g(&c.red, Color32::RED)),
+            chrome: mix(bg, away, if light { 0.5 } else { 0.35 }),
+            surface: mix(bg, fg, 0.045),
+            surface_hi: mix(bg, fg, 0.085),
+            border: mix(bg, fg, 0.13),
+            text_dim: mix(fg, bg, 0.38),
+            text_faint: mix(fg, bg, 0.58),
+            on_accent: if luminance(accent) > 0.55 { mix(bg, Color32::BLACK, 0.3) } else { Color32::WHITE },
+            inset: mix(bg, away, 0.32),
         }
     }
 
@@ -132,44 +175,61 @@ impl Theme {
         let mut v = if self.light { Visuals::light() } else { Visuals::dark() };
         v.override_text_color = Some(self.fg);
         v.panel_fill = self.bg;
-        v.window_fill = self.bg_dark;
-        v.extreme_bg_color = self.bg_darker;
-        v.faint_bg_color = self.bg_light;
-        v.code_bg_color = self.bg_darker;
-        v.hyperlink_color = self.blue;
+        v.window_fill = self.surface;
+        v.extreme_bg_color = mix(self.bg, if self.light { Color32::WHITE } else { Color32::BLACK }, 0.2);
+        v.faint_bg_color = self.surface;
+        v.code_bg_color = self.surface_hi;
+        v.text_edit_bg_color = Some(self.inset);
+        v.hyperlink_color = self.accent;
         v.warn_fg_color = self.yellow;
         v.error_fg_color = self.bright_red;
-        v.selection.bg_fill = self.selection;
+        v.selection.bg_fill = mix(self.bg, self.accent, 0.3);
         v.selection.stroke = Stroke::new(1.0, self.accent);
-        v.window_stroke = Stroke::new(1.0, self.muted);
-        v.window_corner_radius = CornerRadius::same(6);
-        v.menu_corner_radius = CornerRadius::same(4);
-        let r = CornerRadius::same(4);
+        v.window_stroke = Stroke::new(1.0, self.border);
+        v.window_corner_radius = CornerRadius::same(radius::CARD);
+        v.menu_corner_radius = CornerRadius::same(radius::CONTROL);
+        v.window_shadow = egui::Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(90) };
+        v.popup_shadow = egui::Shadow { offset: [0, 6], blur: 18, spread: 0, color: Color32::from_black_alpha(80) };
+        v.indent_has_left_vline = false;
+        v.striped = false;
+        v.slider_trailing_fill = true;
+        v.handle_shape = egui::style::HandleShape::Circle;
+        let r = CornerRadius::same(radius::CONTROL);
+        // `bg_fill` paints slider rails and other recessed parts, `weak_bg_fill` paints buttons
         for (w, fill, stroke) in [
-            (&mut v.widgets.noninteractive, self.bg, self.muted),
-            (&mut v.widgets.inactive, self.bg_light, self.muted),
-            (&mut v.widgets.hovered, self.selection, self.accent),
-            (&mut v.widgets.active, self.selection, self.accent),
-            (&mut v.widgets.open, self.bg_light, self.accent),
+            (&mut v.widgets.noninteractive, self.surface, self.border),
+            (&mut v.widgets.inactive, self.surface_hi, self.border),
+            (&mut v.widgets.hovered, mix(self.surface_hi, self.fg, 0.06), self.border),
+            (&mut v.widgets.active, mix(self.surface_hi, self.accent, 0.2), self.accent),
+            (&mut v.widgets.open, self.surface_hi, self.border),
         ] {
-            w.bg_fill = fill;
+            w.bg_fill = self.inset;
             w.weak_bg_fill = fill;
             w.bg_stroke = Stroke::new(1.0, stroke);
             w.fg_stroke = Stroke::new(1.0, self.fg);
             w.corner_radius = r;
+            w.expansion = 0.0;
         }
-        v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, self.fg_dim);
+        v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, self.text_dim);
+        v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, self.border);
         ctx.set_theme(if self.light { egui::Theme::Light } else { egui::Theme::Dark });
         ctx.all_styles_mut(|s| {
             s.visuals = v.clone();
             s.spacing.item_spacing = egui::vec2(spacing::S, spacing::S);
-            s.spacing.button_padding = egui::vec2(spacing::M, spacing::S);
-            s.spacing.interact_size.y = 24.0;
+            s.spacing.button_padding = egui::vec2(spacing::M + 2.0, spacing::S);
+            s.spacing.interact_size.y = 32.0;
+            s.spacing.slider_rail_height = 4.0;
+            s.spacing.window_margin = Margin::same(spacing::L as i8);
+            s.spacing.menu_margin = Margin::same(spacing::S as i8);
+            s.spacing.combo_width = 180.0;
+            s.spacing.text_edit_width = 240.0;
+            s.spacing.scroll = egui::style::ScrollStyle::floating();
+            s.interaction.selectable_labels = false;
             s.text_styles = [
                 (TextStyle::Small, FontId::new(type_scale::SMALL * zoom, FontFamily::Proportional)),
                 (TextStyle::Body, FontId::new(type_scale::BODY * zoom, FontFamily::Proportional)),
-                (TextStyle::Button, FontId::new(type_scale::BODY * zoom, FontFamily::Proportional)),
-                (TextStyle::Heading, FontId::new(type_scale::HEADING * zoom, FontFamily::Proportional)),
+                (TextStyle::Button, FontId::new(type_scale::BODY * zoom, FontFamily::Name(fonts::MEDIUM.into()))),
+                (TextStyle::Heading, FontId::new(type_scale::HEADING * zoom, FontFamily::Name(fonts::SEMIBOLD.into()))),
                 (TextStyle::Monospace, FontId::new(type_scale::BODY * zoom, FontFamily::Monospace)),
             ]
             .into();
@@ -177,20 +237,56 @@ impl Theme {
     }
 }
 
+/// Spacing scale (points).
 pub mod spacing {
-    pub const XS: f32 = 2.0;
-    pub const S: f32 = 6.0;
-    pub const M: f32 = 10.0;
+    pub const XS: f32 = 4.0;
+    pub const S: f32 = 8.0;
+    pub const M: f32 = 12.0;
     pub const L: f32 = 16.0;
     pub const XL: f32 = 24.0;
+    pub const XXL: f32 = 32.0;
 }
 
+/// Corner radii (points).
+pub mod radius {
+    pub const CONTROL: u8 = 8;
+    pub const CARD: u8 = 12;
+    pub const TILE: u8 = 10;
+    pub const PILL: u8 = 255;
+}
+
+/// Type scale (points).
 pub mod type_scale {
-    pub const SMALL: f32 = 11.0;
-    pub const BODY: f32 = 13.5;
-    pub const LARGE: f32 = 16.0;
-    pub const HEADING: f32 = 18.0;
-    pub const DISPLAY: f32 = 26.0;
+    pub const SMALL: f32 = 12.5;
+    pub const BODY: f32 = 14.5;
+    pub const LARGE: f32 = 16.5;
+    pub const HEADING: f32 = 20.0;
+    pub const TITLE: f32 = 26.0;
+    pub const DISPLAY: f32 = 34.0;
+}
+
+/// Font family names installed by [`install_font`].
+pub mod fonts {
+    pub const MEDIUM: &str = "medium";
+    pub const SEMIBOLD: &str = "semibold";
+    pub const BOLD: &str = "bold";
+}
+
+/// `FontId` helpers for the type scale.
+pub fn font(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Proportional)
+}
+pub fn font_medium(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name(fonts::MEDIUM.into()))
+}
+pub fn font_semibold(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name(fonts::SEMIBOLD.into()))
+}
+pub fn font_bold(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name(fonts::BOLD.into()))
+}
+pub fn font_mono(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Monospace)
 }
 
 /// The Omarchy font (`omarchy font current`), resolved to a file with fontconfig.
@@ -207,24 +303,48 @@ fn font_file(family: &str, style: &str) -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
-/// Install the Omarchy font (Nerd Font glyphs = icon set) for all text.
+/// Install the fonts: Inter (bundled, OFL) for all interface text in four weights, and the
+/// Omarchy font for numbers/timecode (monospace) and as the icon set (its Nerd Font glyphs are
+/// the fallback of every family). Returns the Omarchy font's name when found.
 pub fn install_font(ctx: &egui::Context, family: Option<&str>) -> Option<String> {
-    let fam = family.map(str::to_string).or_else(omarchy_font_name)?;
-    let regular = font_file(&fam, "")?;
-    let bytes = std::fs::read(&regular).ok()?;
     let mut defs = FontDefinitions::default();
-    defs.font_data.insert("omarchy".into(), Arc::new(FontData::from_owned(bytes)));
-    if let Some(b) = font_file(&fam, "bold").and_then(|p| std::fs::read(p).ok()) {
-        defs.font_data.insert("omarchy-bold".into(), Arc::new(FontData::from_owned(b)));
-        defs.families.insert(FontFamily::Name("bold".into()), vec!["omarchy-bold".into(), "omarchy".into()]);
-    } else {
-        defs.families.insert(FontFamily::Name("bold".into()), vec!["omarchy".into()]);
+    for (key, bytes) in [
+        ("inter", &include_bytes!("../assets/fonts/Inter-Regular.ttf")[..]),
+        ("inter-medium", &include_bytes!("../assets/fonts/Inter-Medium.ttf")[..]),
+        ("inter-semibold", &include_bytes!("../assets/fonts/Inter-SemiBold.ttf")[..]),
+        ("inter-bold", &include_bytes!("../assets/fonts/Inter-Bold.ttf")[..]),
+        // monochrome emoji for chat, commands and labels (OFL; newer than egui's built-in set)
+        ("noto-emoji", &include_bytes!("../assets/fonts/NotoEmoji.ttf")[..]),
+    ] {
+        defs.font_data.insert(key.into(), Arc::new(FontData::from_static(bytes)));
     }
-    for f in [FontFamily::Proportional, FontFamily::Monospace] {
-        defs.families.entry(f).or_default().insert(0, "omarchy".into());
+    let fam = family.map(str::to_string).or_else(omarchy_font_name);
+    let mono = fam.as_deref().and_then(|f| font_file(f, "")).and_then(|p| std::fs::read(p).ok());
+    let fallback: Vec<String> = defs.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
+    let chain = |first: &str| {
+        let mut v = vec![first.to_string()];
+        if mono.is_some() {
+            v.push("omarchy".into());
+        }
+        v.push("noto-emoji".into());
+        v.extend(fallback.iter().cloned());
+        v
+    };
+    let families = [
+        (FontFamily::Proportional, chain("inter")),
+        (FontFamily::Name(fonts::MEDIUM.into()), chain("inter-medium")),
+        (FontFamily::Name(fonts::SEMIBOLD.into()), chain("inter-semibold")),
+        (FontFamily::Name(fonts::BOLD.into()), chain("inter-bold")),
+    ];
+    if let Some(b) = mono {
+        defs.font_data.insert("omarchy".into(), Arc::new(FontData::from_owned(b)));
+        defs.families.entry(FontFamily::Monospace).or_default().insert(0, "omarchy".into());
+    }
+    for (f, list) in families {
+        defs.families.insert(f, list);
     }
     ctx.set_fonts(defs);
-    Some(fam)
+    fam
 }
 
 /// Watches the Omarchy theme directory and font; sends updates and requests repaints.

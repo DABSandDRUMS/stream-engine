@@ -1,12 +1,12 @@
-//! Show mode (§15.4): preview/program monitors, scenes with thumbnails and number keys,
-//! transition picker + TAKE, preset pads mirroring the Stream Deck page, the Active list, the
-//! right rail (events/chat/queue/mod), the multiview, and the mix strip.
+//! Live-page state and parts (§15.4): quick-effect pads mirroring the Stream Deck page (with
+//! confirm and cooldown), the "running now" list, and the right-rail tabs. The page itself is
+//! laid out in `views::live`.
 
 use crate::app::App;
-use crate::views::{mix, monitor, rail};
-use egui::{Align2, Color32, CornerRadius, FontId, Rect, RichText, Sense, Stroke, StrokeKind, Vec2};
+use crate::views::rail;
+use egui::{Color32, Rect, RichText, Stroke, Vec2};
 use se_proto::{Op, Value};
-use se_ui_kit::widgets::{self, LedState, icon, led_color};
+use se_ui_kit::widgets::{self, LedState, icon};
 use std::time::Instant;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -19,10 +19,10 @@ pub enum RailTab {
 
 impl RailTab {
     pub const ALL: [(RailTab, &'static str, &'static str); 4] = [
-        (RailTab::Events, "EVENTS", icon::ALERT),
-        (RailTab::Chat, "CHAT", icon::CHAT),
-        (RailTab::Queue, "QUEUE", icon::QUEUE),
-        (RailTab::Mod, "MOD", icon::MOD),
+        (RailTab::Chat, "Chat", icon::CHAT),
+        (RailTab::Events, "Activity", icon::ALERT),
+        (RailTab::Queue, "Songs", icon::QUEUE),
+        (RailTab::Mod, "Mod", icon::MOD),
     ];
     pub fn id(self) -> &'static str {
         match self {
@@ -50,12 +50,13 @@ pub struct ShowState {
     pub chat_filter: String,
     pub multiview_in_main: bool,
     pub rail_state: rail::RailState,
+    pub on_air: crate::views::live::OnAirView,
 }
 
 impl Default for ShowState {
     fn default() -> Self {
         ShowState {
-            rail: RailTab::Events,
+            rail: RailTab::Chat,
             rail_width: 360.0,
             transition: None,
             take_ms: None,
@@ -64,193 +65,13 @@ impl Default for ShowState {
             chat_filter: String::new(),
             multiview_in_main: true,
             rail_state: rail::RailState::default(),
+            on_air: Default::default(),
         }
     }
 }
 
 /// Seconds a confirm-preset stays armed after the first press.
 const ARM_SECS: f32 = 3.0;
-
-pub fn ui(app: &mut App, ui: &mut egui::Ui) {
-    let t = app.t.clone();
-    egui::Panel::right("rail").resizable(true).default_size(app.show.rail_width).min_size(260.0).show(ui, |ui| rail_panel(app, ui));
-    egui::Panel::bottom("mix").resizable(true).default_size(150.0).min_size(90.0).show(ui, |ui| mix::strip(app, ui));
-    if app.show.multiview_in_main && !app.is_popped_out("multiview") {
-        egui::Panel::bottom("multiview").resizable(true).default_size(130.0).min_size(70.0).show(ui, |ui| {
-            widgets::section(ui, &t, icon::SCENE, "Multiview");
-            let h = (ui.available_height() - 4.0).max(40.0);
-            monitor::multiview(app, ui, h);
-        });
-    }
-    egui::CentralPanel::default().show(ui, |ui| {
-        egui::ScrollArea::vertical().id_salt("show-main").show(ui, |ui| {
-            monitor::preview_program_row(app, ui);
-            ui.add_space(6.0);
-            scenes(app, ui);
-            transition_row(app, ui);
-            ui.add_space(6.0);
-            ui.columns(2, |cols| {
-                pads(app, &mut cols[0]);
-                active(app, &mut cols[1]);
-            });
-        });
-    });
-}
-
-pub fn rail_panel(app: &mut App, ui: &mut egui::Ui) {
-    let t = app.t.clone();
-    ui.horizontal(|ui| {
-        for (tab, label, ic) in RailTab::ALL {
-            let badge = rail::badge_count(app, tab);
-            let text = if badge > 0 { format!("{ic} {label} ({badge})") } else { format!("{ic} {label}") };
-            let rt = RichText::new(text).strong().color(if app.show.rail == tab { t.accent } else { t.fg_dim });
-            if ui.selectable_label(app.show.rail == tab, rt).clicked() {
-                app.show.rail = tab;
-            }
-        }
-    });
-    ui.separator();
-    match app.show.rail {
-        RailTab::Events => rail::events(app, ui),
-        RailTab::Chat => rail::chat(app, ui),
-        RailTab::Queue => rail::queue(app, ui),
-        RailTab::Mod => rail::moderation(app, ui),
-    }
-}
-
-fn scene_list(app: &App) -> Vec<(String, String, i64)> {
-    app.m
-        .q_list("scenes")
-        .iter()
-        .enumerate()
-        .map(|(i, s)| {
-            let name = s.get_path("name").and_then(Value::as_str).unwrap_or("").to_string();
-            let label = s.get_path("label").and_then(Value::as_str).unwrap_or(&name).to_string();
-            let key = s.get_path("key").and_then(Value::as_i64).unwrap_or(i as i64 + 1);
-            (name, label, key)
-        })
-        .collect()
-}
-
-pub fn scenes(app: &mut App, ui: &mut egui::Ui) {
-    let t = app.t.clone();
-    widgets::section(ui, &t, icon::SCENE, "Scenes");
-    let program = app.m.str("show.scene.program").to_string();
-    let preview = app.m.str("show.scene.preview").to_string();
-    let direct = app.m.b("show.direct");
-    let list = scene_list(app);
-    if list.is_empty() {
-        ui.label(RichText::new(if app.m.connected { "no scenes in the project (scenes/*.toml)" } else { "engine offline" }).color(t.fg_dim));
-        return;
-    }
-    ui.horizontal_wrapped(|ui| {
-        for (name, label, key) in &list {
-            let st = if *name == program {
-                LedState::Active
-            } else if *name == preview {
-                LedState::Armed
-            } else {
-                LedState::Idle
-            };
-            let size = Vec2::new(150.0, 104.0);
-            let (rect, r) = ui.allocate_exact_size(size, Sense::click());
-            if ui.is_rect_visible(rect) {
-                let thumb = Rect::from_min_size(rect.min + Vec2::new(3.0, 3.0), Vec2::new(size.x - 6.0, (size.x - 6.0) * 9.0 / 16.0));
-                monitor::scene_thumb(app, ui, thumb, name);
-                let p = ui.painter_at(rect);
-                let edge = if st == LedState::Idle { t.muted } else { led_color(&t, st) };
-                let fill = if r.hovered() { t.bg_light } else { t.bg_dark };
-                let bar = Rect::from_min_max(egui::pos2(rect.left(), thumb.bottom() + 2.0), rect.right_bottom());
-                p.rect_filled(bar, CornerRadius::same(4), fill);
-                p.text(bar.left_center() + Vec2::new(8.0, 0.0), Align2::LEFT_CENTER, format!("{key}"), FontId::proportional(12.0), t.fg_dim);
-                p.text(bar.center(), Align2::CENTER_CENTER, label, FontId::proportional(13.0), t.fg);
-                let tag = match st {
-                    LedState::Active => "PGM",
-                    LedState::Armed => "PVW",
-                    _ => "",
-                };
-                p.text(bar.right_center() - Vec2::new(8.0, 0.0), Align2::RIGHT_CENTER, tag, FontId::proportional(10.0), edge);
-                p.rect_stroke(rect, CornerRadius::same(5), Stroke::new(if st == LedState::Idle { 1.0 } else { 3.0 }, edge), StrokeKind::Inside);
-            }
-            let hint = format!("{key}: to preview · Shift+{key}: direct to program · double-click: take directly");
-            let r = r.on_hover_text(hint);
-            if r.double_clicked() || (r.clicked() && direct) {
-                app.m.command(Op::SceneCut { scene: name.clone(), transition: app.show.transition.clone() });
-            } else if r.clicked() {
-                app.m.command(Op::SceneGo { scene: name.clone() });
-            }
-        }
-    });
-}
-
-/// "random: morph ×3 · fade · zoomblur  500–900ms" for the preview scene's pool.
-fn pool_label(app: &App, scene: &str) -> String {
-    let Some(s) = app.build.scene_config(scene) else { return "scene pool (random)".into() };
-    let Some(pool) = s.get_path("transitions.pool").and_then(Value::as_list).filter(|l| !l.is_empty()) else {
-        return "default transition".into();
-    };
-    let parts: Vec<String> = pool
-        .iter()
-        .filter_map(|e| {
-            let n = e.get_path("name").and_then(Value::as_str).or(e.as_str())?;
-            let w = e.get_path("w").and_then(Value::as_f64).unwrap_or(1.0);
-            Some(if (w - 1.0).abs() > f64::EPSILON { format!("{n} ×{w}") } else { n.to_string() })
-        })
-        .collect();
-    let ms = match s.get_path("transitions.ms") {
-        Some(Value::List(l)) if l.len() == 2 => format!("  {}–{}ms", l[0], l[1]),
-        Some(v) if v.as_f64().is_some() => format!("  {v}ms"),
-        _ => String::new(),
-    };
-    format!("random: {}{ms}", parts.join(" · "))
-}
-
-pub fn transition_row(app: &mut App, ui: &mut egui::Ui) {
-    let t = app.t.clone();
-    let preview = app.m.str("show.scene.preview").to_string();
-    ui.horizontal(|ui| {
-        ui.label(RichText::new("TRANSITION").small().strong().color(t.fg_dim));
-        let pool = pool_label(app, &preview);
-        let cur = app.show.transition.clone().unwrap_or_else(|| pool.clone());
-        egui::ComboBox::from_id_salt("transition").width(300.0).selected_text(cur).show_ui(ui, |ui| {
-            if ui.selectable_label(app.show.transition.is_none(), pool.as_str()).clicked() {
-                app.show.transition = None;
-            }
-            for n in app.m.q_list("transitions").iter().filter_map(|v| v.as_str().map(String::from)).collect::<Vec<_>>() {
-                if ui.selectable_label(app.show.transition.as_deref() == Some(&n), &n).clicked() {
-                    app.show.transition = Some(n);
-                }
-            }
-        });
-        let mut ms = app.show.take_ms.unwrap_or(0) as f64;
-        let r = ui.add(
-            egui::DragValue::new(&mut ms)
-                .range(0.0..=10000.0)
-                .speed(10.0)
-                .suffix(" ms")
-                .custom_formatter(|v, _| if v <= 0.0 { "auto".into() } else { format!("{v:.0}") }),
-        );
-        if r.changed() {
-            app.show.take_ms = (ms > 0.0).then_some(ms as u32);
-        }
-        r.on_hover_text("Take duration (auto = the pool's range)");
-        if app.m.b("show.transition.active") {
-            ui.add(egui::ProgressBar::new(app.m.f("show.transition.progress") as f32).desired_width(140.0).text(app.m.str("show.transition.name").to_string()));
-        } else if app.m.has("show.transition.name") {
-            ui.label(RichText::new(format!("last: {} {}ms", app.m.str("show.transition.name"), app.m.f("show.transition.ms") as i64)).small().color(t.fg_dim));
-        }
-        let mut direct = app.m.b("show.direct");
-        if ui.checkbox(&mut direct, "direct").on_hover_text("Scene clicks go straight to program").changed() {
-            app.m.command(Op::Set { address: "show.direct".into(), value: Value::Bool(direct) });
-        }
-        let take = egui::Button::new(RichText::new(format!("TAKE {}", app.keys_label("take"))).strong().size(16.0).color(t.fg_bright))
-            .fill(t.red.gamma_multiply(0.75))
-            .min_size(Vec2::new(130.0, 34.0));
-        if ui.add_enabled(!preview.is_empty(), take).on_hover_text("Preview → program").clicked() {
-            app.take();
-        }
-    });
-}
 
 /// One pad of the Show-mode grid (deck key mirror or plain preset).
 struct PadItem {
@@ -374,21 +195,32 @@ fn release_pad(app: &mut App, index: usize) {
     }
 }
 
+/// Where the pads come from, for the card subtitle.
+pub fn pads_source(app: &App) -> String {
+    match app.m.q("controllers.page").filter(|p| p.get_path("keys").is_some()) {
+        Some(page) => {
+            let name = page.get_path("label").or_else(|| page.get_path("page")).and_then(Value::as_str).unwrap_or("");
+            format!("Same as your Stream Deck page \"{name}\". Right-click stops one.")
+        }
+        None => "Tap to start. Right-click stops one.".into(),
+    }
+}
+
 pub fn pads(app: &mut App, ui: &mut egui::Ui) {
     let t = app.t.clone();
-    let (title, items) = pad_items(app);
-    widgets::section(ui, &t, icon::PRESET, &title);
+    let (_, items) = pad_items(app);
     if items.is_empty() {
-        ui.label(RichText::new("no presets (presets/*.toml) and no deck page").color(t.fg_dim));
+        widgets::empty_state(ui, &t, icon::BOLT, "No quick effects yet", "Make one in Scenes → Overlays & effects.", None);
         return;
     }
-    let cols = 5usize;
-    let w = ((ui.available_width() - (cols as f32 - 1.0) * ui.spacing().item_spacing.x) / cols as f32).clamp(70.0, 150.0);
-    let size = Vec2::new(w, (w * 0.62).clamp(52.0, 90.0));
+    let gap = 10.0;
+    let cols = ((ui.available_width() + gap) / (118.0 + gap)).floor().clamp(2.0, 8.0) as usize;
+    let w = (ui.available_width() - (cols as f32 - 1.0) * gap) / cols as f32;
+    let size = Vec2::new(w, 84.0);
     let armed_id = app.show.armed.as_ref().filter(|(_, at)| at.elapsed().as_secs_f32() < ARM_SECS).map(|(n, _)| n.clone());
     let mut fire = None;
     let mut release = None;
-    egui::Grid::new("pads").spacing(Vec2::splat(ui.spacing().item_spacing.x)).show(ui, |ui| {
+    egui::Grid::new("pads").spacing(Vec2::splat(gap)).show(ui, |ui| {
         for (i, it) in items.iter().enumerate() {
             let id = match &it.fire {
                 PadFire::Deck { key, page } => format!("deck:{page}:{key}"),
@@ -403,7 +235,7 @@ pub fn pads(app: &mut App, ui: &mut egui::Ui) {
                 LedState::Idle
             };
             let hint = if i < 12 { app.keys_label(&format!("pad.{}", i + 1)) } else { String::new() };
-            let label = if it.starred { format!("{}*", it.label) } else { it.label.clone() };
+            let label = it.label.replace('_', " ");
             let r = widgets::pad(ui, &t, size, &it.icon, &label, it.color, state, it.progress, Some(&hint));
             if let Some(cd) = it.cooldown {
                 // cooldown ring: arc around the pad edge proportional to the remaining cooldown
@@ -415,11 +247,10 @@ pub fn pads(app: &mut App, ui: &mut egui::Ui) {
                     p.add(egui::Shape::line(pts, Stroke::new(3.0, t.blue)));
                 }
             }
-            let tip = match (&it.fire, it.confirm) {
-                (PadFire::Deck { key, page }, _) => format!("deck page {page} key {key}{}", if it.confirm { " · press twice to confirm" } else { "" }),
-                (PadFire::Preset(p), true) => format!("preset {p} · press twice to confirm"),
-                (PadFire::Preset(p), false) => format!("preset {p} · right-click releases"),
-                _ => String::new(),
+            let tip = match (it.confirm, it.starred) {
+                (true, _) => "Tap twice to confirm. Right-click stops it.".to_string(),
+                (false, true) => "Viewers can't trigger this one from chat. Right-click stops it.".to_string(),
+                _ => "Right-click stops it.".to_string(),
             };
             let r = r.on_hover_text(tip);
             if r.clicked() {
@@ -468,7 +299,6 @@ enum Kill {
 
 pub fn active(app: &mut App, ui: &mut egui::Ui) {
     let t = app.t.clone();
-    widgets::section(ui, &t, icon::EFFECT, "Active");
     let mut rows: Vec<(String, String, Option<f32>, String, Kill)> = Vec::new();
     for it in app.m.q_list("active") {
         let kind = it.get_path("kind").and_then(Value::as_str).unwrap_or("");
@@ -476,11 +306,11 @@ pub fn active(app: &mut App, ui: &mut egui::Ui) {
         let chat = it.get_path("chat").is_some_and(Value::truthy);
         let level = it.get_path("level").and_then(Value::as_f64).map(|l| l as f32);
         let rem = match it.get_path("remaining_ms").and_then(Value::as_f64) {
-            Some(ms) => format!("{:.1}s", ms / 1000.0),
-            None => "latched".into(),
+            Some(ms) => format!("{:.0}s left", (ms / 1000.0).ceil()),
+            None => "until stopped".into(),
         };
         let (ic, kill) = if kind == "preset" { (icon::PRESET, Kill::Preset(name.clone())) } else { (icon::EFFECT, Kill::Release(name.clone())) };
-        rows.push((ic.to_string(), format!("{name}{}", if chat { " (chat)" } else { "" }), level, rem, kill));
+        rows.push((ic.to_string(), format!("{}{}", name.replace('_', " "), if chat { "  · from chat" } else { "" }), level, rem, kill));
     }
     let cuelists: Vec<String> =
         app.m.under("lights.cuelist").filter_map(|(a, v)| a.strip_suffix(".playing").filter(|_| v.truthy()).map(String::from)).collect();
@@ -490,7 +320,7 @@ pub fn active(app: &mut App, ui: &mut egui::Ui) {
         let master = app.m.get(&format!("{a}.master")).and_then(Value::as_f64).map(|v| v as f32);
         rows.push((
             icon::LIGHT.into(),
-            format!("{cl} · cue {cue}"),
+            format!("Lights: {cl}, cue {cue}"),
             master,
             "running".into(),
             Kill::Action("lights.release", Value::map().with("cuelist", cl)),
@@ -503,33 +333,32 @@ pub fn active(app: &mut App, ui: &mut egui::Ui) {
         let len = app.m.f(&format!("{a}.length"));
         let time = app.m.f(&format!("{a}.time"));
         let prog = (len > 0.0).then(|| (time / len).clamp(0.0, 1.0) as f32);
-        rows.push((
-            icon::TIMELINE.into(),
-            format!("{name} · {}", app.m.str(&format!("{a}.status"))),
-            prog,
-            tc,
-            Kill::Action("timeline.stop", Value::map().with("name", name)),
-        ));
+        rows.push((icon::TIMELINE.into(), format!("Timeline: {name}"), prog, tc, Kill::Action("timeline.stop", Value::map().with("name", name))));
     }
     if rows.is_empty() {
-        ui.label(RichText::new("nothing running").color(t.fg_dim));
+        widgets::hint(ui, &t, "Nothing running right now.");
         return;
     }
     let mut kill = None;
-    egui::Grid::new("active").striped(true).num_columns(4).show(ui, |ui| {
-        for (i, (ic, name, level, rem, _)) in rows.iter().enumerate() {
-            ui.label(format!("{ic} {name}"));
-            match level {
-                Some(l) => ui.add(egui::ProgressBar::new(*l).desired_width(90.0)),
-                None => ui.label(""),
-            };
-            ui.label(RichText::new(rem).monospace());
-            if ui.button(icon::CROSS).on_hover_text("kill").clicked() {
-                kill = Some(i);
-            }
-            ui.end_row();
-        }
-    });
+    for (i, (ic, name, level, rem, _)) in rows.iter().enumerate() {
+        egui::Frame::new().fill(t.surface_hi).corner_radius(se_ui_kit::theme::radius::CONTROL).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(ic).color(t.accent));
+                ui.label(RichText::new(name).color(t.fg));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if widgets::icon_button(ui, &t, icon::CROSS, "Stop").clicked() {
+                        kill = Some(i);
+                    }
+                    ui.label(RichText::new(rem).size(se_ui_kit::theme::type_scale::SMALL).color(t.text_dim));
+                    if let Some(l) = level {
+                        widgets::meter_h(ui, &t, Vec2::new(60.0, 5.0), *l);
+                    }
+                });
+            });
+        });
+        ui.add_space(4.0);
+    }
     if let Some(i) = kill {
         match rows.swap_remove(i).4 {
             Kill::Preset(n) => app.m.command(Op::PresetRelease { name: n }),

@@ -60,7 +60,7 @@ fn items(app: &App) -> Vec<Item> {
     let mut v = Vec::new();
     let mut add = |label: String, detail: &str, shortcut: String, act: Act| v.push(Item { label, detail: detail.to_string(), shortcut, act });
     add(format!("{} take", icon::PLAY), "preview → program", app.keys_label("take"), Act::Take);
-    add(format!("{} toggle Show/Build", icon::SETTINGS), "mode", app.keys_label("mode.toggle"), Act::ToggleMode);
+    add(format!("{} switch Live ↔ Scenes", icon::SETTINGS), "page", app.keys_label("mode.toggle"), Act::ToggleMode);
     add(format!("{} clean", icon::CROSS), "clear chat effects", app.keys_label("clean"), Act::Op(Op::Clean));
     add(format!("{} undo", icon::PLAY), "", app.keys_label("undo"), Act::Op(Op::Undo));
     add(format!("{} redo", icon::PLAY), "", app.keys_label("redo"), Act::Op(Op::Redo));
@@ -131,9 +131,7 @@ fn items(app: &App) -> Vec<Item> {
     }
     for p in Panel::all() {
         add(format!("{} pop out {}", icon::LINK, p.title()), &format!("stream-engine.{}", p.id()), String::new(), Act::PopOut(p.id()));
-        if p.is_dock_tab() {
-            add(format!("{} show {}", icon::SEARCH, p.title()), "dock tab", String::new(), Act::Focus(p));
-        }
+        add(format!("{} show {}", icon::SEARCH, p.title()), "go to", String::new(), Act::Focus(p));
     }
     for a in app.m.state.keys().chain(app.m.fetched.keys()) {
         add(format!("{} {a}", icon::SEARCH), "inspect address", String::new(), Act::Select(a.clone()));
@@ -155,14 +153,13 @@ pub fn run(app: &mut App, act: Act) {
         Act::Op(op) => app.m.command(op),
         Act::Select(a) => {
             app.select(a);
-            app.mode = crate::app::Mode::Build;
-            app.view = None;
+            app.open_view(crate::app::ViewId::Composition);
         }
-        Act::View(v) => app.view = Some(v),
+        Act::View(v) => app.open_view(v),
         Act::Layout(l) => app.switch_layout(&l),
         Act::PopOut(p) => app.pop_out(&p),
         Act::Focus(p) => app.open_panel(p),
-        Act::ToggleMode => app.toggle_mode(),
+        Act::ToggleMode => app.toggle_page(),
         Act::Take => app.take(),
     }
 }
@@ -191,7 +188,7 @@ pub fn ui(app: &mut App, ctx: &egui::Context) {
     egui::Window::new("palette").title_bar(false).anchor(egui::Align2::CENTER_TOP, [0.0, 80.0]).fixed_size([720.0, 420.0]).show(ctx, |ui| {
         ui.label(RichText::new(format!("{} commands, scenes, presets, layouts, views, addresses — or type a command", icon::SEARCH)).color(t.fg_dim));
         let r = ui.add(
-            egui::TextEdit::singleline(&mut app.palette.text)
+            se_ui_kit::widgets::field(&mut app.palette.text)
                 .desired_width(f32::INFINITY)
                 .hint_text("take · preset.fire hype · set fx.vhs.amount 0.5 · layout build"),
         );

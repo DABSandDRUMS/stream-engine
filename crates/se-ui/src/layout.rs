@@ -1,7 +1,9 @@
 //! Named layouts (`layouts/*.toml`, §15.3).
 //!
-//! A [`Layout`] says which mode the main window starts in, where the main window, pop-out panels,
-//! and the confidence window go, and how the Build-mode dock is split. Files are human-edited:
+//! A [`Layout`] says which page the main window starts on and where the main window, pop-out
+//! panels, and the (optional) confidence window go. The default, `single`, is one window and
+//! nothing else; `show-3disp` / `show-2disp` add the multiview and a program window on other
+//! screens for people who want them. Files are human-edited:
 //! every key is optional ([`Layout::parse_over`] fills gaps from the built-in of the same name),
 //! and [`Layout::to_toml`] rewrites an existing file with `toml_edit`, keeping comments and the
 //! order of untouched keys. Parsing and serializing are pure (`&str` in, `String` out); the UI
@@ -14,25 +16,19 @@ use std::collections::BTreeMap;
 use toml_edit::{DocumentMut, Item, TableLike, Value};
 
 /// Built-in layouts, in the order the switcher lists them.
-pub const BUILTIN_NAMES: [&str; 3] = ["show-3disp", "show-2disp", "build"];
+pub const BUILTIN_NAMES: [&str; 3] = ["single", "show-3disp", "show-2disp"];
+/// Layout used when none is chosen.
+pub const DEFAULT_LAYOUT: &str = "single";
 /// Stem of the shortcuts file that shares the `layouts/` directory (not a layout).
 pub const SHORTCUTS_STEM: &str = "shortcuts";
 /// App-id of the main window.
 pub const MAIN_APP_ID: &str = "stream-engine";
 /// App-id of the confidence (program) window.
 pub const CONFIDENCE_APP_ID: &str = "stream-engine.program";
-/// Dock tab ids besides `view.<name>`.
-pub const DOCK_TABS: [&str; 7] = ["rules", "timeline", "scopes", "trace", "simulator", "console", "perf"];
-/// Show-mode right-rail tabs.
+/// Page ids a layout can open on (see `app::Page`).
+pub const PAGES: [&str; 8] = ["live", "scenes", "lights", "sound", "automation", "community", "recordings", "settings"];
+/// Live-page right-rail tabs.
 pub const RAIL_TABS: [&str; 4] = ["events", "chat", "queue", "mod"];
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Mode {
-    #[default]
-    Show,
-    Build,
-}
 
 /// Which program canvases the confidence window shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,7 +46,8 @@ pub enum Canvases {
 pub struct Layout {
     /// Equals the file stem (the stem wins when they differ).
     pub name: String,
-    pub mode: Mode,
+    /// Page the main window opens on (`live`, `scenes`, `lights`, …).
+    pub page: String,
     /// In-app zoom on top of the Hyprland monitor scale.
     pub zoom: f32,
     /// Layout used instead while none of `confidence.monitors` is present (TV off/unplugged).
@@ -60,7 +57,6 @@ pub struct Layout {
     /// Pop-out panels: separate windows with app-id `stream-engine.<panel>`.
     pub windows: Vec<PopOut>,
     pub confidence: ConfidenceCfg,
-    pub dock: DockCfg,
     pub show: ShowCfg,
 }
 
@@ -120,41 +116,6 @@ impl Default for ConfidenceCfg {
     }
 }
 
-/// Build-mode bottom dock.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct DockCfg {
-    /// Tab groups left → right; ids from [`DOCK_TABS`] or `view.<name>`.
-    pub groups: Vec<Vec<String>>,
-    /// Width share per group (normalized by [`DockCfg::shares`]).
-    pub fractions: Vec<f32>,
-    /// Dock height in logical points.
-    pub height: f32,
-}
-
-impl Default for DockCfg {
-    fn default() -> Self {
-        DockCfg { groups: vec![DOCK_TABS.iter().map(|t| t.to_string()).collect()], fractions: vec![1.0], height: 300.0 }
-    }
-}
-
-impl DockCfg {
-    /// One share per group, summing to 1. Falls back to equal shares when `fractions` doesn't
-    /// have one finite positive value per group.
-    pub fn shares(&self) -> Vec<f32> {
-        let n = self.groups.len();
-        if !self.fractions_valid() {
-            return vec![1.0 / n.max(1) as f32; n];
-        }
-        let sum: f32 = self.fractions.iter().sum();
-        self.fractions.iter().map(|f| f / sum).collect()
-    }
-
-    fn fractions_valid(&self) -> bool {
-        self.fractions.len() == self.groups.len() && self.fractions.iter().all(|f| f.is_finite() && *f > 0.0)
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ShowCfg {
@@ -167,7 +128,7 @@ pub struct ShowCfg {
 
 impl Default for ShowCfg {
     fn default() -> Self {
-        ShowCfg { rail_tab: "events".into(), rail_width: 360.0, multiview: true }
+        ShowCfg { rail_tab: "chat".into(), rail_width: 380.0, multiview: true }
     }
 }
 
@@ -175,13 +136,12 @@ impl Default for Layout {
     fn default() -> Self {
         Layout {
             name: String::new(),
-            mode: Mode::Show,
+            page: "live".into(),
             zoom: 1.0,
             auto_fallback: None,
             main: MainCfg::default(),
             windows: Vec::new(),
             confidence: ConfidenceCfg::default(),
-            dock: DockCfg::default(),
             show: ShowCfg::default(),
         }
     }
@@ -197,12 +157,14 @@ pub struct WindowPlan {
 }
 
 impl Layout {
-    /// The built-in layouts (§15.3) for this machine: DP-1 main, DP-2 side, Philips TV confidence.
+    /// The built-in layouts (§15.3): `single` (one window, the default) and the multi-screen
+    /// setups for this machine (DP-1 main, DP-2 side, Philips TV confidence).
     pub fn builtin(name: &str) -> Option<Layout> {
         let m = |s: &str| Some(MonitorMatch::parse(s));
         let multiview = |size| PopOut { panel: "multiview".into(), monitor: m("DP-2"), fullscreen: false, size };
         let base = Layout { name: name.to_string(), main: MainCfg { monitor: m("DP-1") }, ..Layout::default() };
         Some(match name {
+            "single" => Layout { name: name.to_string(), confidence: ConfidenceCfg { enabled: false, ..ConfidenceCfg::default() }, ..Layout::default() },
             "show-3disp" => Layout {
                 windows: vec![multiview(None)],
                 auto_fallback: Some("show-2disp".into()),
@@ -220,19 +182,6 @@ impl Layout {
                     ..ConfidenceCfg::default()
                 },
                 show: ShowCfg { multiview: false, ..ShowCfg::default() },
-                ..base
-            },
-            "build" => Layout {
-                mode: Mode::Build,
-                dock: DockCfg {
-                    groups: vec![
-                        vec!["rules".into(), "timeline".into()],
-                        vec!["scopes".into(), "trace".into()],
-                        vec!["simulator".into(), "console".into(), "perf".into()],
-                    ],
-                    fractions: vec![0.4, 0.3, 0.3],
-                    height: 320.0,
-                },
                 ..base
             },
             _ => return None,
@@ -307,17 +256,8 @@ impl Layout {
         if self.auto_fallback.as_deref() == Some(self.name.as_str()) {
             w.push("auto_fallback points at the layout itself".into());
         }
-        let mut seen = std::collections::HashSet::new();
-        for tab in self.dock.groups.iter().flatten() {
-            if !DOCK_TABS.contains(&tab.as_str()) && !tab.strip_prefix("view.").is_some_and(|v| !v.is_empty()) {
-                w.push(format!("dock: unknown tab `{tab}`"));
-            }
-            if !seen.insert(tab.as_str()) {
-                w.push(format!("dock: tab `{tab}` listed twice"));
-            }
-        }
-        if !self.dock.fractions.is_empty() && !self.dock.fractions_valid() {
-            w.push(format!("dock: fractions {:?} don't fit {} groups (using equal widths)", self.dock.fractions, self.dock.groups.len()));
+        if !PAGES.contains(&self.page.as_str()) {
+            w.push(format!("unknown page `{}`", self.page));
         }
         if !RAIL_TABS.contains(&self.show.rail_tab.as_str()) {
             w.push(format!("show: unknown rail_tab `{}`", self.show.rail_tab));
@@ -540,7 +480,7 @@ const FILE_HEADER: &str = "\
 /// Comments for a freshly written file: (table path, key or "" for the table header, comment).
 const FILE_COMMENTS: &[(&str, &str, &str)] = &[
     ("", "name", "# must match the file name"),
-    ("", "mode", "# show | build"),
+    ("", "page", "# page to open on: live | scenes | lights | sound | automation | community | recordings | settings"),
     ("", "zoom", "# in-app zoom on top of the Hyprland monitor scale"),
     ("", "auto_fallback", "# layout used while no confidence monitor is present (TV off or unplugged)"),
     ("main", "", "# main window (app-id stream-engine)"),
@@ -549,9 +489,7 @@ const FILE_COMMENTS: &[(&str, &str, &str)] = &[
     ("confidence", "monitors", "# first present and enabled match wins"),
     ("confidence", "fallback", "# used while none of `monitors` is present"),
     ("confidence", "canvases", "# wide | tall | both"),
-    ("dock", "", "# Build-mode bottom dock: tab groups left to right.\n# Tabs: rules, timeline, scopes, trace, simulator, console, perf, view.<name>"),
-    ("dock", "fractions", "# width share per group"),
-    ("show", "", "# Show mode"),
+    ("show", "", "# Live page"),
     ("show", "rail_tab", "# events | chat | queue | mod"),
 ];
 
@@ -598,8 +536,11 @@ mod tests {
 
     #[test]
     fn builtins_match_the_plan() {
+        let one = Layout::builtin("single").unwrap();
+        assert!(!one.confidence.enabled && one.windows.is_empty() && one.main.monitor.is_none());
+        assert_eq!(one.page, "live");
         let s3 = Layout::builtin("show-3disp").unwrap();
-        assert_eq!((s3.mode, s3.auto_fallback.as_deref()), (Mode::Show, Some("show-2disp")));
+        assert_eq!(s3.auto_fallback.as_deref(), Some("show-2disp"));
         assert_eq!(s3.main.monitor, Some(MonitorMatch::Name("DP-1".into())));
         assert_eq!(s3.windows.len(), 1);
         assert_eq!((s3.windows[0].app_id().as_str(), s3.windows[0].monitor.as_ref().map(|m| m.to_string())), ("stream-engine.multiview", Some("DP-2".into())));
@@ -611,13 +552,6 @@ mod tests {
         assert!(!s2.confidence.fullscreen && s2.confidence.size.is_some());
         assert_eq!(s2.confidence.monitors, vec![MonitorMatch::Name("DP-2".into())]);
 
-        let b = Layout::builtin("build").unwrap();
-        assert_eq!(b.mode, Mode::Build);
-        let mut tabs: Vec<&str> = b.dock.groups.iter().flatten().map(String::as_str).collect();
-        tabs.sort();
-        let mut all = DOCK_TABS.to_vec();
-        all.sort();
-        assert_eq!(tabs, all);
         for n in BUILTIN_NAMES {
             assert!(Layout::builtin(n).unwrap().warnings().is_empty(), "{n}");
         }
@@ -641,7 +575,7 @@ mod tests {
         let text = r#"# my show layout
 name = "mine"   # the name
 zoom = 1.25
-mode = "show"   # trailing comment stays
+page = "live"   # trailing comment stays
 my_note = "not a layout key"
 
 [main]
@@ -671,7 +605,7 @@ monitors = ["desc:Philips FTV"]   # the TV
         let out = l.to_toml(Some(text));
         assert!(
             out.starts_with(
-                "# my show layout\nname = \"mine\"   # the name\nzoom = 1.5\nmode = \"show\"   # trailing comment stays\nmy_note = \"not a layout key\"\n"
+                "# my show layout\nname = \"mine\"   # the name\nzoom = 1.5\npage = \"live\"   # trailing comment stays\nmy_note = \"not a layout key\"\n"
             ),
             "{out}"
         );
@@ -713,23 +647,24 @@ monitors = ["desc:Philips FTV"]   # the TV
         let (set, errors) = LayoutSet::from_files([("layouts/show-3disp.toml", "zoom = 1.2\n[show]\nrail_width = 400\n")]);
         assert!(errors.is_empty(), "{errors:?}");
         let l = set.get("show-3disp").unwrap();
-        assert_eq!((l.zoom, l.show.rail_width, l.show.rail_tab.as_str()), (1.2, 400.0, "events"));
+        assert_eq!((l.zoom, l.show.rail_width, l.show.rail_tab.as_str()), (1.2, 400.0, "chat"));
         assert_eq!(l.auto_fallback.as_deref(), Some("show-2disp"));
         assert_eq!(l.windows, Layout::builtin("show-3disp").unwrap().windows);
 
-        let err = format!("{:#}", Layout::parse("mode = \"shw\"\n").unwrap_err());
-        assert!(err.contains("shw") && err.contains("line 1"), "{err}");
+        let err = format!("{:#}", Layout::parse("zoom = \"big\"\n").unwrap_err());
+        assert!(err.contains("big") && err.contains("line 1"), "{err}");
+        assert_eq!(Layout::parse("page = \"lghts\"\n").unwrap().warnings(), ["unknown page `lghts`"]);
         assert!(Layout::parse("[confidence]\ncanvases = 3\n").is_err());
         assert!(Layout::parse("zoom = ").is_err());
         let (set, errors) = LayoutSet::from_files([
             ("a/bad.toml", "zoom = \"big\""),
-            ("a/good.toml", "mode = \"build\""),
+            ("a/good.toml", "page = \"lights\""),
             ("a/shortcuts.toml", "[keys]\n"),
             ("a/readme.md", ""),
         ]);
         assert_eq!(errors.len(), 1);
         assert!(errors[0].starts_with("a/bad.toml: "));
-        assert_eq!(set.names(), ["show-3disp", "show-2disp", "build", "good"]);
+        assert_eq!(set.names(), ["single", "show-3disp", "show-2disp", "good"]);
         assert_eq!(set.get("good").unwrap().name, "good");
     }
 
@@ -739,11 +674,11 @@ monitors = ["desc:Philips FTV"]   # the TV
         for n in ["zeta", "alpha"] {
             set.insert(Layout { name: n.into(), ..Layout::default() });
         }
-        assert_eq!(set.names(), ["show-3disp", "show-2disp", "build", "alpha", "zeta"]);
+        assert_eq!(set.names(), ["single", "show-3disp", "show-2disp", "alpha", "zeta"]);
         assert_eq!(set.next("show-3disp"), "show-2disp");
-        assert_eq!(set.next("build"), "alpha");
-        assert_eq!(set.next("zeta"), "show-3disp");
-        assert_eq!(set.next("missing"), "show-3disp");
+        assert_eq!(set.next("show-2disp"), "alpha");
+        assert_eq!(set.next("zeta"), "single");
+        assert_eq!(set.next("missing"), "single");
     }
 
     #[test]
@@ -758,7 +693,7 @@ monitors = ["desc:Philips FTV"]   # the TV
         // Unknown monitor list: stay.
         assert_eq!(effective(s3, &set, &[]).name, "show-3disp");
         // Layouts without auto_fallback, or with a dangling one, stay.
-        assert_eq!(effective(set.get("build").unwrap(), &set, &fixture("tv-disabled")).name, "build");
+        assert_eq!(effective(set.get("single").unwrap(), &set, &fixture("tv-disabled")).name, "single");
         let dangling = Layout { auto_fallback: Some("gone".into()), ..s3.clone() };
         assert_eq!(effective(&dangling, &set, &fixture("tv-disabled")).name, "show-3disp");
     }
@@ -783,29 +718,12 @@ monitors = ["desc:Philips FTV"]   # the TV
     }
 
     #[test]
-    fn dock_shares_and_warnings() {
-        let d = DockCfg { groups: vec![vec!["rules".into()], vec!["trace".into()]], fractions: vec![3.0, 1.0], height: 300.0 };
-        assert_eq!(d.shares(), [0.75, 0.25]);
-        let bad = DockCfg { fractions: vec![1.0], ..d.clone() };
-        assert_eq!(bad.shares(), [0.5, 0.5]);
-        let neg = DockCfg { fractions: vec![1.0, -1.0], ..d.clone() };
-        assert_eq!(neg.shares(), [0.5, 0.5]);
-        assert!(DockCfg { groups: vec![], fractions: vec![], height: 1.0 }.shares().is_empty());
-        let l = Layout {
-            zoom: 9.0,
-            dock: DockCfg {
-                groups: vec![vec!["rules".into(), "bogus".into(), "view.lights".into(), "rules".into(), "view.".into()]],
-                fractions: vec![1.0, 2.0],
-                height: 300.0,
-            },
-            windows: vec![PopOut { panel: "has space".into(), ..PopOut::default() }],
-            ..Layout::default()
-        };
+    fn warnings_flag_bad_values() {
+        let l = Layout { zoom: 9.0, page: "nope".into(), windows: vec![PopOut { panel: "has space".into(), ..PopOut::default() }], ..Layout::default() };
         let w = l.warnings().join("\n");
-        for needle in ["zoom 9", "`bogus`", "`rules` listed twice", "`view.`", "don't fit 1 groups", "`has space`"] {
+        for needle in ["zoom 9", "unknown page `nope`", "`has space`"] {
             assert!(w.contains(needle), "missing {needle:?} in\n{w}");
         }
-        assert!(!w.contains("view.lights"));
     }
 
     #[test]

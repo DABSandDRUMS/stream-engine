@@ -1,14 +1,36 @@
-//! Mix strip (§15.4): our buses (`audio.bus.<b>.*`, meters from `audio.<b>.level|peak`
+//! Mix strip (§15.4): our sound channels (`audio.bus.<b>.*`, meters from `audio.<b>.level|peak`
 //! signals) plus the StudioLive 16R channels (`mixer.16r.ch.<n>.*`, meters
 //! `mixer.16r.meter.ch.<n>`). Faders follow MIDI and the mixer live (they only read state).
+//! Also the shared friendly channel names and order used by the Live page and Sound → Mix.
 
 use crate::app::App;
 use egui::{RichText, Vec2};
 use se_proto::{Op, Value};
-use se_ui_kit::widgets::{self, icon};
+use se_ui_kit::theme::{font_medium, font_mono, font_semibold, spacing, type_scale};
+use se_ui_kit::widgets::{self, Kind, Size, icon};
 
 /// Bus order in the strip; unknown buses follow alphabetically.
 const BUS_ORDER: &[&str] = &["mic", "band", "drums", "music", "game", "sfx", "tts", "program"];
+
+/// Sort position of a bus (known buses first, in mixer order).
+pub fn bus_rank(b: &str) -> usize {
+    BUS_ORDER.iter().position(|o| *o == b).unwrap_or(usize::MAX)
+}
+
+/// Friendly channel name: `sfx` → "Sound effects", `program` → "Everything".
+pub fn bus_label(b: &str) -> String {
+    match b {
+        "mic" => "Mic".into(),
+        "band" => "Band".into(),
+        "drums" => "Drums".into(),
+        "music" => "Music".into(),
+        "game" => "Game".into(),
+        "sfx" => "Sound effects".into(),
+        "tts" => "Read-out voice".into(),
+        "program" => "Everything".into(),
+        other => crate::views::live::nice(other),
+    }
+}
 
 pub fn buses(app: &App) -> Vec<String> {
     let mut v: Vec<String> = app
@@ -16,7 +38,7 @@ pub fn buses(app: &App) -> Vec<String> {
         .under("audio.bus")
         .filter_map(|(a, _)| a.strip_prefix("audio.bus.")?.strip_suffix(".gain").filter(|b| !b.contains('.')).map(String::from))
         .collect();
-    v.sort_by_key(|b| (BUS_ORDER.iter().position(|o| o == b).unwrap_or(usize::MAX), b.clone()));
+    v.sort_by_key(|b| (bus_rank(b), b.clone()));
     v
 }
 
@@ -29,25 +51,32 @@ pub fn pos_to_db(p: f32, [lo, hi]: [f64; 2]) -> f64 {
     (db * 10.0).round() / 10.0
 }
 
+/// A level as "+1.5 dB" (never "-0.0 dB").
+pub fn db_text(db: f64) -> String {
+    let r = (db * 10.0).round() / 10.0;
+    format!("{:+.1} dB", if r == 0.0 { 0.0 } else { r })
+}
+
 pub fn strip(app: &mut App, ui: &mut egui::Ui) {
     let t = app.t.clone();
-    let h = (ui.available_height() - 58.0).clamp(40.0, 400.0);
+    let h = (ui.available_height() - 72.0).clamp(40.0, 400.0);
     let bus_list = buses(app);
     let ch16 = app.m.get("mixer.16r.channels").and_then(Value::as_i64).unwrap_or(0).max(0) as usize;
     let connected16 = app.m.b("mixer.16r.connected");
     egui::ScrollArea::horizontal().id_salt("mix").show(ui, |ui| {
-        ui.horizontal(|ui| {
-            widgets::section(ui, &t, icon::MIX, "Mix");
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = spacing::S;
             if bus_list.is_empty() {
-                ui.label(RichText::new("no audio buses (audio engine not running)").color(t.fg_dim));
+                widgets::hint(ui, &t, if app.m.connected { "No sound channels yet." } else { "Waiting for the engine…" });
             }
             for b in &bus_list {
                 bus_strip(app, ui, b, h);
             }
+            ui.add_space(spacing::M);
             ui.separator();
-            widgets::section(ui, &t, icon::MIX, "16R");
+            ui.add_space(spacing::M);
             if !connected16 || ch16 == 0 {
-                ui.label(RichText::new(if app.m.has("mixer.16r.connected") { "16R disconnected" } else { "16R not connected" }).color(t.fg_dim));
+                widgets::hint(ui, &t, "Mixing desk not connected");
             } else {
                 for n in 1..=ch16 {
                     ch_strip(app, ui, n, h);
@@ -66,30 +95,31 @@ fn bus_strip(app: &mut App, ui: &mut egui::Ui, b: &str, h: f32) {
     let muted = app.m.b(&mute_a);
     let level = app.m.sig(&format!("audio.{b}.level")).unwrap_or(0.0);
     let peak = app.m.sig(&format!("audio.{b}.peak")).unwrap_or(level);
-    let ducked = app.m.f(&format!("audio.bus.{b}.ducked"));
+    let lowered = app.m.f(&format!("audio.bus.{b}.ducked")) < -0.5;
     let modulated = app.is_modulated(&gain_a);
+    let label = bus_label(b);
     ui.vertical(|ui| {
-        ui.set_width(54.0);
-        let name = if ducked < -0.5 { format!("{b} (duck)") } else { b.to_string() };
-        ui.label(RichText::new(name).small().strong().color(if muted { t.fg_dim } else { t.fg }));
+        ui.set_width(64.0);
+        ui.add(egui::Label::new(RichText::new(&label).font(font_semibold(type_scale::SMALL)).color(if muted { t.text_faint } else { t.fg })).truncate())
+            .on_hover_text(if lowered { format!("{label} · lowered while you talk") } else { label.clone() });
         ui.horizontal(|ui| {
-            widgets::meter(ui, &t, Vec2::new(10.0, h), level, peak);
+            widgets::meter(ui, &t, Vec2::new(8.0, h), if muted { 0.0 } else { level }, peak);
             let mut pos = db_to_pos(db, range);
-            let r = widgets::fader(ui, &t, Vec2::new(22.0, h), &mut pos, modulated);
+            let r = widgets::fader(ui, &t, Vec2::new(28.0, h), &mut pos, modulated || lowered);
             if r.changed() {
                 app.m.command(Op::Set { address: gain_a.clone(), value: Value::Float(pos_to_db(pos, range)) });
             }
             if r.double_clicked() {
                 app.m.command(Op::Set { address: gain_a.clone(), value: Value::Float(0.0) });
             }
-            r.on_hover_text(format!("{b}: {db:+.1} dB · double-click = 0 dB · right-click: inspect"));
+            r.on_hover_text(format!("{label}: {} · double-click for 0 dB", db_text(db)));
         });
         ui.horizontal(|ui| {
-            let m = ui.selectable_label(muted, RichText::new("M").small().color(if muted { t.bright_red } else { t.fg_dim }));
-            if m.clicked() {
+            let (ic, tip) = if muted { (icon::MUTE, "Unmute") } else { (icon::VOLUME, "Mute") };
+            if widgets::button_ex(ui, &t, Some(ic), "", if muted { Kind::Danger } else { Kind::Ghost }, Size::Small, 28.0, true).on_hover_text(tip).clicked() {
                 app.m.command(Op::Set { address: mute_a.clone(), value: Value::Bool(!muted) });
             }
-            ui.label(RichText::new(format!("{db:+.0}")).small().monospace().color(t.fg_dim));
+            ui.label(RichText::new(format!("{:+}", db.round() as i64)).font(font_mono(type_scale::SMALL)).color(t.text_dim));
         });
     });
     if !app.m.meta.contains_key(&gain_a) && app.m.connected {
@@ -108,23 +138,29 @@ fn ch_strip(app: &mut App, ui: &mut egui::Ui, n: usize, h: f32) {
     let db = app.m.get(&format!("{p}.db")).and_then(Value::as_f64);
     let modulated = app.is_modulated(&fader_a);
     ui.vertical(|ui| {
-        ui.set_width(44.0);
-        let label = if name.is_empty() { format!("{n}") } else { name.chars().take(6).collect() };
-        ui.label(RichText::new(label).small().strong().color(if muted { t.fg_dim } else { t.fg })).on_hover_text(format!("16R ch {n} {name}"));
+        ui.set_width(56.0);
+        let label = if name.is_empty() { format!("Ch. {n}") } else { name.clone() };
+        ui.add(egui::Label::new(RichText::new(&label).font(font_medium(type_scale::SMALL)).color(if muted { t.text_faint } else { t.fg })).truncate())
+            .on_hover_text(format!("Desk channel {n}: {label}"));
         ui.horizontal(|ui| {
-            widgets::meter(ui, &t, Vec2::new(8.0, h), level, level);
+            widgets::meter(ui, &t, Vec2::new(8.0, h), if muted { 0.0 } else { level }, level);
             let mut pos = app.m.f(&fader_a) as f32;
-            let r = widgets::fader(ui, &t, Vec2::new(18.0, h), &mut pos, modulated);
+            let r = widgets::fader(ui, &t, Vec2::new(24.0, h), &mut pos, modulated);
             if r.changed() {
                 app.m.command(Op::Set { address: fader_a.clone(), value: Value::Float(pos as f64) });
             }
         });
         ui.horizontal(|ui| {
-            if ui.selectable_label(muted, RichText::new("M").small().color(if muted { t.bright_red } else { t.fg_dim })).clicked() {
+            let (ic, tip) = if muted { (icon::MUTE, "Unmute") } else { (icon::VOLUME, "Mute") };
+            if widgets::button_ex(ui, &t, Some(ic), "", if muted { Kind::Danger } else { Kind::Ghost }, Size::Small, 28.0, true).on_hover_text(tip).clicked() {
                 app.m.command(Op::Set { address: mute_a.clone(), value: Value::Bool(!muted) });
             }
             if let Some(db) = db {
-                ui.label(RichText::new(if db <= -80.0 { "-∞".into() } else { format!("{db:+.0}") }).small().monospace().color(t.fg_dim));
+                ui.label(
+                    RichText::new(if db <= -80.0 { "-∞".into() } else { format!("{:+}", db.round() as i64) })
+                        .font(font_mono(type_scale::SMALL))
+                        .color(t.text_dim),
+                );
             }
         });
     });

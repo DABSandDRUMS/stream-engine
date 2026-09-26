@@ -1,13 +1,13 @@
 # Show layout for two displays (PLAN §15.3), used automatically by show-3disp while the TV is
 # off or unplugged:
-#   DP-1  main window in Show mode
+#   DP-1  main window (Live page)
 #   DP-2  multiview and a windowed confidence (program) monitor, side by side
 #
 # Monitor matches: a connector name ("DP-1"), or "desc:<text>" / "make:<text>" / "model:<text>":
 # case-insensitive substrings of what `hyprctl monitors all` reports.
 
 name = "show-2disp"
-mode = "show"   # show | build
+page = "live"   # page to open on: live | scenes | lights | sound | automation | community | recordings | settings
 zoom = 1.0      # in-app zoom on top of the Hyprland monitor scale
 
 [main]
@@ -28,13 +28,9 @@ canvases = "both"   # wide | tall | both (side by side)
 fullscreen = false  # shares DP-2 with multiview
 size = [1360.0, 1080.0]
 
-[dock]
-# Tabs: rules, timeline, scopes, trace, simulator, console, perf, view.<name>
-groups = [["rules", "timeline", "scopes", "trace", "simulator", "console", "perf"]]
-fractions = [1.0]
-height = 300.0
 
 [show]
-rail_tab = "events"   # events | chat | queue | mod
-rail_width = 360.0
+# Live page
+rail_tab = "chat"     # chat | events | queue | mod
+rail_width = 380.0
 multiview = false

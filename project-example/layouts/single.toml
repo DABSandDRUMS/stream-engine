@@ -1,0 +1,26 @@
+# The default layout: one window, nothing else opens on its own (PLAN §15.3).
+#
+# Switch layouts with Ctrl+L or the command palette. The UI rewrites changed values only:
+# comments and key order survive saves.
+
+name = "single"
+page = "live"   # page to open on: live | scenes | lights | sound | automation | community | recordings | settings
+zoom = 1.0      # in-app zoom on top of the Hyprland monitor scale
+windows = []    # pop-out windows: none
+
+[confidence]
+# A separate program window (e.g. on the TV). Off here; turn it on in Settings → Accounts & app → Screens.
+enabled = false
+monitors = ["desc:Philips FTV", "HDMI-A-1"]
+fallback = ["DP-2"]
+canvases = "both"
+fullscreen = true
+
+[main]
+# the main window goes wherever Hyprland puts it
+
+[show]
+# Live page
+rail_tab = "chat"   # chat | events | queue | mod
+rail_width = 380.0
+multiview = true

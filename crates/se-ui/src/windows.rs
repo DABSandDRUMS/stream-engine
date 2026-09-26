@@ -3,7 +3,7 @@
 //! `stream-engine.program` on the TV that follows hotplug (TV absent → DP-2, back when it
 //! returns), placement through Hyprland, and the `--program` mode.
 
-use crate::app::{App, Mode};
+use crate::app::{App, Page};
 use crate::frames::Canvas;
 use crate::layout::{self, Canvases, Layout, LayoutSet};
 use crate::monitors::MonitorWatcher;
@@ -38,7 +38,7 @@ pub struct Windows {
 impl Windows {
     pub fn new(ctx: &egui::Context, chosen: Option<String>) -> Windows {
         let set = LayoutSet::builtin();
-        let chosen = chosen.filter(|c| set.get(c).is_some() || !c.is_empty()).unwrap_or_else(|| "show-3disp".into());
+        let chosen = chosen.filter(|c| set.get(c).is_some() || !c.is_empty()).unwrap_or_else(|| layout::DEFAULT_LAYOUT.into());
         Windows {
             set,
             effective: chosen.clone(),
@@ -114,26 +114,25 @@ fn load_files(app: &mut App) {
         crate::shortcuts_ui::load(app, &t);
     }
     if app.win.set.get(&app.win.chosen).is_none() {
-        app.m.toast(format!("layout `{}` not found; using show-3disp", app.win.chosen), true);
-        app.win.chosen = "show-3disp".into();
+        app.m.toast(format!("layout `{}` not found; using {}", app.win.chosen, layout::DEFAULT_LAYOUT), true);
+        app.win.chosen = layout::DEFAULT_LAYOUT.into();
     }
     // re-apply with the file versions
     app.win.applied = None;
     app.win.seen_gen = u64::MAX;
 }
 
-/// Apply a layout's UI settings (mode, zoom, rail, dock, pop-outs).
+/// Apply a layout's UI settings (start page, zoom, rail, pop-outs).
 fn apply(app: &mut App, l: &Layout, ctx: &egui::Context) {
     if app.win.applied.as_deref() == Some(l.name.as_str()) {
         return;
     }
     let first = app.win.applied.is_none();
     app.win.applied = Some(l.name.clone());
-    if !app.program_only {
-        app.mode = match l.mode {
-            layout::Mode::Show => Mode::Show,
-            layout::Mode::Build => Mode::Build,
-        };
+    if !app.program_only
+        && let Some(p) = Page::parse(&l.page)
+    {
+        app.page = p;
     }
     if first || (l.zoom - app.zoom).abs() > f32::EPSILON {
         app.set_zoom(ctx, l.zoom.clamp(0.6, 2.0));
@@ -143,20 +142,6 @@ fn apply(app: &mut App, l: &Layout, ctx: &egui::Context) {
     }
     app.show.rail_width = l.show.rail_width.max(260.0);
     app.show.multiview_in_main = l.show.multiview;
-    let groups: Vec<Vec<Panel>> = l.dock.groups.iter().map(|g| g.iter().filter_map(|id| Panel::parse(id)).collect()).collect();
-    let mut groups: Vec<Vec<Panel>> = groups.into_iter().filter(|g: &Vec<Panel>| !g.is_empty()).collect();
-    if groups.is_empty() {
-        groups = crate::dock::default_groups();
-    }
-    if !groups.iter().flatten().any(|p| *p == Panel::Modulate)
-        && let Some(g) = groups.first_mut()
-    {
-        g.push(Panel::Modulate);
-    }
-    app.dock = crate::dock::build(&groups, &l.dock.shares());
-    if l.dock.height > 0.0 {
-        app.build.dock_height = l.dock.height;
-    }
     app.win.popouts = l.windows.iter().filter(|p| Panel::parse(&p.panel).is_some()).map(|p| p.panel.clone()).collect();
     for p in l.warnings() {
         tracing::warn!("layout {}: {p}", l.name);
@@ -203,6 +188,16 @@ pub fn tick(app: &mut App, ctx: &egui::Context) {
     }
 }
 
+/// Keep every stream-engine window fully opaque on Hyprland (Omarchy makes windows slightly
+/// see-through by default; a video app must not be). Runtime rules, nothing written to disk.
+pub fn make_opaque() {
+    if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_none() {
+        return;
+    }
+    let lua = r#"hl.window_rule({ match = { class = "^stream-engine(\\..+)?$" }, tag = "-default-opacity" }); hl.window_rule({ match = { class = "^stream-engine(\\..+)?$" }, opacity = "1 1" })"#;
+    let _ = std::process::Command::new("hyprctl").args(["eval", lua]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
+}
+
 /// Every pop-out panel in its own OS window.
 pub fn popouts(app: &mut App, ctx: &egui::Context) {
     let l = app.win.layout();
@@ -221,7 +216,7 @@ pub fn popouts(app: &mut App, ctx: &egui::Context) {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(panel.title()).strong());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("dock").on_hover_text("put this panel back into the main window").clicked() {
+                        if ui.small_button("Put back").on_hover_text("Put this back into the main window").clicked() {
                             close = true;
                         }
                     });

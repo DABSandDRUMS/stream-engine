@@ -57,7 +57,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         }
     });
     actions_for(app, ui, &sel);
-    ui.add(egui::TextEdit::singleline(&mut app.build.inspector.filter).hint_text(format!("{} filter parameters", icon::SEARCH)).desired_width(f32::INFINITY));
+    ui.add(se_ui_kit::widgets::field(&mut app.build.inspector.filter).hint_text(format!("{} filter parameters", icon::SEARCH)).desired_width(f32::INFINITY));
     ui.separator();
     let f = app.build.inspector.filter.to_lowercase();
     let mut rows: Vec<(String, Value)> = Vec::new();
@@ -248,7 +248,7 @@ fn control(app: &mut App, ui: &mut egui::Ui, a: &str, v: &Value, meta: &Meta) {
         }
         _ => {
             let buf = app.build.inspector.text.entry(a.to_string()).or_insert_with(|| v.as_str().map(String::from).unwrap_or_else(|| v.to_string()));
-            let r = ui.add(egui::TextEdit::singleline(buf).desired_width(160.0));
+            let r = ui.add(se_ui_kit::widgets::field(buf).desired_width(160.0));
             if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 let text = buf.clone();
                 let value = if v.as_str().is_some() || meta.ty == ValueType::String { Value::Str(text) } else { Value::parse_text(&text) };

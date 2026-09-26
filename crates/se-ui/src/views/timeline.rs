@@ -1,21 +1,25 @@
-//! Timeline editor (§2.7, §9.2, §15.5): per-timeline transport with timecode, record mode and
-//! tap, and a track editor over the media analysis (waveform, beat grid, sections, chorus):
-//! cue markers, automation curves, and regions. Pure client of the `timelines` /
-//! `timeline.grid` queries, `timeline.<name>.*` state, and `timeline.*` actions; edits go through
-//! `timeline.edit.*` (the engine rewrites the TOML and reloads the project).
+//! Timelines (§2.7, §9.2, §15.5): a list of timelines with play/stop, and an editor that shows
+//! what a timeline follows ("follows the song", "follows your music software") with its transport,
+//! record and tap, over a track editor on the song's analysis (waveform, beats, sections,
+//! chorus): moments (cues), smooth changes (automation) and sections (regions). Frame rates,
+//! chase speed and record patterns sit under "Sync details". Pure client of the
+//! `timelines` / `timeline.grid` queries, `timeline.<name>.*` state, and `timeline.*` actions;
+//! edits go through `timeline.edit.*` (the engine rewrites the TOML and reloads the project).
 
 use crate::app::App;
 use crate::model::Model;
+use crate::views::live::nice;
 use egui::{Align2, CornerRadius, CursorIcon, FontId, Id, Key, Modifiers, Pos2, Rect, RichText, Sense, Shape, Stroke, StrokeKind, Ui, UiBuilder, pos2, vec2};
 use se_core::timeline::{format_time, value_text};
 use se_proto::{Ease, Op, Value};
-use se_ui_kit::widgets::{self, LedState, icon};
+use se_ui_kit::theme::{font_bold, font_medium, font_mono, font_semibold, mix, radius};
+use se_ui_kit::widgets::{self, Kind, LedState, Size, icon};
 use se_ui_kit::{Theme, spacing, type_scale};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const LIST_W: f32 = 230.0;
+const LIST_W: f32 = 320.0;
 /// Track header gutter left of the lanes (ruler and strip share it).
 const HEAD_W: f32 = 160.0;
 const RULER_H: f32 = 26.0;
@@ -52,8 +56,6 @@ const FORWARD: &str = "\u{f04e}";
 const PLUS: &str = "\u{f067}";
 const MINUS: &str = "\u{f068}";
 const FIT: &str = "\u{f065}";
-const FOLLOW: &str = "\u{f05b}";
-const SNAP: &str = "\u{f076}";
 const TAP: &str = "\u{f25a}";
 const CUE_ICON: &str = "\u{f024}";
 const REGION_ICON: &str = "\u{f0c8}";
@@ -61,7 +63,6 @@ const MUTED: &str = "\u{f026}";
 const UNMUTED: &str = "\u{f028}";
 const TRASH: &str = "\u{f1f8}";
 const EDIT: &str = "\u{f040}";
-const LOOP: &str = "\u{f01e}";
 
 // ---------------------------------------------------------------- pure helpers
 
@@ -352,6 +353,68 @@ fn status_led(status: &str) -> LedState {
     }
 }
 
+/// Transport / chase status in words.
+fn status_words(status: &str, source: SourceKind) -> String {
+    match status {
+        "playing" => "Playing".into(),
+        "paused" => "Paused".into(),
+        "stopped" => "Stopped".into(),
+        "idle" | "" => "Ready".into(),
+        "waiting" if source == SourceKind::Media => "Waiting for the song".into(),
+        "waiting" if source.chased() => "Waiting for the clock".into(),
+        "locked" => "In sync".into(),
+        "locking" => "Getting in sync…".into(),
+        "freewheel" => "Keeping time (signal dropped)".into(),
+        "lost" => "Lost the signal".into(),
+        "disabled" => "Off".into(),
+        other => nice(other),
+    }
+}
+
+/// What drives a timeline, in words.
+fn source_words(source: SourceKind) -> &'static str {
+    match source {
+        SourceKind::Internal => "Runs on its own",
+        SourceKind::Manual => "Moves only when told",
+        SourceKind::Media => "Follows the song",
+        SourceKind::Mtc => "Follows your music software",
+        SourceKind::Ltc => "Follows the audio clock",
+    }
+}
+
+/// What drives a timeline, short (list rows).
+fn source_short(source: SourceKind) -> &'static str {
+    match source {
+        SourceKind::Internal => "Own clock",
+        SourceKind::Manual => "Moves when told",
+        SourceKind::Media => "Song",
+        SourceKind::Mtc => "Music software",
+        SourceKind::Ltc => "Audio clock",
+    }
+}
+
+/// Chased timelines are "armed" (following) unless idle / stopped / off.
+fn following(status: &str) -> bool {
+    !matches!(status, "idle" | "stopped" | "disabled" | "")
+}
+
+/// Curve names in words.
+fn curve_words(c: &str) -> &'static str {
+    match c {
+        "linear" => "Straight",
+        "in_quad" => "Ease in",
+        "out_quad" => "Ease out",
+        "in_out_quad" => "Ease in and out",
+        "in_cubic" => "Ease in (strong)",
+        "out_cubic" => "Ease out (strong)",
+        "in_out_cubic" => "Ease in and out (strong)",
+        "smoothstep" => "Smooth",
+        "out_back" => "Overshoot",
+        "step" => "Jump",
+        _ => "Custom",
+    }
+}
+
 // ---------------------------------------------------------------- data
 
 fn s<'a>(v: &'a Value, k: &str) -> &'a str {
@@ -438,10 +501,10 @@ impl RegionAction {
 
     fn describe(&self) -> (&'static str, String) {
         match self {
-            RegionAction::Preset(p) => (icon::PRESET, format!("preset {p}")),
-            RegionAction::Cuelist(c, Some(q)) => (icon::LIGHT, format!("cuelist {c} · {q}")),
-            RegionAction::Cuelist(c, None) => (icon::LIGHT, format!("cuelist {c}")),
-            RegionAction::Fx(f) => (icon::EFFECT, format!("fx {f}")),
+            RegionAction::Preset(p) => (icon::PRESET, nice(p)),
+            RegionAction::Cuelist(c, Some(q)) => (icon::LIGHT, format!("{} lights · cue {q}", nice(c))),
+            RegionAction::Cuelist(c, None) => (icon::LIGHT, format!("{} lights", nice(c))),
+            RegionAction::Fx(f) => (icon::EFFECT, nice(f)),
             RegionAction::Commands(on, _) => {
                 let first = on.first().cloned().unwrap_or_else(|| "commands".into());
                 (icon::CONSOLE, if on.len() > 1 { format!("{first} +{}", on.len() - 1) } else { first })
@@ -935,9 +998,8 @@ fn view(m: &Model, t: &Theme, st: &mut TlState, ui: &mut Ui, out: &mut Vec<Op>, 
         st.selected = tls.first().map(|tl| tl.name.clone());
     }
     let list_rect = Rect::from_min_max(full.min, pos2((full.left() + LIST_W).min(full.right()), full.bottom()));
-    let main_rect = Rect::from_min_max(pos2(list_rect.right() + spacing::M, full.top()), full.max);
-    ui.scope_builder(UiBuilder::new().max_rect(list_rect), |ui| list_column(m, t, st, ui, &tls));
-    ui.painter().vline(list_rect.right() + spacing::M / 2.0, full.y_range(), Stroke::new(1.0, t.muted));
+    let main_rect = Rect::from_min_max(pos2(list_rect.right() + spacing::XL, full.top()), full.max);
+    ui.scope_builder(UiBuilder::new().max_rect(list_rect), |ui| list_column(m, t, st, ui, out, &tls));
     let selected = st.selected.clone().and_then(|n| tls.iter().find(|tl| tl.name == n));
     ui.scope_builder(UiBuilder::new().max_rect(main_rect), |ui| match selected {
         Some(tl) => {
@@ -945,70 +1007,111 @@ fn view(m: &Model, t: &Theme, st: &mut TlState, ui: &mut Ui, out: &mut Vec<Op>, 
             main_area(m, t, st, ui, out, now, tl, grid.as_deref());
         }
         None => {
-            ui.add_space(spacing::XL);
-            let msg = if !m.connected {
-                "engine offline".to_string()
-            } else if let Some(e) = m.query_errors.get("timelines") {
-                format!("timelines unavailable: {e}")
-            } else {
-                "No timelines yet — create one on the left (or add timelines/*.toml to the project).".to_string()
-            };
-            ui.label(RichText::new(msg).color(t.fg_dim));
+            widgets::panel(ui, t, |ui| {
+                ui.set_width(ui.available_width());
+                let (title, body, action) = if !m.connected {
+                    ("Stream Engine isn't running", "Your timelines show up here once it's running.".to_string(), None)
+                } else if let Some(e) = m.query_errors.get("timelines") {
+                    ("Timelines aren't available", format!("Stream Engine said: {e}"), None)
+                } else {
+                    (
+                        "No timelines yet",
+                        "A timeline makes things happen at the right moment: along with a song, with your music software, or on its own clock. Make one with New.".to_string(),
+                        None,
+                    )
+                };
+                if widgets::empty_state(ui, t, icon::TIMELINE, title, &body, action) {
+                    st.editor = Some(Editor::Timeline { name: String::new(), source: "internal", source_id: String::new(), fps: "30", length: String::new() });
+                }
+            });
         }
     });
     ui.allocate_rect(full, Sense::hover());
     editor_window(ui.ctx(), t, st, out, m);
 }
 
-fn list_column(m: &Model, t: &Theme, st: &mut TlState, ui: &mut Ui, tls: &[Tl]) {
-    widgets::section(ui, t, icon::TIMELINE, "Timelines");
-    let h = (ui.available_height() - 40.0).max(60.0);
-    egui::ScrollArea::vertical().id_salt("tl_list").max_height(h).auto_shrink([false, true]).show(ui, |ui| {
-        for tl in tls {
-            let live = Live::read(m, tl);
-            let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::click());
-            let sel = st.selected.as_deref() == Some(tl.name.as_str());
-            let fill = if sel {
-                t.selection
-            } else if resp.hovered() {
-                t.bg_light
-            } else {
-                t.bg_dark
-            };
-            let p = ui.painter_at(rect);
-            p.rect_filled(rect, CornerRadius::same(5), fill);
-            if sel {
-                p.rect_stroke(rect, CornerRadius::same(5), Stroke::new(1.0, t.accent), StrokeKind::Inside);
+/// One line of text cut with "…" to `width`.
+fn elide(ui: &Ui, text: String, font: FontId, color: egui::Color32, width: f32) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::single_section(text, egui::TextFormat::simple(font, color));
+    job.wrap = egui::text::TextWrapping { max_width: width.max(10.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+    ui.painter().layout_job(job)
+}
+
+fn list_column(m: &Model, t: &Theme, st: &mut TlState, ui: &mut Ui, out: &mut Vec<Op>, tls: &[Tl]) {
+    let mut new = false;
+    let sub = match tls.len() {
+        0 => String::new(),
+        1 => "1 timeline".to_string(),
+        n => format!("{n} timelines"),
+    };
+    let h = (ui.available_height() - 110.0).max(60.0);
+    widgets::titled(
+        ui,
+        t,
+        "Your timelines",
+        &sub,
+        |ui| new = widgets::button_ex(ui, t, Some(icon::PLUS), "New", Kind::Primary, Size::Small, 0.0, true).on_hover_text("Make a new timeline").clicked(),
+        |ui| {
+            ui.set_width(ui.available_width());
+            if tls.is_empty() {
+                widgets::empty_state(ui, t, icon::TIMELINE, "No timelines yet", "Make one with New.", None);
+                return;
             }
-            let led = if tl.enabled { status_led(&live.status) } else { LedState::Idle };
-            p.circle_filled(rect.left_center() + vec2(12.0, 0.0), 4.5, widgets::led_color(t, led));
-            let name_col = if tl.enabled { t.fg_bright } else { t.fg_dim };
-            p.text(
-                rect.left_top() + vec2(24.0, 7.0),
-                Align2::LEFT_TOP,
-                tl.label.as_deref().unwrap_or(&tl.name),
-                FontId::proportional(type_scale::BODY),
-                name_col,
-            );
-            let sub = format!("{}  ·  {}", live.source, if tl.enabled { live.status.as_str() } else { "disabled" });
-            p.text(rect.left_bottom() + vec2(24.0, -7.0), Align2::LEFT_BOTTOM, sub, FontId::proportional(type_scale::SMALL), t.fg_dim);
-            if live.recording {
-                let badge = Rect::from_min_size(rect.right_top() + vec2(-44.0, 6.0), vec2(38.0, 16.0));
-                p.rect_filled(badge, CornerRadius::same(3), t.tally_program());
-                p.text(badge.center(), Align2::CENTER_CENTER, "REC", FontId::proportional(10.0), widgets::contrast(t.tally_program()));
-            } else if live.playing {
-                p.text(rect.right_top() + vec2(-10.0, 7.0), Align2::RIGHT_TOP, icon::PLAY, FontId::proportional(11.0), t.healthy());
-            }
-            if resp.clicked() && !sel {
-                st.selected = Some(tl.name.clone());
-                st.drag = None;
-            }
-            ui.add_space(spacing::XS);
-        }
-    });
-    ui.add_space(spacing::S);
-    if ui.button(RichText::new(format!("{PLUS} New timeline")).strong()).clicked() {
+            egui::ScrollArea::vertical().id_salt("tl_list").max_height(h).auto_shrink([false, true]).show(ui, |ui| {
+                for tl in tls {
+                    list_row(m, t, st, ui, out, tl);
+                    ui.add_space(2.0);
+                }
+            });
+        },
+    );
+    if new {
         st.editor = Some(Editor::Timeline { name: String::new(), source: "internal", source_id: String::new(), fps: "30", length: String::new() });
+    }
+}
+
+fn list_row(m: &Model, t: &Theme, st: &mut TlState, ui: &mut Ui, out: &mut Vec<Op>, tl: &Tl) {
+    let live = Live::read(m, tl);
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 58.0), Sense::click());
+    let sel = st.selected.as_deref() == Some(tl.name.as_str());
+    let p = ui.painter_at(rect);
+    if sel {
+        p.rect_filled(rect, CornerRadius::same(radius::CONTROL), mix(t.surface, t.accent, 0.14));
+    } else if resp.hovered() {
+        p.rect_filled(rect, CornerRadius::same(radius::CONTROL), t.surface_hi);
+    }
+    let led = if tl.enabled { status_led(&live.status) } else { LedState::Idle };
+    p.circle_filled(rect.left_center() + vec2(14.0, 0.0), 4.5, widgets::led_color(t, led));
+    let name_col = if tl.enabled { t.fg } else { t.text_dim };
+    let name = tl.label.clone().unwrap_or_else(|| nice(&tl.name));
+    let text_w = rect.width() - 28.0 - 48.0;
+    let right_pad = if live.recording { 44.0 } else { 0.0 };
+    let ng = elide(ui, name.clone(), font_medium(type_scale::BODY), name_col, text_w - right_pad);
+    p.galley(rect.left_top() + vec2(28.0, 10.0), ng, name_col);
+    let sub = format!("{}  ·  {}", source_short(tl.source), if tl.enabled { status_words(&live.status, tl.source) } else { "Off".into() });
+    let sg = elide(ui, sub.clone(), FontId::proportional(type_scale::SMALL), t.text_dim, text_w);
+    p.galley(rect.left_bottom() + vec2(28.0, -10.0 - sg.size().y), sg, t.text_dim);
+    if live.recording {
+        let badge = Rect::from_min_size(rect.right_top() + vec2(-88.0, 10.0), vec2(38.0, 16.0));
+        p.rect_filled(badge, CornerRadius::same(4), t.tally_program());
+        p.text(badge.center(), Align2::CENTER_CENTER, "REC", font_bold(10.0), widgets::contrast(t.tally_program()));
+    }
+    // play / stop right on the row
+    let running = if tl.source.chased() { following(&live.status) } else { live.playing };
+    let btn = Rect::from_center_size(pos2(rect.right() - 24.0, rect.center().y), vec2(32.0, 32.0));
+    let mut child = ui.new_child(UiBuilder::new().max_rect(btn).id_salt(("tl-row-play", &tl.name)));
+    let (glyph, tip) = match (running, tl.source.chased()) {
+        (true, true) => (icon::STOP, "Stop following"),
+        (true, false) => (icon::STOP, "Stop (back to the start)"),
+        (false, true) => (icon::PLAY, "Start following"),
+        (false, false) => (icon::PLAY, "Play"),
+    };
+    if widgets::button_ex(&mut child, t, Some(glyph), "", Kind::Ghost, Size::Small, 32.0, tl.enabled).on_hover_text(tip).clicked() {
+        out.push(transport(if running { "timeline.stop" } else { "timeline.play" }, &tl.name));
+    }
+    if resp.on_hover_text(format!("{name}\n{sub}")).clicked() && !sel {
+        st.selected = Some(tl.name.clone());
+        st.drag = None;
     }
 }
 
@@ -1039,110 +1142,119 @@ fn main_area(m: &Model, t: &Theme, st: &mut TlState, ui: &mut Ui, out: &mut Vec<
 fn header(t: &Theme, st: &mut TlState, ui: &mut Ui, out: &mut Vec<Op>, tl: &Tl, live: &Live, ph: f64, grid: Option<&Grid>) {
     let chased = tl.source.chased();
     ui.horizontal(|ui| {
-        ui.label(RichText::new(tl.label.as_deref().unwrap_or(&tl.name)).size(type_scale::HEADING).strong().color(t.fg_bright));
-        if tl.label.is_some() {
-            ui.label(RichText::new(&tl.name).small().color(t.fg_dim));
-        }
-        widgets::pill(ui, t, icon::TIMELINE, &live.status, status_led(&live.status)).on_hover_text("transport / chase status");
-        let (src_icon, src_led) = match (chased, live.locked) {
-            (true, true) => (icon::LINK, LedState::Healthy),
-            (true, false) => (icon::UNLINK, status_led(&live.status)),
-            (false, _) => (icon::LINK, LedState::Idle),
-        };
-        let src_text = if chased { format!("{} · {}", live.source, if live.locked { "locked" } else { "unlocked" }) } else { live.source.clone() };
-        widgets::pill(ui, t, src_icon, &src_text, src_led).on_hover_text("timecode source");
+        ui.label(RichText::new(tl.label.clone().unwrap_or_else(|| nice(&tl.name))).font(font_bold(type_scale::HEADING)).color(t.fg));
+        ui.add_space(spacing::S);
+        let led = status_led(&live.status);
+        let c = if led == LedState::Idle { t.text_dim } else { widgets::led_color(t, led) };
+        widgets::badge(ui, t, &status_words(&live.status, tl.source), c);
         if live.active {
-            widgets::pill(ui, t, icon::LIVE, "active", LedState::Active).on_hover_text("applying cues and automation");
+            widgets::badge(ui, t, "Running", t.accent).on_hover_text("Its moments and changes are happening now");
         }
-        if chased {
-            ui.label(RichText::new(format!("×{:.3}", tl.speed)).color(t.fg_dim)).on_hover_text("chase speed");
-        }
-        let rate = match &tl.source_rate {
-            Some(r) if r != tl.rate.label() => format!("{} fps (source {r})", tl.rate.label()),
-            _ => format!("{} fps", tl.rate.label()),
-        };
-        ui.label(RichText::new(rate).small().color(t.fg_dim));
-        let len = tl.length.map_or_else(|| "open".to_string(), format_time);
-        ui.label(RichText::new(format!("length {len}")).small().color(t.fg_dim));
         if tl.looping {
-            ui.label(RichText::new(LOOP).color(t.fg_dim)).on_hover_text("loops");
+            widgets::badge(ui, t, "Loops", t.text_dim);
         }
+        ui.add_space(spacing::S);
+        let src_icon = if chased && !live.locked { icon::UNLINK } else { icon::LINK };
+        ui.label(RichText::new(src_icon).color(t.text_dim));
+        ui.add_space(4.0);
+        ui.label(RichText::new(source_words(tl.source)).color(t.text_dim));
         if let Some(g) = grid.filter(|g| g.bpm > 0.0) {
-            ui.label(RichText::new(format!("{:.1} BPM", g.bpm)).small().color(t.fg_dim));
+            ui.label(RichText::new(format!("·  {:.0} beats a minute", g.bpm)).color(t.text_dim));
         }
     });
+    ui.add_space(spacing::S);
     ui.horizontal(|ui| {
-        ui.label(RichText::new(&live.timecode).font(FontId::monospace(type_scale::DISPLAY * 1.3)).color(if live.playing { t.fg_bright } else { t.fg }));
-        ui.vertical(|ui| {
-            ui.label(RichText::new(format_time(ph)).font(FontId::monospace(type_scale::LARGE)).color(t.fg));
-            ui.label(RichText::new(format!("extent {}", format_time(tl.extent))).small().color(t.fg_dim));
-        });
-        ui.separator();
-        let btn = |ui: &mut Ui, text: &str, tip: &str, enabled: bool| {
-            ui.add_enabled(enabled, egui::Button::new(RichText::new(text).size(type_scale::LARGE))).on_hover_text(tip).clicked()
+        // chased timelines show the clock they follow (with frames); the rest minutes:seconds
+        let clock = if chased { live.timecode.clone() } else { format_time(ph) };
+        ui.label(RichText::new(clock).font(font_mono(type_scale::DISPLAY)).color(if live.playing { t.fg } else { t.text_dim }))
+            .on_hover_text(format!("At {}", format_time(ph)));
+        ui.add_space(spacing::L);
+        let btn = |ui: &mut Ui, glyph: &str, label: &str, tip: &str, kind: Kind, enabled: bool| {
+            widgets::button_ex(ui, t, Some(glyph), label, kind, Size::Medium, 0.0, enabled).on_hover_text(tip).clicked()
         };
         if chased {
-            if btn(ui, icon::PLAY, &format!("arm: follow {}", live.source), true) {
+            let armed = following(&live.status);
+            let source = source_words(tl.source).to_lowercase();
+            if armed {
+                if btn(ui, icon::STOP, "Stop following", "It stops playing along (Space)", Kind::Secondary, true) {
+                    out.push(transport("timeline.stop", &tl.name));
+                }
+            } else if btn(ui, icon::PLAY, "Start following", &format!("It {source} and plays along by itself (Space)"), Kind::Primary, true) {
                 out.push(transport("timeline.play", &tl.name));
             }
-            if btn(ui, icon::STOP, "disarm", true) {
-                out.push(transport("timeline.stop", &tl.name));
-            }
-            ui.label(RichText::new(format!("transport follows {}", live.source)).small().color(t.fg_dim));
+            widgets::hint(ui, t, "Moves by itself with its source.");
         } else {
-            if btn(ui, TO_START, "locate to start (Home)", true) {
+            if btn(ui, TO_START, "", "Back to the start (Home)", Kind::Secondary, true) {
                 out.push(locate(&tl.name, 0.0));
             }
             let bars = grid.map(|g| &g.downbeats[..]).filter(|d| !d.is_empty());
             if let Some(d) = bars
-                && btn(ui, &format!("{BACK} bar"), "back one bar", bar_target(d, ph, false).is_some())
+                && btn(ui, BACK, "Bar", "Back one bar", Kind::Secondary, bar_target(d, ph, false).is_some())
                 && let Some(to) = bar_target(d, ph, false)
             {
                 out.push(locate(&tl.name, to));
             }
-            if btn(ui, &format!("{BACK} 1s"), "jog back 1 s", true) {
+            if btn(ui, BACK, "1s", "Back one second", Kind::Secondary, true) {
                 out.push(act("timeline.jog", Value::map().with("name", tl.name.as_str()).with("delta", -1.0)));
             }
-            let (play_icon, play_tip) = if live.playing { (PAUSE, "pause (Space)") } else { (icon::PLAY, "play (Space)") };
-            if btn(ui, play_icon, play_tip, true) {
+            let (play_icon, play_label) = if live.playing { (PAUSE, "Pause") } else { (icon::PLAY, "Play") };
+            if btn(ui, play_icon, play_label, "Play / pause (Space)", Kind::Primary, true) {
                 out.push(transport(if live.playing { "timeline.pause" } else { "timeline.play" }, &tl.name));
             }
-            if btn(ui, icon::STOP, "stop (back to 0)", true) {
+            if btn(ui, icon::STOP, "", "Stop and go back to the start", Kind::Secondary, true) {
                 out.push(transport("timeline.stop", &tl.name));
             }
-            if btn(ui, &format!("1s {FORWARD}"), "jog forward 1 s", true) {
+            if btn(ui, FORWARD, "1s", "Forward one second", Kind::Secondary, true) {
                 out.push(act("timeline.jog", Value::map().with("name", tl.name.as_str()).with("delta", 1.0)));
             }
             if let Some(d) = bars
-                && btn(ui, &format!("bar {FORWARD}"), "forward one bar", bar_target(d, ph, true).is_some())
+                && btn(ui, FORWARD, "Bar", "Forward one bar", Kind::Secondary, bar_target(d, ph, true).is_some())
                 && let Some(to) = bar_target(d, ph, true)
             {
                 out.push(locate(&tl.name, to));
             }
         }
-        ui.separator();
+        ui.add_space(spacing::L);
         widgets::live_edge(ui, t, live.recording, |ui| {
             ui.horizontal(|ui| {
-                let rec = RichText::new(format!("{} REC", icon::REC)).strong().color(if live.recording { t.tally_program() } else { t.fg });
-                if ui.button(rec).on_hover_text("record mode toggle (R): manual commands become cues, armed addresses become keys").clicked() {
+                let (label, kind) = if live.recording { ("Stop recording", Kind::Live) } else { ("Record", Kind::Secondary) };
+                if btn(ui, icon::REC, label, "Record (R): what you do by hand becomes moments on this timeline", kind, true) {
                     out.push(record(&tl.name, !live.recording, &st.arm));
                 }
-                ui.add_enabled(
-                    !live.recording,
-                    egui::TextEdit::singleline(&mut st.arm).hint_text("arm: fx.*.mix, lights.* (empty = automation lanes)").desired_width(190.0),
-                );
-                if let Some(r) = &tl.record {
-                    ui.label(RichText::new(format!("from {} · {} cues · {} keys", format_time(r.from), r.cues, r.keys)).small().color(t.tally_program()));
-                }
-                ui.add(egui::TextEdit::singleline(&mut st.tap_label).hint_text("tap label").desired_width(90.0));
-                if ui
-                    .add_enabled(live.recording, egui::Button::new(format!("{TAP} Tap")))
-                    .on_hover_text("drop a cue at the playhead while recording (T)")
-                    .clicked()
-                {
+                if btn(ui, TAP, "Tap", "Drop a moment here while recording (T)", Kind::Secondary, live.recording) {
                     out.push(tap(&tl.name, &st.tap_label));
                 }
+                ui.add(se_ui_kit::widgets::field(&mut st.tap_label).hint_text("Next moment's name (optional)").desired_width(260.0));
+                if let Some(r) = &tl.record {
+                    ui.label(RichText::new(format!("{} moments · {} points since {}", r.cues, r.keys, format_time(r.from))).color(t.tally_program()));
+                }
             });
+        });
+    });
+    widgets::details(ui, t, ("tl-sync", tl.name.as_str()), "Sync details", |ui| {
+        widgets::fact(ui, t, "Follows", &live.source);
+        widgets::fact(ui, t, "Position", &format!("{} ({})", format_time(ph), live.timecode));
+        let rate = match &tl.source_rate {
+            Some(r) if r != tl.rate.label() => format!("{} fps (the source sends {r})", tl.rate.label()),
+            _ => format!("{} fps", tl.rate.label()),
+        };
+        widgets::fact(ui, t, "Frame rate", &rate);
+        if chased {
+            widgets::fact(ui, t, "Speed", &format!("×{:.3}", tl.speed));
+            widgets::fact(ui, t, "Locked", if live.locked { "yes" } else { "no" });
+        }
+        widgets::fact(ui, t, "Length", &tl.length.map_or_else(|| "open".to_string(), format_time));
+        widgets::fact(ui, t, "Furthest point", &format_time(tl.extent));
+        widgets::fact(ui, t, "Name", &tl.name);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("While recording, also capture").color(t.text_dim));
+            ui.add_enabled(
+                !live.recording,
+                se_ui_kit::widgets::field(&mut st.arm)
+                    .hint_text("fx.*.mix, lights.* (empty: the tracks' own settings)")
+                    .font(font_mono(type_scale::SMALL + 0.5))
+                    .desired_width(320.0),
+            );
         });
     });
 }
@@ -1202,46 +1314,69 @@ fn shortcuts(st: &mut TlState, ui: &mut Ui, out: &mut Vec<Op>, tl: &Tl, live: &L
     }
 }
 
+/// Time span of everything on the timeline's tracks (moments, points, sections).
+fn content_range(tl: &Tl) -> Option<(f64, f64)> {
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    let mut see = |a: f64, b: f64| {
+        lo = lo.min(a);
+        hi = hi.max(b);
+    };
+    for tr in &tl.tracks {
+        match &tr.kind {
+            TrackKind::Cues(c) => c.iter().for_each(|c| see(c.at, c.at)),
+            TrackKind::Automation { keys, .. } => keys.iter().for_each(|k| see(k.at, k.at)),
+            TrackKind::Regions(r) => r.iter().for_each(|r| see(r.start, r.end)),
+        }
+    }
+    lo.is_finite().then_some((lo, hi))
+}
+
+/// The view that shows everything on the timeline (or its whole length when it's empty).
+fn fit_view(tl: &Tl, grid: Option<&Grid>, lane_w: f32) -> Viewport {
+    match content_range(tl) {
+        Some((lo, hi)) => {
+            let pad = ((hi - lo) * 0.08).max(2.0);
+            Viewport { origin: (lo - pad).max(0.0), pps: fit_pps(hi - lo + 2.0 * pad, lane_w) }
+        }
+        None => Viewport { origin: 0.0, pps: fit_pps(tl.span(grid), lane_w) },
+    }
+}
+
 fn toolbar(t: &Theme, st: &mut TlState, ui: &mut Ui, tl: &Tl, grid: Option<&Grid>) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new(SNAP).color(t.fg_dim)).on_hover_text("snap drags and adds");
-        let cur = st.snap.get(&tl.name).copied().unwrap_or(tl.snap);
-        for (mode, label) in Snap::ALL {
-            let enabled = mode == Snap::Off || grid.is_some();
-            let text = RichText::new(label).color(if cur == mode { t.accent } else { t.fg_dim });
-            let resp = ui.add_enabled(enabled, egui::Button::selectable(cur == mode, text));
-            if resp.clicked() {
-                st.snap.insert(tl.name.clone(), mode);
+        if grid.is_some() {
+            ui.label(RichText::new("Snap to").color(t.text_dim)).on_hover_text("Where moved and added things land");
+            let cur = st.snap.get(&tl.name).copied().unwrap_or(tl.snap);
+            let mut idx = Snap::ALL.iter().position(|(m, _)| *m == cur).unwrap_or(0);
+            if widgets::segmented(ui, t, &mut idx, &["Off", "Beat", "Bar"]) {
+                st.snap.insert(tl.name.clone(), Snap::ALL[idx].0);
             }
-            if !enabled {
-                resp.on_disabled_hover_text("needs a beat grid (media analysis)");
-            }
+            ui.add_space(spacing::M);
         }
-        ui.separator();
-        let follow = RichText::new(format!("{FOLLOW} follow")).color(if st.follow { t.accent } else { t.fg_dim });
-        if ui.add(egui::Button::selectable(st.follow, follow)).on_hover_text("keep the playhead in view").clicked() {
-            st.follow = !st.follow;
-        }
+        widgets::toggle(ui, t, &mut st.follow).on_hover_text("Scroll along so the playhead stays in view");
+        ui.label(RichText::new("Follow the playhead").color(t.text_dim));
+        ui.add_space(spacing::M);
         let vp = st.views.get(&tl.name).copied();
         if let Some(mut vp) = vp {
             let lanes_w = st.lane_w.max(100.0);
-            if ui.button(MINUS).on_hover_text("zoom out (Ctrl+wheel)").clicked() {
+            if widgets::icon_button(ui, t, MINUS, "Zoom out (Ctrl + scroll)").clicked() {
                 vp.pps = (vp.pps / 1.5).clamp(MIN_PPS, MAX_PPS);
             }
-            if ui.button(PLUS).on_hover_text("zoom in (Ctrl+wheel)").clicked() {
+            if widgets::icon_button(ui, t, PLUS, "Zoom in (Ctrl + scroll)").clicked() {
                 vp.pps = (vp.pps * 1.5).clamp(MIN_PPS, MAX_PPS);
             }
-            if ui.button(FIT).on_hover_text("fit the whole timeline").clicked() {
-                vp = Viewport { origin: 0.0, pps: fit_pps(tl.span(grid), lanes_w) };
+            if widgets::icon_button(ui, t, FIT, "Show everything on the timeline").clicked() {
+                vp = fit_view(tl, grid, lanes_w);
                 st.follow = false;
             }
             st.views.insert(tl.name.clone(), vp);
         }
-        ui.separator();
-        if ui.button(format!("{PLUS} Track")).clicked() {
+        ui.add_space(spacing::M);
+        if widgets::button_ex(ui, t, Some(PLUS), "Add a track", Kind::Secondary, Size::Small, 0.0, true).clicked() {
             st.editor = Some(Editor::Track { timeline: tl.name.clone(), name: String::new(), kind: "cues", address: String::new() });
         }
-        ui.label(RichText::new("double-click a lane to add · drag to move · right-click for more").small().color(t.fg_dim));
+        widgets::hint(ui, t, "Double-click a track to add · drag to move · right-click for more");
     });
 }
 
@@ -1265,7 +1400,7 @@ fn tracks_area(
     let x0 = region.left() + HEAD_W;
     let lane_w = region.right() - x0;
     st.lane_w = lane_w;
-    let vp = *st.views.entry(tl.name.clone()).or_insert_with(|| Viewport { origin: 0.0, pps: fit_pps(tl.span(grid), lane_w) });
+    let vp = *st.views.entry(tl.name.clone()).or_insert_with(|| fit_view(tl, grid, lane_w));
     let mut axis = Axis { x0, origin: vp.origin, pps: vp.pps };
 
     // wheel = scroll time, ctrl+wheel = zoom (around the pointer)
@@ -1301,14 +1436,8 @@ fn tracks_area(
     let tc_rate = matches!(tl.source, SourceKind::Mtc | SourceKind::Ltc).then_some(tl.rate);
     paint_ruler(ui, t, ruler, axis, tc_rate, grid, tl, live, ph);
     let gutter = Rect::from_min_max(region.min, pos2(x0, region.top() + RULER_H));
-    ui.painter().rect_filled(gutter, CornerRadius::ZERO, t.bg_dark);
-    ui.painter().text(
-        gutter.left_center() + vec2(8.0, 0.0),
-        Align2::LEFT_CENTER,
-        if tc_rate.is_some() { "timecode" } else { "time" },
-        FontId::proportional(type_scale::SMALL),
-        t.fg_dim,
-    );
+    ui.painter().rect_filled(gutter, CornerRadius::ZERO, t.surface);
+    ui.painter().text(gutter.left_center() + vec2(8.0, 0.0), Align2::LEFT_CENTER, "Time", FontId::proportional(type_scale::SMALL), t.text_dim);
 
     let mut top = ruler.bottom();
     if let Some(g) = grid {
@@ -1316,10 +1445,10 @@ fn tracks_area(
         paint_strip(ui, t, strip, axis, g);
         let head = Rect::from_min_max(pos2(region.left(), top), pos2(x0, strip.bottom()));
         let p = ui.painter();
-        p.rect_filled(head, CornerRadius::ZERO, t.bg_dark);
-        p.text(head.left_top() + vec2(8.0, 6.0), Align2::LEFT_TOP, "analysis", FontId::proportional(type_scale::SMALL), t.fg_dim);
+        p.rect_filled(head, CornerRadius::ZERO, t.surface);
+        p.text(head.left_top() + vec2(8.0, 6.0), Align2::LEFT_TOP, "The song", FontId::proportional(type_scale::SMALL), t.text_dim);
         if g.bpm > 0.0 {
-            p.text(head.left_top() + vec2(8.0, 22.0), Align2::LEFT_TOP, format!("{:.1} BPM", g.bpm), FontId::proportional(type_scale::BODY), t.fg);
+            p.text(head.left_top() + vec2(8.0, 22.0), Align2::LEFT_TOP, format!("{:.0} a minute", g.bpm), FontId::proportional(type_scale::BODY), t.fg);
         }
         top = strip.bottom();
     }
@@ -1334,7 +1463,7 @@ fn tracks_area(
                 ui.spacing_mut().item_spacing.y = 1.0;
                 if tl.tracks.is_empty() {
                     ui.add_space(spacing::M);
-                    ui.label(RichText::new("No tracks — add one with  + Track.").color(t.fg_dim));
+                    widgets::hint(ui, t, "No tracks yet. Use “Add a track” above: moments, smooth changes, or sections.");
                 }
                 for (ti, track) in tl.tracks.iter().enumerate() {
                     track_row(t, st, ui, out, now, tl, ti, track, axis, grid, snap);
@@ -1345,7 +1474,7 @@ fn tracks_area(
     // playhead over ruler, strip and lanes
     let p = ui.painter_at(lanes);
     let x = axis.x(ph);
-    let col = if live.recording { t.tally_program() } else { t.fg_bright };
+    let col = if live.recording { t.tally_program() } else { t.fg };
     p.vline(x, lanes.y_range(), Stroke::new(1.5, col));
     p.add(Shape::convex_polygon(vec![pos2(x - 6.0, lanes.top()), pos2(x + 6.0, lanes.top()), pos2(x, lanes.top() + 8.0)], col, Stroke::NONE));
     ui.allocate_rect(region, Sense::hover());
@@ -1354,12 +1483,12 @@ fn tracks_area(
 #[allow(clippy::too_many_arguments)]
 fn paint_ruler(ui: &Ui, t: &Theme, rect: Rect, axis: Axis, tc: Option<Rate>, grid: Option<&Grid>, tl: &Tl, live: &Live, ph: f64) {
     let p = ui.painter_at(rect);
-    p.rect_filled(rect, CornerRadius::ZERO, t.bg_darker);
+    p.rect_filled(rect, CornerRadius::ZERO, t.inset);
     let (t0, t1) = (axis.t(rect.left()).max(0.0), axis.t(rect.right()));
     if let Some(l) = tl.length {
         let x = axis.x(l);
         if x < rect.right() {
-            p.rect_filled(Rect::from_min_max(pos2(x.max(rect.left()), rect.top()), rect.max), CornerRadius::ZERO, t.bg_dark);
+            p.rect_filled(Rect::from_min_max(pos2(x.max(rect.left()), rect.top()), rect.max), CornerRadius::ZERO, t.surface);
         }
     }
     if let (Some(r), true) = (&tl.record, live.recording) {
@@ -1370,16 +1499,17 @@ fn paint_ruler(ui: &Ui, t: &Theme, rect: Rect, axis: Axis, tc: Option<Rate>, gri
         let bar_px = if g.bpm > 0.0 { (240.0 / g.bpm) as f32 * axis.pps } else { 0.0 };
         if bar_px >= 6.0 {
             for &d in visible(&g.downbeats, t0, t1) {
-                p.vline(axis.x(d), (rect.bottom() - 6.0)..=rect.bottom(), Stroke::new(1.0, t.fg_dim));
+                p.vline(axis.x(d), (rect.bottom() - 6.0)..=rect.bottom(), Stroke::new(1.0, t.text_dim));
             }
         }
     }
-    let step = tick_step(axis.pps, 80.0, tc);
+    // timecode labels (hh:mm:ss:ff) need more room than m:ss
+    let step = tick_step(axis.pps, if tc.is_some() { 118.0 } else { 80.0 }, tc);
     let minor = step / 5.0;
     if minor * axis.pps as f64 >= 6.0 {
         let mut i = (t0 / minor).floor() as i64;
         while (i as f64) * minor <= t1 {
-            p.vline(axis.x(i as f64 * minor), (rect.bottom() - 4.0)..=rect.bottom(), Stroke::new(1.0, t.muted));
+            p.vline(axis.x(i as f64 * minor), (rect.bottom() - 4.0)..=rect.bottom(), Stroke::new(1.0, t.text_faint));
             i += 1;
         }
     }
@@ -1387,19 +1517,23 @@ fn paint_ruler(ui: &Ui, t: &Theme, rect: Rect, axis: Axis, tc: Option<Rate>, gri
     while (i as f64) * step <= t1 + step {
         let at = i as f64 * step;
         let x = axis.x(at);
-        p.vline(x, (rect.top() + 4.0)..=rect.bottom(), Stroke::new(1.0, t.fg_dim));
+        p.vline(x, (rect.top() + 4.0)..=rect.bottom(), Stroke::new(1.0, t.text_dim));
         let label = match tc {
             Some(r) => timecode(at, r),
             None => ruler_label(at, step),
         };
-        p.text(pos2(x + 3.0, rect.top() + 3.0), Align2::LEFT_TOP, label, FontId::monospace(type_scale::SMALL), t.fg_dim);
+        // only whole labels: none cut off at either edge
+        let g = ui.painter().layout_no_wrap(label, FontId::monospace(type_scale::SMALL), t.text_dim);
+        if x >= rect.left() - 0.5 && x + 3.0 + g.size().x <= rect.right() {
+            p.galley(pos2(x + 3.0, rect.top() + 3.0), g, t.text_dim);
+        }
         i += 1;
     }
 }
 
 fn paint_strip(ui: &Ui, t: &Theme, rect: Rect, axis: Axis, g: &Grid) {
     let p = ui.painter_at(rect);
-    p.rect_filled(rect, CornerRadius::ZERO, t.bg_darker);
+    p.rect_filled(rect, CornerRadius::ZERO, t.inset);
     let (t0, t1) = (axis.t(rect.left()), axis.t(rect.right()));
     for (i, (a, b, label)) in g.sections.iter().enumerate() {
         if *b < t0 || *a > t1 {
@@ -1429,7 +1563,7 @@ fn paint_strip(ui: &Ui, t: &Theme, rect: Rect, axis: Axis, g: &Grid) {
     if bar_px >= 26.0 {
         let first = g.downbeats.partition_point(|&d| d < t0);
         for (n, &d) in visible(&g.downbeats, t0, t1).iter().enumerate() {
-            p.text(pos2(axis.x(d) + 2.0, rect.bottom() - 2.0), Align2::LEFT_BOTTOM, format!("{}", first + n + 1), FontId::proportional(9.5), t.fg_dim);
+            p.text(pos2(axis.x(d) + 2.0, rect.bottom() - 2.0), Align2::LEFT_BOTTOM, format!("{}", first + n + 1), FontId::proportional(9.5), t.text_dim);
         }
     }
     for &c in visible(&g.chorus, t0, t1) {
@@ -1448,12 +1582,12 @@ fn beat_lines(p: &egui::Painter, t: &Theme, rect: Rect, axis: Axis, g: &Grid) {
     let beat_px = (60.0 / g.bpm) as f32 * axis.pps;
     if beat_px >= 8.0 {
         for &b in visible(&g.beats, t0, t1) {
-            p.vline(axis.x(b), rect.y_range(), Stroke::new(1.0, t.muted.gamma_multiply(0.35)));
+            p.vline(axis.x(b), rect.y_range(), Stroke::new(1.0, t.text_faint.gamma_multiply(0.35)));
         }
     }
     if beat_px * 4.0 >= 8.0 {
         for &d in visible(&g.downbeats, t0, t1) {
-            p.vline(axis.x(d), rect.y_range(), Stroke::new(1.0, t.muted.gamma_multiply(0.8)));
+            p.vline(axis.x(d), rect.y_range(), Stroke::new(1.0, t.text_faint.gamma_multiply(0.8)));
         }
     }
 }
@@ -1484,10 +1618,10 @@ fn track_row(
     // header: type icon, name, mute toggle; right-click removes
     let hr = ui.interact(head, Id::new(("se.tl.head", &tl.name, &track.name)), Sense::click());
     let p = ui.painter_at(head);
-    p.rect_filled(head, CornerRadius::ZERO, if hr.hovered() { t.bg_light } else { t.bg_dark });
-    let name_col = if track.mute { t.fg_dim } else { t.fg };
+    p.rect_filled(head, CornerRadius::ZERO, if hr.hovered() { t.surface_hi } else { t.surface });
+    let name_col = if track.mute { t.text_dim } else { t.fg };
     p.text(head.left_center() + vec2(8.0, 0.0), Align2::LEFT_CENTER, track.type_icon(), FontId::proportional(type_scale::BODY), t.accent);
-    p.text(head.left_center() + vec2(26.0, 0.0), Align2::LEFT_CENTER, &track.name, FontId::proportional(type_scale::BODY), name_col);
+    p.text(head.left_center() + vec2(26.0, 0.0), Align2::LEFT_CENTER, nice(&track.name), FontId::proportional(type_scale::BODY), name_col);
     let mute_rect = Rect::from_center_size(pos2(head.right() - 16.0, head.center().y), vec2(22.0, 20.0));
     let mr = ui.interact(mute_rect, Id::new(("se.tl.mute", &tl.name, &track.name)), Sense::click());
     ui.painter().text(
@@ -1500,27 +1634,30 @@ fn track_row(
         } else if mr.hovered() {
             t.fg
         } else {
-            t.fg_dim
+            t.text_dim
         },
     );
-    if mr.on_hover_text(if track.mute { "unmute track" } else { "mute track" }).clicked() {
+    if mr.on_hover_text(if track.mute { "Unmute track" } else { "Mute track" }).clicked() {
         out.push(act("timeline.edit.track.mute", Value::map().with("timeline", tl.name.as_str()).with("name", track.name.as_str()).with("mute", !track.mute)));
     }
     let tip = match &track.kind {
-        TrackKind::Cues(c) => format!("cue track · {} cues", c.len()),
-        TrackKind::Automation { address, keys } => format!("automation · {address} · {} keys", keys.len()),
-        TrackKind::Regions(r) => format!("region track · {} regions", r.len()),
+        TrackKind::Cues(c) => format!("Moments · {} on this track", c.len()),
+        TrackKind::Automation { address, keys } => {
+            format!("Smooth change of {} · {} points\n{address}", crate::views::rules::setting_words(address), keys.len())
+        }
+        TrackKind::Regions(r) => format!("Sections · {} on this track", r.len()),
     };
+    let hr = hr.on_hover_cursor(CursorIcon::ContextMenu);
     let hr = hr.on_hover_text(tip);
     hr.context_menu(|ui| {
-        if ui.button(format!("{} {}", if track.mute { UNMUTED } else { MUTED }, if track.mute { "Unmute" } else { "Mute" })).clicked() {
+        if ui.button(format!("{}  {}", if track.mute { UNMUTED } else { MUTED }, if track.mute { "Unmute track" } else { "Mute track" })).clicked() {
             out.push(act(
                 "timeline.edit.track.mute",
                 Value::map().with("timeline", tl.name.as_str()).with("name", track.name.as_str()).with("mute", !track.mute),
             ));
             ui.close();
         }
-        if ui.button(RichText::new(format!("{TRASH} Remove track")).color(t.bright_red)).clicked() {
+        if ui.button(RichText::new(format!("{TRASH}  Remove track")).color(t.bright_red)).clicked() {
             out.push(act("timeline.edit.track.remove", Value::map().with("timeline", tl.name.as_str()).with("name", track.name.as_str())));
             ui.close();
         }
@@ -1528,14 +1665,14 @@ fn track_row(
 
     // lane background
     let lp = ui.painter_at(lane);
-    lp.rect_filled(lane, CornerRadius::ZERO, t.bg_darker);
+    lp.rect_filled(lane, CornerRadius::ZERO, t.inset);
     if let Some(g) = grid {
         beat_lines(&lp, t, lane, axis, g);
     }
     if let Some(l) = tl.length {
         let x = axis.x(l);
         if x < lane.right() {
-            lp.rect_filled(Rect::from_min_max(pos2(x.max(lane.left()), lane.top()), lane.max), CornerRadius::ZERO, t.bg_dark.gamma_multiply(0.8));
+            lp.rect_filled(Rect::from_min_max(pos2(x.max(lane.left()), lane.top()), lane.max), CornerRadius::ZERO, t.surface.gamma_multiply(0.8));
         }
     }
     let lr = ui.interact(lane, Id::new(("se.tl.lane", &tl.name, &track.name)), Sense::click());
@@ -1611,12 +1748,22 @@ fn cue_lane(
     }
     let p = ui.painter_at(lane);
     let y = lane.center().y;
+    let xs: Vec<f32> = cues
+        .iter()
+        .enumerate()
+        .map(|(ci, cue)| match st.preview(&tl.name, &track.name, ci) {
+            Some(DragWhat::Cue { at }) => axis.x(at),
+            _ => axis.x(cue.at),
+        })
+        .collect();
+    // label room: up to the next marker to the right (labels never run into each other)
+    let room = |ci: usize| {
+        let x = xs[ci];
+        let next = xs.iter().enumerate().filter(|(j, nx)| *j != ci && (**nx > x || (**nx == x && *j > ci))).map(|(_, nx)| *nx).fold(lane.right(), f32::min);
+        next - x - 9.0 - 8.0
+    };
     for (ci, cue) in cues.iter().enumerate() {
-        let at = match st.preview(&tl.name, &track.name, ci) {
-            Some(DragWhat::Cue { at }) => at,
-            _ => cue.at,
-        };
-        let x = axis.x(at);
+        let x = xs[ci];
         let active_drag = st.dragging() && st.preview(&tl.name, &track.name, ci).is_some();
         if !active_drag && (x < lane.left() - 10.0 || x > lane.right() + 10.0) {
             continue;
@@ -1647,23 +1794,32 @@ fn cue_lane(
         let flash =
             st.flashes.iter().any(|f| f.0 == tl.name && f.1 == track.name && (f.2 - cue.at).abs() < 1e-3 && now.saturating_duration_since(f.3) < CUE_FLASH);
         let fill = if flash {
-            t.fg_bright
+            t.fg
         } else if resp.hovered() || resp.dragged() {
             t.accent.gamma_multiply(1.2)
         } else {
             t.accent
         };
         let r = if flash { 8.0 } else { 6.0 };
-        p.add(Shape::convex_polygon(vec![pos2(x, y - r), pos2(x + r, y), pos2(x, y + r), pos2(x - r, y)], fill, Stroke::new(1.0, t.bg_darker)));
-        if let Some(label) = &cue.label {
-            p.text(pos2(x + 9.0, y), Align2::LEFT_CENTER, label, FontId::proportional(type_scale::SMALL), t.fg);
+        p.add(Shape::convex_polygon(vec![pos2(x, y - r), pos2(x + r, y), pos2(x, y + r), pos2(x - r, y)], fill, Stroke::new(1.0, t.inset)));
+        if let Some(label) = &cue.label
+            && room(ci) >= 30.0
+        {
+            let g = elide(ui, label.clone(), FontId::proportional(type_scale::SMALL), t.fg, room(ci));
+            p.galley(pos2(x + 9.0, y - g.size().y / 2.0), g, t.fg);
         }
         let resp = resp.on_hover_ui(|ui| {
-            ui.label(RichText::new(cue.label.as_deref().unwrap_or("cue")).strong());
-            ui.label(RichText::new(format!("{}  ·  track {}", format_time(cue.at), cue.mode)).small().color(t.fg_dim));
+            ui.label(RichText::new(cue.label.as_deref().unwrap_or("Moment")).font(font_semibold(type_scale::BODY)));
+            let tracking = match cue.mode.as_str() {
+                "always" => " · also applies when you jump past it",
+                "never" => " · only when played through",
+                _ => "",
+            };
+            ui.label(RichText::new(format!("at {}{tracking}", format_time(cue.at))).size(type_scale::SMALL).color(t.text_dim));
             for c in &cue.commands {
-                ui.label(RichText::new(c).monospace());
+                ui.label(RichText::new(c).font(font_mono(type_scale::SMALL + 0.5)));
             }
+            ui.label(RichText::new("Double-click to edit · drag to move").size(type_scale::SMALL).color(t.text_dim));
         });
         let open_editor = |st: &mut TlState, pos: Pos2| {
             st.editor = Some(Editor::Cue {
@@ -1680,11 +1836,11 @@ fn cue_lane(
             open_editor(st, pos2(x, y));
         }
         resp.context_menu(|ui| {
-            if ui.button(format!("{EDIT} Edit…")).clicked() {
+            if ui.button(format!("{EDIT}  Edit…")).clicked() {
                 open_editor(st, pos2(x, y));
                 ui.close();
             }
-            if ui.button(RichText::new(format!("{TRASH} Delete cue")).color(t.bright_red)).clicked() {
+            if ui.button(RichText::new(format!("{TRASH}  Delete moment")).color(t.bright_red)).clicked() {
                 out.push(act("timeline.edit.cue.remove", edit_args(&tl.name, &track.name).with("index", ci)));
                 ui.close();
             }
@@ -1744,10 +1900,10 @@ fn key_lane(
     }
 
     let p = ui.painter_at(lane);
-    let col = if track.mute { t.muted } else { t.modulated() };
+    let col = if track.mute { t.text_faint } else { t.modulated() };
     if numeric || keys.is_empty() {
-        p.text(lane.left_top() + vec2(4.0, 2.0), Align2::LEFT_TOP, fmt_num(range.1), FontId::proportional(9.5), t.fg_dim);
-        p.text(lane.left_bottom() + vec2(4.0, -2.0), Align2::LEFT_BOTTOM, fmt_num(range.0), FontId::proportional(9.5), t.fg_dim);
+        p.text(lane.left_top() + vec2(4.0, 2.0), Align2::LEFT_TOP, fmt_num(range.1), FontId::proportional(9.5), t.text_dim);
+        p.text(lane.left_bottom() + vec2(4.0, -2.0), Align2::LEFT_BOTTOM, fmt_num(range.0), FontId::proportional(9.5), t.text_dim);
     }
     if numeric {
         let mut line = Vec::with_capacity((lane.width() / 2.0) as usize + 2);
@@ -1764,6 +1920,7 @@ fn key_lane(
         p.hline(lane.x_range(), y, Stroke::new(1.0, col.gamma_multiply(0.5)));
     }
 
+    let mut label_end = f32::NEG_INFINITY;
     for &(i, at, v) in &pts {
         let k = &keys[i];
         let x = axis.x(at);
@@ -1805,13 +1962,16 @@ fn key_lane(
             out.push(act("timeline.edit.key.set", args));
         }
         let hot = resp.hovered() || resp.dragged();
-        p.circle_filled(pos2(x, y), if hot { 5.5 } else { 4.5 }, if hot { t.fg_bright } else { col });
-        p.circle_stroke(pos2(x, y), if hot { 5.5 } else { 4.5 }, Stroke::new(1.0, t.bg_darker));
-        if !numeric {
-            p.text(pos2(x + 7.0, y - 3.0), Align2::LEFT_BOTTOM, value_text(&k.value), FontId::proportional(9.5), t.fg);
+        p.circle_filled(pos2(x, y), if hot { 5.5 } else { 4.5 }, if hot { t.fg } else { col });
+        p.circle_stroke(pos2(x, y), if hot { 5.5 } else { 4.5 }, Stroke::new(1.0, t.inset));
+        if !numeric && x + 7.0 >= label_end + 4.0 {
+            let g = ui.painter().layout_no_wrap(value_text(&k.value), FontId::proportional(type_scale::SMALL), t.fg);
+            label_end = x + 7.0 + g.size().x;
+            p.galley(pos2(x + 7.0, y - 3.0 - g.size().y), g, t.fg);
         }
         let shown = if numeric { fmt_num(v) } else { value_text(&k.value) };
-        let resp = resp.on_hover_text(format!("{}  =  {shown}\ncurve to next: {}", format_time(at), k.curve));
+        let resp =
+            resp.on_hover_text(format!("{}  →  {shown}\nThen: {}\nDouble-click to edit · drag to move", format_time(at), curve_words(&k.curve).to_lowercase()));
         let open_editor = |st: &mut TlState| {
             st.editor = Some(Editor::Key {
                 timeline: tl.name.clone(),
@@ -1827,19 +1987,19 @@ fn key_lane(
             open_editor(st);
         }
         resp.context_menu(|ui| {
-            ui.menu_button(format!("{} Curve: {}", icon::SCOPE, k.curve), |ui| {
+            ui.menu_button(format!("{}  Shape: {}", icon::SCOPE, curve_words(&k.curve)), |ui| {
                 for c in CURVES {
-                    if ui.selectable_label(k.curve == c, c).clicked() {
+                    if ui.selectable_label(k.curve == c, curve_words(c)).clicked() {
                         out.push(act("timeline.edit.key.set", edit_args(&tl.name, &track.name).with("index", i).with("curve", c)));
                         ui.close();
                     }
                 }
             });
-            if ui.button(format!("{EDIT} Edit…")).clicked() {
+            if ui.button(format!("{EDIT}  Edit…")).clicked() {
                 open_editor(st);
                 ui.close();
             }
-            if ui.button(RichText::new(format!("{TRASH} Delete key")).color(t.bright_red)).clicked() {
+            if ui.button(RichText::new(format!("{TRASH}  Delete point")).color(t.bright_red)).clicked() {
                 out.push(act("timeline.edit.key.remove", edit_args(&tl.name, &track.name).with("index", i)));
                 ui.close();
             }
@@ -1951,28 +2111,25 @@ fn region_lane(
             None => format!("{ic} {what}"),
         };
         let clip = ui.painter_at(rect.shrink(2.0).intersect(lane));
-        clip.text(
-            pos2(rect.left() + 6.0, rect.center().y),
-            Align2::LEFT_CENTER,
-            text,
-            FontId::proportional(type_scale::SMALL),
-            if active { t.fg_bright } else { t.fg },
-        );
+        clip.text(pos2(rect.left() + 6.0, rect.center().y), Align2::LEFT_CENTER, text, FontId::proportional(type_scale::SMALL), t.fg);
         let body = body.on_hover_ui(|ui| {
-            ui.label(RichText::new(r.label.as_deref().unwrap_or(&what)).strong());
+            ui.label(RichText::new(r.label.as_deref().unwrap_or(&what)).font(font_semibold(type_scale::BODY)));
             ui.label(
-                RichText::new(format!("{} → {}{}", format_time(r.start), format_time(r.end), if active { "  · active" } else { "" })).small().color(t.fg_dim),
+                RichText::new(format!("{} → {}{}", format_time(r.start), format_time(r.end), if active { "  · on now" } else { "" }))
+                    .size(type_scale::SMALL)
+                    .color(t.text_dim),
             );
             if let RegionAction::Commands(on, off) = &r.action {
                 for c in on {
-                    ui.label(RichText::new(format!("on:  {c}")).monospace());
+                    ui.label(RichText::new(format!("start: {c}")).font(font_mono(type_scale::SMALL + 0.5)));
                 }
                 for c in off {
-                    ui.label(RichText::new(format!("off: {c}")).monospace());
+                    ui.label(RichText::new(format!("end:   {c}")).font(font_mono(type_scale::SMALL + 0.5)));
                 }
             } else {
-                ui.label(RichText::new(what.clone()).monospace());
+                ui.label(RichText::new(what.clone()));
             }
+            ui.label(RichText::new("Double-click to edit · drag to move · drag the edges to resize").size(type_scale::SMALL).color(t.text_dim));
         });
         let open_editor = |st: &mut TlState, pos: Pos2| {
             let (kind, target, cue) = match &r.action {
@@ -2004,11 +2161,11 @@ fn region_lane(
             open_editor(st, rect.center());
         }
         body.context_menu(|ui| {
-            if ui.button(format!("{EDIT} Edit…")).clicked() {
+            if ui.button(format!("{EDIT}  Edit…")).clicked() {
                 open_editor(st, rect.center());
                 ui.close();
             }
-            if ui.button(RichText::new(format!("{TRASH} Delete region")).color(t.bright_red)).clicked() {
+            if ui.button(RichText::new(format!("{TRASH}  Delete section")).color(t.bright_red)).clicked() {
                 out.push(act("timeline.edit.region.remove", edit_args(&tl.name, &track.name).with("index", ri)));
                 ui.close();
             }
@@ -2018,29 +2175,77 @@ fn region_lane(
 
 // ---------------------------------------------------------------- editors
 
-fn field(ui: &mut Ui, label: &str, text: &mut String, hint: &str, width: f32) {
-    ui.label(label);
-    ui.add(egui::TextEdit::singleline(text).hint_text(hint).desired_width(width));
+fn field(ui: &mut Ui, t: &Theme, label: &str, text: &mut String, hint: &str, width: f32) {
+    ui.label(RichText::new(label).color(t.text_dim));
+    ui.add(se_ui_kit::widgets::field(text).hint_text(hint).desired_width(width));
     ui.end_row();
 }
 
 fn time_ok(t: &Theme, ui: &mut Ui, text: &str) -> Option<f64> {
     let v = parse_secs(text);
     if v.is_none() && !text.trim().is_empty() {
-        ui.label(RichText::new(format!("{} bad time `{}` (seconds or m:ss.fff)", icon::WARN, text.trim())).small().color(t.bright_red));
+        warn(ui, t, &format!("“{}” isn't a time. Use seconds (12.5) or minutes:seconds (1:02.5).", text.trim()));
     }
     v
 }
 
+fn warn(ui: &mut Ui, t: &Theme, text: &str) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(icon::WARN).color(t.yellow));
+        ui.label(RichText::new(text).color(t.fg));
+    });
+}
+
+/// Choice buttons (primary when chosen). Returns the clicked index.
+fn choices(ui: &mut Ui, t: &Theme, labels: &[&str], cur: usize) -> Option<usize> {
+    let mut out = None;
+    ui.horizontal_wrapped(|ui| {
+        for (n, l) in labels.iter().enumerate() {
+            if widgets::chip(ui, t, "", l, n == cur).clicked() && n != cur {
+                out = Some(n);
+            }
+        }
+    });
+    out
+}
+
+/// Save / delete / cancel row of an editor window. Returns (save, delete, cancel).
+fn editor_buttons(ui: &mut Ui, t: &Theme, save_label: &str, can_save: bool, can_delete: bool, delete_label: &str) -> (bool, bool, bool) {
+    ui.add_space(spacing::S);
+    let mut r = (false, false, false);
+    ui.horizontal(|ui| {
+        r.0 = widgets::button_ex(ui, t, Some(icon::CHECK), save_label, Kind::Primary, Size::Medium, 0.0, can_save).clicked();
+        r.2 = widgets::button(ui, t, "Cancel", Kind::Ghost).clicked();
+        if can_delete {
+            r.1 = widgets::button_ex(ui, t, Some(TRASH), delete_label, Kind::Danger, Size::Medium, 0.0, true).clicked();
+        }
+    });
+    r
+}
+
+const SOURCE_WORDS: [(&str, &str, &str); 5] = [
+    ("internal", "Its own clock", "Plays when you press play (or when something tells it to)."),
+    ("manual", "Only when told", "Moves only when something jumps or nudges it."),
+    ("media", "The song", "Plays along with a song video, from wherever the song is."),
+    ("mtc", "Music software", "Plays along with the clock your music software sends."),
+    ("ltc", "Audio clock", "Follows a clock signal that comes in as sound."),
+];
+
+const TRACK_WORDS: [(&str, &str, &str); 3] = [
+    ("cues", "Moments", "Do something at a point in time, like firing an effect on the drop."),
+    ("automation", "Smooth changes", "Move one setting over time, like fading a glow in."),
+    ("regions", "Sections", "Keep something on for a stretch, like a light look during the chorus."),
+];
+
 fn editor_window(ctx: &egui::Context, t: &Theme, st: &mut TlState, out: &mut Vec<Op>, m: &Model) {
     let Some(mut ed) = st.editor.take() else { return };
     let title = match &ed {
-        Editor::Cue { index: None, .. } => "Add cue",
-        Editor::Cue { .. } => "Edit cue",
-        Editor::Key { .. } => "Edit key",
-        Editor::Region { index: None, .. } => "Add region",
-        Editor::Region { .. } => "Edit region",
-        Editor::Track { .. } => "Add track",
+        Editor::Cue { index: None, .. } => "Add a moment",
+        Editor::Cue { .. } => "Edit moment",
+        Editor::Key { .. } => "Edit point",
+        Editor::Region { index: None, .. } => "Add a section",
+        Editor::Region { .. } => "Edit section",
+        Editor::Track { .. } => "Add a track",
         Editor::Timeline { .. } => "New timeline",
     };
     let pos = match &ed {
@@ -2049,270 +2254,268 @@ fn editor_window(ctx: &egui::Context, t: &Theme, st: &mut TlState, out: &mut Vec
     };
     let mut open = true;
     let mut done = false;
-    let mut win = egui::Window::new(RichText::new(title).strong()).id(Id::new("se.tl.editor")).collapsible(false).resizable(false).open(&mut open);
+    let mut win = egui::Window::new(RichText::new(title).font(font_semibold(type_scale::LARGE)))
+        .id(Id::new("se.tl.editor"))
+        .collapsible(false)
+        .resizable(false)
+        .open(&mut open);
     win = match pos {
         Some(p) => win.default_pos(p),
         None => win.anchor(Align2::CENTER_TOP, [0.0, 90.0]),
     };
     win.show(ctx, |ui| {
+        ui.set_max_width(460.0);
         match &mut ed {
             Editor::Cue { timeline, track, index, at, label, commands, .. } => {
-                egui::Grid::new("tl-ed-cue").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
-                    field(ui, "At", at, "seconds or m:ss.fff", 120.0);
-                    field(ui, "Label", label, "optional", 220.0);
-                    ui.label("Do");
+                egui::Grid::new("tl-ed-cue").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                    field(ui, t, "Time", at, "seconds or m:ss", 120.0);
+                    field(ui, t, "Name", label, "optional, like “drop”", 240.0);
+                    ui.label(RichText::new("What happens").color(t.text_dim));
                     ui.add(
                         egui::TextEdit::multiline(commands)
                             .hint_text("one command per line\npreset.fire drop\nset fx.glow.amount 1")
-                            .code_editor()
+                            .font(font_mono(type_scale::BODY - 1.0))
                             .desired_rows(4)
                             .desired_width(320.0),
                     );
                     ui.end_row();
                 });
                 let at_v = time_ok(t, ui, at);
-                ui.horizontal(|ui| {
-                    let ok = at_v.is_some() && (index.is_some() || !lines(commands).is_empty() || !label.trim().is_empty());
-                    if ui.add_enabled(ok, egui::Button::new(RichText::new(format!("{} Save", icon::CHECK)).strong())).clicked()
-                        && let Some(at_v) = at_v
-                    {
-                        let mut args = edit_args(timeline, track).with("at", at_v).with("do", lines(commands));
-                        if !label.trim().is_empty() || index.is_some() {
-                            args = args.with("label", label.trim());
-                        }
-                        match index {
-                            Some(i) => out.push(act("timeline.edit.cue.set", args.with("index", *i))),
-                            None => out.push(act("timeline.edit.cue.add", args)),
-                        }
-                        done = true;
+                let ok = at_v.is_some() && (index.is_some() || !lines(commands).is_empty() || !label.trim().is_empty());
+                let (save, delete, cancel) = editor_buttons(ui, t, "Save", ok, index.is_some(), "Delete");
+                if save && let Some(at_v) = at_v {
+                    let mut args = edit_args(timeline, track).with("at", at_v).with("do", lines(commands));
+                    if !label.trim().is_empty() || index.is_some() {
+                        args = args.with("label", label.trim());
                     }
-                    if let Some(i) = index
-                        && ui.button(RichText::new(format!("{TRASH} Delete")).color(t.bright_red)).clicked()
-                    {
-                        out.push(act("timeline.edit.cue.remove", edit_args(timeline, track).with("index", *i)));
-                        done = true;
+                    match index {
+                        Some(i) => out.push(act("timeline.edit.cue.set", args.with("index", *i))),
+                        None => out.push(act("timeline.edit.cue.add", args)),
                     }
-                    if ui.button("Cancel").clicked() {
-                        done = true;
-                    }
-                });
+                    done = true;
+                }
+                if delete && let Some(i) = index {
+                    out.push(act("timeline.edit.cue.remove", edit_args(timeline, track).with("index", *i)));
+                    done = true;
+                }
+                done |= cancel;
             }
             Editor::Key { timeline, track, index, at, value, curve, .. } => {
-                egui::Grid::new("tl-ed-key").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
-                    field(ui, "At", at, "seconds or m:ss.fff", 120.0);
-                    field(ui, "Value", value, "0.5 · #ff8800 · true", 160.0);
-                    ui.label("Curve to next");
-                    egui::ComboBox::from_id_salt("tl-ed-curve").selected_text(curve.as_str()).show_ui(ui, |ui| {
+                egui::Grid::new("tl-ed-key").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                    field(ui, t, "Time", at, "seconds or m:ss", 120.0);
+                    field(ui, t, "Value", value, "0.5 · #ff8800 · true", 180.0);
+                    ui.label(RichText::new("Then").color(t.text_dim));
+                    egui::ComboBox::from_id_salt("tl-ed-curve").width(200.0).selected_text(curve_words(curve)).show_ui(ui, |ui| {
                         for c in CURVES {
-                            ui.selectable_value(curve, c.to_string(), c);
+                            ui.selectable_value(curve, c.to_string(), curve_words(c));
                         }
                     });
                     ui.end_row();
                 });
+                widgets::hint(ui, t, "“Then” is how it moves on to the next point.");
                 let at_v = time_ok(t, ui, at);
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(at_v.is_some() && !value.trim().is_empty(), egui::Button::new(RichText::new(format!("{} Save", icon::CHECK)).strong()))
-                        .clicked()
-                        && let Some(at_v) = at_v
-                    {
-                        let args = edit_args(timeline, track)
-                            .with("index", *index)
-                            .with("at", at_v)
-                            .with("value", Value::parse_text(value.trim()))
-                            .with("curve", curve.as_str());
-                        out.push(act("timeline.edit.key.set", args));
-                        done = true;
-                    }
-                    if ui.button(RichText::new(format!("{TRASH} Delete")).color(t.bright_red)).clicked() {
-                        out.push(act("timeline.edit.key.remove", edit_args(timeline, track).with("index", *index)));
-                        done = true;
-                    }
-                    if ui.button("Cancel").clicked() {
-                        done = true;
-                    }
-                });
+                let (save, delete, cancel) = editor_buttons(ui, t, "Save", at_v.is_some() && !value.trim().is_empty(), true, "Delete");
+                if save && let Some(at_v) = at_v {
+                    let args = edit_args(timeline, track)
+                        .with("index", *index)
+                        .with("at", at_v)
+                        .with("value", Value::parse_text(value.trim()))
+                        .with("curve", curve.as_str());
+                    out.push(act("timeline.edit.key.set", args));
+                    done = true;
+                }
+                if delete {
+                    out.push(act("timeline.edit.key.remove", edit_args(timeline, track).with("index", *index)));
+                    done = true;
+                }
+                done |= cancel;
             }
             Editor::Region { timeline, track, index, start, end, label, kind, target, cue, on, off, .. } => {
-                egui::Grid::new("tl-ed-region").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
-                    field(ui, "Start", start, "seconds or m:ss.fff", 120.0);
-                    field(ui, "End", end, "seconds or m:ss.fff", 120.0);
-                    field(ui, "Label", label, "optional", 220.0);
-                    ui.label("Action");
-                    if index.is_some() {
-                        ui.label(RichText::new("fixed once created (remove and re-add to change)").small().color(t.fg_dim));
-                        ui.end_row();
-                    } else {
-                        ui.horizontal(|ui| {
-                            for (k, l) in
-                                [(ActionKind::Preset, "preset"), (ActionKind::Cuelist, "cuelist"), (ActionKind::Fx, "fx"), (ActionKind::Commands, "commands")]
-                            {
-                                let sel = std::mem::discriminant(kind) == std::mem::discriminant(&k);
-                                if ui.add(egui::Button::selectable(sel, l)).clicked() {
-                                    *kind = k;
-                                }
-                            }
-                        });
-                        ui.end_row();
-                        match kind {
-                            ActionKind::Preset => {
-                                ui.label("Preset");
-                                let presets: Vec<String> = m.q_list("presets").iter().filter_map(|p| opt_s(p, "name")).collect();
-                                egui::ComboBox::from_id_salt("tl-ed-preset")
-                                    .selected_text(if target.is_empty() { "choose…" } else { target.as_str() })
-                                    .show_ui(ui, |ui| {
-                                        for p in presets {
-                                            ui.selectable_value(target, p.clone(), p);
-                                        }
-                                    });
-                                ui.end_row();
-                            }
-                            ActionKind::Cuelist => {
-                                field(ui, "Cue list", target, "cue list name", 160.0);
-                                field(ui, "Cue", cue, "optional cue", 120.0);
-                            }
-                            ActionKind::Fx => field(ui, "Effect", target, "fx name", 160.0),
-                            ActionKind::Commands => {
-                                ui.label("On enter");
-                                ui.add(egui::TextEdit::multiline(on).hint_text("one command per line").code_editor().desired_rows(3).desired_width(300.0));
-                                ui.end_row();
-                                ui.label("On exit");
-                                ui.add(egui::TextEdit::multiline(off).hint_text("one command per line").code_editor().desired_rows(3).desired_width(300.0));
-                                ui.end_row();
-                            }
-                        }
-                    }
+                egui::Grid::new("tl-ed-region").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                    field(ui, t, "Starts", start, "seconds or m:ss", 120.0);
+                    field(ui, t, "Ends", end, "seconds or m:ss", 120.0);
+                    field(ui, t, "Name", label, "optional, like “chorus”", 240.0);
                 });
+                ui.add_space(spacing::S);
+                if index.is_some() {
+                    widgets::hint(ui, t, "What it does can't change once made. Delete it and add a new one to change that.");
+                } else {
+                    ui.label(RichText::new("While it's on").color(t.text_dim));
+                    let kinds = [ActionKind::Preset, ActionKind::Cuelist, ActionKind::Fx, ActionKind::Commands];
+                    let cur = kinds.iter().position(|k| std::mem::discriminant(k) == std::mem::discriminant(kind)).unwrap_or(0);
+                    if let Some(n) = choices(ui, t, &["Quick effect", "Light cue list", "Effect", "Commands"], cur) {
+                        *kind = kinds[n].clone();
+                    }
+                    ui.add_space(spacing::XS);
+                    egui::Grid::new("tl-ed-region-do").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| match kind {
+                        ActionKind::Preset => {
+                            ui.label(RichText::new("Quick effect").color(t.text_dim));
+                            let presets: Vec<(String, String)> = m
+                                .q_list("presets")
+                                .iter()
+                                .filter_map(|p| opt_s(p, "name").map(|n| (n.clone(), opt_s(p, "label").map_or_else(|| nice(&n), |l| nice(&l.to_lowercase())))))
+                                .collect();
+                            let shown = presets
+                                .iter()
+                                .find(|(n, _)| n == target)
+                                .map_or_else(|| if target.is_empty() { "Pick one".to_string() } else { nice(target) }, |(_, l)| l.clone());
+                            egui::ComboBox::from_id_salt("tl-ed-preset").width(220.0).selected_text(shown).show_ui(ui, |ui| {
+                                for (n, l) in presets {
+                                    ui.selectable_value(target, n, l);
+                                }
+                            });
+                            ui.end_row();
+                        }
+                        ActionKind::Cuelist => {
+                            field(ui, t, "Cue list", target, "cue list name", 180.0);
+                            field(ui, t, "Cue", cue, "optional", 120.0);
+                        }
+                        ActionKind::Fx => field(ui, t, "Effect", target, "effect name", 180.0),
+                        ActionKind::Commands => {
+                            ui.label(RichText::new("When it starts").color(t.text_dim));
+                            ui.add(
+                                egui::TextEdit::multiline(on)
+                                    .hint_text("one command per line")
+                                    .font(font_mono(type_scale::BODY - 1.0))
+                                    .desired_rows(3)
+                                    .desired_width(300.0),
+                            );
+                            ui.end_row();
+                            ui.label(RichText::new("When it ends").color(t.text_dim));
+                            ui.add(
+                                egui::TextEdit::multiline(off)
+                                    .hint_text("one command per line")
+                                    .font(font_mono(type_scale::BODY - 1.0))
+                                    .desired_rows(3)
+                                    .desired_width(300.0),
+                            );
+                            ui.end_row();
+                        }
+                    });
+                }
                 let (sv, ev) = (time_ok(t, ui, start), time_ok(t, ui, end));
                 let span_ok = matches!((sv, ev), (Some(a), Some(b)) if b > a);
                 if sv.is_some() && ev.is_some() && !span_ok {
-                    ui.label(RichText::new(format!("{} end must be after start", icon::WARN)).small().color(t.bright_red));
+                    warn(ui, t, "It has to end after it starts.");
                 }
                 let action_ok = index.is_some()
                     || match kind {
                         ActionKind::Commands => !lines(on).is_empty(),
                         _ => !target.trim().is_empty(),
                     };
-                ui.horizontal(|ui| {
-                    if ui.add_enabled(span_ok && action_ok, egui::Button::new(RichText::new(format!("{} Save", icon::CHECK)).strong())).clicked()
-                        && let (Some(sv), Some(ev)) = (sv, ev)
-                    {
-                        let mut args = edit_args(timeline, track).with("start", sv).with("end", ev);
-                        if !label.trim().is_empty() || index.is_some() {
-                            args = args.with("label", label.trim());
+                let (save, delete, cancel) = editor_buttons(ui, t, "Save", span_ok && action_ok, index.is_some(), "Delete");
+                if save && let (Some(sv), Some(ev)) = (sv, ev) {
+                    let mut args = edit_args(timeline, track).with("start", sv).with("end", ev);
+                    if !label.trim().is_empty() || index.is_some() {
+                        args = args.with("label", label.trim());
+                    }
+                    match index {
+                        Some(i) => out.push(act("timeline.edit.region.set", args.with("index", *i))),
+                        None => {
+                            args = match kind {
+                                ActionKind::Preset => args.with("preset", target.trim()),
+                                ActionKind::Cuelist if cue.trim().is_empty() => args.with("cuelist", target.trim()),
+                                ActionKind::Cuelist => args.with("cuelist", target.trim()).with("cue", cue.trim()),
+                                ActionKind::Fx => args.with("fx", target.trim()),
+                                ActionKind::Commands => args.with("do", lines(on)).with("undo", lines(off)),
+                            };
+                            out.push(act("timeline.edit.region.add", args));
                         }
-                        match index {
-                            Some(i) => out.push(act("timeline.edit.region.set", args.with("index", *i))),
-                            None => {
-                                args = match kind {
-                                    ActionKind::Preset => args.with("preset", target.trim()),
-                                    ActionKind::Cuelist if cue.trim().is_empty() => args.with("cuelist", target.trim()),
-                                    ActionKind::Cuelist => args.with("cuelist", target.trim()).with("cue", cue.trim()),
-                                    ActionKind::Fx => args.with("fx", target.trim()),
-                                    ActionKind::Commands => args.with("do", lines(on)).with("undo", lines(off)),
-                                };
-                                out.push(act("timeline.edit.region.add", args));
-                            }
-                        }
-                        done = true;
                     }
-                    if let Some(i) = index
-                        && ui.button(RichText::new(format!("{TRASH} Delete")).color(t.bright_red)).clicked()
-                    {
-                        out.push(act("timeline.edit.region.remove", edit_args(timeline, track).with("index", *i)));
-                        done = true;
-                    }
-                    if ui.button("Cancel").clicked() {
-                        done = true;
-                    }
-                });
+                    done = true;
+                }
+                if delete && let Some(i) = index {
+                    out.push(act("timeline.edit.region.remove", edit_args(timeline, track).with("index", *i)));
+                    done = true;
+                }
+                done |= cancel;
             }
             Editor::Track { timeline, name, kind, address } => {
-                egui::Grid::new("tl-ed-track").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
-                    field(ui, "Name", name, "e.g. drops", 180.0);
-                    ui.label("Type");
+                egui::Grid::new("tl-ed-track").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                    field(ui, t, "Name", name, "like “drops”", 220.0);
+                });
+                ui.add_space(spacing::S);
+                ui.label(RichText::new("Kind of track").color(t.text_dim));
+                let cur = TRACK_WORDS.iter().position(|(k, ..)| k == kind).unwrap_or(0);
+                if let Some(n) = choices(ui, t, &TRACK_WORDS.map(|(_, l, _)| l), cur) {
+                    *kind = TRACK_WORDS[n].0;
+                }
+                widgets::hint(ui, t, TRACK_WORDS[TRACK_WORDS.iter().position(|(k, ..)| k == kind).unwrap_or(0)].2);
+                if *kind == "automation" {
+                    ui.add_space(spacing::XS);
                     ui.horizontal(|ui| {
-                        for k in ["cues", "automation", "regions"] {
-                            if ui.add(egui::Button::selectable(*kind == k, k)).clicked() {
-                                *kind = k;
-                            }
-                        }
+                        ui.label(RichText::new("Setting").color(t.text_dim));
+                        ui.add(se_ui_kit::widgets::field(address).hint_text("fx.glow.amount").font(font_mono(type_scale::BODY - 1.0)).desired_width(240.0));
                     });
-                    ui.end_row();
+                }
+                let ok = !name.trim().is_empty() && (*kind != "automation" || !address.trim().is_empty());
+                let (save, _, cancel) = editor_buttons(ui, t, "Add track", ok, false, "");
+                if save {
+                    let mut args = Value::map().with("timeline", timeline.as_str()).with("name", name.trim()).with("type", *kind);
                     if *kind == "automation" {
-                        field(ui, "Address", address, "fx.glow.amount", 220.0);
+                        args = args.with("address", address.trim());
                     }
-                });
-                ui.horizontal(|ui| {
-                    let ok = !name.trim().is_empty() && (*kind != "automation" || !address.trim().is_empty());
-                    if ui.add_enabled(ok, egui::Button::new(RichText::new(format!("{} Add", icon::CHECK)).strong())).clicked() {
-                        let mut args = Value::map().with("timeline", timeline.as_str()).with("name", name.trim()).with("type", *kind);
-                        if *kind == "automation" {
-                            args = args.with("address", address.trim());
-                        }
-                        out.push(act("timeline.edit.track.add", args));
-                        done = true;
-                    }
-                    if ui.button("Cancel").clicked() {
-                        done = true;
-                    }
-                });
+                    out.push(act("timeline.edit.track.add", args));
+                    done = true;
+                }
+                done |= cancel;
             }
             Editor::Timeline { name, source, source_id, fps, length } => {
-                egui::Grid::new("tl-ed-new").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
-                    field(ui, "Name", name, "e.g. intro_song", 180.0);
-                    ui.label("Source");
-                    ui.horizontal(|ui| {
-                        for k in SOURCE_KINDS {
-                            if ui.add(egui::Button::selectable(*source == k, k)).clicked() {
-                                *source = k;
-                            }
-                        }
-                    });
-                    ui.end_row();
-                    match *source {
-                        "media" => field(ui, "Media", source_id, "yt:VIDEO_ID", 180.0),
-                        "mtc" => field(ui, "MIDI port", source_id, "optional", 180.0),
-                        "ltc" => field(ui, "LTC input", source_id, "input.ltc.0 (optional)", 180.0),
-                        _ => {}
+                egui::Grid::new("tl-ed-new").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                    field(ui, t, "Name", name, "like intro_song", 220.0);
+                });
+                ui.add_space(spacing::S);
+                ui.label(RichText::new("It follows").color(t.text_dim));
+                let cur = SOURCE_WORDS.iter().position(|(k, ..)| k == source).unwrap_or(0);
+                if let Some(n) = choices(ui, t, &SOURCE_WORDS.map(|(_, l, _)| l), cur) {
+                    *source = SOURCE_KINDS[n];
+                }
+                let cur = SOURCE_WORDS.iter().position(|(k, ..)| k == source).unwrap_or(0);
+                widgets::hint(ui, t, SOURCE_WORDS[cur].2);
+                ui.add_space(spacing::XS);
+                egui::Grid::new("tl-ed-new-src").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| match *source {
+                    "media" => field(ui, t, "Song", source_id, "yt:VIDEO_ID", 220.0),
+                    "mtc" => field(ui, t, "From", source_id, "any device (optional)", 220.0),
+                    "ltc" => field(ui, t, "Audio input", source_id, "optional, like input.ltc.0", 220.0),
+                    _ => {}
+                });
+                widgets::details(ui, t, "tl-new-advanced", "Advanced", |ui| {
+                    ui.label(RichText::new("Frame rate (for timecode)").color(t.text_dim));
+                    let cur = FPS_CHOICES.iter().position(|f| f == fps).unwrap_or(3);
+                    if let Some(n) = choices(ui, t, &FPS_CHOICES, cur) {
+                        *fps = FPS_CHOICES[n];
                     }
-                    ui.label("Frame rate");
                     ui.horizontal(|ui| {
-                        for f in FPS_CHOICES {
-                            if ui.add(egui::Button::selectable(*fps == f, f)).clicked() {
-                                *fps = f;
-                            }
-                        }
+                        ui.label(RichText::new("Length").color(t.text_dim));
+                        ui.add(se_ui_kit::widgets::field(length).hint_text("empty: no end").desired_width(120.0));
                     });
-                    ui.end_row();
-                    field(ui, "Length", length, "empty = open", 120.0);
                 });
                 let len = time_ok(t, ui, length);
                 let needs_id = *source == "media";
                 let name_ok = !name.trim().is_empty() && name.trim().chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
                 if !name.trim().is_empty() && !name_ok {
-                    ui.label(RichText::new(format!("{} letters, digits, _ and - only", icon::WARN)).small().color(t.bright_red));
+                    warn(ui, t, "Use letters, numbers, - or _ in the name (no spaces).");
                 }
-                ui.horizontal(|ui| {
-                    let ok = name_ok && (!needs_id || !source_id.trim().is_empty()) && (length.trim().is_empty() || len.is_some());
-                    if ui.add_enabled(ok, egui::Button::new(RichText::new(format!("{} Create", icon::CHECK)).strong())).clicked() {
-                        let src = if source_id.trim().is_empty() || !matches!(*source, "media" | "mtc" | "ltc") {
-                            source.to_string()
-                        } else {
-                            format!("{source}:{}", source_id.trim())
-                        };
-                        let mut args = Value::map().with("name", name.trim()).with("source", src).with("fps", *fps);
-                        if let Some(l) = len {
-                            args = args.with("length", l);
-                        }
-                        out.push(act("timeline.create", args));
-                        st.selected = Some(name.trim().to_string());
-                        done = true;
+                if needs_id && source_id.trim().is_empty() {
+                    widgets::hint(ui, t, "Paste the song's video id, like yt:dQw4w9WgXcQ.");
+                }
+                let ok = name_ok && (!needs_id || !source_id.trim().is_empty()) && (length.trim().is_empty() || len.is_some());
+                let (save, _, cancel) = editor_buttons(ui, t, "Create", ok, false, "");
+                if save {
+                    let src = if source_id.trim().is_empty() || !matches!(*source, "media" | "mtc" | "ltc") {
+                        source.to_string()
+                    } else {
+                        format!("{source}:{}", source_id.trim())
+                    };
+                    let mut args = Value::map().with("name", name.trim()).with("source", src).with("fps", *fps);
+                    if let Some(l) = len {
+                        args = args.with("length", l);
                     }
-                    if ui.button("Cancel").clicked() {
-                        done = true;
-                    }
-                });
+                    out.push(act("timeline.create", args));
+                    st.selected = Some(name.trim().to_string());
+                    done = true;
+                }
+                done |= cancel;
             }
         }
         if ui.input(|i| i.key_pressed(Key::Escape)) {
@@ -2548,8 +2751,8 @@ mod tests {
         assert!(tl.tracks[1].mute);
         assert!(matches!(&tl.tracks[1].kind, TrackKind::Automation { address, keys } if address == "fx.glow.amount" && keys.len() == 1));
         let TrackKind::Regions(r) = &tl.tracks[2].kind else { panic!("regions") };
-        assert_eq!(r[0].action.describe().1, "cuelist main");
-        assert_eq!(r[1].action.describe().1, "a +1");
+        assert!(matches!(&r[0].action, RegionAction::Cuelist(c, None) if c == "main"));
+        assert!(matches!(&r[1].action, RegionAction::Commands(on, off) if on == &["a", "b"] && off.is_empty()));
         assert_eq!(tl.regions_on[2], vec![true, false]);
         assert_eq!(tl.span(None), 30.0);
     }

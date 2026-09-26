@@ -1,18 +1,22 @@
-//! Status bar (§15.4, both modes): live state + uptime, per-output health, recording, mode
-//! picker, GPU frame time, warnings (opens the list), layout, Clean, Panic (hold).
+//! Top bar (§15.4, every page): on-air state + time, what the show is doing (in plain words), a
+//! single "all good / needs attention" pill with the list behind it, Clear chat effects,
+//! Emergency stop (hold), and the one big Go live / End stream button.
 
-use crate::app::{App, Mode, ViewId};
+use crate::app::{App, ViewId};
 use crate::panels::Panel;
-use egui::RichText;
+use egui::{Align, Layout, RichText};
 use se_proto::{Op, Value};
-use se_ui_kit::widgets::{self, LedState, icon};
+use se_ui_kit::theme::{font_bold, font_semibold, mix, radius, type_scale};
+use se_ui_kit::widgets::{self, Kind, Size, icon};
 
-/// Something the operator should know about, with where to look.
+/// Something the streamer should know about, in plain words, with where to fix it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Warning {
     pub text: String,
     pub fail: bool,
     pub open: Option<Panel>,
+    /// Part of finishing setup (Twitch not connected, OBS not open while off air), not a fault.
+    pub setup: bool,
 }
 
 /// `hh:mm:ss` for a duration in seconds.
@@ -25,226 +29,379 @@ pub fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
+/// Friendly name of a show mode.
+pub fn mode_label(mode: &str) -> String {
+    match mode {
+        "offline" => "Off air".into(),
+        "preshow" => "Starting soon".into(),
+        "live" => "Live".into(),
+        "brb" => "Be right back".into(),
+        "ad_break" => "Ad break".into(),
+        "outro" => "Ending".into(),
+        "rehearsal" => "Rehearsal".into(),
+        "" => "…".into(),
+        other => {
+            let mut c = other.replace('_', " ");
+            if let Some(f) = c.get_mut(0..1) {
+                f.make_ascii_uppercase();
+            }
+            c
+        }
+    }
+}
+
+/// Health checks that are optional features: "not set up" there is not a problem.
+const OPTIONAL: [&str; 4] = ["relay", "youtube", "tiktok", "twitch"];
+
+/// Plain-language title for a health check, and where to fix it.
+fn check_info(check: &str) -> (&'static str, Option<Panel>) {
+    let base = check.split('.').next().unwrap_or(check);
+    match base {
+        "obs" => ("OBS", Some(Panel::View(ViewId::Setup))),
+        "twitch" => ("Twitch", Some(Panel::View(ViewId::Setup))),
+        "youtube" => ("Song requests", Some(Panel::View(ViewId::Setup))),
+        "relay" => ("Tips & public queue", Some(Panel::View(ViewId::Setup))),
+        "sources" | "devices" => ("Cameras & devices", Some(Panel::View(ViewId::Devices))),
+        "audio" => ("Sound", Some(Panel::View(ViewId::Audio))),
+        "mixer" => ("Mixing desk", Some(Panel::View(ViewId::Mixer))),
+        "dmx" | "lights" => ("Lights", Some(Panel::View(ViewId::Lights))),
+        "deck" | "midi" | "input" | "voice" => ("Buttons & pedals", Some(Panel::View(ViewId::Controllers))),
+        "render" | "gpu" => ("Video", Some(Panel::View(ViewId::Performance))),
+        "patches" | "cef" => ("Overlays", Some(Panel::View(ViewId::Patches))),
+        "tts" => ("Text to speech", Some(Panel::View(ViewId::Tts))),
+        "timecode" => ("Timelines", Some(Panel::View(ViewId::Timeline))),
+        "clips" | "recordings" => ("Recordings", Some(Panel::View(ViewId::Sessions))),
+        "backup" => ("Backups", Some(Panel::View(ViewId::Maintenance))),
+        "alerts" | "bot" | "player" => ("Community", Some(Panel::View(ViewId::Alerts))),
+        "disk" => ("Disk space", Some(Panel::View(ViewId::Maintenance))),
+        "idle_inhibitor" => ("Screen saver", None),
+        _ => ("Engine", Some(Panel::View(ViewId::Troubleshoot))),
+    }
+}
+
+/// A plain sentence for the health checks people actually meet (the engine's detail text is
+/// for troubleshooting; it stays in Settings → Troubleshooting and Performance).
+fn friendly(app: &App, check: &str, status: &str, detail: &str) -> Option<String> {
+    let fail = status == "fail";
+    Some(match check.split('.').next().unwrap_or(check) {
+        "obs" if check == "obs" => {
+            if fail {
+                "OBS isn't open.".into()
+            } else {
+                "OBS needs a look: our video isn't in its scenes yet.".into()
+            }
+        }
+        "audio" if check == "audio.obs" => "OBS can't hear Stream Engine's sound yet. Add it as an audio source in OBS.".into(),
+        "audio" => "Something's off with the sound. See Sound → Mix → Advanced.".into(),
+        "twitch" => "Twitch isn't set up yet.".into(),
+        "mixer" => {
+            if fail {
+                "Can't find your mixing desk on the network. Is it switched on?".into()
+            } else {
+                "The mixing desk needs a look.".into()
+            }
+        }
+        "sources" => {
+            // "3 live; cam_3: no signal" → "Camera 3 (HDMI 3) has no picture."
+            let cams: Vec<String> = detail
+                .split(';')
+                .filter_map(|p| {
+                    p.trim().split_once(':').filter(|(_, why)| why.contains("signal")).map(|(n, _)| crate::views::composition::source_label(app, n.trim()))
+                })
+                .collect();
+            match cams.as_slice() {
+                [] => "A camera needs a look.".into(),
+                [one] => format!("{one} has no picture. Is the camera on?"),
+                many => format!("{} have no picture.", many.join(", ")),
+            }
+        }
+        "devices" => {
+            if fail {
+                "A device you use is unplugged.".into()
+            } else {
+                "A device needs a look.".into()
+            }
+        }
+        "dmx" | "lights" => "The lights box isn't connected.".into(),
+        "deck" | "midi" | "input" => "A controller isn't connected.".into(),
+        "voice" => "Voice control isn't ready.".into(),
+        "render" | "gpu" => "Video is struggling to keep up.".into(),
+        "cef" | "patches" => "An overlay has a problem.".into(),
+        "tts" => "The read-out voice isn't ready.".into(),
+        "disk" => "You're running low on disk space.".into(),
+        "backup" => "Backups aren't being made.".into(),
+        "recordings" => "Recordings are using more space than you allowed.".into(),
+        "timecode" => "A timeline can't hear its clock.".into(),
+        "clips" => "Clip making needs a look.".into(),
+        _ => return None,
+    })
+}
+
 /// Every current warning, most severe first.
 pub fn warnings(app: &App) -> Vec<Warning> {
     let mut w = Vec::new();
+    let on_air = streaming(app) || app.m.get("show.live_since").and_then(Value::as_i64).unwrap_or(0) > 0;
     if !app.m.connected {
-        w.push(Warning { text: format!("engine offline: {}", app.m.last_disconnect.as_deref().unwrap_or("connecting")), fail: true, open: None });
+        w.push(Warning { text: "The engine isn't running. It restarts by itself; waiting…".into(), fail: true, open: None, setup: false });
         return w;
     }
     for (a, v) in app.m.under("health") {
+        let check = a.trim_start_matches("health.");
         let st = v.get_path("status").and_then(Value::as_str).unwrap_or("");
-        if st == "warn" || st == "fail" {
+        let optional = OPTIONAL.iter().any(|o| check.starts_with(o));
+        if st == "fail" || (st == "warn" && !optional) {
             let detail = v.get_path("detail").and_then(Value::as_str).unwrap_or("");
-            w.push(Warning { text: format!("{}: {detail}", a.trim_start_matches("health.")), fail: st == "fail", open: None });
+            let (title, open) = check_info(check);
+            let setup = check.starts_with("twitch") || (check.starts_with("obs") && !on_air);
+            let text = match friendly(app, check, st, detail) {
+                Some(f) => f,
+                None => format!("{title}: {detail}"),
+            };
+            w.push(Warning { text, fail: st == "fail" && !optional, open, setup });
         }
     }
     let errs = app.m.f("project.errors") as i64;
     if errs > 0 {
-        w.push(Warning { text: format!("{errs} project file error(s) — last good version is live"), fail: false, open: Some(Panel::Console) });
+        w.push(Warning {
+            text: format!("{errs} settings file(s) have a mistake. The last working version is still in use."),
+            fail: false,
+            open: Some(Panel::Console),
+            setup: false,
+        });
     }
     for (a, v) in app.m.under("patch") {
         if a.ends_with(".error") && v.as_str().is_some_and(|s| !s.is_empty()) {
-            w.push(Warning { text: format!("{}: {}", a.trim_end_matches(".error"), v.as_str().unwrap_or("")), fail: false, open: Some(Panel::Console) });
+            let name = a.trim_start_matches("patch.").trim_end_matches(".error");
+            w.push(Warning {
+                text: format!("Overlay \"{name}\" has an error. The previous version is still showing."),
+                fail: false,
+                open: Some(Panel::View(ViewId::Patches)),
+                setup: false,
+            });
         }
     }
-    if app.m.has("obs.link") && !app.m.b("obs.link") {
-        w.push(Warning { text: "OBS plugin not connected".into(), fail: true, open: None });
-    }
     for c in ["wide", "tall"] {
-        if app.m.b(&format!("obs.stale.{c}")) {
-            w.push(Warning { text: format!("OBS sees the {c} canvas as stale"), fail: true, open: None });
+        // only meaningful while OBS is connected (otherwise "OBS isn't open" says it all)
+        if app.m.b("obs.link") && app.m.b(&format!("obs.stale.{c}")) {
+            w.push(Warning {
+                text: format!("OBS isn't getting the {} video.", if c == "wide" { "main" } else { "vertical" }),
+                fail: true,
+                open: None,
+                setup: false,
+            });
         }
     }
     if app.m.b("obs.fallback.active") {
-        w.push(Warning { text: "OBS is showing the fallback scene".into(), fail: true, open: None });
+        w.push(Warning { text: "OBS is showing the \"Technical difficulties\" screen.".into(), fail: true, open: None, setup: false });
     }
     for (a, v) in app.m.under("obs.output") {
         if let Some(id) = a.strip_suffix(".dropped").and_then(|p| p.strip_prefix("obs.output."))
             && v.as_f64().is_some_and(|d| d > 0.0)
         {
             let label = app.m.str(&format!("obs.output.{id}.label")).to_string();
-            w.push(Warning { text: format!("{}: {} dropped frames", if label.is_empty() { id } else { &label }, v), fail: false, open: None });
+            w.push(Warning {
+                text: format!("{}: {} frames dropped (internet too slow?)", if label.is_empty() { id } else { &label }, v),
+                fail: false,
+                open: None,
+                setup: false,
+            });
         }
     }
     let gpu = app.m.f("perf.gpu_ms");
     if gpu > 8.0 {
         w.push(Warning {
-            text: format!("GPU frame time {gpu:.1} ms (budget 8 ms) — UI previews reduced"),
+            text: "The graphics card is busy. Previews here are slowed down to keep the stream smooth.".into(),
             fail: gpu > 14.0,
             open: Some(Panel::View(ViewId::Performance)),
+            setup: false,
         });
     }
     let xruns = app.m.f("perf.audio.xruns") as i64;
     if xruns > 0 {
-        w.push(Warning { text: format!("{xruns} audio xruns"), fail: false, open: Some(Panel::View(ViewId::Performance)) });
+        w.push(Warning { text: format!("Sound glitched {xruns} time(s)."), fail: false, open: Some(Panel::View(ViewId::Performance)), setup: false });
     }
     if app.m.b("show.panic") {
-        w.push(Warning { text: "PANIC is active".into(), fail: true, open: None });
+        w.push(Warning { text: "Emergency stop is on.".into(), fail: true, open: None, setup: false });
     }
-    w.sort_by_key(|x| !x.fail);
+    w.sort_by_key(|x| (x.setup, !x.fail));
     w
 }
 
-fn outputs(app: &App) -> Vec<(String, bool, f64, f64)> {
-    let mut ids: Vec<String> = app.m.under("obs.output").filter_map(|(a, _)| a.strip_prefix("obs.output.")?.strip_suffix(".kind").map(String::from)).collect();
-    ids.dedup();
-    let mut out: Vec<(String, bool, f64, f64)> = ids
-        .into_iter()
-        .filter(|id| app.m.str(&format!("obs.output.{id}.kind")) == "stream")
-        .map(|id| {
-            let p = format!("obs.output.{id}");
-            let label = app.m.str(&format!("{p}.label"));
-            (
-                if label.is_empty() { id.clone() } else { label.to_string() },
-                app.m.b(&format!("{p}.active")),
-                app.m.f(&format!("{p}.kbps")),
-                app.m.f(&format!("{p}.dropped")),
-            )
-        })
-        .collect();
-    if out.is_empty() && app.m.has("obs.stream.active") {
-        out.push(("Stream".into(), app.m.b("obs.stream.active"), app.m.f("obs.stream.kbps"), app.m.f("obs.stream.dropped")));
+/// Start OBS detached from the UI (closing the UI must not close OBS).
+pub fn open_obs(app: &mut App) {
+    match std::process::Command::new("setsid").args(["-f", "obs"]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn() {
+        Ok(_) => app.m.toast("Opening OBS…", false),
+        Err(e) => app.m.toast(format!("Couldn't open OBS: {e}"), true),
     }
-    out
+}
+
+fn streaming(app: &App) -> bool {
+    app.m.b("obs.stream.active") || app.m.under("obs.output").any(|(a, v)| a.ends_with(".active") && v.truthy())
+}
+
+fn set_mode(app: &mut App, mode: &str) {
+    app.m.command(Op::ModeSet { mode: mode.into() });
+}
+
+fn obs(app: &mut App, name: &str) {
+    app.m.command(Op::Action { name: name.into(), args: Value::Null });
 }
 
 pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     let t = app.t.clone();
+    let mode = app.m.str("show.mode").to_string();
+    let since = app.m.get("show.live_since").and_then(Value::as_i64).unwrap_or(0);
+    let on_air = streaming(app) || since > 0;
     ui.horizontal_centered(|ui| {
-        let mode = app.m.str("show.mode").to_string();
-        let since = app.m.get("show.live_since").and_then(Value::as_i64).unwrap_or(0);
-        let on_air = since > 0;
-        let (txt, st) = if !app.m.connected {
-            ("ENGINE OFFLINE".to_string(), LedState::Error)
+        // ---- on-air state -------------------------------------------------------------------
+        let (txt, color) = if !app.m.connected {
+            ("Engine offline".to_string(), t.bright_red)
         } else if on_air {
-            (format!("{} {}", if mode == "live" { "LIVE".to_string() } else { mode.to_uppercase() }, hms((now_ms() - since) / 1000)), LedState::Active)
+            let time = if since > 0 { format!("  {}", hms((now_ms() - since) / 1000)) } else { String::new() };
+            (format!("ON AIR{time}"), t.tally_program())
         } else {
-            (if mode.is_empty() { "…".into() } else { mode.to_uppercase() }, LedState::Idle)
+            ("Off air".to_string(), t.text_dim)
         };
-        widgets::led(ui, &t, st);
-        ui.label(RichText::new(txt).strong().monospace().color(if on_air { t.tally_program() } else { t.fg }));
-        ui.separator();
-        let mode_label = if app.mode == Mode::Show { "SHOW" } else { "BUILD" };
-        if ui
-            .selectable_label(false, RichText::new(mode_label).strong().color(t.accent))
-            .on_hover_text(format!("Show/Build ({})", app.keys_label("mode.toggle")))
-            .clicked()
-        {
-            app.toggle_mode();
-        }
-        ui.separator();
-        for (label, active, kbps, dropped) in outputs(app) {
-            let text = if active { format!("{label} {:.1}Mb/s {} drop", kbps / 1000.0, dropped as i64) } else { format!("{label} off") };
-            let s = if !active {
-                LedState::Idle
-            } else if dropped > 0.0 {
-                LedState::Armed
-            } else {
-                LedState::Healthy
-            };
-            widgets::pill(ui, &t, icon::LIVE, &text, s);
-        }
-        if app.m.has("obs.record.active") {
-            let rec = app.m.b("obs.record.active");
-            widgets::pill(ui, &t, icon::REC, if rec { "REC" } else { "rec off" }, if rec { LedState::Active } else { LedState::Idle });
-        } else if !app.m.has("obs.link") {
-            widgets::pill(ui, &t, icon::REC, "OBS —", LedState::Idle).on_hover_text("OBS link not running");
-        }
-        ui.separator();
-        egui::ComboBox::from_id_salt("mode").selected_text(format!("mode: {}", if mode.is_empty() { "?" } else { &mode })).show_ui(ui, |ui| {
-            let modes: Vec<String> = app.m.q_list("modes").iter().filter_map(|v| v.as_str().map(String::from)).collect();
-            for md in modes {
-                if ui.selectable_label(md == mode, &md).clicked() {
-                    app.m.command(Op::ModeSet { mode: md });
+        let fid = font_bold(type_scale::BODY);
+        let g = ui.painter().layout_no_wrap(txt, fid, color);
+        let (r, _) = ui.allocate_exact_size(egui::vec2(g.size().x + 34.0, 36.0), egui::Sense::hover());
+        let fill = if on_air { t.tally_program() } else { t.surface };
+        ui.painter().rect_filled(r, radius::PILL, fill);
+        let fg = if on_air { egui::Color32::WHITE } else { color };
+        ui.painter().circle_filled(egui::pos2(r.left() + 15.0, r.center().y), 4.5, fg);
+        ui.painter().galley_with_override_text_color(egui::pos2(r.left() + 26.0, r.center().y - g.size().y / 2.0), g, fg);
+        ui.add_space(4.0);
+
+        // ---- show mode (plain words; only once something is happening) --------------------------
+        if app.m.connected && (on_air || (mode != "offline" && !mode.is_empty())) {
+            let label = format!("{}  {}", mode_label(&mode), icon::DOWN);
+            let resp = widgets::button_ex(ui, &t, None, &label, Kind::Ghost, Size::Medium, 0.0, true).on_hover_text("What the show is doing right now");
+            egui::Popup::menu(&resp).show(|ui| {
+                ui.set_min_width(220.0);
+                let modes: Vec<String> = app.m.q_list("modes").iter().filter_map(|v| v.as_str().map(String::from)).collect();
+                for md in modes {
+                    if ui.selectable_label(md == mode, mode_label(&md)).clicked() {
+                        set_mode(app, &md);
+                        ui.close();
+                    }
                 }
-            }
-        });
-        let gpu = app.m.f("perf.gpu_ms");
-        if app.m.has("perf.gpu_ms") {
-            let s = if gpu > 12.0 {
-                LedState::Error
-            } else if gpu > 8.0 {
-                LedState::Armed
-            } else {
-                LedState::Healthy
-            };
-            if widgets::pill(ui, &t, icon::GPU, &format!("GPU {gpu:.1}ms"), s).on_hover_text("open Performance").clicked() {
-                app.view = Some(ViewId::Performance);
-            }
+            });
         }
+
+        // ---- health --------------------------------------------------------------------------
         let warns = warnings(app);
-        let n = warns.len();
-        let s = if warns.iter().any(|w| w.fail) {
-            LedState::Error
-        } else if n > 0 {
-            LedState::Armed
+        let fails = warns.iter().filter(|w| w.fail && !w.setup).count();
+        let checks = warns.iter().filter(|w| !w.fail && !w.setup).count();
+        let setup = warns.iter().filter(|w| w.setup).count();
+        let plural = |n: usize, one: &str, many: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {many}") };
+        let (text, c) = if fails > 0 {
+            (plural(fails, "problem", "problems"), t.bright_red)
+        } else if checks > 0 {
+            (plural(checks, "thing to check", "things to check"), t.yellow)
+        } else if setup > 0 {
+            ("Finish setting up".to_string(), t.accent)
         } else {
-            LedState::Healthy
+            ("All good".to_string(), t.green)
         };
-        let pill = widgets::pill(ui, &t, icon::WARN, &format!("{n}"), s).on_hover_text("warnings");
-        egui::Popup::menu(&pill).show(|ui| {
-            ui.set_min_width(360.0);
+        let resp = widgets::pill(ui, &t, if warns.is_empty() { icon::CHECK } else { icon::WARN }, &text, se_ui_kit::widgets::LedState::Idle);
+        ui.painter().rect_stroke(resp.rect, radius::PILL, egui::Stroke::new(1.0, mix(t.border, c, 0.7)), egui::StrokeKind::Inside);
+        let resp = resp.on_hover_text("Click to see details");
+        egui::Popup::menu(&resp).show(|ui| {
+            ui.set_min_width(420.0);
             if warns.is_empty() {
-                ui.label(RichText::new(format!("{} all clear", icon::CHECK)).color(t.green));
+                ui.label(RichText::new(format!("{}  Everything is working.", icon::CHECK)).color(t.green));
             }
             for w in &warns {
-                let c = if w.fail { t.bright_red } else { t.yellow };
-                let r = ui.add(
-                    egui::Label::new(RichText::new(format!("{} {}", if w.fail { icon::CROSS } else { icon::WARN }, w.text)).color(c))
-                        .sense(egui::Sense::click()),
-                );
-                if let Some(p) = w.open
-                    && r.clicked()
-                {
-                    app.open_panel(p);
-                    ui.close();
-                }
-            }
-            ui.separator();
-            if ui.button("preflight…").clicked() {
-                app.m.query("preflight", Value::Null);
-                app.open_panel(Panel::Console);
-                ui.close();
-            }
-        });
-        ui.separator();
-        ui.menu_button(format!("{} views", icon::SEARCH), |ui| {
-            if ui.selectable_label(app.view.is_none(), "main").clicked() {
-                app.view = None;
-                ui.close();
-            }
-            for (v, ic, label) in ViewId::ALL {
-                if ui.selectable_label(app.view == Some(*v), format!("{ic} {label}")).clicked() {
-                    app.view = Some(*v);
-                    ui.close();
-                }
+                ui.horizontal(|ui| {
+                    let (ic, c) = match (w.setup, w.fail) {
+                        (true, _) => (icon::ROCKET, t.accent),
+                        (false, true) => (icon::CROSS, t.bright_red),
+                        (false, false) => (icon::WARN, t.yellow),
+                    };
+                    ui.label(RichText::new(ic).color(c));
+                    ui.add(egui::Label::new(RichText::new(&w.text).color(t.fg)).wrap());
+                    if let Some(p) = w.open {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if widgets::button_ex(ui, &t, None, "Fix", Kind::Secondary, Size::Small, 0.0, true).clicked() {
+                                app.open_panel(p);
+                                ui.close();
+                            }
+                        });
+                    }
+                });
             }
         });
-        let layout = app.layout_name();
-        if ui
-            .selectable_label(false, RichText::new(format!("{} {layout}", icon::SETTINGS)).small().color(t.fg_dim))
-            .on_hover_text(format!("layout ({} to switch)", app.keys_label("layout.next")))
-            .clicked()
-        {
-            app.next_layout();
+        if app.m.b("obs.record.active") {
+            widgets::badge(ui, &t, "Recording", t.tally_program());
         }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if widgets::hold_button(ui, &t, "PANIC", t.bright_red, 0.8) {
+
+        // ---- right side: big actions ------------------------------------------------------------
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let obs_ok = app.m.b("obs.link");
+            if on_air {
+                let r = widgets::button_ex(ui, &t, Some(icon::STOP), "End stream", Kind::Danger, Size::Large, 150.0, app.m.connected);
+                egui::Popup::menu(&r).show(|ui| {
+                    ui.set_min_width(260.0);
+                    ui.label(RichText::new("End the stream?").font(font_semibold(type_scale::LARGE)));
+                    ui.add_space(6.0);
+                    if widgets::button_ex(ui, &t, Some(icon::FILM), "Play the ending first", Kind::Secondary, Size::Medium, 240.0, true).clicked() {
+                        set_mode(app, "outro");
+                        ui.close();
+                    }
+                    ui.add_space(4.0);
+                    if widgets::button_ex(ui, &t, Some(icon::STOP), "Stop now", Kind::Danger, Size::Medium, 240.0, true).clicked() {
+                        obs(app, "obs.stream.stop");
+                        set_mode(app, "offline");
+                        ui.close();
+                    }
+                });
+            } else if app.m.connected && !obs_ok {
+                let r = widgets::button_ex(ui, &t, Some(icon::PLAY), "Open OBS", Kind::Secondary, Size::Medium, 0.0, true)
+                    .on_hover_text("OBS sends your stream to Twitch. Open it and Go live appears here.");
+                if r.clicked() {
+                    open_obs(app);
+                }
+            } else {
+                let r = widgets::button_ex(ui, &t, Some(icon::LIVE), "Go live", Kind::Live, Size::Large, 150.0, app.m.connected);
+                egui::Popup::menu(&r).show(|ui| {
+                    ui.set_min_width(280.0);
+                    ui.label(RichText::new("How do you want to start?").font(font_semibold(type_scale::LARGE)));
+                    ui.add_space(6.0);
+                    if widgets::button_ex(ui, &t, Some(icon::CLOCK), "Starting-soon screen first", Kind::Secondary, Size::Medium, 260.0, true).clicked() {
+                        obs(app, "obs.stream.start");
+                        set_mode(app, "preshow");
+                        ui.close();
+                    }
+                    ui.add_space(4.0);
+                    if widgets::button_ex(ui, &t, Some(icon::LIVE), "Go live right now", Kind::Live, Size::Medium, 260.0, true).clicked() {
+                        obs(app, "obs.stream.start");
+                        set_mode(app, "live");
+                        ui.close();
+                    }
+                });
+            }
+            if on_air && mode != "live" && app.m.connected {
+                if widgets::button_ex(ui, &t, Some(icon::LIVE), "Go live", Kind::Primary, Size::Large, 0.0, true).clicked() {
+                    set_mode(app, "live");
+                }
+            } else if on_air
+                && mode == "live"
+                && widgets::button_ex(ui, &t, Some(icon::PAUSE), "Be right back", Kind::Secondary, Size::Large, 0.0, true).clicked()
+            {
+                set_mode(app, "brb");
+            }
+            ui.add_space(8.0);
+            if widgets::hold_button(ui, &t, "Emergency stop", t.bright_red, 0.8) {
                 app.m.command(Op::Panic);
             }
-            if ui.button(RichText::new("CLEAN").strong()).on_hover_text(format!("Clear chat effects ({})", app.keys_label("clean"))).clicked() {
+            let clean = widgets::button_ex(ui, &t, Some(icon::BROOM), "Clear chat effects", Kind::Ghost, Size::Medium, 0.0, app.m.connected);
+            if clean.on_hover_text(format!("Remove every effect viewers triggered from chat ({})", app.keys_label("clean"))).clicked() {
                 app.m.command(Op::Clean);
             }
-            ui.separator();
-            let conn = if app.m.connected {
-                format!("{} {}", icon::LINK, app.m.session)
-            } else {
-                format!("{} {}", icon::UNLINK, app.m.last_disconnect.as_deref().unwrap_or("connecting…"))
-            };
-            ui.label(RichText::new(conn).small().color(if app.m.connected { t.fg_dim } else { t.bright_red }));
         });
     });
+    let r = ui.max_rect();
+    ui.painter().hline(r.x_range(), r.bottom() - 0.5, egui::Stroke::new(1.0, t.border));
 }
 
 #[cfg(test)]
@@ -256,5 +413,12 @@ mod tests {
         assert_eq!(hms(0), "00:00:00");
         assert_eq!(hms(2 * 3600 + 14 * 60 + 33), "02:14:33");
         assert_eq!(hms(-5), "00:00:00");
+    }
+
+    #[test]
+    fn modes_read_as_words() {
+        assert_eq!(mode_label("preshow"), "Starting soon");
+        assert_eq!(mode_label("ad_break"), "Ad break");
+        assert_eq!(mode_label("my_custom"), "My custom");
     }
 }
