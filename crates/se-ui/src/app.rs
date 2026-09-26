@@ -867,9 +867,6 @@ impl eframe::App for App {
         } else {
             self.main_ui(ui, ctx);
         }
-        if self.page != Page::Recordings && !self.is_popped_out(&Panel::View(ViewId::Sessions).id()) {
-            views::sessions::leave(ctx);
-        }
         self.toasts(ctx);
         let repaint = [33, 50, 80][self.gpu_pressure() as usize];
         ctx.request_repaint_after(std::time::Duration::from_millis(repaint));
