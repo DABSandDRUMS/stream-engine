@@ -75,6 +75,7 @@ fn check_info(check: &str) -> (&'static str, Option<Panel>) {
         "alerts" | "bot" | "player" => ("Community", Some(Panel::View(ViewId::Alerts))),
         "disk" => ("Disk space", Some(Panel::View(ViewId::Maintenance))),
         "idle_inhibitor" => ("Screen saver", None),
+        "night_light" => ("Night light", None),
         _ => ("Engine", Some(Panel::View(ViewId::Troubleshoot))),
     }
 }
@@ -94,6 +95,7 @@ fn friendly(app: &App, check: &str, status: &str, detail: &str) -> Option<String
         "audio" if check == "audio.obs" => "OBS can't hear Stream Engine's sound yet. Sound → \"Add our sound to OBS\" fixes it.".into(),
         "audio" => "Something's off with the sound. See Sound → Mix → Advanced.".into(),
         "twitch" => "Twitch isn't set up yet.".into(),
+        "night_light" => "Night light is on, so your screens look warmer than your stream. Turn it off while you adjust colours.".into(),
         "mixer" => {
             if fail {
                 "Can't find your mixing desk on the network. Is it switched on?".into()

@@ -96,6 +96,9 @@ pub fn register_preflight(ctx: &Ctx) {
                     if idle || mode == "offline" { "pass" } else { "warn" },
                     if idle { "stay-awake on".into() } else { "idle allowed (turns on at preshow)".to_string() },
                 ));
+                if let Some(k) = night_light_kelvin().await {
+                    items.push(night_light_check(k));
+                }
                 if let Some((temp, used, total)) = gpu_stats().await {
                     let st = if temp > 85.0 || used / total > 0.9 {
                         "fail"
@@ -126,6 +129,32 @@ fn disk_free_gb(p: &std::path::Path) -> f64 {
     st.f_bavail as f64 * st.f_frsize as f64 / 1e9
 }
 
+/// Colour temperature hyprsunset applies to the displays, if it's running (§16.3).
+async fn night_light_kelvin() -> Option<u32> {
+    let out = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        tokio::process::Command::new("hyprctl").args(["hyprsunset", "temperature"]).kill_on_drop(true).output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    String::from_utf8(out.stdout).ok()?.trim().parse().ok()
+}
+
+/// Night light doesn't reach the stream, but it makes the preview and colour work misleading.
+/// Omarchy's night light is 4000 K; "off" (identity) reports 6000 K.
+fn night_light_check(kelvin: u32) -> Value {
+    if kelvin < 5500 {
+        check(
+            "night_light",
+            "warn",
+            format!("night light is on ({kelvin} K): colours on your screens look warmer than on stream; turn it off while you adjust colours or lights"),
+        )
+    } else {
+        check("night_light", "pass", "off".into())
+    }
+}
+
 /// `(temp °C, used MB, total MB)` from nvidia-smi.
 async fn gpu_stats() -> Option<(f64, f64, f64)> {
     let out = tokio::process::Command::new("nvidia-smi")
@@ -136,4 +165,18 @@ async fn gpu_stats() -> Option<(f64, f64, f64)> {
     let s = String::from_utf8(out.stdout).ok()?;
     let v: Vec<f64> = s.lines().next()?.split(',').filter_map(|x| x.trim().parse().ok()).collect();
     (v.len() == 3).then(|| (v[0], v[1], v[2]))
+}
+
+#[cfg(test)]
+mod night_light_tests {
+    use super::*;
+
+    #[test]
+    fn warm_night_light_warns_and_neutral_passes() {
+        let st = |k| night_light_check(k).get_path("status").and_then(Value::as_str).unwrap_or("").to_string();
+        assert_eq!(st(4000), "warn");
+        assert_eq!(st(5499), "warn");
+        assert_eq!(st(6000), "pass", "identity reports 6000 K");
+        assert_eq!(st(6500), "pass");
+    }
 }
