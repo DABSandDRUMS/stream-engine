@@ -201,7 +201,9 @@ impl Op {
     /// Actions that carry secrets (`youtube.key.set`, `relay.secret.set`, `*.token.set`): their
     /// args must never reach logs, traces, sessions, or the audit table (§19).
     pub fn is_secret(&self) -> bool {
-        matches!(self, Op::Action { name, .. } if name.ends_with(".key.set") || name.ends_with(".secret.set") || name.ends_with(".token.set"))
+        matches!(self, Op::Action { name, .. } if name.ends_with(".key.set") || name.ends_with(".secret.set") || name.ends_with(".token.set")
+            // the UI's write-only secret entry and device pairing carry the secret in their args
+            || name == "secrets.set" || name == "api.device.add")
     }
 
     /// Copy safe for persistence: secret-carrying args replaced by `{redacted: true}`.
@@ -465,6 +467,13 @@ mod tests {
         assert!(!op.describe().contains("SECRET"));
         assert!(!serde_json::to_string(&op.redacted()).unwrap().contains("SECRET"));
         assert!(!Op::parse("preset.fire hype").unwrap().is_secret());
+        for line in ["secrets.set name=youtube.key value=SECRET", "api.device.add name=phone token=SECRETSECRETSECRETSECRET scope=read"] {
+            let op = Op::parse(line).unwrap();
+            assert!(op.is_secret(), "{line}");
+            assert!(!serde_json::to_string(&op.redacted()).unwrap().contains("SECRET"), "{line}");
+            assert!(!op.describe().contains("SECRET"), "{line}");
+        }
+        assert!(!Op::parse("api.device.remove phone").unwrap().is_secret());
     }
 
     #[test]

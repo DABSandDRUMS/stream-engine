@@ -374,6 +374,7 @@ async fn async_main(ctx: Ctx) -> Result<()> {
             }
         })?;
     }
+    hub.ready();
     tracing::info!("engine ready (session {})", ctx.session.lock());
     hub.emit(Event::new("engine.started", Origin::System, Value::map().with("session", ctx.session.lock().clone())));
 

@@ -142,6 +142,9 @@ pub struct Hub {
     /// Render-thread heartbeat (0 until the renderer runs).
     pub render_heartbeat: AtomicU64,
     unrouted_warned: Mutex<std::collections::HashSet<String>>,
+    /// Until [`Hub::ready`]: actions that arrive before their subsystem has registered its
+    /// route (clients can connect while the engine is still starting) wait here.
+    early: Mutex<Option<Vec<Command>>>,
     /// CPU video frames from producers (web pages, media) to the renderer.
     pub video: media::VideoSlots,
     /// Audio sample rings from producers (web pages, media, TTS, sfx) to the audio graph.
@@ -166,6 +169,7 @@ impl Hub {
             core_heartbeat: AtomicU64::new(0),
             render_heartbeat: AtomicU64::new(0),
             unrouted_warned: Mutex::new(Default::default()),
+            early: Mutex::new(Some(Vec::new())),
             video: Default::default(),
             audio: Default::default(),
             draw: Default::default(),
@@ -324,11 +328,28 @@ impl Hub {
                 let _ = tx.send(c);
             }
             None => {
+                {
+                    let mut early = self.early.lock();
+                    if let Some(q) = early.as_mut()
+                        && q.len() < 1024
+                    {
+                        q.push(c);
+                        return;
+                    }
+                }
                 if self.unrouted_warned.lock().insert(name.clone()) {
                     tracing::warn!("no handler for action `{name}`");
                 }
                 self.publish_bus(Bus::Unrouted(c));
             }
+        }
+    }
+
+    /// Every subsystem has registered its actions: deliver the ones that arrived early.
+    pub fn ready(&self) {
+        let Some(q) = self.early.lock().take() else { return };
+        for c in q {
+            self.dispatch_action(c);
         }
     }
 
@@ -546,5 +567,21 @@ mod tests {
         assert!(hub.query("presets", Value::Null).await.unwrap().as_list().unwrap().len() == 1);
         hub.shutdown();
         t.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn actions_sent_while_starting_reach_routes_registered_later() {
+        let (hub, _rx) = Hub::new(Arc::new(se_clock::Clock::new()));
+        let act = |n: &str| Command::new(Origin::Cli, Op::Action { name: n.into(), args: Value::Null });
+        hub.dispatch_action(act("api.device.add"));
+        let mut api = hub.route_actions("api");
+        hub.ready();
+        let got = tokio::time::timeout(std::time::Duration::from_secs(1), api.recv()).await.unwrap().unwrap();
+        assert_eq!(got.op.describe().split_whitespace().next(), Some("api.device.add"));
+        // once ready, an unknown action is not held back for a route that never comes
+        let mut bus = hub.subscribe();
+        hub.dispatch_action(act("nobody.home"));
+        let b = tokio::time::timeout(std::time::Duration::from_secs(1), bus.recv()).await.unwrap().unwrap();
+        assert!(matches!(*b, Bus::Unrouted(_)));
     }
 }

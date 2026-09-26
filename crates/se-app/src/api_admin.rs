@@ -12,7 +12,12 @@ use std::sync::Arc;
 pub const SETTABLE: &[(&str, &str)] =
     &[(secrets::names::YOUTUBE_KEY, "YouTube Data API key"), (secrets::names::RELAY_SECRET, "Cloudflare relay shared secret")];
 
+/// Paired devices: name → scope in the runtime DB; each token lives in the keyring (§19).
 const DEVICES_NS: &str = "api.devices";
+
+fn device_secret(name: &str) -> String {
+    format!("api.device.{name}")
+}
 
 fn scope_name(s: &Scope) -> String {
     match s {
@@ -37,11 +42,29 @@ pub fn start(ctx: &Ctx, auth: Arc<Auth>) {
     match ctx.db.kv_list(DEVICES_NS) {
         Ok(list) => {
             for (name, v) in list {
-                let (Some(tok), Some(scope)) = (v.get_path("token").and_then(Value::as_str), v.get_path("scope").and_then(Value::as_str).and_then(parse_scope))
-                else {
-                    continue;
-                };
-                auth.add(tok, &name, scope);
+                let Some(scope_s) = v.get_path("scope").and_then(Value::as_str) else { continue };
+                let Some(scope) = parse_scope(scope_s) else { continue };
+                // older versions kept the token in the DB: move it to the keyring
+                if let Some(old) = v.get_path("token").and_then(Value::as_str) {
+                    match secrets::set(&device_secret(&name), old) {
+                        Ok(()) => {
+                            if let Err(e) = ctx.db.kv_set(DEVICES_NS, &name, &Value::map().with("scope", scope_s)) {
+                                tracing::warn!("paired device `{name}`: {e:#}");
+                            } else {
+                                tracing::info!("paired device `{name}`: token moved to the keyring");
+                            }
+                        }
+                        Err(e) => tracing::warn!("paired device `{name}`: keyring unavailable, token stays in the database for now: {e:#}"),
+                    }
+                }
+                match secrets::get(&device_secret(&name)) {
+                    Ok(Some(tok)) if !tok.is_empty() => auth.add(&tok, &name, scope),
+                    Ok(_) => match v.get_path("token").and_then(Value::as_str) {
+                        Some(old) => auth.add(old, &name, scope),
+                        None => tracing::warn!("paired device `{name}`: no token in the keyring; pair it again"),
+                    },
+                    Err(e) => tracing::warn!("paired device `{name}`: keyring: {e:#}"),
+                }
             }
         }
         Err(e) => tracing::warn!("paired devices: {e:#}"),
@@ -101,7 +124,14 @@ pub fn start(ctx: &Ctx, auth: Arc<Auth>) {
 }
 
 fn handle(ctx: &Ctx, auth: &Auth, name: &str, args: &Value) -> Result<(), String> {
-    let s = |k: &str| args.get_path(k).and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty());
+    // `name=…` or, from the CLI, the first positional argument (`api.device.remove phone`)
+    let s = |k: &str| {
+        args.get_path(k)
+            .and_then(Value::as_str)
+            .or_else(|| (k == "name").then(|| args.get_path("args").and_then(|a| a.as_list()).and_then(|l| l.first()).and_then(Value::as_str)).flatten())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    };
     match name {
         "api.token.rotate" => {
             let t = secrets::random_token();
@@ -117,14 +147,16 @@ fn handle(ctx: &Ctx, auth: &Auth, name: &str, args: &Value) -> Result<(), String
             }
             let scope_s = s("scope").unwrap_or("read");
             let scope = parse_scope(scope_s).ok_or_else(|| format!("unknown scope `{scope_s}` (full | read | mod)"))?;
+            secrets::set(&device_secret(dev), tok).map_err(|e| format!("keyring: {e:#}"))?;
+            ctx.db.kv_set(DEVICES_NS, dev, &Value::map().with("scope", scope_s)).map_err(|e| format!("{e:#}"))?;
             auth.remove_named(dev);
             auth.add(tok, dev, scope);
-            ctx.db.kv_set(DEVICES_NS, dev, &Value::map().with("token", tok).with("scope", scope_s)).map_err(|e| format!("{e:#}"))?;
         }
         "api.device.remove" => {
             let dev = s("name").ok_or("needs `name`")?;
             auth.remove_named(dev);
             ctx.db.kv_del(DEVICES_NS, dev).map_err(|e| format!("{e:#}"))?;
+            secrets::delete(&device_secret(dev)).map_err(|e| format!("keyring: {e:#}"))?;
         }
         "secrets.set" | "secrets.delete" => {
             let key = s("name").ok_or("needs `name`")?;
