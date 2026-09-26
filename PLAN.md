@@ -1311,13 +1311,13 @@ Each milestone ends with a **live smoke run**: the actual app, real devices, out
 | # | Verified live | Waiting on |
 |---|---|---|
 | M0–M1 | User service with watchdog, reconnect, hot reload, `kill -9` restore, cheer → rule → preset with trace, session replay | — |
-| M2 | OBS 32.2.2 (isolated config copy) imported both canvases as dmabufs: 60.0 fps for 120 s with 3 live cameras, 10 Takes, feed loss → fallback in ≈300 ms and back, 44 s 1080p60 NVENC recording | `streamctl do obs.setup` in the owner's own OBS profile (adds video + sound) |
+| M2 | Camera previews on the Devices page from the real inputs (kit, wide, kick, room live; HDMI 3 reports "No signal"). OBS 32.2.2 (isolated config copy) imported both canvases as dmabufs: 60.0 fps for 120 s with 3 live cameras, 10 Takes, feed loss → fallback in ≈300 ms and back, 44 s 1080p60 NVENC recording | `streamctl do obs.setup` in the owner's own OBS profile (adds video + sound) |
 | M3 | Patch hot reload, broken shader keeps the last good version, CEF web sources, GPU device-loss recovery | — |
 | M4 | PipeWire buses, `SCHED_FIFO` engine thread, 0 xruns over 10 min and the 4 h soak (`scripts/audio-soak.sh`) | Feel test with the band playing through the 16R mix |
 | M5 | Mock EventSub end to end; a 50-gift bomb gives one combined alert; a VIP chat command fires a preset and the bot replies | Twitch Client ID (§28.2) |
 | M6 | Relay test suite, Ko-fi buffering; the song path with the library | YouTube key, Cloudflare domain, Ko-fi token (§28.2) |
 | M7 | ENTTEC output 44 Hz, jitter p99 0.02 ms; the Main cue list runs from `lights.go` | Fixture list (§28.3); deck LX GO key and X-TOUCH fader presses (`scripts/acceptance-surfaces.sh cuelist`) |
-| M8 | The same preset fired by voice (Whisper), keybind/CLI and VIP chat, each with its own origin; UCNET control of the 16R at 10.0.0.187 (earlier session) | Deck, X-TOUCH, FBV presses and ring check (`scripts/acceptance-surfaces.sh`); the 16R back on the LAN |
+| M8 | The same preset fired by voice (Whisper), keybind/CLI and VIP chat, each with its own origin; UCNET control of the 16R at 10.0.0.187 (earlier session) | Deck, X-TOUCH, FBV presses and ring check (`scripts/acceptance-surfaces.sh`); the 16R back on the LAN (plus the two `ufw` rules in docs/devices-and-sources.md for discovery) |
 | M9 | MTC in/out; LTC out read back by `ltcdump` | — |
 | M10 | Full job on a 3-minute generated session: ranked wide + tall clips, captions, music track dropped (NVENC) | A real session recorded with OBS in Advanced output, tracks 1–6 (docs/obs.md step 6) |
 | M11 | Package builds (all libraries resolve, no file conflicts); a fresh home's first start creates the starter project and Get started opens | `sudo pacman -U` of the package (needs the owner's password) |
