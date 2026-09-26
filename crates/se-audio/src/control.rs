@@ -906,7 +906,7 @@ impl Control {
         }
         let prog = pw.consumers.get("se-program").cloned().unwrap_or_default();
         let obs = if prog.is_empty() {
-            h("warn", "nothing is capturing se-program (add it as an audio source in OBS)".into())
+            h("warn", "nothing is capturing se-program (run `streamctl do obs.setup`, or add it as an audio source in OBS)".into())
         } else {
             h("pass", format!("se-program → {}", prog.join(", ")))
         };

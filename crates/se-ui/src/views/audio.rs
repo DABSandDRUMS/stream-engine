@@ -253,14 +253,22 @@ fn obs_callout(app: &mut App, ui: &mut Ui, t: &Theme, data: &Value) {
         Tone::Warn,
         icon::VOLUME,
         "OBS can't hear your sound yet",
-        "Your viewers won't hear anything on this page until OBS picks it up. It takes one minute.",
-        (!obs_open).then_some("Open OBS"),
+        if obs_open {
+            "Your viewers won't hear anything on this page until OBS picks it up. One click adds it; nothing in OBS is removed."
+        } else {
+            "Your viewers won't hear anything on this page until OBS picks it up. Open OBS first."
+        },
+        Some(if obs_open { "Add our sound to OBS" } else { "Open OBS" }),
     );
     if open {
-        crate::views::status::open_obs(app);
+        if obs_open {
+            app.m.command(Op::Action { name: "obs.setup".into(), args: Value::Null });
+        } else {
+            crate::views::status::open_obs(app);
+        }
     }
     let name = program_bus(data).map(|p| s(p, "name")).unwrap_or("program");
-    widgets::details(ui, t, "obs-sound-howto", "Show me how", |ui| {
+    widgets::details(ui, t, "obs-sound-howto", "Or do it by hand in OBS", |ui| {
         for (i, step) in [
             "In OBS, click the + button under Sources.".to_string(),
             "Choose “Audio Input Capture (PipeWire)” and press OK.".to_string(),

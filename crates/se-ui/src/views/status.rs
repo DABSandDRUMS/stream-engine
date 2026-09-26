@@ -91,7 +91,7 @@ fn friendly(app: &App, check: &str, status: &str, detail: &str) -> Option<String
                 "OBS needs a look: our video isn't in its scenes yet.".into()
             }
         }
-        "audio" if check == "audio.obs" => "OBS can't hear Stream Engine's sound yet. Add it as an audio source in OBS.".into(),
+        "audio" if check == "audio.obs" => "OBS can't hear Stream Engine's sound yet. Sound → \"Add our sound to OBS\" fixes it.".into(),
         "audio" => "Something's off with the sound. See Sound → Mix → Advanced.".into(),
         "twitch" => "Twitch isn't set up yet.".into(),
         "mixer" => {

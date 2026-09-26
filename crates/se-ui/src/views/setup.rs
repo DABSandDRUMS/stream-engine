@@ -71,7 +71,9 @@ fn twitch_status(app: &App) -> Status {
 }
 
 fn obs_status(app: &App) -> Status {
-    if app.m.b("obs.link") && health_status(app, "obs") == "pass" { Status::Done } else { Status::Todo }
+    let sound = health_status(app, "audio.obs");
+    // sound counts once OBS captures it (or when the engine's audio is off)
+    if app.m.b("obs.link") && health_status(app, "obs") == "pass" && (sound == "pass" || sound.is_empty()) { Status::Done } else { Status::Todo }
 }
 
 /// Required steps not done yet (the sidebar badge).
@@ -202,21 +204,21 @@ fn checklist(app: &mut App, ui: &mut egui::Ui, st: &mut State) {
         let obs = obs_status(app);
         let installed = app.m.b("obs.plugin.installed");
         let obs_text = if obs == Status::Done {
-            "OBS is connected and receiving your video."
+            "OBS is connected and gets your video and sound."
         } else if !installed {
             "OBS sends your stream to Twitch. The Stream Engine add-on for OBS isn't installed yet."
         } else if !app.m.b("obs.link") {
             "OBS sends your stream to Twitch. Open OBS and it connects by itself."
         } else {
-            "OBS is connected. Add the Stream Engine video to your OBS scenes."
+            "OBS is connected. Add the Stream Engine video and sound to OBS."
         };
         let mut open_obs = false;
         step(ui, &t, 3, obs, "OBS", obs_text, |ui| {
             if obs != Status::Done && app.m.b("obs.link") {
-                if widgets::button_ex(ui, &t, Some(icon::PLUS), "Add our video to OBS", Kind::Primary, Size::Medium, 0.0, true).clicked() {
+                if widgets::button_ex(ui, &t, Some(icon::PLUS), "Add our video and sound to OBS", Kind::Primary, Size::Medium, 0.0, true).clicked() {
                     act(app, "obs.setup", Value::Null);
                 }
-                widgets::hint(ui, &t, "Adds the wide and vertical video to your OBS scenes. Nothing is removed.");
+                widgets::hint(ui, &t, "Adds the wide and vertical video and our sound to your OBS scenes. Nothing is removed.");
             } else if obs != Status::Done && installed {
                 if widgets::button_ex(ui, &t, Some(icon::PLAY), "Open OBS", Kind::Primary, Size::Medium, 0.0, true).clicked() {
                     open_obs = true;

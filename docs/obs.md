@@ -21,10 +21,15 @@ Build deps: obs-studio 32 headers (libobs + obs-frontend-api CMake configs), sim
 
 ## One-time OBS setup (the owner does this once)
 
-Either run `streamctl do obs.setup` while OBS and the engine are running (it only **adds**
-`stream-engine: wide` to the main canvas's current program scene and `stream-engine: tall` to the
-current scene of the `Vertical` canvas, scaled to fill; it never removes, reorders, or changes
-anything else), or click it yourself:
+Either run `streamctl do obs.setup` while OBS and the engine are running (the UI's Get started →
+OBS "Add our video and sound to OBS" and Sound → "Add our sound to OBS" run the same thing), or
+click it yourself. `obs.setup` only **adds**: `stream-engine: wide` to the main canvas's current
+program scene and `stream-engine: tall` to the current scene of the `Vertical` canvas, scaled to
+fill; and one PulseAudio capture per engine audio node (`se-program` on track 1 for the stream,
+`se-band`/`se-music`/`se-sfx`/`se-tts`/`se-game` on tracks 2–6 for the recording) in the main
+program scene and in the fallback scene, so the sound carries on during technical difficulties.
+Sources that already exist under those names are reused as they are. It never removes, reorders,
+or changes anything else; running it again adds nothing.
 
 1. Restart OBS after installing. `Help → Log Files → View Current Log` shows
    `[stream-engine] loaded v0.1.0`.
@@ -35,9 +40,13 @@ anything else), or click it yourself:
    they will fight the engine for `/dev/video*`.
 5. Audio (PLAN §5): add one **Audio Input Capture (PulseAudio)** per engine node and name each OBS
    source exactly like the node (`se-program`, `se-band`, `se-music`, `se-sfx`, `se-tts`,
-   `se-game`). For separate recording tracks switch **Settings → Output → Output Mode: Advanced**,
-   enable the tracks under Recording, and assign sources to tracks in **Advanced Audio Properties**.
-   The plugin reports which sources feed which recording track (session meta `recordings[].tracks`).
+   `se-game`); in **Advanced Audio Properties** put `se-program` on track 1 only and each stem on
+   its own track (2–6). `obs.setup` does all of this.
+6. Separate recording tracks (the only step `obs.setup` leaves to you, because it changes your
+   encoder settings): **Settings → Output → Output Mode: Advanced**, check that Streaming and
+   Recording still use NVENC, and tick tracks 1–6 under Recording. Clips can then leave the music
+   out (docs/clips.md). The plugin reports which sources feed which recording track (session meta
+   `recordings[].tracks`).
 
 Check: `streamctl preflight` → `obs: pass — OBS 32.2.2, plugin 0.1.0: receiving wide + tall`.
 
