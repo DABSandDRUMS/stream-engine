@@ -347,6 +347,15 @@ pub struct MonitorStrip {
     pub r: Vec<f32>,
 }
 
+/// Post-fader software buses sent to the physical output feeding the external mixer.
+/// The captured 16R/24c mix is never part of this strip.
+pub struct PlaybackStrip {
+    pub buses: Vec<u8>,
+    pub ports: [Option<u16>; 2],
+    pub l: Vec<f32>,
+    pub r: Vec<f32>,
+}
+
 pub struct DrumStage {
     pub trig: DrumTriggers,
     /// (input index, channel) per pad.
@@ -447,6 +456,7 @@ pub struct Graph {
     pub bank: Box<SampleBank>,
     pub sources: Vec<SourceStrip>,
     pub monitor: Option<MonitorStrip>,
+    pub playback: Option<PlaybackStrip>,
     pub drums: Option<DrumStage>,
     pub duck: Ducker,
     /// Index of the program bus.
@@ -472,6 +482,7 @@ impl Graph {
         bank: Box<SampleBank>,
         sources: Vec<SourceStrip>,
         monitor: Option<MonitorStrip>,
+        playback: Option<PlaybackStrip>,
         drums: Option<DrumStage>,
         duck: Ducker,
     ) -> Graph {
@@ -486,6 +497,9 @@ impl Graph {
         if let Some(m) = &monitor {
             out_ports.extend(m.ports.iter().flatten());
         }
+        if let Some(p) = &playback {
+            out_ports.extend(p.ports.iter().flatten());
+        }
         let mut g = Graph {
             generation,
             sr,
@@ -498,6 +512,7 @@ impl Graph {
             bank,
             sources,
             monitor,
+            playback,
             drums,
             duck,
             program,
@@ -644,7 +659,7 @@ impl Graph {
         self.duck.reset();
     }
 
-    /// Render one chunk (≤ MAX_BLOCK). Writes bus/monitor outputs into internal buffers.
+    /// Render one chunk (≤ MAX_BLOCK). Writes bus, monitor, and playback outputs into internal buffers.
     #[allow(clippy::too_many_arguments)]
     fn render(
         &mut self,
@@ -864,6 +879,18 @@ impl Graph {
                 r[i] *= g;
             }
         }
+        if let Some(p) = self.playback.as_mut() {
+            let (l, r) = (&mut p.l[..n], &mut p.r[..n]);
+            l.fill(0.0);
+            r.fill(0.0);
+            for b in &p.buses {
+                let bus = &self.buses[*b as usize];
+                for i in 0..n {
+                    l[i] += bus.out_l[i];
+                    r[i] += bus.out_r[i];
+                }
+            }
+        }
     }
 
     /// Write this graph's outputs for the chunk. `ramp` = (from, to) gain across the chunk
@@ -898,6 +925,14 @@ impl Graph {
             }
             if let Some(p) = m.ports[1] {
                 put(p, &m.r);
+            }
+        }
+        if let Some(p) = &self.playback {
+            if let Some(port) = p.ports[0] {
+                put(port, &p.l);
+            }
+            if let Some(port) = p.ports[1] {
+                put(port, &p.r);
             }
         }
     }

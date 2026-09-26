@@ -35,6 +35,15 @@ delay = "0ms"          # A/V delay (live: audio.input.band.delay_ms)
 [slots]
 "youtube" = { bus = "music", delay = "0ms" }
 
+# Software audio leaves the motherboard's rear analog output into the 16R. The 16R
+# combines it with drums and sends its one final mix through the Studio 24c to OBS.
+# Do not put band or program here: returning the 24c input would create feedback.
+# If the cable uses the front-panel jack, select "Motherboard Audio Front Headphones".
+[playback]
+target = "Motherboard Audio Speakers"
+channels = [1, 2]
+buses = ["music", "sfx", "tts", "game"]
+
 # Live analysis → band.*, music.*, beat.*, mic.* signals.
 [analysis]
 buses = ["band", "music"]

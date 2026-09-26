@@ -4,6 +4,7 @@
 mod common;
 
 use common::*;
+use se_audio::builder::LinkTarget;
 use se_audio::dsp::SlotReader;
 use se_audio::graph::{ChainRef, FxWhat, RtMsg, RtOut, SlotEntry, TapEntry, TapSource, Target};
 use se_audio::taps::TapProducer;
@@ -46,6 +47,43 @@ fn band_input_reaches_band_and_program_nodes_and_follows_the_fader() {
     let prog = r.out_port("out_program_L");
     let out = r.run(20, &[il, ir], sine(1000.0, 0.25), prog);
     assert!((rms(&out[out.len() - 4800..]) - 0.125 / 2f32.sqrt()).abs() < 2e-3);
+}
+
+#[test]
+fn motherboard_playback_keeps_the_24c_capture_out_and_follows_the_music_fader() {
+    let mut r = Rig::new("quantum = 256\n[playback]\ntarget = \"Motherboard Audio Speakers\"\nbuses = [\"music\", \"sfx\", \"tts\", \"game\"]");
+    for (port, channel) in [("play_1", 1), ("play_2", 2)] {
+        assert!(
+            r.built.links.iter().any(|link| { link.port == port && link.to == LinkTarget::Sink { target: "Motherboard Audio Speakers".into(), channel } }),
+            "{port} must link to motherboard channel {channel}, not to the 24c"
+        );
+    }
+    let (il, ir) = (r.in_port("in_band_1"), r.in_port("in_band_2"));
+    let play = r.out_port("play_1");
+    let band = r.out_port("out_band_L");
+    let capture = r.run(60, &[il, ir], sine(220.0, 0.3), play);
+    assert!(max_abs(&capture) < 1e-6, "24c capture must never return to the 16R");
+    assert!(rms(&r.io.outs[band]) > 0.15, "the 24c input was present for the test");
+
+    let mut youtube = attach_slot(&mut r, "youtube", 0, 2);
+    let quantum = r.quantum;
+    let mut fill = |cycles: usize| {
+        for i in 0..cycles * quantum {
+            let sample = 0.2 * (std::f32::consts::TAU * 440.0 * i as f32 / SR).sin();
+            youtube.push(sample).unwrap();
+            youtube.push(sample).unwrap();
+        }
+    };
+    fill(60);
+    let before = r.run(60, &[il, ir], sine(220.0, 0.3), play);
+    let before = rms(&before[before.len() - 4800..]);
+    assert!(before > 0.1, "YouTube audio must reach the motherboard");
+    let music = bus(&r, "music");
+    r.param(Target::BusGain(music), -6.0206);
+    fill(60);
+    let after = r.run(60, &[il, ir], sine(220.0, 0.3), play);
+    let after = rms(&after[after.len() - 4800..]);
+    assert!((after / before - 0.5).abs() < 0.03, "music fader must affect the physical output: {after}/{before}");
 }
 
 #[test]

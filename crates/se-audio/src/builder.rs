@@ -561,6 +561,18 @@ pub fn build(cfg: &AudioConfig, generation: u32, ports: &mut PortTable, bank: Sa
         }
     });
 
+    // ---- software buses → motherboard output → 16R. The 24c capture is not returned
+    // to this output; the drummer's independent pre-fader monitor remains separate.
+    let playback = cfg.playback.as_ref().map(|p| {
+        let mut ports_ix = [None, None];
+        for (ci, ch) in p.channels.iter().enumerate() {
+            let pname = format!("play_{}", ci + 1);
+            ports_ix[ci] = Some(ports.output(&pname));
+            c.out.links.push(LinkSpec { port: pname, input: false, to: LinkTarget::Sink { target: p.target.clone(), channel: *ch } });
+        }
+        PlaybackStrip { buses: p.buses.iter().filter_map(|name| cfg.bus_index(name)).map(|index| index as u8).collect(), ports: ports_ix, l: buf(), r: buf() }
+    });
+
     // ---- direct routes (slot → device channel)
     for d in &cfg.direct {
         let pname = format!("direct_{}", d.slot.replace('.', "_"));
@@ -642,9 +654,10 @@ pub fn build(cfg: &AudioConfig, generation: u32, ports: &mut PortTable, bank: Sa
                 .with("keys", Value::List(d.keys.iter().cloned().map(Value::Str).collect()))
                 .with("signals", Value::List(d.signals.iter().cloned().map(Value::Str).collect())),
         )
-        .with("monitor", cfg.monitor.as_ref().map(|m| Value::Str(m.target.clone())).unwrap_or_default());
+        .with("monitor", cfg.monitor.as_ref().map(|m| Value::Str(m.target.clone())).unwrap_or_default())
+        .with("playback", cfg.playback.as_ref().map(|p| Value::Str(p.target.clone())).unwrap_or_default());
 
-    let graph = Graph::new(generation, sr, inputs, buses, samplers, sound_bus, Box::new(bank), sources, monitor, drums, duck);
+    let graph = Graph::new(generation, sr, inputs, buses, samplers, sound_bus, Box::new(bank), sources, monitor, playback, drums, duck);
     c.out.info = info.with("latency", graph.latency as i64);
     c.out.graph = Some(Box::new(graph));
     c.out

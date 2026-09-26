@@ -119,6 +119,15 @@ pub struct MonitorDef {
     pub fx: Vec<FxDef>,
 }
 
+/// Physical playback of software buses before they enter the external mixer.
+/// Unlike the drummer monitor, these are post-fader; never route captured inputs back.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlaybackDef {
+    pub target: String,
+    pub channels: Vec<u32>,
+    pub buses: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct DirectDef {
     pub slot: String,
@@ -189,6 +198,7 @@ pub struct AudioConfig {
     pub duck: DuckDef,
     pub sounds: Vec<SoundCfg>,
     pub monitor: Option<MonitorDef>,
+    pub playback: Option<PlaybackDef>,
     pub direct: Vec<DirectDef>,
     pub pads: Vec<PadDef>,
     pub sources: Vec<SourceDef>,
@@ -239,6 +249,7 @@ struct Raw {
     duck: RawDuck,
     sounds: BTreeMap<String, RawSound>,
     monitor: Option<RawMonitor>,
+    playback: Option<RawPlayback>,
     direct: BTreeMap<String, RawDirect>,
     drums: RawDrums,
     sources: BTreeMap<String, RawSource>,
@@ -324,6 +335,14 @@ struct RawMonitor {
     inputs: Vec<String>,
     gain: f32,
     fx: Vec<toml::Table>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct RawPlayback {
+    target: Option<String>,
+    channels: Option<Vec<u32>>,
+    buses: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -706,6 +725,28 @@ pub fn parse(section: &toml::Table, fragments: &BTreeMap<String, toml::Table>) -
             Some(MonitorDef { target, channels, buses: m.buses, inputs: m.inputs, gain_db: m.gain.clamp(-60.0, 12.0), fx: parse_fx(&m.fx, "monitor")? })
         }
     };
+    let playback = match raw.playback {
+        None => None,
+        Some(p) => {
+            let target = p.target.filter(|s| !s.trim().is_empty()).ok_or("playback: needs `target` (sink node)")?;
+            let channels = p.channels.unwrap_or_else(|| vec![1, 2]);
+            if channels.is_empty() || channels.len() > 2 || channels.contains(&0) || (channels.len() == 2 && channels[0] == channels[1]) {
+                return Err("playback: channels must be distinct, one-based device channels (one or two)".into());
+            }
+            if p.buses.is_empty() {
+                return Err("playback: specify at least one software bus".into());
+            }
+            for b in &p.buses {
+                if !has_bus(b) {
+                    return Err(format!("playback: unknown bus `{b}`"));
+                }
+                if b == "program" || inputs.iter().any(|input| &input.bus == b) {
+                    return Err(format!("playback: `{b}` contains a captured input; routing it back to the mixer risks feedback"));
+                }
+            }
+            Some(PlaybackDef { target, channels, buses: p.buses })
+        }
+    };
 
     let direct = raw
         .direct
@@ -786,7 +827,7 @@ pub fn parse(section: &toml::Table, fragments: &BTreeMap<String, toml::Table>) -
         return Err(format!("analysis.mic: unknown input `{m}`"));
     }
 
-    Ok(AudioConfig { rate, quantum, inputs, buses, slot_routes, slot_delay_ms, duck, sounds, monitor, direct, pads, sources, analysis, max_delay_ms })
+    Ok(AudioConfig { rate, quantum, inputs, buses, slot_routes, slot_delay_ms, duck, sounds, monitor, playback, direct, pads, sources, analysis, max_delay_ms })
 }
 
 fn default_band(pad: &str) -> [f32; 2] {
@@ -879,6 +920,21 @@ layer = { sound = "kick_layer", gain = -6 }
         assert_eq!(c.pads[0].retrigger_ms, 35.0);
         assert_eq!(c.pads[0].layer, Some(("kick_layer".into(), -6.0)));
         assert_eq!(c.sounds[0].layers.len(), 2);
+    }
+
+    #[test]
+    fn physical_playback_rejects_captured_mix_and_duplicate_channels() {
+        let parse_playback = |s: &str| parse(&t(s), &BTreeMap::new());
+        let configured =
+            parse_playback("[playback]\ntarget = \"Motherboard Audio Speakers\"\nchannels = [1, 2]\nbuses = [\"music\", \"sfx\", \"tts\"]").unwrap();
+        assert_eq!(configured.playback.as_ref().unwrap().buses, ["music", "sfx", "tts"]);
+        for forbidden in ["band", "program"] {
+            let config = format!("[playback]\ntarget = \"Motherboard Audio Speakers\"\nbuses = [\"{forbidden}\"]");
+            assert!(parse_playback(&config).unwrap_err().contains("feedback"), "{forbidden}");
+        }
+        assert!(
+            parse_playback("[playback]\ntarget = \"Motherboard Audio Speakers\"\nchannels = [1, 1]\nbuses = [\"music\"]").unwrap_err().contains("distinct")
+        );
     }
 
     #[test]
