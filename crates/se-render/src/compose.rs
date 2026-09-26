@@ -2,7 +2,7 @@
 //! evaluation of effect attachments into per-frame [`FxEval`]s.
 
 use crate::addr::{Resolved, Whens};
-use crate::effects::{self, Exec, LIBRARY, MAX_PARAMS};
+use crate::effects::{self, Exec, LIBRARY, MAX_FUSED, MAX_PARAMS};
 use crate::pipelines::Pipelines;
 use crate::plan::{Attach, Blend, EffectKind, ParamSrc, Plan, StrSrc};
 use crate::resources::{Arena, BindCache, Layouts, Tex};
@@ -42,6 +42,23 @@ pub struct FxUniform {
     pub bass: f32,
     pub seed: f32,
     pub pad: f32,
+}
+
+/// One stage of a fused pass (`FxStage` in `fx_common.wgsl`); strength 0 skips it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct FxStage {
+    pub params: [f32; MAX_PARAMS],
+    pub strength: f32,
+    pub pad: [f32; 3],
+}
+
+/// Uniforms of a fused pass: the shared header, then one stage per chain position.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct FusedUniform {
+    pub head: FxUniform,
+    pub stages: [FxStage; MAX_FUSED],
 }
 
 #[repr(C)]
@@ -148,12 +165,13 @@ fn fx_bind<'b>(g: &'b mut Gfx, input: &Tex, aux: Option<&Tex>, lut: Option<(u32,
 }
 
 /// One full-screen effect-style pass `input → out` (scissored to `scissor` px when given).
+/// `u` is an [`FxUniform`] or, for fused passes, a [`FusedUniform`].
 #[allow(clippy::too_many_arguments)]
-pub fn fx_pass(
+pub fn fx_pass<U: bytemuck::Pod>(
     enc: &mut wgpu::CommandEncoder,
     g: &mut Gfx,
     pipeline: &wgpu::RenderPipeline,
-    u: &FxUniform,
+    u: &U,
     input: &Tex,
     aux: Option<&Tex>,
     lut: Option<(u32, &wgpu::TextureView)>,
@@ -345,6 +363,10 @@ mod tests {
         assert_eq!(std::mem::size_of::<FxUniform>(), 112);
         assert_eq!(std::mem::offset_of!(FxUniform, params), 32);
         assert_eq!(std::mem::offset_of!(FxUniform, beat_phase), 96);
+        assert_eq!(std::mem::size_of::<FxStage>(), 80);
+        assert_eq!(std::mem::offset_of!(FusedUniform, stages), 112);
+        assert_eq!(std::mem::size_of::<FusedUniform>(), 112 + 80 * MAX_FUSED);
+        assert!(std::mem::size_of::<FusedUniform>() <= crate::resources::WINDOW);
         assert_eq!(std::mem::size_of::<BlitUniform>(), 16);
         assert_eq!(std::mem::size_of::<crate::sources::ConvertUniform>(), 48);
     }

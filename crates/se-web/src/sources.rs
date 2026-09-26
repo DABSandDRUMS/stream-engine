@@ -2,6 +2,7 @@
 //! set, the scene configuration, and `[web]` in `project.toml`.
 
 use crate::protocol::{MAX_FPS, MAX_SIDE};
+use se_api::auth::Scope;
 use se_core::Config;
 use se_patch::{Kind, Layer, PatchSet};
 use std::collections::BTreeMap;
@@ -43,6 +44,15 @@ pub struct Spec {
     pub size: (u32, u32),
     /// Patch generation; a change reloads the page.
     pub generation: u64,
+    /// Manifest `grants`: what the page's token may write besides its own namespace.
+    pub grants: Vec<String>,
+}
+
+impl Spec {
+    /// The page token's scope (§19).
+    pub fn scope(&self) -> Scope {
+        Scope::Patch(self.owner.scope_id().to_string(), self.grants.clone())
+    }
 }
 
 /// `[web]` settings that need a host restart when they change.
@@ -199,6 +209,7 @@ pub fn desired(config: &Config, patches: &PatchSet, base: &str, share_dir: &Path
             fps: m.fps.unwrap_or(DEFAULT_PATCH_FPS).clamp(1, MAX_FPS),
             size,
             generation: p.generation,
+            grants: m.grants.clone(),
             slot: slot.clone(),
         };
         out.insert(slot, spec);
@@ -219,6 +230,7 @@ pub fn desired(config: &Config, patches: &PatchSet, base: &str, share_dir: &Path
             fps: yt.fps.unwrap_or(DEFAULT_YOUTUBE_FPS),
             size: yt.size.or_else(|| node_size(config, YOUTUBE_SLOT)).unwrap_or(DEFAULT_SIZE),
             generation: 0,
+            grants: Vec::new(),
         };
         out.insert(YOUTUBE_SLOT.into(), spec);
     }

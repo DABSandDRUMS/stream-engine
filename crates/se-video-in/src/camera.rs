@@ -6,6 +6,7 @@
 use crate::config::{CameraDef, SourceDef};
 use crate::controls;
 use crate::frame::{DropCounter, FpsMeter, MjpegDecoder, SignalDetector, copy_rows, rgba_stats, yuyv_stats};
+use crate::preview;
 use crate::status::{CpuMeter, OWNER, Publisher, Status};
 use crossbeam_channel::{Receiver, RecvTimeoutError, TryRecvError};
 use se_devices::v4l2::{self, Control, Device, Stream};
@@ -223,6 +224,8 @@ fn capture(
     let base_dropped = st.dropped.load(Ordering::Relaxed);
     let mut signal = false;
     let frame_bytes = (slot_stride * h) as usize;
+    // Settings → Devices thumbnails come from this thread while the camera is captured.
+    let yuv = preview::Yuv::new(fmt.matrix(), fmt.range());
 
     loop {
         let ready = match stream.wait(100) {
@@ -256,6 +259,7 @@ fn capture(
                     let now = se_clock::now();
                     let ts = f.monotonic_ns.filter(|t| *t <= now && now - *t < 1_000_000_000).unwrap_or(now);
                     let data = stream.data(&f);
+                    let thumb = st.preview.due(now);
                     let ok = match &mut decoder {
                         None => {
                             if data.len() >= frame_bytes || data.len() >= (slot_stride * (h - 1) + w * 2) as usize {
@@ -263,6 +267,9 @@ fn capture(
                                 writer.write_with(w, h, slot_stride, slot_fmt, ts, |dst| {
                                     copy_rows(data, slot_stride as usize, dst, slot_stride as usize, (w * 2) as usize, h as usize);
                                 });
+                                if thumb {
+                                    st.preview.offer(now, |out| preview::yuyv_thumb(data, w, h, slot_stride, yuv, out));
+                                }
                                 det.frame(now, stats);
                                 true
                             } else {
@@ -276,6 +283,9 @@ fn capture(
                                 writer.write_with(w, h, slot_stride, slot_fmt, ts, |dst| {
                                     res = dec.decode_rgba(data, dst, w, h, slot_stride);
                                     stats = rgba_stats(dst, w, h, slot_stride);
+                                    if thumb && res.is_ok() {
+                                        st.preview.offer(now, |out| preview::rgba_thumb(dst, w, h, slot_stride, out));
+                                    }
                                 });
                                 det.frame(now, stats);
                                 res.is_ok()

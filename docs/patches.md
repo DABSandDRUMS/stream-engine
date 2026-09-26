@@ -15,6 +15,7 @@ Every patch gets the same addresses:
 | `patch.<id>.state` | `loaded` · `error` · `suspended` · `disabled` |
 | `patch.<id>.error` | last error, `file:line: message` (empty when healthy) |
 | event `patch.<id>.trigger` | emitted on every trigger with the trigger payload |
+| `patch.<id>.payload.*` | numbers of the last trigger's payload (§4), read-only |
 
 ## 1. Create a patch
 
@@ -50,7 +51,7 @@ params to signals.
 |---|---|---|
 | `source` | placeable in scenes | scene node `{ src = "patch.<id>", rect = [...] }` |
 | `overlay` | global layer above the scene on every canvas | drawn while `patch.<id>.active` or `env > 0`; always if the patch has no trigger |
-| `effect` | takes an input texture (`se_input`) | `fx = [{ name = "patch.<id>", amount = 0.8 }]` on a source, scene node, scene, `[render.canvas_fx.<canvas>]`, or `[render.output_fx.<canvas>]`; with a trigger it also runs canvas-wide while `env > 0` (so presets can `fx = [{ name = "patch.<id>" }]`) |
+| `effect` | takes an input texture (`se_input`) | `fx = [{ name = "patch.<id>", amount = 0.8 }]` on a source, scene node, scene, `[render.canvas_fx.<canvas>]`, or `[render.output_fx.<canvas>]`; with a trigger it also runs canvas-wide while `env > 0` (so presets can `fx = [{ name = "patch.<id>" }]`). Also usable as a morph enter/exit style (`enter = "patch.<id>"`: the node in `se_input`, its box in `se.region`, presence in `se.progress`; docs/render.md) |
 | `transition` | takes A (`se_input`), B (`se_input_b`), `se.progress` | `scene.take transition=patch.<id>`, a scene's `transitions.pool = [{ name = "patch.<id>" }]`, or `transitions/<name>.toml` with `kind = "shader"`, `shader = "patch.<id>"`, `ms = 700` |
 | `audio-effect` | insert on a bus/input (`dsp` only) | audio chains `{ patch = "<id>" }` |
 | `audio-source` | generates audio (`dsp` only) | `[audio.sources."patch.<id>"] bus = "sfx"` |
@@ -72,6 +73,7 @@ budget  = { cpu_ms = 1.0 }        # scripts: + instructions, memory_mb; shaders:
 signals = ["twitch.chat_rate"]    # extra signals (shaders get s_<name>(); scripts get them as 0 until published)
 size    = [1920, 1080]            # render size for source/overlay web and script layers (optional)
 fps     = 60                      # web pages: CEF frame rate 1–120 (default 60)
+grants  = ["lights.*", "source.cam1"]   # web pages: extra things the page may control (see §8)
 particles = { count = 4096, sim = "sim.wgsl", draw = "draw.wgsl" }   # particles only
 ```
 
@@ -87,6 +89,20 @@ particles = { count = 4096, sim = "sim.wgsl", draw = "draw.wgsl" }   # particles
 the standard set); `palette.*` (the stream palette: `accent`, `background`, `foreground`, `red`,
 `yellow`, `green`, `cyan`, `magenta` — from the `palette.*` addresses); `resolution`; the input
 texture(s) for effect/transition layers.
+
+Shader, particles, and dsp patches can't read text, so they get the payload's numbers
+(`se.trigger.*` in WGSL, the params block in dsp modules, `patch.<id>.payload.*` in state):
+
+| Field | Value |
+|---|---|
+| `amount` | how big the event was: payload `amount`, else `bits`, `count`, `viewers` |
+| `bits`, `tier`, `months`, `viewers`, `count` | the payload's numbers (numeric text counts too), 0 when missing |
+| `user_hash` | 0–1, the same for the same user every time (0 without a user) |
+| `user_color` | the user's chat colour (payload `color`), else a colour picked by `user_hash`; transparent without a user |
+
+A rule passes the event's numbers along: `do = ["patch.sparks.trigger bits={event.bits}"]` (the
+user comes from the event). The payload is set in the same tick as `patch.<id>.active`, so a
+patch never sees a new trigger with the previous payload; it stays until the next trigger.
 
 Standard signals (always present, 0 until something publishes them): `band.level`,
 `band.bass`, `band.mid`, `band.high`, `band.kick`, `band.snare`, `band.hat`, `band.centroid`,
@@ -212,7 +228,8 @@ The header (see `crates/se-patch/src/wgsl.rs`):
 
 | Binding / item | |
 |---|---|
-| `se: SeInputs` (`@group(0) @binding(0)`, uniform) | `time`, `dt`, `frame: u32`, `env`, `resolution: vec2<f32>`, `progress` (transitions), `trigger_count: u32`, `beat_phase`, `bpm`, `palette: array<vec4<f32>, 8>`, `params`, `signals` |
+| `se: SeInputs` (`@group(0) @binding(0)`, uniform) | `time`, `dt`, `frame: u32`, `env`, `resolution: vec2<f32>`, `progress` (transitions, enter/exit styles), `trigger_count: u32`, `beat_phase`, `bpm`, `region: vec4<f32>` (uv `x0, y0, x1, y1` of the node an effect or enter/exit style runs for; `0, 0, 1, 1` otherwise), `trigger: SeTrigger`, `palette: array<vec4<f32>, 8>`, `params`, `signals` |
+| `se.trigger` (`SeTrigger`) | payload of the last trigger: `amount`, `bits`, `tier`, `months`, `viewers`, `count`, `user_hash` (0–1), `user_color: vec4<f32>` — see §4 |
 | `se_sampler` (`binding(1)`) | linear, clamp |
 | `se_input` (`binding(2)`) | effect input / transition A (outgoing) |
 | `se_input_b` (`binding(3)`) | transition B (incoming) |
@@ -236,7 +253,7 @@ const SE_PARTICLE_COUNT: u32 = <particles.count>u;
 fn se_hash(n: u32) -> f32   // 0..1
 ```
 
-- `sim.wgsl`: `@compute @workgroup_size(64) fn sim(@builtin(global_invocation_id) id: vec3<u32>)`, dispatched `ceil(count / 64)` times per frame. The buffer starts zeroed (`life = 0` = dead); spawn from `se.env` / `se.trigger_count`.
+- `sim.wgsl`: `@compute @workgroup_size(64) fn sim(@builtin(global_invocation_id) id: vec3<u32>)`, dispatched `ceil(count / 64)` times per frame. The buffer starts zeroed (`life = 0` = dead); spawn from `se.env` / `se.trigger_count`, and shape the burst with `se.trigger` (the template spawns more for bigger events and colours some particles with `se.trigger.user_color`).
 - `draw.wgsl`: `@vertex fn vs(@builtin(vertex_index) v: u32, @builtin(instance_index) i: u32)` (6 vertices per particle, instance = particle index) and `@fragment fn fs(...)`; your own vertex-output struct is fine. Positions are 0–1 of the layer (y down): clip = `(x * 2 - 1, 1 - y * 2)`. Output premultiplied alpha.
 
 ## 8. Web patches (`kind = "web"`)
@@ -246,9 +263,10 @@ the canvas for overlays, or manifest `size`), at `fps`, into the video slot `pat
 audio goes to the audio slot `patch.<id>`. It is loaded from
 `http://localhost:<http port>/patches/<id>/index.html?token=<token>`; the token is scoped to
 the patch (§19): it can read everything, but only write `patch.<id>.*` (set, animate, trigger,
-release, emit `patch.<id>.*` events, `patch.<id>.*` actions). Keep the page background
-transparent. A renderer crash reloads the page; the rest of the engine is unaffected. Saving any
-file in the folder reloads the page. See `docs/web.md` for the CEF runtime.
+release, emit `patch.<id>.*` events, `patch.<id>.*` actions) plus what the manifest `grants`
+allow (below). Keep the page background transparent. A renderer crash reloads the page; the
+rest of the engine is unaffected. Saving any file in the folder reloads the page. See
+`docs/web.md` for the CEF runtime.
 
 ```html
 <script src="/engine.js"></script>
@@ -265,17 +283,60 @@ file in the folder reloads the page. See `docs/web.md` for the CEF runtime.
 </script>
 ```
 
+### Grants: letting a page control more
+
+```toml
+kind   = "web"
+grants = ["lights.*", "source.cam1", "scene.**", "preset.fire"]
+```
+
+Each grant is an address pattern with the same `*` (one segment, or a glob inside a segment)
+and `**` (any depth) wildcards as `set`/`animate`/`release`, and it covers every address it
+matches **and everything beneath it**: `lights.*` covers `lights.cue` and
+`lights.fixture.par1.dimmer`; `source.cam1` covers `source.cam1.exposure`. What a grant is
+compared against:
+
+| Op | Checked name |
+|---|---|
+| `set`, `animate`, `trigger`, `release` | the address |
+| `emit` | the event type |
+| actions (`lights.cue`, `obs.stream.start`, …) | the action name |
+| `scene.go` / `scene.cut` / `scene.take`, `preset.fire` / `preset.release`, `mode.set` | that command word (so `scene.*` or `scene.go` allows switching scenes) |
+
+A command whose address is itself a pattern is allowed only when its wildcards stay inside a
+grant (`lights.*` allows `set lights.* 0` but not `set *.dimmer 0`).
+
+Rules:
+
+- Grants apply to `kind = "web"` only; on other kinds they are a manifest error.
+- A grant must start with a name: `*`, `**`, `*.fader` or `li*.cue` are manifest errors, so a
+  page can never be given everything. Empty or malformed patterns (`lights..cue`, spaces) are
+  errors too, reported as `patch.toml:0: grants: …`.
+- Never grantable, whatever the pattern: `api.*` (tokens, device pairing), `secrets.*`,
+  `project.*` (file writes, reload), `patch.new`, `patch.open`, any secret-carrying action
+  (`*.key.set`, `*.secret.set`, `*.token.set`), `set_base` (project edits), and `panic`,
+  `clean`, `undo`, `redo`.
+- Changing `grants` and saving takes effect on the page's existing token immediately (the log
+  says `patch.<id>: page permissions now [...]`); removing them drops the page back to its own
+  namespace.
+- *Scenes → Overlays & effects* shows each patch's grants in plain words ("Can also control:
+  lights, Cam1") on its card.
+
 ## 9. DSP patches (`kind = "dsp"`)
 
-WebAssembly block ABI v1 (host: `se-dsp`): no imports; export `memory`, `se_dsp_abi() -> 1`,
-`init(sample_rate: f32, channels: i32, max_frames: i32) -> i32` (0 = ok; allocate only here),
-`input_buffer()`, `output_buffer()`, `params_buffer()` (byte offsets), `process(in, out,
+WebAssembly block ABI (host: `se-dsp`): no imports; export `memory`, `se_dsp_abi() -> 2` (1 still
+loads), `init(sample_rate: f32, channels: i32, max_frames: i32) -> i32` (0 = ok; allocate only
+here), `input_buffer()`, `output_buffer()`, `params_buffer()` (byte offsets), `process(in, out,
 frames, params)`, optional `reset()` and `latency() -> i32`. Buffers are planar f32 (channel
 `c` at `ptr + c * max_frames * 4`), `max_frames = 1024`, 2 channels. The params block is
 `[env, bpm, beat_phase, bar_phase, trigger_count, 0, 0, 0, <params…>]` with the manifest
-params in alphabetical order, each `slots()` floats (bool 0/1, enum = option index). Over
-`budget.cpu_ms` per block three times in a row, or a trap → auto-bypass with a crossfade and
-`patch.<id>.error`. The template (`dsp/default`) is a Rust `no_std` crate with `build.sh`
+params in alphabetical order, each `slots()` floats (bool 0/1, enum = option index), 64 slots.
+ABI 2 appends the last trigger's payload (88 floats in all): `[72]` amount, `[73]` bits, `[74]`
+tier, `[75]` months, `[76]` viewers, `[77]` count, `[78]` user_hash, `[79]` 0, `[80..84]`
+user_color r g b a, `[84..88]` 0. It changes in the same block as the trigger edge (never
+after it); an ABI 1 module keeps its 72-float block. Over `budget.cpu_ms` per block three times
+in a row, or a trap → auto-bypass with a crossfade and `patch.<id>.error`. The template
+(`dsp/default`, ABI 2: a sub's tier pushes its drive) is a Rust `no_std` crate with `build.sh`
 (`rustup target add wasm32-unknown-unknown`); the engine hot-swaps `main.wasm` on save.
 
 ## 10. Troubleshooting

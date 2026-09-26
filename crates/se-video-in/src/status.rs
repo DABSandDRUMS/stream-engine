@@ -38,6 +38,8 @@ pub struct Status {
     pub dropped: AtomicU64,
     pub frames: AtomicU64,
     pub info: Mutex<Info>,
+    /// Thumbnails for Settings → Devices while someone looks at this camera.
+    pub preview: Arc<crate::preview::Tap>,
 }
 
 impl Status {

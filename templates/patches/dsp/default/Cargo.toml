@@ -1,6 +1,6 @@
 [package]
 name = "patch-{{id}}"
-description = "{{label}}: a stream-engine `dsp` patch (WebAssembly block ABI v1)"
+description = "{{label}}: a stream-engine `dsp` patch (WebAssembly block ABI v2)"
 version = "0.1.0"
 edition = "2024"
 publish = false

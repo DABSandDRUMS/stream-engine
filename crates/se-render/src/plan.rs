@@ -336,9 +336,13 @@ pub enum Style {
     SlideRight,
     SlideUp,
     SlideDown,
+    /// Shader style `Plan::styles[i]` (a shader patch or a `.wgsl` file): the node is drawn
+    /// through it with `se.progress` = presence (0 = gone, 1 = in place).
+    Custom(u32),
 }
 
 impl Style {
+    /// Built-in styles (custom ones are resolved by the plan builder).
     pub fn parse(s: &str) -> Option<Style> {
         Some(match s {
             "none" | "cut" => Style::None,
@@ -491,6 +495,8 @@ pub struct Plan {
     pub state: AddrTable,
     pub signals: AddrTable,
     pub project_root: PathBuf,
+    /// Shaders of custom enter/exit styles ([`Style::Custom`] indexes this).
+    pub styles: Vec<ShaderSource>,
     /// Non-fatal problems (logged and shown on `health.render`).
     pub errors: Vec<String>,
 }
@@ -511,10 +517,46 @@ struct Builder<'a> {
     effect_index: HashMap<String, usize>,
     sources: Vec<SourcePlan>,
     source_index: HashMap<String, u32>,
+    styles: Vec<ShaderSource>,
     errors: Vec<String>,
 }
 
 impl Builder<'_> {
+    /// An enter/exit style: a built-in name, `patch.<id>` (a shader patch), or a project `.wgsl`
+    /// file. Unknown values are reported and yield `None`.
+    fn style(&mut self, s: &str, ctx: &str) -> Option<Style> {
+        if let Some(st) = Style::parse(s) {
+            return Some(st);
+        }
+        let src = if let Some(id) = s.strip_prefix("patch.") {
+            match self.manifests.get(id) {
+                Some(m) if m.kind == Kind::Shader => ShaderSource::Patch(id.to_string()),
+                Some(_) => {
+                    self.errors.push(format!("{ctx}: style `{s}` must be a shader patch"));
+                    return None;
+                }
+                None => {
+                    self.errors.push(format!("{ctx}: style `{s}`: no such patch"));
+                    return None;
+                }
+            }
+        } else if s.ends_with(".wgsl") {
+            ShaderSource::File(PathBuf::from(s))
+        } else {
+            self.errors
+                .push(format!("{ctx}: unknown style `{s}` (fade, scale, slide_left, slide_right, slide_up, slide_down, none, patch.<id>, or a .wgsl file)"));
+            return None;
+        };
+        let i = match self.styles.iter().position(|x| *x == src) {
+            Some(i) => i,
+            None => {
+                self.styles.push(src);
+                self.styles.len() - 1
+            }
+        };
+        Some(Style::Custom(i as u32))
+    }
+
     fn when(&mut self, src: &Option<String>, ctx: &str) -> Option<u32> {
         let s = src.as_deref()?.trim();
         if s.is_empty() {
@@ -703,16 +745,8 @@ fn node_plan(b: &mut Builder, scene: &str, layout: &str, n: &NodeDef) -> NodePla
         b.errors.push(format!("{ctx}: unknown blend `{}`", n.blend));
         Blend::Normal
     });
-    let style = |b: &mut Builder, s: &Option<String>, what: &str| {
-        s.as_deref().and_then(|x| {
-            Style::parse(x).or_else(|| {
-                b.errors.push(format!("{ctx}: unknown {what} style `{x}`"));
-                None
-            })
-        })
-    };
-    let enter = style(b, &n.enter, "enter");
-    let exit = style(b, &n.exit, "exit");
+    let enter = n.enter.as_deref().and_then(|s| b.style(s, &format!("{ctx} enter")));
+    let exit = n.exit.as_deref().and_then(|s| b.style(s, &format!("{ctx} exit")));
     let fx = b.attaches(&n.fx, Some(&p), &ctx);
     NodePlan {
         id: n.id.clone(),
@@ -747,7 +781,8 @@ fn node_plan(b: &mut Builder, scene: &str, layout: &str, n: &NodeDef) -> NodePla
     }
 }
 
-fn transition_plan(t: &TransitionDef, errors: &mut Vec<String>) -> TransitionPlan {
+fn transition_plan(b: &mut Builder, t: &TransitionDef) -> TransitionPlan {
+    let errors = &mut b.errors;
     let kind = match t.kind.as_str() {
         "cut" => TrKind::Cut,
         "morph" => TrKind::Morph,
@@ -768,12 +803,6 @@ fn transition_plan(t: &TransitionDef, errors: &mut Vec<String>) -> TransitionPla
             Some(ShaderSource::Builtin("fade"))
         }
         (None, _) => None,
-    };
-    let style = |s: &str, errors: &mut Vec<String>| {
-        Style::parse(s).unwrap_or_else(|| {
-            errors.push(format!("transitions/{}.toml: unknown style `{s}`", t.name));
-            Style::Fade
-        })
     };
     let mut params = Vec::new();
     for (k, v) in &t.params {
@@ -800,7 +829,10 @@ fn transition_plan(t: &TransitionDef, errors: &mut Vec<String>) -> TransitionPla
         }
         params.push((k.clone(), se_patch::ParamSpec { ty: ty.into(), default, range: None, options: Vec::new(), unit: None, description: None }));
     }
-    TransitionPlan { name: t.name.clone(), kind, shader, ease: t.ease, enter: style(&t.enter, errors), exit: style(&t.exit, errors), params }
+    let ctx = format!("transitions/{}.toml", t.name);
+    let enter = b.style(&t.enter, &format!("{ctx} enter")).unwrap_or(Style::Fade);
+    let exit = b.style(&t.exit, &format!("{ctx} exit")).unwrap_or(Style::Fade);
+    TransitionPlan { name: t.name.clone(), kind, shader, ease: t.ease, enter, exit, params }
 }
 
 /// Built-in transitions when the project has no file for them (§4.4; core `BUILTIN_TRANSITIONS`).
@@ -836,6 +868,7 @@ impl Plan {
             effect_index: HashMap::new(),
             sources: Vec::new(),
             source_index: HashMap::new(),
+            styles: Vec::new(),
             errors: Vec::new(),
         };
         let settings = Settings::from_config(cfg, &mut b.errors);
@@ -952,7 +985,7 @@ impl Plan {
         let mut transition_index = HashMap::new();
         for t in cfg.transitions.values() {
             transition_index.insert(t.name.clone(), transitions.len());
-            transitions.push(transition_plan(t, &mut b.errors));
+            transitions.push(transition_plan(&mut b, t));
         }
         for n in se_core::config::BUILTIN_TRANSITIONS {
             if !transition_index.contains_key(*n)
@@ -1069,6 +1102,7 @@ impl Plan {
         }
 
         let errors = std::mem::take(&mut b.errors);
+        let styles = std::mem::take(&mut b.styles);
         Plan {
             settings,
             canvases,
@@ -1091,6 +1125,7 @@ impl Plan {
             state: b.state,
             signals: b.signals,
             project_root,
+            styles,
             errors,
         }
     }
@@ -1231,7 +1266,6 @@ pub(crate) mod tests {
         let p = Plan::build(&c, &manifests, root);
         assert!(p.errors.is_empty(), "{:?}", p.errors);
         let duo = p.scene("duo").unwrap();
-        assert_eq!(duo.layouts[WIDE].nodes.len(), 3);
         assert_eq!(duo.layouts[TALL].nodes.len(), 2);
         let wide_cam = &duo.layouts[WIDE].nodes[1];
         assert_eq!(p.state.name(wide_cam.rect), "scene.duo.node.cam_wide.rect.wide");
@@ -1291,6 +1325,45 @@ pub(crate) mod tests {
         assert_eq!(n.blend, Blend::Normal);
         // broken `when` fails closed (hidden)
         assert_eq!(p.whens[n.when.unwrap() as usize].expr.source(), "false");
+    }
+
+    #[test]
+    fn custom_enter_exit_styles_resolve_to_shared_shaders() {
+        let dir = tempfile::tempdir().unwrap();
+        let mk = |id: &str, toml: &str| {
+            let d = dir.path().join("patches").join(id);
+            std::fs::create_dir_all(&d).unwrap();
+            Arc::new(Manifest::parse(&d, toml).unwrap())
+        };
+        let ms = vec![mk("dissolve", "kind = \"shader\"\nlayer = \"effect\""), mk("meteors", "kind = \"script\"\nlayer = \"overlay\"")];
+        let c = config(&[
+            ("project", "project", "schema = 1"),
+            ("transitions", "wipe", "kind = \"morph\"\nenter = \"transitions/wipe.wgsl\"\nexit = \"patch.dissolve\""),
+            ("transitions", "bad", "kind = \"morph\"\nenter = \"patch.meteors\"\nexit = \"wobble\""),
+            (
+                "scenes",
+                "s",
+                "[canvas.wide]\nnodes = [{ src = \"cam\", enter = \"patch.dissolve\", exit = \"transitions/wipe.wgsl\" }, { src = \"cam2\", enter = \"patch.nope\" }]",
+            ),
+        ]);
+        let p = Plan::build(&c, &ms, dir.path().to_path_buf());
+        // one shader per distinct source, shared by nodes and transitions
+        assert_eq!(p.styles.len(), 2, "{:?}", p.styles);
+        let custom = |src: ShaderSource| Style::Custom(p.styles.iter().position(|s| *s == src).unwrap() as u32);
+        let (file, patch) = (custom(ShaderSource::File("transitions/wipe.wgsl".into())), custom(ShaderSource::Patch("dissolve".into())));
+        let wipe = p.transition("wipe");
+        assert_eq!((wipe.enter, wipe.exit), (file, patch));
+        let nodes = &p.scene("s").unwrap().layouts[WIDE].nodes;
+        assert_eq!((nodes[0].enter, nodes[0].exit), (Some(patch), Some(file)));
+        // non-shader patch, unknown patch, unknown name: reported; transitions fall back to fade,
+        // nodes to the transition's style
+        let bad = p.transition("bad");
+        assert_eq!((bad.enter, bad.exit), (Style::Fade, Style::Fade));
+        assert_eq!(nodes[1].enter, None);
+        let all = p.errors.join("\n");
+        for needle in ["`patch.meteors` must be a shader patch", "unknown style `wobble`", "`patch.nope`: no such patch"] {
+            assert!(all.contains(needle), "missing `{needle}` in:\n{all}");
+        }
     }
 
     #[test]

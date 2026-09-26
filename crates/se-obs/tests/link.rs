@@ -410,6 +410,28 @@ async fn second_plugin_rejected_config_hot_reload_and_bad_lines() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn rehearsal_never_starts_the_stream() {
+    let mut e = engine().await;
+    let mut p = Plugin::connect(&e.sock).await;
+    p.hello().await;
+    e.state("obs.link", true).await;
+    e.hub.command(Command::new(Origin::Cli, Op::ModeSet { mode: "rehearsal".into() }));
+    e.state("show.mode", "rehearsal").await;
+
+    e.action("obs.stream.start");
+    let ev = e.event("obs.dry_run").await;
+    assert_eq!(ev.payload.get_path("action").and_then(Value::as_str), Some("obs.stream.start"));
+    // recording is a test output: it still reaches OBS (and is the first command OBS sees)
+    e.action("obs.record.start");
+    assert_eq!(p.recv().await["op"], "record.start");
+
+    // "Go live" from rehearsal: the mode change sent just before stream.start counts
+    e.hub.command(Command::new(Origin::Cli, Op::ModeSet { mode: "preshow".into() }));
+    e.action("obs.stream.start");
+    assert_eq!(p.recv().await["op"], "stream.start");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn stale_socket_file_is_replaced() {
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("obs.sock");

@@ -5,13 +5,16 @@
 //! vc42_1 = { kind = "camera", label = "VC42 HDMI 1 (kit)", identity = "pci-0000:05:00.0-video-index0" }
 //! deck   = { kind = "hid", label = "Stream Deck", usb = "0fd9:006d" }
 //! dmx    = { kind = "serial", label = "ENTTEC DMX USB PRO", identity = "usb-ENTTEC_DMX_USB_PRO_*" }
+//! desk   = { kind = "ucnet", label = "StudioLive 16R", serial = "RA1E24110101" }
+//! node   = { kind = "artnet", label = "Truss node", mac = "00:50:c2:12:34:56" }
 //! ```
 //!
 //! Criteria (all given ones must match): `identity` (glob), `usb` (`vvvv:pppp`), `serial`,
-//! `port` (udev `ID_PATH` glob), `name` (case-insensitive glob). `optional = true` downgrades a
-//! missing device from fail to warn.
+//! `port` (udev `ID_PATH` glob), `name` (case-insensitive glob), `mac` (network devices; any
+//! of `:`/`-`/no separators). `optional = true` downgrades a missing device from fail to warn.
 
 use crate::identity::{DeviceInfo, Kind, glob};
+use crate::network::{fmt_mac, parse_mac};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -24,6 +27,8 @@ pub struct Expected {
     pub serial: Option<String>,
     pub port: Option<String>,
     pub name: Option<String>,
+    /// Normalized `aa:bb:cc:dd:ee:ff`.
+    pub mac: Option<String>,
     pub optional: bool,
 }
 
@@ -35,12 +40,13 @@ impl Expected {
             && self.serial.as_ref().is_none_or(|s| d.serial.as_deref() == Some(s.as_str()))
             && self.port.as_ref().is_none_or(|p| d.port.as_deref().is_some_and(|dp| glob(p, dp)))
             && self.name.as_ref().is_none_or(|n| glob(&n.to_lowercase(), &d.name.to_lowercase()))
+            && self.mac.as_ref().is_none_or(|m| d.extra.get("mac") == Some(m))
     }
 
     fn specificity(&self) -> u32 {
         let exact_identity = self.identity.as_deref().is_some_and(|i| !i.contains('*') && !i.contains('?'));
         (exact_identity as u32) * 8
-            + self.serial.is_some() as u32 * 4
+            + (self.serial.is_some() || self.mac.is_some()) as u32 * 4
             + self.port.is_some() as u32 * 2
             + (self.usb.is_some() || self.name.is_some() || self.identity.is_some()) as u32
     }
@@ -92,6 +98,16 @@ pub fn parse(section: Option<&toml::Value>) -> (Vec<Expected>, Vec<String>) {
             },
             None => None,
         };
+        let mac = match s("mac") {
+            Some(m) => match parse_mac(&m) {
+                Some(m) => Some(fmt_mac(m)),
+                None => {
+                    errors.push(format!("devices.expected.{id}: mac must look like \"00:0a:92:03:3a:24\", got `{m}`"));
+                    continue;
+                }
+            },
+            None => None,
+        };
         let e = Expected {
             id: id.clone(),
             kind,
@@ -101,10 +117,11 @@ pub fn parse(section: Option<&toml::Value>) -> (Vec<Expected>, Vec<String>) {
             serial: s("serial"),
             port: s("port"),
             name: s("name"),
+            mac,
             optional: t.get("optional").and_then(toml::Value::as_bool).unwrap_or(false),
         };
-        if e.identity.is_none() && e.usb.is_none() && e.serial.is_none() && e.port.is_none() && e.name.is_none() {
-            errors.push(format!("devices.expected.{id}: needs at least one of identity, usb, serial, port, name"));
+        if e.identity.is_none() && e.usb.is_none() && e.serial.is_none() && e.port.is_none() && e.name.is_none() && e.mac.is_none() {
+            errors.push(format!("devices.expected.{id}: needs at least one of identity, usb, serial, port, name, mac"));
             continue;
         }
         out.push(e);
@@ -249,5 +266,30 @@ mod tests {
         assert!(!e2.matches(&d));
         let e3 = Expected { name: Some("*streaming*".into()), ..Default::default() };
         assert!(e3.matches(&d));
+    }
+
+    #[test]
+    fn network_devices_match_by_serial_mac_or_identity() {
+        let mut desk = dev(Kind::Ucnet, "ucnet-RA1E24110101", "Stage Rack (StudioLive 16R)", None);
+        desk.serial = Some("RA1E24110101".into());
+        let mut node = dev(Kind::ArtNet, "mac-00:50:c2:12:34:56", "Truss node", None);
+        node.extra.insert("mac".into(), "00:50:c2:12:34:56".into());
+        let bare = dev(Kind::ArtNet, "artnet-10.0.0.77", "Art-Net node 10.0.0.77", None);
+        let v = cfg(r#"
+            [devices.expected]
+            desk = { kind = "mixer", serial = "RA1E24110101" }
+            truss = { kind = "artnet", mac = "00-50-C2-12-34-56" }
+            floor = { kind = "artnet", identity = "artnet-10.0.0.*" }
+            other_desk = { kind = "ucnet", mac = "00:0a:92:00:00:01", optional = true }
+            bad_mac = { kind = "artnet", mac = "00:50:c2" }
+        "#);
+        let (e, errs) = parse(Some(&v));
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert_eq!(e.iter().find(|x| x.id == "truss").and_then(|x| x.mac.as_deref()), Some("00:50:c2:12:34:56"), "normalized");
+        let b = assign(&e, &[desk, node, bare]);
+        assert_eq!((b["desk"], b["truss"], b["floor"]), (0, 1, 2));
+        // the console's MAC is only known sometimes: a MAC entry doesn't bind a console without one
+        assert!(!b.contains_key("other_desk"));
+        assert_eq!(health(&e, &b).0, "warn");
     }
 }

@@ -89,7 +89,13 @@ fn declare(hub: &Hub) {
     hub.declare("queue.quota.remaining", ro(Meta::int(0, [0.0, 1e9]).unit("units"), "YouTube API units left today"));
     hub.declare("song.state", ro(Meta::enumeration("idle", &["idle", "loading", "buffering", "playing", "paused", "ad"]), "Player state"));
     hub.declare("song.duration", ro(Meta::float(0.0, [0.0, 86_400.0]).unit("s"), "Current song duration"));
-    hub.declare("song.media", ro(Meta::string(""), "Timeline media key of the current song (`yt:<id>`)"));
+    hub.declare(
+        "song.media",
+        ro(
+            Meta::string(""),
+            "Timeline media key of the song player's current song (`yt:<id>`); only the song queue sets it (local media files report `source.<n>.media`)",
+        ),
+    );
     hub.declare("song.player", ro(Meta { ty: ValueType::Map, ..Default::default() }, "Desired state of the player page (web/player.html)"));
     hub.declare("song.volume", Meta::float(1.0, [0.0, 1.0]).owner(OWNER).describe("YouTube player volume (the music bus fader comes after it)"));
     for h in ["health.youtube", "health.player"] {

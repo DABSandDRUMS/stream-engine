@@ -9,7 +9,7 @@ exactly.
 
 ```toml
 # timelines/nightly_song.toml
-media = "yt:VIDEO_ID"            # or: source = "internal" | "manual" | "mtc[:port]" | "ltc[:tap]" | "media:<id>"
+media = "yt:VIDEO_ID"            # or "file:<hash>" | "isrc:<code>"; or: source = "internal" | "manual" | "mtc[:port]" | "ltc[:tap]" | "media:<id>"
 fps = "30"                       # 24 | 25 | 29.97df | 30 — timecode labels (MTC/LTC report their own)
 priority = 200                   # override priority of this timeline's sets/automation (1–299)
 length = "4:05"                  # internal/manual: stop (or loop) here; also the UI extent
@@ -21,7 +21,7 @@ analysis = "assets/song.wav"     # audio file whose offline analysis gives the b
 record_track = "recorded"        # where record mode writes cues
 
 [chase]                          # external sources only
-jitter = "80ms"                  # lock tolerance (media default 80 ms; MTC/LTC 1 frame)
+jitter = "80ms"                  # lock tolerance (yt: 80 ms, file:/isrc: 20 ms; MTC/LTC 1 frame)
 jump = "500ms"                   # beyond this a discontinuity is a locate (tracked state is applied)
 freewheel = "1s"                 # keep running this long when the source goes quiet (MTC/LTC default 2 s)
 
@@ -80,6 +80,8 @@ A broken file keeps its last good version running; the error shows in the UI con
 | `internal` | show clock | `timeline.play|pause|toggle|stop|locate|jog` from UI, deck, rules, CLI |
 | `manual` | jog/locate | optional `scrub = "<signal>"` (0–1 × `scrub_range`, default `length`) for a fader/encoder |
 | `media:yt:<id>` (`media = "yt:<id>"`) | `song.position` | active only while `song.media` is this id; holds while `song.state` isn't `playing`; a seek is a jump |
+| `media:file:<hash>` | a media source playing that file | exact: the time of every shown frame; active while it plays, holds on pause/end |
+| `media:isrc:<code>` | a media source whose file is tagged with that ISRC | as `file:`; `US-RC1-76-07839` and `USRC17607839` are the same code |
 | `mtc` / `mtc:<port>` | MIDI Time Code | quarter + full-frame messages; port from `[timecode] mtc_in` |
 | `ltc` / `ltc:<tap>` | SMPTE LTC audio | decoded from an input tap; tap from `[timecode] ltc_in` |
 
@@ -87,6 +89,20 @@ External sources are **chased**: observations are fitted to a smooth clock (posi
 jitter inside `jitter` is absorbed without steps, larger corrections re-sync, the timeline
 freewheels through dropouts for `freewheel`, then holds (`lost`). Status: `timeline.<n>.status`
 = `idle | disabled | stopped | paused | playing | waiting | locking | locked | freewheel | lost`.
+
+### Media: who reports the song
+
+* **The song player** (song requests, YouTube) is the only producer of `song.media`,
+  `song.position` and `song.state`. Its reported time is smoothed and interpolated; `yt:`
+  timelines follow it.
+* **Local media** (media-file sources, `sources/<n>.toml` with `file = …`) publishes
+  `source.<n>.media` = `file:<hash>` — the first 16 hex digits of the BLAKE3 hash of the file,
+  the same key the offline analysis uses, so a `file:` timeline gets the file's beat grid — and
+  `source.<n>.isrc` from the file's `ISRC`/`TSRC` tag. `file:`/`isrc:` timelines follow that
+  playback with the exact position of each shown frame (pause, seek, loop, rate and end
+  included; chase defaults: 20 ms jitter, 250 ms jump). If two sources play the same file at
+  once, the one that started first drives the timeline until it stops.
+* To find a file's id: `streamctl get source.<n>.media` while it plays.
 
 ### Jumps and tracked state
 
@@ -177,7 +193,8 @@ offline (§8.4).
 ## Replay
 
 MTC/LTC positions enter the core as recorded `timecode` inputs (≈15 per second while locked,
-every discontinuity immediately). `song.position` and scrub signals aren't part of the session
-log, so the core records each position it consumes as a `timecode` input itself; player state
-(`song.media`, `song.state`) is replayed as state. `stream-engine replay` therefore reproduces
-timeline positions, fired cues, and automation exactly.
+every discontinuity immediately); so do local media positions (`media:file:<hash>`,
+`media:isrc:<code>`). `song.position` and scrub signals aren't part of the session log, so the
+core records each position it consumes as a `timecode` input itself; player state (`song.media`,
+`song.state`) is replayed as state. `stream-engine replay` therefore reproduces timeline
+positions, fired cues, and automation exactly.

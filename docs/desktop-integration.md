@@ -53,6 +53,43 @@ engine from a terminal.
 The UI is launched on demand (`stream-engine ui`, the desktop entry, the bar widget, or the
 keybind); closing it never affects output.
 
+## Going live
+
+**Go live** in the top bar first runs every preflight check (the same list as
+`streamctl preflight`: devices, cameras, OBS, Twitch, sound, lights, disk space, graphics card,
+screen lock, night light, …) and shows it in plain words, problems first, each with a **Fix**
+button. The two start buttons ("Starting-soon screen first", "Go live right now") only work when
+everything is green — optional extras that aren't set up (song requests, tips, TikTok) don't count
+— or after switching on **Go live anyway**. The list refreshes every few seconds while it's open.
+Starting sets the show mode first and then starts OBS, so going live from rehearsal works.
+
+## Notifications
+
+Background problems show up as desktop notifications (freedesktop, via `notify-send`; the
+Omarchy shell is the notification daemon) — only while no Stream Engine window has focus, and
+never for routine events:
+
+| Problem | When |
+|---|---|
+| OBS stopped getting the main / vertical video | OBS is open, the feed has been stale for 5 s, and it matters (streaming, recording, or a show mode other than off air / rehearsal) |
+| "*device*" was disconnected | an expected device (`[devices.expected]`) that was present went away for 3 s |
+| Twitch (or the chat bot) needs you to sign in again | the sign-in expired or failed, or renewing keeps failing, for a minute |
+| The disk is almost full | under 10 GB free on the project disk |
+| Backups / recordings disk / recordings budget | asked for by the backup and retention tasks ([extras.md](extras.md#backups-and-retention)) |
+
+Each problem is notified once per occurrence; the same problem isn't repeated within 30 minutes,
+and notifications are at least 30 s apart (problems that come up in between arrive together as
+"N things need your attention"). A problem that starts while a Stream Engine window is in front
+counts as seen. Clicking a notification opens (or focuses) the UI on the page that fixes it.
+
+The UI reports its focus with the action `ui.focus {focused, pid}` whenever it changes and after
+every reconnect; a UI that has exited, or no UI at all, counts as not focused (`ui.focused`
+state). Other subsystems, presets or rules can ask for one with
+`notify.send {title, body?, key?, urgency = normal|critical, open?}` (same rules; `open` is the UI
+page to show on click, e.g. `devices`). Every notification is also the event `notify.sent`.
+Notifications are part of the `extras` subsystem (`SE_DISABLE=extras` turns them off in
+development).
+
 ## Device access (udev)
 
 `70-stream-engine.rules` gives the logged-in user (`TAG+="uaccess"`, mode 0660) access to:

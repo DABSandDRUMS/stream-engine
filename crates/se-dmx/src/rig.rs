@@ -249,6 +249,9 @@ pub enum OutputKind {
 pub struct OutputDef {
     pub id: String,
     pub enabled: bool,
+    /// Keeps sending the live show in `rehearsal` mode (a test node or visualizer); other
+    /// outputs hold the look they had when rehearsal started (§17.2).
+    pub rehearsal: bool,
     pub kind: OutputKind,
 }
 
@@ -785,6 +788,7 @@ struct RawOutput {
     net: Option<u8>,
     subnet: Option<u8>,
     widget_rate: Option<u8>,
+    rehearsal: Option<bool>,
 }
 
 impl RawOutput {
@@ -856,7 +860,7 @@ impl RawOutput {
             }
             o => return Err(format!("unknown output kind `{o}`")),
         };
-        Ok(OutputDef { id: id.into(), enabled, kind })
+        Ok(OutputDef { id: id.into(), enabled, rehearsal: self.rehearsal.unwrap_or(false), kind })
     }
 }
 

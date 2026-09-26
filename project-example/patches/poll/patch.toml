@@ -1,0 +1,18 @@
+# Poll: the running Twitch poll (state `twitch.poll`) with live vote bars and time left; when it
+# ends, the winner stays up for `result_seconds`. Placement: [overlays.poll] in project.toml,
+# shown while `twitch.poll.active` or `patch.poll.showing` (the page keeps that on for the result).
+# Run polls from Community → Twitch → Polls & predictions, or `twitch.poll.start` / `twitch.poll.end`.
+kind        = "web"
+entry       = "index.html"
+layer       = "overlay"
+label       = "Poll"
+description = "Twitch poll with live results and the winner"
+size        = [576, 432]
+fps         = 30
+params.result_seconds = { type = "float", default = 12.0, range = [0.0, 120.0], unit = "s", description = "How long the result stays up after the poll ends" }
+params.show_votes     = { type = "bool",   default = true, description = "Vote counts next to the percentages" }
+params.showing        = { type = "bool",   default = false, description = "The card is on screen (set by the page)" }
+params.accent         = { type = "color",  default = "#7aa2f7" }
+params.text_color     = { type = "color",  default = "#ffffff" }
+params.card_bg        = { type = "color",  default = [0.07, 0.08, 0.12, 0.88] }
+params.font           = { type = "string", default = "" }

@@ -235,6 +235,10 @@ pub struct TransitionPool {
     pub lights: Option<LightsRef>,
     /// Explicit transition (overrides the pool).
     pub name: Option<String>,
+    /// Scene-pair pools (`[transitions.from.<scene>]`): used instead of this pool when the take
+    /// comes from that scene.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub from: BTreeMap<String, TransitionPool>,
 }
 
 impl TransitionPool {
@@ -244,6 +248,40 @@ impl TransitionPool {
             Some(v) => v.as_f64().map(|m| (m as u32, m as u32)),
             None => None,
         }
+    }
+
+    /// The effective settings for a take from `from`: the pair's (`[transitions.from.<from>]`)
+    /// where it gives them, else this (the target scene's). A pair with its own `pool` also
+    /// brings its own `avoid_repeat` and ignores the scene's fixed `name`.
+    pub fn for_pair(&self, from: &str) -> TransitionPool {
+        let Some(p) = self.from.get(from) else { return TransitionPool { from: BTreeMap::new(), ..self.clone() } };
+        let own_pool = !p.pool.is_empty();
+        TransitionPool {
+            pool: if own_pool { p.pool.clone() } else { self.pool.clone() },
+            avoid_repeat: if own_pool { p.avoid_repeat } else { self.avoid_repeat },
+            ms: p.ms.clone().or_else(|| self.ms.clone()),
+            lights: p.lights.clone().or_else(|| self.lights.clone()),
+            name: if own_pool { p.name.clone() } else { p.name.clone().or_else(|| self.name.clone()) },
+            from: BTreeMap::new(),
+        }
+    }
+}
+
+/// `[transition_vote]` in project.toml (§4.4): chat votes (`transition.vote`, e.g. `!transition
+/// fade`) collected over `window` pick the next take's transition.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TransitionVoteDef {
+    pub enabled: bool,
+    /// Only votes from this long before the take count.
+    pub window: Dur,
+    /// What viewers may vote for (empty = every transition).
+    pub choices: Vec<String>,
+}
+
+impl Default for TransitionVoteDef {
+    fn default() -> Self {
+        TransitionVoteDef { enabled: true, window: Dur(60_000), choices: Vec::new() }
     }
 }
 
@@ -652,17 +690,56 @@ impl Config {
     /// Cross-file checks (reported, never fatal).
     fn validate(&mut self) {
         let mut errs = Vec::new();
+        let known = |n: &str| self.transitions.contains_key(n) || BUILTIN_TRANSITIONS.contains(&n);
         for s in self.scenes.values() {
+            let file = self.files.get(&format!("scenes/{}", s.name)).cloned().unwrap_or_default();
+            let mut err = |msg: String| errs.push(ConfigError { file: file.clone(), msg });
             for e in &s.transitions.pool {
-                if !self.transitions.contains_key(&e.name) && !BUILTIN_TRANSITIONS.contains(&e.name.as_str()) {
-                    errs.push(ConfigError {
-                        file: self.files.get(&format!("scenes/{}", s.name)).cloned().unwrap_or_default(),
-                        msg: format!("unknown transition `{}`", e.name),
-                    });
+                if !known(&e.name) {
+                    err(format!("unknown transition `{}`", e.name));
+                }
+            }
+            for (from, p) in &s.transitions.from {
+                if !self.scenes.contains_key(from) {
+                    err(format!("[transitions.from.{from}]: unknown scene `{from}`"));
+                }
+                if !p.from.is_empty() {
+                    err(format!("[transitions.from.{from}] can't have its own `from` pools"));
+                }
+                for n in p.pool.iter().map(|e| &e.name).chain(&p.name) {
+                    if !known(n) {
+                        err(format!("[transitions.from.{from}]: unknown transition `{n}`"));
+                    }
                 }
             }
         }
+        let project_file = self.files.get("project/project").cloned().unwrap_or_else(|| "project.toml".into());
+        match self.transition_vote() {
+            Ok(Some(v)) => {
+                for n in v.choices.iter().filter(|n| !known(n)) {
+                    errs.push(ConfigError { file: project_file.clone(), msg: format!("[transition_vote] choices: unknown transition `{n}`") });
+                }
+            }
+            Ok(None) => {}
+            Err(e) => errs.push(ConfigError { file: project_file, msg: e }),
+        }
         self.errors.extend(errs);
+    }
+
+    /// `[transition_vote]` of project.toml (`None` when the section is absent).
+    pub fn transition_vote(&self) -> Result<Option<TransitionVoteDef>, String> {
+        match self.project.extra.get("transition_vote") {
+            None => Ok(None),
+            Some(v) => v.clone().try_into().map(Some).map_err(|e: toml::de::Error| format!("[transition_vote]: {}", e.message())),
+        }
+    }
+
+    /// Every transition name: built-ins first, then project files (a file overriding a
+    /// built-in is listed once).
+    pub fn transition_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = BUILTIN_TRANSITIONS.iter().map(|s| s.to_string()).collect();
+        names.extend(self.transitions.keys().filter(|k| !BUILTIN_TRANSITIONS.contains(&k.as_str())).cloned());
+        names
     }
 
     /// Keep the previous version of any file that failed to parse this time.

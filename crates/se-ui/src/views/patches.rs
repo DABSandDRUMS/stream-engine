@@ -4,11 +4,12 @@
 //! shipped templates. File locations, script CPU and errors with line numbers live under Details.
 
 use crate::app::App;
+use crate::views::composition::source_label;
 use crate::views::live::nice;
 use egui::{Align, Color32, Layout, RichText, Vec2};
 use se_proto::{Op, Value};
 use se_ui_kit::theme::{font_mono, font_semibold, mix, radius, spacing, type_scale};
-use se_ui_kit::widgets::{self, Kind, Size, icon};
+use se_ui_kit::widgets::{self, Kind, Size, Tone, icon};
 
 /// Kinds a user can create: (kind, friendly name, one-line explanation).
 const NEW_KINDS: &[(&str, &str, &str)] = &[
@@ -75,6 +76,31 @@ fn kind_icon(kind: &str) -> &'static str {
         "script" => icon::BOLT,
         "dsp" => icon::VOLUME,
         _ => icon::SPARKLE,
+    }
+}
+
+/// A manifest grant in words: `lights.*` → "lights", `source.cam1` → the camera's name,
+/// `patch.confetti` → "the Confetti overlay".
+fn grant_words(app: &App, grant: &str) -> String {
+    let mut segs = grant.split('.');
+    let root = segs.next().unwrap_or("");
+    let named = segs.next().filter(|s| !s.contains('*'));
+    match (root, named) {
+        ("source" | "sources", Some(n)) => source_label(app, n),
+        ("source" | "sources", None) => "cameras and other sources".into(),
+        ("patch", Some(n)) => format!("the {} overlay", nice(n)),
+        ("patch", None) => "other overlays".into(),
+        ("scene", Some(n)) if !["go", "cut", "take"].contains(&n) => format!("the {} scene", nice(n)),
+        ("scene", _) => "scenes".into(),
+        ("lights" | "dmx", _) => "lights".into(),
+        ("mixer" | "audio", _) => "sound".into(),
+        ("preset", _) => "presets".into(),
+        ("mode", _) => "the show mode".into(),
+        ("tts", _) => "the read-out voice".into(),
+        ("bot" | "chat", _) => "chat".into(),
+        ("queue" | "song" | "songs", _) => "music".into(),
+        ("fx", _) => "effects".into(),
+        (r, _) => nice(r),
     }
 }
 
@@ -283,6 +309,25 @@ fn patch_card(app: &mut App, ui: &mut egui::Ui, p: &Value, min_h: f32) -> f32 {
             if !desc.is_empty() {
                 ui.add_space(spacing::S);
                 ui.label(RichText::new(desc).color(t.text_dim));
+            }
+            let mut extra: Vec<String> = Vec::new();
+            for g in p.get_path("grants").and_then(Value::as_list).unwrap_or(&[]).iter().filter_map(Value::as_str) {
+                let w = grant_words(app, g);
+                if !extra.contains(&w) {
+                    extra.push(w);
+                }
+            }
+            if !extra.is_empty() {
+                ui.add_space(spacing::S);
+                widgets::callout(
+                    ui,
+                    &t,
+                    Tone::Info,
+                    icon::MOD,
+                    &format!("Can also control: {}", extra.join(", ")),
+                    "Its files give it this extra control. To take it away, use Edit files under Details.",
+                    None,
+                );
             }
             ui.add_space(spacing::S);
             ui.horizontal(|ui| {

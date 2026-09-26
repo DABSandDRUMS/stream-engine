@@ -3,9 +3,12 @@
 //! the flash limiter, dmabuf/shm export, and the multiview atlas (§4.1).
 
 use crate::addr::{Resolved, Whens};
-use crate::compose::{self, BLIT_COPY, BLIT_LIMIT, BLIT_OPAQUE, BlitUniform, FxContext, FxEval, FxUniform, Gfx, KIND_FLASH, LutLookup, NodeUniform};
+use crate::compose::{
+    self, BLIT_COPY, BLIT_LIMIT, BLIT_OPAQUE, BlitUniform, FusedUniform, FxContext, FxEval, FxStage, FxUniform, Gfx, KIND_FLASH, LutLookup, NodeUniform,
+};
 use crate::effects::{Exec, LIBRARY, Point};
 use crate::export::{DRM_FORMAT_ABGR8888, DmabufRing, FenceExport, MAX_BARRIERS, ownership_barrier};
+use crate::fuse::{FusedPipe, Step, Steps};
 use crate::gpu::Gpu;
 use crate::limiter::{CELLS, FlashDetector};
 use crate::lut::Lut;
@@ -89,17 +92,27 @@ pub enum Msg {
         effect: String,
         level: Option<f32>,
     },
+    /// A patch was triggered with this payload (`se_core::triggers::TriggerPayload::floats`).
     PatchTrigger {
         patch: String,
+        payload: [f32; se_core::triggers::PAYLOAD_FLOATS],
     },
     /// A file under assets/ changed: reload it if it is in use (project-relative path).
     AssetChanged(String),
+    /// A fused pointwise effect chain compiled for device `device_gen` (`crate::fuse`).
+    Fused {
+        device_gen: u64,
+        chain: Box<[u8]>,
+        pipeline: wgpu::RenderPipeline,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum PipeKey {
     Patch(String),
     Transition(String),
+    /// Custom enter/exit style shader file (project-relative path).
+    Style(String),
 }
 
 enum Slot {
@@ -257,7 +270,7 @@ impl CanvasRt {
     }
 }
 
-/// Per-transition compiled shader with its static params.
+/// Per-transition (or style file) compiled shader with its static params.
 struct TransitionRt {
     layout: se_patch::wgsl::Layout,
     pipes: Arc<UserPipes>,
@@ -279,7 +292,13 @@ pub struct Renderer {
     sources: Vec<Src>,
     patches: Vec<PatchRt>,
     transitions: HashMap<String, TransitionRt>,
+    /// Compiled custom enter/exit style files by path.
+    styles: HashMap<String, TransitionRt>,
     user_patch_pipes: HashMap<String, (se_patch::wgsl::Layout, Arc<UserPipes>)>,
+    /// Fused effect chains compiled for this device (kept across plan swaps), shortest first.
+    fused: Vec<FusedPipe>,
+    /// Effect passes this frame, and effects that ran inside fused passes.
+    fx_counts: FxCounts,
     fade_layout: se_patch::wgsl::Layout,
     fade_buf: Vec<f32>,
     luts: HashMap<String, Slot>,
@@ -358,7 +377,10 @@ impl Renderer {
             sources: Vec::new(),
             patches: Vec::new(),
             transitions: HashMap::new(),
+            styles: HashMap::new(),
             user_patch_pipes: HashMap::new(),
+            fused: Vec::new(),
+            fx_counts: FxCounts::default(),
             fade_buf: vec![0.0; fade_layout.floats],
             fade_layout,
             luts: HashMap::new(),
@@ -504,6 +526,7 @@ impl Renderer {
         for (name, t) in self.transitions.iter_mut() {
             t.values = transition_values(&plan, name, &t.layout);
         }
+        self.styles.retain(|path, _| plan.styles.iter().any(|s| matches!(s, ShaderSource::File(p) if p.to_str() == Some(path.as_str()))));
         self.trigger_levels = vec![None; plan.effects.len()];
         self.globals_canvas = plan.global_attaches(Point::Canvas);
         self.globals_output = plan.global_attaches(Point::Output);
@@ -537,6 +560,10 @@ impl Renderer {
                         let values = transition_values(&self.plan, &name, &layout);
                         let buf = vec![0.0; layout.floats];
                         self.transitions.insert(name, TransitionRt { layout, pipes, values, buf });
+                    }
+                    PipeKey::Style(path) => {
+                        let buf = vec![0.0; layout.floats];
+                        self.styles.insert(path, TransitionRt { layout, pipes, values: Vec::new(), buf });
                     }
                 }
             }
@@ -617,9 +644,18 @@ impl Renderer {
                     }
                 }
             }
-            Msg::PatchTrigger { patch } => {
+            Msg::Fused { device_gen, chain, pipeline } => {
+                if device_gen == self.device_gen {
+                    self.fused.retain(|f| f.chain != chain);
+                    let at = self.fused.partition_point(|f| f.chain.len() <= chain.len());
+                    self.fused.insert(at, FusedPipe { chain, pipeline });
+                }
+            }
+            Msg::PatchTrigger { patch, payload } => {
                 if let Some(i) = self.plan.patch_index.get(&patch) {
-                    self.patches[*i].trigger_count = self.patches[*i].trigger_count.wrapping_add(1);
+                    let rt = &mut self.patches[*i];
+                    rt.trigger_count = rt.trigger_count.wrapping_add(1);
+                    rt.trigger = payload;
                 }
             }
         }
@@ -737,6 +773,7 @@ impl Renderer {
             self.gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") })
         };
         self.arena.reset();
+        self.fx_counts = FxCounts::default();
         if let Some(ts) = &mut self.ts {
             ts.begin_frame();
             ts.start(&mut enc, P_SOURCES);
@@ -801,6 +838,7 @@ impl Renderer {
 
         let ms = started.elapsed().as_secs_f32() * 1000.0;
         self.stats.set_frame(ms);
+        self.stats.set_fx(self.fx_counts.passes, self.fx_counts.fused);
         self.stats.frames.fetch_add(1, Ordering::Relaxed);
         if now.saturating_sub(self.last_vram_query) > 1_000_000_000 {
             self.last_vram_query = now;
@@ -906,6 +944,8 @@ impl Renderer {
             vector,
             vector_error_logged,
             frame,
+            fused,
+            fx_counts,
             ..
         } = self;
         let device = &gpu.device;
@@ -957,9 +997,10 @@ impl Renderer {
                             let (a, b) = (a.as_ref().expect("allocated"), b.as_ref().expect("allocated"));
                             let mut cur = out;
                             let mut which = 0;
-                            for e in fx.iter() {
+                            let chain = Chain { evals: fx, fused, region: [0.0, 0.0, 1.0, 1.0], scissor: None, quarter: None };
+                            for step in Steps::new(&plan, fx, fused) {
                                 let dst = if which == 0 { a } else { b };
-                                apply_effect(enc, &mut g, &plan, patches, e, cur, dst, None, [0.0, 0.0, 1.0, 1.0], None, snap, res, fi, lut_views);
+                                apply_step(enc, &mut g, &plan, patches, &chain, step, cur, dst, snap, res, fi, lut_views, fx_counts);
                                 cur = dst;
                                 s.fx_out = Some(which);
                                 which ^= 1;
@@ -1005,7 +1046,7 @@ impl Renderer {
                         }
                         rt.last_render_ns[li] = now_ns.max(1);
                         let res_px = [t.size[0] as f32, t.size[1] as f32];
-                        let off = rt.uniforms(pp, snap, res, fi, res_px, 0.0, None, arena);
+                        let off = rt.uniforms(pp, snap, res, fi, res_px, se_patch::wgsl::FULL, 0.0, None, arena);
                         if !simulated {
                             rt.simulate(device, enc, layouts, arena, binds, *frame, off, count);
                             simulated = true;
@@ -1069,8 +1110,11 @@ impl Renderer {
             globals_canvas,
             globals_output,
             transitions,
+            styles,
             fade_layout,
             fade_buf,
+            fused,
+            fx_counts,
             ..
         } = self;
         let device = &gpu.device;
@@ -1079,7 +1123,17 @@ impl Renderer {
         let cx = FxContext { plan: &plan, snap, res, trigger_levels, flash_scale };
         let mut g = Gfx { device, layouts, pipes, arena, binds };
 
-        // node effects: pre-render each node with active fx into a pool texture
+        // custom enter/exit styles that cannot run (not compiled yet, no texture) fade instead
+        for it in cv.items.iter_mut().chain(cv.items_b.iter_mut()) {
+            if let Some((st, p)) = it.style
+                && (!style_ready(&plan, patches, styles, st) || sources[it.source as usize].tex(layout).is_none())
+            {
+                it.opacity *= p;
+                it.style = None;
+            }
+        }
+
+        // node effects and custom styles: pre-render each such node into a pool texture
         cv.slots.clear();
         cv.slots.resize(n, -1);
         cv.slots_b.clear();
@@ -1090,12 +1144,14 @@ impl Renderer {
             for i in 0..count {
                 let it = if pass_b { cv.items_b[i] } else { cv.items[i] };
                 let node = it.node(&plan);
-                if node.fx.is_empty() {
+                if node.fx.is_empty() && it.style.is_none() {
                     continue;
                 }
                 fx_node.clear();
-                compose::eval_attaches(&cx, whens, &mut LutTable { map: luts, assets }, &node.fx, fx_node);
-                if fx_node.is_empty() {
+                if !node.fx.is_empty() {
+                    compose::eval_attaches(&cx, whens, &mut LutTable { map: luts, assets }, &node.fx, fx_node);
+                }
+                if fx_node.is_empty() && it.style.is_none() {
                     continue;
                 }
                 let Some((stex, premult)) = sources[it.source as usize].tex(layout) else { continue };
@@ -1123,9 +1179,14 @@ impl Renderer {
                 let mut cur = used_pool;
                 let spare_idx = used_pool + 1;
                 let mut spare = spare_idx;
-                for e in fx_node.iter() {
+                let chain = Chain { evals: fx_node, fused, region, scissor, quarter: None };
+                for step in Steps::new(&plan, fx_node, fused) {
                     let (src_t, dst_t) = (&cv.pool[cur], &cv.pool[spare]);
-                    apply_effect(enc, &mut g, &plan, patches, e, src_t, dst_t, None, region, scissor, snap, res, fi, lut_views);
+                    apply_step(enc, &mut g, &plan, patches, &chain, step, src_t, dst_t, snap, res, fi, lut_views, fx_counts);
+                    std::mem::swap(&mut cur, &mut spare);
+                }
+                if let Some((st, presence)) = it.style {
+                    style_pass(enc, &mut g, &plan, patches, styles, st, presence, region, &cv.pool[cur], &cv.pool[spare], snap, res, fi);
                     std::mem::swap(&mut cur, &mut spare);
                 }
                 if cur != used_pool {
@@ -1199,7 +1260,7 @@ impl Renderer {
         if let Some(s) = program {
             fx.clear();
             compose::eval_attaches(&cx, whens, &mut LutTable { map: luts, assets }, &plan.scenes[s].layouts[layout].fx, fx);
-            run_chain(enc, &mut g, &plan, patches, fx, &cv.t, &cv.quarter, &mut cur, &mut spare, snap, res, fi, lut_views);
+            run_chain(enc, &mut g, &plan, patches, fx, fused, &cv.t, &cv.quarter, &mut cur, &mut spare, snap, res, fi, lut_views, fx_counts);
         }
         if shader_tr || combined_tr {
             let (a_idx, b_idx) = if shader_tr {
@@ -1209,7 +1270,7 @@ impl Renderer {
                 if let Some(f) = tr.from {
                     fx.clear();
                     compose::eval_attaches(&cx, whens, &mut LutTable { map: luts, assets }, &plan.scenes[f].layouts[layout].fx, fx);
-                    run_chain(enc, &mut g, &plan, patches, fx, &cv.t, &cv.quarter, &mut fcur, &mut fspare, snap, res, fi, lut_views);
+                    run_chain(enc, &mut g, &plan, patches, fx, fused, &cv.t, &cv.quarter, &mut fcur, &mut fspare, snap, res, fi, lut_views, fx_counts);
                 }
                 (fcur, cur)
             } else {
@@ -1242,12 +1303,12 @@ impl Renderer {
         fx.clear();
         compose::eval_attaches(&cx, whens, &mut LutTable { map: luts, assets }, &plan.canvases[c].fx, fx);
         compose::eval_attaches(&cx, whens, &mut LutTable { map: luts, assets }, globals_canvas, fx);
-        run_chain(enc, &mut g, &plan, patches, fx, &cv.t, &cv.quarter, &mut cur, &mut spare, snap, res, fi, lut_views);
+        run_chain(enc, &mut g, &plan, patches, fx, fused, &cv.t, &cv.quarter, &mut cur, &mut spare, snap, res, fi, lut_views, fx_counts);
         draw_overlays(enc, &mut g, &plan, c, sources, &cv.t[cur], false, &cx, whens);
         fx.clear();
         compose::eval_attaches(&cx, whens, &mut LutTable { map: luts, assets }, &plan.canvases[c].output_fx, fx);
         compose::eval_attaches(&cx, whens, &mut LutTable { map: luts, assets }, globals_output, fx);
-        run_chain(enc, &mut g, &plan, patches, fx, &cv.t, &cv.quarter, &mut cur, &mut spare, snap, res, fi, lut_views);
+        run_chain(enc, &mut g, &plan, patches, fx, fused, &cv.t, &cv.quarter, &mut cur, &mut spare, snap, res, fi, lut_views, fx_counts);
 
         // final: flash limiter (program canvases) or plain copy (preview)
         if c == PREVIEW {
@@ -1583,6 +1644,24 @@ fn transition_values(plan: &Plan, name: &str, layout: &se_patch::wgsl::Layout) -
     layout.params.iter().map(|(n, _, _)| tp.params.iter().find(|(k, _)| k == n).map_or([0.0; 4], |(_, spec)| crate::plan::param_default4(spec))).collect()
 }
 
+/// Effect passes of the frame so far, and how many effects ran inside fused passes.
+#[derive(Clone, Copy, Debug, Default)]
+struct FxCounts {
+    passes: u32,
+    fused: u32,
+}
+
+/// An evaluated effect chain and where it runs.
+struct Chain<'a> {
+    evals: &'a [FxEval],
+    fused: &'a [FusedPipe],
+    /// uv region the effects apply to (node effects: the node rect).
+    region: [f32; 4],
+    scissor: Option<[u32; 4]>,
+    /// Quarter-resolution targets for blur (canvas chains).
+    quarter: Option<&'a [Tex]>,
+}
+
 /// Run an effect chain on canvas targets, ping-ponging between `cur` and `spare`.
 #[allow(clippy::too_many_arguments)]
 fn run_chain(
@@ -1591,6 +1670,7 @@ fn run_chain(
     plan: &Plan,
     patches: &mut [PatchRt],
     evals: &[FxEval],
+    fused: &[FusedPipe],
     t: &[Tex],
     quarter: &[Tex],
     cur: &mut usize,
@@ -1599,10 +1679,56 @@ fn run_chain(
     res: &Resolved,
     fi: &FrameInputs,
     lut_views: &[wgpu::TextureView],
+    counts: &mut FxCounts,
 ) {
-    for e in evals {
-        apply_effect(enc, g, plan, patches, e, &t[*cur], &t[*spare], Some(quarter), [0.0, 0.0, 1.0, 1.0], None, snap, res, fi, lut_views);
+    let chain = Chain { evals, fused, region: [0.0, 0.0, 1.0, 1.0], scissor: None, quarter: Some(quarter) };
+    for step in Steps::new(plan, evals, fused) {
+        apply_step(enc, g, plan, patches, &chain, step, &t[*cur], &t[*spare], snap, res, fi, lut_views, counts);
         std::mem::swap(cur, spare);
+    }
+}
+
+/// One pass of a chain `input → out`: a single effect, or a run of pointwise effects through
+/// their fused pipeline (stages of inactive effects stay at strength 0 and are skipped).
+#[allow(clippy::too_many_arguments)]
+fn apply_step(
+    enc: &mut wgpu::CommandEncoder,
+    g: &mut Gfx,
+    plan: &Plan,
+    patches: &mut [PatchRt],
+    chain: &Chain,
+    step: Step,
+    input: &Tex,
+    out: &Tex,
+    snap: &Snapshot,
+    res: &Resolved,
+    fi: &FrameInputs,
+    lut_views: &[wgpu::TextureView],
+    counts: &mut FxCounts,
+) {
+    counts.passes += 1;
+    match step {
+        Step::Single(i) => {
+            apply_effect(enc, g, plan, patches, &chain.evals[i], input, out, chain.quarter, chain.region, chain.scissor, snap, res, fi, lut_views);
+        }
+        Step::Fused { first, len, pipe, slots } => {
+            counts.fused += len as u32;
+            let mut u = FusedUniform {
+                head: FxUniform {
+                    resolution: [input.size[0] as f32, input.size[1] as f32],
+                    time: fi.time,
+                    region: chain.region,
+                    beat_phase: res.signal(snap, plan.show.beat_phase),
+                    bass: res.signal(snap, plan.show.bass),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            for (e, slot) in chain.evals[first..first + len].iter().zip(slots) {
+                u.stages[slot as usize] = FxStage { params: e.params, strength: e.strength, pad: [0.0; 3] };
+            }
+            compose::fx_pass(enc, g, &chain.fused[pipe].pipeline, &u, input, None, None, out, chain.scissor);
+        }
     }
 }
 
@@ -1640,7 +1766,7 @@ fn apply_effect(
                 pad: 0.0,
             };
             match def.exec {
-                Exec::Simple => compose::fx_pass(enc, g, &g.pipes.effects[*i], &u, input, None, None, out, scissor),
+                Exec::Simple | Exec::Pointwise => compose::fx_pass(enc, g, &g.pipes.effects[*i], &u, input, None, None, out, scissor),
                 Exec::Lut => {
                     let lut = (e.lut > 0).then(|| (e.lut, &lut_views[e.lut as usize - 1]));
                     compose::fx_pass(enc, g, &g.pipes.effects[*i], &u, input, None, lut, out, scissor);
@@ -1664,12 +1790,28 @@ fn apply_effect(
         EffectKind::Patch(id) => {
             let Some(pi) = plan.patch_index.get(id).copied() else { return };
             let rt = &mut patches[pi];
-            let off = rt.uniforms(&plan.patches[pi], snap, res, fi, size, 0.0, Some(e.strength), g.arena);
+            let off = rt.uniforms(&plan.patches[pi], snap, res, fi, size, region, 0.0, Some(e.strength), g.arena);
             if !rt.draw(g.device, enc, g.layouts, g.arena, g.binds, &out.view, off, Some(input), None, 0) {
                 // not compiled (yet): pass the input through unchanged
                 compose::blit(enc, g, BlitUniform { mode: BLIT_COPY, ..Default::default() }, input, None, &out.view);
             }
         }
+    }
+}
+
+/// Fixed header fields of a transition-style pass (full target, env 1, no trigger).
+fn transition_fixed(fi: &FrameInputs, size: [f32; 2], progress: f32) -> se_patch::wgsl::Fixed<'_> {
+    se_patch::wgsl::Fixed {
+        time: fi.time,
+        dt: fi.dt,
+        frame: fi.frame,
+        env: 1.0,
+        resolution: size,
+        progress,
+        trigger_count: 0,
+        region: se_patch::wgsl::FULL,
+        trigger: &se_patch::wgsl::NO_TRIGGER,
+        palette: &fi.palette,
     }
 }
 
@@ -1698,7 +1840,7 @@ fn transition_pass(
         && let Some(pi) = plan.patch_index.get(id).copied()
     {
         let rt = &mut patches[pi];
-        let off = rt.uniforms(&plan.patches[pi], snap, res, fi, size, progress, Some(1.0), g.arena);
+        let off = rt.uniforms(&plan.patches[pi], snap, res, fi, size, se_patch::wgsl::FULL, progress, Some(1.0), g.arena);
         if rt.draw(g.device, enc, g.layouts, g.arena, g.binds, &out.view, off, Some(a), Some(b), 0) {
             return;
         }
@@ -1707,33 +1849,28 @@ fn transition_pass(
         (Some(ShaderSource::File(_)), Some(t)) => match t.pipes.as_ref() {
             UserPipes::Fullscreen(p) => {
                 let values = &t.values;
-                t.layout.write(
-                    &mut t.buf,
-                    fi.time,
-                    fi.dt,
-                    fi.frame,
-                    1.0,
-                    size,
-                    progress,
-                    0,
-                    &fi.palette,
-                    |i, _| values.get(i).copied().unwrap_or([0.0; 4]),
-                    sig,
-                );
+                t.layout.write(&mut t.buf, &transition_fixed(fi, size, progress), |i, _| values.get(i).copied().unwrap_or([0.0; 4]), sig);
                 (p, g.arena.push_f32(&t.buf))
             }
             UserPipes::Particles { .. } => return,
         },
         _ => {
-            fade_layout.write(fade_buf, fi.time, fi.dt, fi.frame, 1.0, size, progress, 0, &fi.palette, |_, _| [0.0; 4], sig);
+            fade_layout.write(fade_buf, &transition_fixed(fi, size, progress), |_, _| [0.0; 4], sig);
             (&g.pipes.fade, g.arena.push_f32(fade_buf))
         }
     };
+    header_pass(enc, g, "transition", pipeline, off, a, b, out);
+}
+
+/// One full-screen pass of a shader compiled with the generated header (`a` → `se_input`,
+/// `b` → `se_input_b`), uniform block at arena offset `off`.
+#[allow(clippy::too_many_arguments)]
+fn header_pass(enc: &mut wgpu::CommandEncoder, g: &mut Gfx, label: &'static str, pipeline: &wgpu::RenderPipeline, off: u32, a: &Tex, b: &Tex, out: &Tex) {
     let (device, layouts, arena) = (g.device, g.layouts, &*g.arena);
     let bg = g.binds.get_or((KIND_PATCH, a.id, b.id, 0), || {
         let _p = se_alloc::Pause::new();
         device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("transition"),
+            label: Some(label),
             layout: &layouts.patch,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: arena.binding() },
@@ -1745,10 +1882,58 @@ fn transition_pass(
         })
     });
     let _p = se_alloc::Pause::new();
-    let mut pass = compose::begin(enc, "transition", &out.view, Some([0.0; 4]));
+    let mut pass = compose::begin(enc, label, &out.view, Some([0.0; 4]));
     pass.set_pipeline(pipeline);
     pass.set_bind_group(0, bg, &[off]);
     pass.draw(0..3, 0..1);
+}
+
+/// Whether custom style `style` can run this frame (its shader is compiled).
+fn style_ready(plan: &Plan, patches: &[PatchRt], styles: &HashMap<String, TransitionRt>, style: u32) -> bool {
+    match plan.styles.get(style as usize) {
+        Some(ShaderSource::Patch(id)) => plan.patch_index.get(id).is_some_and(|pi| matches!(patches[*pi].pipes.as_deref(), Some(UserPipes::Fullscreen(_)))),
+        Some(ShaderSource::File(p)) => p.to_str().is_some_and(|k| styles.contains_key(k)),
+        _ => false,
+    }
+}
+
+/// Draw a node (`input`, the node alone at its place) through its custom enter/exit style at
+/// `presence` (0 = gone, 1 = in place) into `out`. `region`: the node's uv rect.
+#[allow(clippy::too_many_arguments)]
+fn style_pass(
+    enc: &mut wgpu::CommandEncoder,
+    g: &mut Gfx,
+    plan: &Plan,
+    patches: &mut [PatchRt],
+    styles: &mut HashMap<String, TransitionRt>,
+    style: u32,
+    presence: f32,
+    region: [f32; 4],
+    input: &Tex,
+    out: &Tex,
+    snap: &Snapshot,
+    res: &Resolved,
+    fi: &FrameInputs,
+) {
+    let size = [out.size[0] as f32, out.size[1] as f32];
+    match plan.styles.get(style as usize) {
+        Some(ShaderSource::Patch(id)) => {
+            let Some(pi) = plan.patch_index.get(id).copied() else { return };
+            let rt = &mut patches[pi];
+            let off = rt.uniforms(&plan.patches[pi], snap, res, fi, size, region, presence, Some(1.0), g.arena);
+            rt.draw(g.device, enc, g.layouts, g.arena, g.binds, &out.view, off, Some(input), None, 0);
+        }
+        Some(ShaderSource::File(p)) => {
+            let Some(s) = p.to_str().and_then(|k| styles.get_mut(k)) else { return };
+            let UserPipes::Fullscreen(pipeline) = s.pipes.as_ref() else { return };
+            let sig = |i: usize, _: &str| plan.std_signals.get(i).map_or(0.0, |s| res.signal(snap, *s));
+            let fixed = se_patch::wgsl::Fixed { region, ..transition_fixed(fi, size, presence) };
+            s.layout.write(&mut s.buf, &fixed, |_, _| [0.0; 4], sig);
+            let off = g.arena.push_f32(&s.buf);
+            header_pass(enc, g, "style", pipeline, off, input, input, out);
+        }
+        _ => {}
+    }
 }
 
 /// Composite the overlay layers of canvas `c` (those with `fx == with_fx`) onto `target`.

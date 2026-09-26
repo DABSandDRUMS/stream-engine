@@ -212,6 +212,7 @@ universes = [1]           # port-address = (net << 8) | (subnet << 4) | (univers
 net = 0
 subnet = 0
 # port = 6454             # optional UDP port override
+# rehearsal = true        # keep sending the live show in rehearsal (test node / visualizer); see §8
 
 [safety]
 max_flash_hz = 3.0
@@ -498,6 +499,13 @@ clamp the extra onsets — the output never exceeds 3 flashes/s.
   `(net << 8) | (subnet << 4) | (universe - 1)`.
 
 Several outputs may be enabled at once (e.g. USB PRO for universe 1 and sACN for a network node).
+
+**Rehearsal** (show mode `rehearsal`, §17.2): outputs keep sending, but each one holds the look it
+had when rehearsal started, so the room doesn't flash through the practice run; the Lights view
+(visualizer, DMX monitor) shows what the rehearsal does. An output with `rehearsal = true` (for
+example an Art-Net output to a test node or a visualizer program) gets the live rehearsal frames
+instead. Leaving rehearsal puts every output back on the live show. While held, the `lights.rig`
+query marks the output `held` and `health.dmx` says so.
 
 ### RDM discovery
 With `[rdm] discover_on_start = true` (or `lights.rdm.discover`), the engine runs RDM discovery

@@ -10,7 +10,7 @@ use crate::rng::Rng;
 use crate::signals::{Lfo, Signals, builtin_lfos};
 use crate::state::{Anim, Mod, Override, StateTree};
 use crate::trace::Trace;
-use crate::triggers::{Instance, TriggerRt, TriggerSpec};
+use crate::triggers::{Instance, PAYLOAD_FIELDS, TriggerPayload, TriggerRt, TriggerSpec};
 use se_expr::{Expr, Scope};
 use se_proto::wire::{Provenance, TraceRec};
 use se_proto::{Actor, Command, Event, Id, Meta, Op, Origin, PRIORITY_CHAT, PRIORITY_MANUAL, PRIORITY_PRESET, Role, Ts, Value, address, next_id};
@@ -222,6 +222,8 @@ pub mod addr {
     pub const TR_PROGRESS: &str = "show.transition.progress";
     pub const TR_FROM: &str = "show.transition.from";
     pub const TR_START: &str = "show.transition.start";
+    /// Live chat votes for the next take's transition: `{transition: votes}`.
+    pub const TR_VOTES: &str = "show.transition.votes";
     pub const PANIC: &str = "show.panic";
 }
 
@@ -252,6 +254,8 @@ pub struct Core {
     redo: Vec<UndoEntry>,
     transition: Option<Transition>,
     transition_history: Vec<String>,
+    /// Chat votes for the next take's transition: (voter id, transition, expires at).
+    transition_votes: Vec<(String, String, Ts)>,
     scene_layer: Vec<usize>,
     caps: Vec<(String, [f64; 2])>,
     chat_caps: Vec<(String, [f64; 2])>,
@@ -401,6 +405,7 @@ impl Core {
             redo: Vec::new(),
             transition: None,
             transition_history: Vec::new(),
+            transition_votes: Vec::new(),
             scene_layer: Vec::new(),
             caps: Vec::new(),
             chat_caps: Vec::new(),
@@ -821,6 +826,25 @@ impl Core {
                 let c = Ctx { key: None, priority: Some(PRIORITY_CHAT), parent: Some(id), actor, depth: ctx.depth + 1, event };
                 self.run_list(&commands, Origin::Rule, c);
             }
+            Effect::Redeem(r) => {
+                let id = next_id();
+                let who = r.actor().map(|a| a.name.clone()).unwrap_or_default();
+                self.trace.add(id, Some(r.event.id), self.now(), "policy", format!("redeem for {who}"));
+                let c = Ctx {
+                    key: None,
+                    priority: Some(PRIORITY_CHAT),
+                    parent: Some(id),
+                    actor: r.actor().cloned(),
+                    depth: ctx.depth + 1,
+                    event: Some(r.event.clone()),
+                };
+                let outcome = self.run_commands(&r.commands, Origin::Rule, c, true);
+                let mut fx = Vec::new();
+                self.policy.settle(*r, outcome, &mut fx);
+                for e in fx {
+                    self.apply_policy(e, ctx);
+                }
+            }
             Effect::Action { name, args, actor } => {
                 let mut c = Command::new(Origin::System, Op::Action { name, args });
                 c.actor = actor;
@@ -942,12 +966,23 @@ impl Core {
 
     /// Run a command list with `wait` delays and per-token templating.
     fn run_list(&mut self, cmds: &[String], origin: Origin, ctx: Ctx) {
+        let _ = self.run_commands(cmds, origin, ctx, false);
+    }
+
+    /// [`Self::run_list`]; with `strict`, the first command before any `wait` that fails
+    /// stops the list and its error is returned (commands after a `wait` are only scheduled,
+    /// so they can't fail it).
+    fn run_commands(&mut self, cmds: &[String], origin: Origin, ctx: Ctx, strict: bool) -> Result<(), String> {
         let mut delay: Ts = 0;
         for text in cmds {
             let op = match self.template_op(text, ctx.event.as_ref()) {
                 Ok(op) => op,
                 Err(e) => {
-                    self.trace.add(next_id(), ctx.parent, self.now(), "error", format!("`{text}`: {e}"));
+                    let msg = format!("`{text}`: {e}");
+                    self.trace.add(next_id(), ctx.parent, self.now(), "error", msg.clone());
+                    if strict && delay == 0 {
+                        return Err(msg);
+                    }
                     continue;
                 }
             };
@@ -956,11 +991,15 @@ impl Core {
                 continue;
             }
             if delay == 0 {
-                self.exec_traced(&op, origin, &ctx);
+                let r = self.try_exec_traced(&op, origin, &ctx);
+                if strict {
+                    r?;
+                }
             } else {
                 self.schedule(self.now() + delay, op, origin, ctx.clone());
             }
         }
+        Ok(())
     }
 
     fn template_op(&self, text: &str, ev: Option<&Event>) -> Result<Op, String> {
@@ -987,13 +1026,20 @@ impl Core {
     }
 
     fn exec_traced(&mut self, op: &Op, origin: Origin, ctx: &Ctx) {
+        let _ = self.try_exec_traced(op, origin, ctx);
+    }
+
+    /// Execute with a trace entry; failures are traced and returned.
+    fn try_exec_traced(&mut self, op: &Op, origin: Origin, ctx: &Ctx) -> Result<(), String> {
         let id = next_id();
         self.trace.add(id, ctx.parent, self.now(), "command", op.describe());
         let mut c = ctx.clone();
         c.parent = Some(id);
-        if let Err(e) = self.exec(op, origin, &c) {
-            self.trace.add(next_id(), Some(id), self.now(), "error", e);
+        let r = self.exec(op, origin, &c);
+        if let Err(e) = &r {
+            self.trace.add(next_id(), Some(id), self.now(), "error", e.clone());
         }
+        r
     }
 
     // ---- command execution -----------------------------------------------------------
@@ -1246,12 +1292,32 @@ impl Core {
 
     // ---- triggers --------------------------------------------------------------------
 
+    /// `X.payload.*` of patch triggers (what shader/dsp patches read of the last payload).
+    fn declare_payload(&mut self, address: &str) -> Vec<usize> {
+        if !address.starts_with("patch.") {
+            return Vec::new();
+        }
+        let mut ids: Vec<usize> = PAYLOAD_FIELDS
+            .iter()
+            .map(|f| {
+                self.state
+                    .declare(&format!("{address}.payload.{f}"), Meta::float(0.0, [0.0, 1e12]).readonly().owner("triggers").describe("Last trigger payload"))
+            })
+            .collect();
+        ids.push(
+            self.state
+                .declare(&format!("{address}.payload.user_color"), Meta::color([0.0; 4]).readonly().owner("triggers").describe("Last trigger's user colour")),
+        );
+        ids
+    }
+
     fn ensure_trigger(&mut self, address: &str) -> &mut TriggerRt {
         if !self.triggers.contains_key(address) {
             let spec = self.trigger_specs.get(address).copied().unwrap_or_default();
             let env_id = self.state.declare(&format!("{address}.env"), Meta::float(0.0, [0.0, 1.0]).readonly().owner("triggers"));
             let active_id = self.state.declare(&format!("{address}.active"), Meta::boolean(false).readonly().owner("triggers"));
-            self.triggers.insert(address.to_string(), TriggerRt { spec, env_id, active_id, ..Default::default() });
+            let payload_ids = self.declare_payload(address);
+            self.triggers.insert(address.to_string(), TriggerRt { spec, env_id, active_id, payload_ids, ..Default::default() });
         }
         let spec = self.trigger_specs.get(address).copied();
         let t = self.triggers.get_mut(address).unwrap();
@@ -1266,9 +1332,11 @@ impl Core {
         for a in addrs {
             let env = self.state.declare(&format!("{a}.env"), Meta::float(0.0, [0.0, 1.0]).readonly().owner("triggers"));
             let act = self.state.declare(&format!("{a}.active"), Meta::boolean(false).readonly().owner("triggers"));
+            let payload = self.declare_payload(&a);
             let t = self.triggers.get_mut(&a).unwrap();
             t.env_id = env;
             t.active_id = act;
+            t.payload_ids = payload;
         }
     }
 
@@ -1309,6 +1377,16 @@ impl Core {
         let t = self.triggers.get_mut(address).unwrap();
         if !t.fire(inst) {
             return Err(format!("`{address}` is busy (retrigger = reject)"));
+        }
+        // same tick as `.active`, so a patch never sees the new edge with the old payload
+        if !t.payload_ids.is_empty() {
+            let ids = t.payload_ids.clone();
+            let p = TriggerPayload::from_event(payload, ctx.actor.as_ref());
+            let f = p.floats();
+            for (i, id) in ids[..PAYLOAD_FIELDS.len()].iter().enumerate() {
+                self.state.set_base(*id, Value::Float(f[i] as f64));
+            }
+            self.state.set_base(ids[PAYLOAD_FIELDS.len()], Value::from(p.user_color));
         }
         let mut e = Event::new(format!("{address}.trigger"), origin, payload.clone());
         e.actor = ctx.actor.clone();
@@ -1550,10 +1628,14 @@ impl Core {
             return Ok(());
         }
         let def = self.config.scenes.get(&to).cloned().unwrap_or_default();
-        let name = transition.unwrap_or_else(|| self.pick_transition(&def));
+        let pool = def.transitions.for_pair(&from);
+        let (name, by) = match transition {
+            Some(t) => (t, "command"),
+            None => self.pick_transition(&pool, now),
+        };
         let tdef = self.config.transitions.get(&name);
         let dur_ms = ms
-            .or_else(|| def.transitions.ms_range().map(|(lo, hi)| self.rng.range(lo, hi)))
+            .or_else(|| pool.ms_range().map(|(lo, hi)| self.rng.range(lo, hi)))
             .or_else(|| tdef.and_then(|t| t.ms).map(|d| d.ms() as u32))
             .unwrap_or(if name == "cut" { 0 } else { 700 });
         self.transition_history.push(name.clone());
@@ -1569,14 +1651,14 @@ impl Core {
         self.set_sys(addr::PROGRAM, Value::Str(to.clone()));
         self.transition = (dur_ms > 0).then(|| Transition { from: from.clone(), to: to.clone(), name: name.clone(), start: now, dur: dur_ms as u64 * MS });
         self.apply_scene_layer();
-        let payload = Value::map().with("from", from.clone()).with("to", to.clone()).with("transition", name).with("ms", dur_ms as i64);
+        let payload = Value::map().with("from", from.clone()).with("to", to.clone()).with("transition", name).with("ms", dur_ms as i64).with("by", by);
         let e = Event::new("scene.take", Origin::System, payload).with_causal(ctx.parent);
         self.events.push_back((e, Ctx { depth: ctx.depth, parent: ctx.parent, ..Default::default() }));
         let sctx = Ctx { key: Some(format!("scene:{to}")), priority: Some(PRIORITY_PRESET), parent: ctx.parent, depth: ctx.depth, ..Default::default() };
         if let Some(old) = self.config.scenes.get(&from).cloned() {
             self.run_list(&old.on_exit, Origin::Rule, sctx.clone());
         }
-        if let Some(l) = def.lights.clone().or(def.transitions.lights.clone()) {
+        if let Some(l) = def.lights.clone().or(pool.lights.clone()) {
             let args = Value::map().with("cue", l.cue.map(Value::Str).unwrap_or_default()).with("cuelist", l.cuelist.map(Value::Str).unwrap_or_default());
             self.exec_traced(&Op::Action { name: "lights.cue".into(), args }, Origin::Rule, &sctx);
         }
@@ -1588,13 +1670,20 @@ impl Core {
         Ok(())
     }
 
-    fn pick_transition(&mut self, def: &SceneDef) -> String {
-        let p = &def.transitions;
+    /// Transition for a take without one named: the pair's/scene's fixed `name`, else the chat
+    /// vote winner, else a weighted pick from the pool (avoiding recent repeats), else `fade`.
+    /// Returns the name and what chose it.
+    fn pick_transition(&mut self, p: &crate::config::TransitionPool, now: Ts) -> (String, &'static str) {
         if let Some(n) = &p.name {
-            return n.clone();
+            return (n.clone(), "fixed");
+        }
+        if let Some(n) = self.vote_winner(now) {
+            self.transition_votes.clear();
+            self.publish_votes(now);
+            return (n, "vote");
         }
         if p.pool.is_empty() {
-            return "fade".into();
+            return ("fade".into(), "default");
         }
         let recent: Vec<&String> = self.transition_history.iter().rev().take(p.avoid_repeat).collect();
         let mut cands: Vec<&crate::config::PoolEntry> = p.pool.iter().filter(|e| !recent.contains(&&e.name) && e.w > 0.0).collect();
@@ -1602,20 +1691,107 @@ impl Core {
             cands = p.pool.iter().filter(|e| e.w > 0.0).collect();
         }
         if cands.is_empty() {
-            return "fade".into();
+            return ("fade".into(), "default");
         }
         let total: f64 = cands.iter().map(|e| e.w).sum();
         let mut r = self.rng.f64() * total;
         for e in &cands {
             if r < e.w {
-                return e.name.clone();
+                return (e.name.clone(), "pool");
             }
             r -= e.w;
         }
-        cands.last().unwrap().name.clone()
+        (cands.last().unwrap().name.clone(), "pool")
+    }
+
+    // ---- transition votes (§4.4) ------------------------------------------------------
+
+    fn vote_cfg(&self) -> Option<crate::config::TransitionVoteDef> {
+        self.config.transition_vote().ok().flatten().filter(|v| v.enabled)
+    }
+
+    /// What viewers may vote for (canonical names).
+    fn vote_choices(&self, v: &crate::config::TransitionVoteDef) -> Vec<String> {
+        if v.choices.is_empty() { self.config.transition_names() } else { v.choices.clone() }
+    }
+
+    /// Live votes per transition, in order of their first vote.
+    fn vote_tally(&self, now: Ts) -> Vec<(String, i64)> {
+        let Some(v) = self.vote_cfg() else { return Vec::new() };
+        let choices = self.vote_choices(&v);
+        let mut tally: Vec<(String, i64)> = Vec::new();
+        for (_, name, expires) in &self.transition_votes {
+            if now > *expires || !choices.contains(name) {
+                continue;
+            }
+            match tally.iter_mut().find(|(n, _)| n == name) {
+                Some((_, c)) => *c += 1,
+                None => tally.push((name.clone(), 1)),
+            }
+        }
+        tally
+    }
+
+    /// Most votes wins; a tie goes to the transition that got its first vote earliest.
+    fn vote_winner(&self, now: Ts) -> Option<String> {
+        let tally = self.vote_tally(now);
+        let best = tally.iter().map(|(_, c)| *c).max()?;
+        tally.into_iter().find(|(_, c)| *c == best).map(|(n, _)| n)
+    }
+
+    /// `show.transition.votes` = `{transition: votes}`; returns it.
+    fn publish_votes(&mut self, now: Ts) -> Value {
+        let m: std::collections::BTreeMap<String, Value> = self.vote_tally(now).into_iter().map(|(n, c)| (n, Value::Int(c))).collect();
+        let v = Value::Map(m);
+        self.set_sys(addr::TR_VOTES, v.clone());
+        v
+    }
+
+    /// `transition.vote {name, user?}`: one vote per viewer (a new vote replaces theirs).
+    fn transition_vote(&mut self, args: &Value, origin: Origin, ctx: &Ctx) -> Result<(), String> {
+        let v = self.vote_cfg().ok_or("transition voting is off ([transition_vote] in project.toml)")?;
+        let from_sim = ctx.event.as_ref().is_some_and(|e| e.origin == Origin::Sim);
+        if prio_is_chat(self.priority_for(origin, ctx)) && !from_sim && !self.policy.cfg.effect_modes.iter().any(|m| m == self.mode_str()) {
+            return Err(format!("chat effects are paused in mode `{}`", self.mode_str()));
+        }
+        let pos0 = args.get_path("args").and_then(Value::as_list).and_then(|l| l.first());
+        let asked = args.get_path("name").or(pos0).map(|n| n.to_string()).unwrap_or_default();
+        let asked = asked.trim().trim_start_matches('#');
+        if asked.is_empty() {
+            return Err("transition.vote needs a transition name".into());
+        }
+        let choices = self.vote_choices(&v);
+        let name = choices
+            .iter()
+            .find(|c| c.eq_ignore_ascii_case(asked))
+            .cloned()
+            .ok_or_else(|| format!("`{asked}` isn't one of the choices ({})", choices.join(", ")))?;
+        let voter = ctx
+            .actor
+            .as_ref()
+            .map(|a| a.id.clone())
+            .or_else(|| args.get_path("user").map(|u| u.to_string()))
+            .filter(|u| !u.is_empty())
+            .ok_or("transition.vote needs a viewer")?;
+        let now = self.now();
+        self.transition_votes.retain(|(who, _, expires)| *who != voter && now <= *expires);
+        self.transition_votes.push((voter, name.clone(), now + v.window.ns()));
+        let tally = self.publish_votes(now);
+        let user = ctx.actor.as_ref().map(|a| a.name.clone()).or_else(|| args.get_path("user").map(|u| u.to_string())).unwrap_or_default();
+        let mut e = Event::new("transition.vote", Origin::System, Value::map().with("user", user).with("name", name).with("votes", tally));
+        e.actor = ctx.actor.clone();
+        e.causal = ctx.parent;
+        e.ts = now;
+        self.events.push_back((e, Ctx { depth: ctx.depth, parent: ctx.parent, ..Default::default() }));
+        Ok(())
     }
 
     fn tick_transition(&mut self, now: Ts) {
+        // votes run out after the window (oldest first)
+        if self.transition_votes.first().is_some_and(|(_, _, expires)| now > *expires) {
+            self.transition_votes.retain(|(_, _, expires)| now <= *expires);
+            self.publish_votes(now);
+        }
         let Some(t) = &self.transition else { return };
         let p = ((now - t.start) as f64 / t.dur.max(1) as f64).min(1.0);
         let to = t.to.clone();
@@ -1829,6 +2005,7 @@ impl Core {
                     self.fire_preset(&n, &Value::Null, origin, ctx)
                 }
             }
+            "transition.vote" => self.transition_vote(args, origin, ctx),
             "scene.next" | "scene.prev" => {
                 let names = scene_order(&self.config);
                 if names.is_empty() {
@@ -2142,9 +2319,7 @@ impl Core {
             ),
             "transitions" => {
                 // built-ins first; a project file with a built-in's name overrides it (listed once)
-                let mut names: Vec<String> = crate::config::BUILTIN_TRANSITIONS.iter().map(|s| s.to_string()).collect();
-                names.extend(self.config.transitions.keys().filter(|k| !crate::config::BUILTIN_TRANSITIONS.contains(&k.as_str())).cloned());
-                Value::from(names)
+                Value::from(self.config.transition_names())
             }
             "modes" => Value::from(self.config.modes()),
             "signals" => {

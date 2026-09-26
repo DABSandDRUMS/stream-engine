@@ -173,6 +173,11 @@ impl FxSlot {
         }
     }
 
+    /// Trigger payload float `k` (forwarded to the effect).
+    pub fn set_payload(&mut self, k: usize, v: f32) {
+        self.fx.set_payload(k, v);
+    }
+
     /// Trigger edge (`X.active`). Forwards changes to the effect.
     pub fn set_trigger(&mut self, on: bool) {
         if self.triggered && on != self.trig_state {

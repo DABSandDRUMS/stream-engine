@@ -3,7 +3,32 @@ name = "brb scene"
 when = "mode.enter.brb"
 do = ["scene.cut brb"]
 
+# brb → ad break: the ad break rules below pick the scene.
 [[rule]]
 name = "back from brb"
 when = "mode.exit.brb"
+if = "mode != 'ad_break'"
 do = ["scene.cut duo"]
+
+# Ad breaks (docs/bot-and-alerts.md): when Twitch starts an ad, the engine switches the mode to
+# `ad_break` and back when the ads end ([policy] ad_break_mode). Remember the scene on program,
+# show the ad break scene, count down the ad length, and go back afterwards.
+[[rule]]
+name = "ad break scene"
+when = "mode.enter.ad_break"
+do = ["set patch.ad_break.return_scene {scene}", "scene.cut ad_break"]
+
+# `duration` is the ad length in seconds; a second ad during the break extends the countdown.
+[[rule]]
+name = "ad break countdown"
+when = "twitch.ad_break"
+if = "mode == 'ad_break'"
+do = ["patch.ad_break.trigger seconds={duration}"]
+
+# Back to the remembered scene (`duo` until one was remembered); back to brb, the brb rule
+# above picks the scene.
+[[rule]]
+name = "back from the ad break"
+when = "mode.exit.ad_break"
+if = "mode != 'brb'"
+do = ["scene.cut {patch.ad_break.return_scene}"]

@@ -141,6 +141,64 @@ fn media_timeline_waits_for_its_video_and_holds_on_pause() {
     assert_eq!(c.get("timeline.nightly_song.active"), Some(&Value::Bool(false)));
 }
 
+#[test]
+fn local_file_and_isrc_timelines_follow_exact_frame_positions() {
+    let clip = "media = \"file:0123456789abcdef\"\ncues = [{ at = \"0:10.000\", do = [\"preset.fire chorus_blast\"], label = \"drop\" }]";
+    let tagged = "media = \"isrc:us-rc1-76-07839\"\ncues = [{ at = \"0:10.500\", do = [\"emit isrc.hit\"] }]";
+    let mut c = core(vec![file("timelines", "clip", clip), file("timelines", "tagged", tagged)]);
+    // the song player plays something else: local media doesn't go through `song.media`
+    c.submit(Input::Publish { address: "song.media".into(), value: "yt:OTHER".into() });
+    c.step();
+    c.step();
+    assert_eq!(c.get("timeline.tagged.source"), Some(&Value::Str("media:isrc:USRC17607839".into())), "ISRC normalized");
+    assert_eq!(c.get("timeline.clip.status"), Some(&Value::Str("waiting".into())));
+    // se-video-in observes each shown frame at its master-clock time (≈15/s after throttling)
+    let keys = ["media:file:0123456789abcdef", "media:isrc:USRC17607839"];
+    let start = c.now();
+    let (from, mut last_obs) = (8.0, 0u64);
+    let mut fired = Vec::new();
+    let mut out = Vec::new();
+    while c.now() - start < 4_000 * MS {
+        let now = c.now();
+        if now - last_obs >= 66 * MS {
+            last_obs = now;
+            for k in keys {
+                c.submit(Input::Timecode { source: k.into(), obs: TcObs::run(from + (now - start) as f64 / 1e9, now) });
+            }
+        }
+        c.step();
+        let o = c.drain_outputs();
+        for e in events(&o, "timeline.cue") {
+            fired.push((e.payload.get_path("timeline").and_then(Value::as_str).unwrap().to_string(), from + (c.now() - start) as f64 / 1e9));
+        }
+        out.extend(o);
+    }
+    assert_eq!(fired.len(), 2, "{fired:?}");
+    let at = |tl: &str| fired.iter().find(|(n, _)| n == tl).map(|(_, t)| *t).unwrap();
+    assert!((at("clip") - 10.0).abs() < 0.02, "file cue at media time {}", at("clip"));
+    assert!((at("tagged") - 10.5).abs() < 0.02, "isrc cue at media time {}", at("tagged"));
+    assert_eq!(events(&out, "isrc.hit").len(), 1);
+    assert_eq!(c.get("timeline.clip.locked"), Some(&Value::Bool(true)));
+    // paused: the source says so and the timeline holds where the frame stopped
+    let stop_at = from + (c.now() - start) as f64 / 1e9;
+    let obs = TcObs { kind: se_clock::timecode::ObsKind::Stop, ..TcObs::run(stop_at, c.now()) };
+    c.submit(Input::Timecode { source: keys[0].into(), obs });
+    for _ in 0..200 {
+        c.step();
+    }
+    assert_eq!(c.get("timeline.clip.playing"), Some(&Value::Bool(false)));
+    assert_eq!(c.get("timeline.clip.active"), Some(&Value::Bool(true)));
+    assert!((f(&c, "timeline.clip.time") - stop_at).abs() < 0.001);
+}
+
+#[test]
+fn isrc_sources_must_be_isrcs() {
+    let parse = |src: &str| se_core::timeline::TimelineDef::parse("t", "timelines/t.toml", &toml::from_str(src).unwrap());
+    assert!(parse("media = \"isrc:12345\"").unwrap_err().contains("not an ISRC"));
+    assert!(parse("media = \"isrc:USRC1760783X\"").is_err(), "designation is digits");
+    assert_eq!(parse("source = \"media:isrc:gb aye 06 01498\"").unwrap().source.label(), "media:isrc:GBAYE0601498");
+}
+
 // ---- MTC: cue list + automation lane, tracked state across locates -------------------------
 
 const MTC_LIGHTS: &str = r#"

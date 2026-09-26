@@ -791,8 +791,12 @@ pub enum Effect {
     Deliver(Event),
     /// A `policy.*` decision event (published, audited, visible to rules).
     Emit(Event),
-    /// Run commands at chat priority for a viewer (reward `fires`, approved commands).
+    /// Run commands at chat priority for a viewer (approved commands).
     Run { commands: Vec<String>, actor: Option<Actor>, event: Option<Event> },
+    /// Run a managed redemption's `fires`, then hand the outcome to [`Policy::settle`] so it
+    /// is fulfilled or rejected (and refunded) by what actually happened (§4.3: a preset with
+    /// `conflict = "reject"` that is already active refunds the viewer).
+    Redeem(Box<Redemption>),
     /// Adapter action (`twitch.refund`, `twitch.fulfill`).
     Action { name: String, args: Value, actor: Option<Actor> },
     /// Switch the show mode (ad breaks).
@@ -818,7 +822,7 @@ impl HoldKind {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct Paid {
     key: String,
     fires: Vec<String>,
@@ -833,6 +837,21 @@ struct Paid {
     /// Modes the reward runs in and whether it came from the simulator (exempt).
     modes: Vec<String>,
     sim: bool,
+}
+
+/// A managed redemption waiting for its `fires` to run (see [`Effect::Redeem`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Redemption {
+    pub commands: Vec<String>,
+    pub event: Event,
+    paid: Paid,
+    approved_by: Option<String>,
+}
+
+impl Redemption {
+    pub fn actor(&self) -> Option<&Actor> {
+        self.event.actor.as_ref()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1268,6 +1287,30 @@ impl Policy {
     }
 
     fn accept_paid(&mut self, mut ev: Event, paid: Paid, approved_by: Option<&str>, out: &mut Vec<Effect>) {
+        if approved_by.is_some() {
+            ev.payload = std::mem::take(&mut ev.payload).with("vetted", true);
+        }
+        if paid.fires.is_empty() {
+            self.fulfilled(ev, paid, approved_by, out);
+        } else {
+            out.push(Effect::Redeem(Box::new(Redemption { commands: paid.fires.clone(), event: ev, paid, approved_by: approved_by.map(String::from) })));
+        }
+    }
+
+    /// The core ran a redemption's `fires`: `Ok` fulfills it, `Err(reason)` (the first command
+    /// that failed, e.g. a `reject` preset that is already active) rejects and refunds it and
+    /// gives back the cooldowns and limits it took.
+    pub fn settle(&mut self, r: Redemption, outcome: Result<(), String>, out: &mut Vec<Effect>) {
+        match outcome {
+            Ok(()) => self.fulfilled(r.event, r.paid, r.approved_by.as_deref(), out),
+            Err(reason) => {
+                self.release_paid(&r.paid);
+                self.reject_paid(r.event, r.paid, &reason, "policy", out);
+            }
+        }
+    }
+
+    fn fulfilled(&mut self, ev: Event, paid: Paid, approved_by: Option<&str>, out: &mut Vec<Effect>) {
         let info = Value::map()
             .with("type", ev.ty.clone())
             .with("reward", s(&ev.payload, "reward"))
@@ -1277,17 +1320,11 @@ impl Policy {
             .with("user_id", paid.user.clone())
             .with("approved_by", approved_by.map(Value::from).unwrap_or_default());
         out.push(Effect::Emit(Self::decision("policy.accepted", &ev, info)));
-        if approved_by.is_some() {
-            ev.payload = std::mem::take(&mut ev.payload).with("vetted", true);
-        }
         let actor = ev.actor.clone();
-        let fulfill_args = Value::map().with("redemption_id", paid.redemption_id.clone()).with("reward_id", paid.reward_id.clone());
-        out.push(Effect::Deliver(ev.clone()));
-        if !paid.fires.is_empty() {
-            out.push(Effect::Run { commands: paid.fires.clone(), actor: actor.clone(), event: Some(ev) });
-        }
+        out.push(Effect::Deliver(ev));
         if paid.fulfill && !paid.redemption_id.is_empty() {
-            out.push(Effect::Action { name: "twitch.fulfill".into(), args: fulfill_args, actor });
+            let args = Value::map().with("redemption_id", paid.redemption_id).with("reward_id", paid.reward_id);
+            out.push(Effect::Action { name: "twitch.fulfill".into(), args, actor });
         }
     }
 
@@ -1593,6 +1630,7 @@ mod tests {
                 Effect::Deliver(e) => format!("deliver {}", e.ty),
                 Effect::Emit(e) => format!("emit {}", e.ty),
                 Effect::Run { commands, .. } => format!("run {}", commands.join(";")),
+                Effect::Redeem(r) => format!("redeem {}", r.commands.join(";")),
                 Effect::Action { name, .. } => format!("action {name}"),
                 Effect::SetMode(m) => format!("mode {m}"),
                 Effect::Pending => "pending".into(),
@@ -1694,7 +1732,36 @@ mod tests {
         let mut p = policy("[policy]\nveto = { redeem = false }", &[("hype", HYPE)]);
         let mut out = Vec::new();
         p.screen(redeem(1, "HYPE", "a", ""), 10 * S, "live", &mut out);
-        assert_eq!(names(&out), ["emit policy.accepted", "deliver twitch.redeem", "run preset.fire hype", "action twitch.fulfill"]);
+        assert_eq!(names(&out), ["redeem preset.fire hype"]);
+        let Some(Effect::Redeem(r)) = out.pop() else { panic!() };
+        p.settle(*r, Ok(()), &mut out);
+        assert_eq!(names(&out), ["emit policy.accepted", "deliver twitch.redeem", "action twitch.fulfill"]);
+    }
+
+    #[test]
+    fn redeem_whose_fires_fail_is_refunded_and_gives_its_limits_back() {
+        let once = "title = \"Once\"\ncost = 1\nmax_per_stream = 1\ncooldown = \"5m\"\nfires = \"preset.hype\"";
+        let mut p = policy("[policy]\nveto = { redeem = false }", &[("once", once)]);
+        let mut out = Vec::new();
+        p.screen(redeem(1, "Once", "a", ""), S, "live", &mut out);
+        let Some(Effect::Redeem(r)) = out.pop() else { panic!("{:?}", names(&out)) };
+        // `conflict = "reject"` preset already active: the viewer paid for nothing
+        p.settle(*r, Err("preset `hype` is already active".into()), &mut out);
+        assert_eq!(names(&out), ["emit policy.rejected", "action twitch.refund"]);
+        let Effect::Emit(e) = &out[0] else { panic!() };
+        assert_eq!(e.payload.get_path("reason").and_then(Value::as_str), Some("preset `hype` is already active"));
+        assert_eq!(e.payload.get_path("refunded"), Some(&Value::Bool(true)));
+        let Effect::Action { args, .. } = &out[1] else { panic!() };
+        assert_eq!(args.get_path("redemption_id").and_then(Value::as_str), Some("red-1"));
+        // the cooldown and the once-per-stream limit it took are given back
+        out.clear();
+        p.screen(redeem(2, "Once", "b", ""), 2 * S, "live", &mut out);
+        assert_eq!(names(&out), ["redeem preset.fire hype"], "limits were released");
+        // a reward without fires is fulfilled right away (nothing can fail)
+        let mut p = policy("[policy]\nveto = { redeem = false }", &[("hi", "title = \"Hi\"\ncost = 1")]);
+        out.clear();
+        p.screen(redeem(3, "Hi", "a", ""), S, "live", &mut out);
+        assert_eq!(names(&out), ["emit policy.accepted", "deliver twitch.redeem", "action twitch.fulfill"]);
     }
 
     #[test]
@@ -1709,7 +1776,7 @@ mod tests {
         // accepted, then global cooldown rejects the next viewer
         out.clear();
         p.screen(redeem(2, "HYPE", "a", ""), S, "live", &mut out);
-        assert!(names(&out).contains(&"action twitch.fulfill".to_string()));
+        assert!(names(&out).contains(&"redeem preset.fire hype".to_string()));
         out.clear();
         p.screen(redeem(3, "HYPE", "b", ""), 2 * S, "live", &mut out);
         assert_eq!(names(&out), ["emit policy.rejected", "action twitch.refund"]);
@@ -1747,7 +1814,7 @@ mod tests {
         p.screen(ev("twitch.stream.online", Value::map(), None), 3 * S, "live", &mut out);
         out.clear();
         p.screen(redeem(3, "Once", "a", ""), 4 * S, "live", &mut out);
-        assert_eq!(names(&out)[0], "emit policy.accepted");
+        assert_eq!(names(&out)[0], "redeem preset.fire hype");
     }
 
     #[test]
@@ -1760,10 +1827,13 @@ mod tests {
         assert_eq!(p.pending_len(), 1);
         out.clear();
         p.resolve("p10", true, "mod1", None, "live", &mut out).unwrap();
-        assert_eq!(
-            names(&out),
-            ["emit policy.approved", "emit policy.accepted", "deliver twitch.redeem", "run preset.fire hype", "action twitch.fulfill", "pending"]
-        );
+        assert_eq!(names(&out), ["emit policy.approved", "redeem preset.fire hype", "pending"]);
+        let Effect::Redeem(r) = out.remove(1) else { panic!() };
+        out.clear();
+        p.settle(*r, Ok(()), &mut out);
+        assert_eq!(names(&out), ["emit policy.accepted", "deliver twitch.redeem", "action twitch.fulfill"]);
+        let Effect::Emit(e) = &out[0] else { panic!() };
+        assert_eq!(e.payload.get_path("approved_by").and_then(Value::as_str), Some("mod1"));
         // second one rejected by a mod → refund and the cooldown is given back
         out.clear();
         p.screen(redeem(0x11, "Pick", "b", ""), 70 * S, "live", &mut out);
@@ -1980,7 +2050,7 @@ mod tests {
                 let mut out = Vec::new();
                 p.screen(r, S, mode, &mut out);
                 let n = names(&out);
-                let accepted = n.contains(&"emit policy.accepted".to_string());
+                let accepted = n.contains(&"redeem preset.fire hype".to_string());
                 let refunded = n.contains(&"action twitch.refund".to_string());
                 prop_assert_eq!(accepted, mode == "live" || mode == "rehearsal");
                 prop_assert_eq!(refunded, !accepted && !status_fulfilled);

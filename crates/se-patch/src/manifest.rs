@@ -9,6 +9,7 @@
 //! trigger = { attack = "100ms", hold = "4s", release = "1s", retrigger = "stack" }
 //! budget  = { cpu_ms = 1.0 }
 //! signals = ["band.bass", "beat.phase"]   # extra signals exposed to shaders
+//! grants  = ["lights.*", "source.cam1"]  # web only: extra addresses/actions the page may control
 //! ```
 
 use se_core::triggers::TriggerSpec;
@@ -190,6 +191,9 @@ struct Raw {
     /// Frame rate for `web` pages (CEF windowless frame rate, 1–120; default 60).
     #[serde(default)]
     fps: Option<u32>,
+    /// Web pages: address/action patterns the page's token may also write (§19).
+    #[serde(default)]
+    grants: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -209,6 +213,9 @@ pub struct Manifest {
     pub description: String,
     pub size: Option<[u32; 2]>,
     pub fps: Option<u32>,
+    /// Web pages: extra address/action patterns (`lights.*`, `source.cam1`) the page may write
+    /// besides its own `patch.<id>.*`. Validated: start with a name, `*`/`**` only after it.
+    pub grants: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -290,6 +297,17 @@ impl Manifest {
         {
             return Err(ManifestError::Parse(path, format!("size = [{w}, {h}] must be 1–8192 per side")));
         }
+        if !raw.grants.is_empty() && raw.kind != Kind::Web {
+            return Err(ManifestError::Parse(path, "grants only apply to web patches (kind = \"web\")".into()));
+        }
+        for g in &raw.grants {
+            if !se_proto::address::is_valid(g, true) {
+                return Err(ManifestError::Parse(path, format!("grants: `{g}` is not an address pattern (write it like `lights.*` or `source.cam1`)")));
+            }
+            if g.split('.').next().is_some_and(|s| s.contains('*')) {
+                return Err(ManifestError::Parse(path, format!("grants: `{g}` must start with a name, not a wildcard (e.g. `lights.*`)")));
+            }
+        }
         Ok(Manifest {
             label: raw.label.unwrap_or_else(|| id.clone()),
             description: raw.description.unwrap_or_default(),
@@ -306,6 +324,7 @@ impl Manifest {
             particles: raw.particles,
             size: raw.size,
             fps: raw.fps,
+            grants: raw.grants,
         })
     }
 
@@ -384,6 +403,19 @@ budget  = { cpu_ms = 1.0 }
         assert!(Manifest::parse(Path::new("/p/patches/x"), "kind = \"shader\"\nparams.env = { type = \"float\" }").is_err());
         assert!(Manifest::parse(Path::new("/p/patches/x"), "kind = \"particles\"").is_err());
         assert!(Manifest::parse(Path::new("/p/patches/a.b"), "kind = \"shader\"").is_err());
+    }
+
+    #[test]
+    fn grants_are_validated() {
+        let p = |src: &str| Manifest::parse(Path::new("/p/patches/w"), src);
+        let m = p("kind = \"web\"\ngrants = [\"lights.*\", \"source.cam1\", \"scene.**\"]").unwrap();
+        assert_eq!(m.grants, ["lights.*", "source.cam1", "scene.**"]);
+        for bad in ["\"*\"", "\"**\"", "\"*.fader\"", "\"li*.cue\"", "\"\"", "\"lights..cue\"", "\"lights cue\"", "\"lights.\""] {
+            let e = p(&format!("kind = \"web\"\ngrants = [{bad}]")).unwrap_err().located();
+            assert!(e.contains("grants:"), "{bad}: {e}");
+        }
+        let e = p("kind = \"script\"\ngrants = [\"lights.*\"]").unwrap_err().located();
+        assert!(e.contains("only apply to web"), "{e}");
     }
 
     #[test]

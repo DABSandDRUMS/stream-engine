@@ -7,15 +7,18 @@
 //! * Media files: FFmpeg (NVDEC `*_cuvid` when available) into NV12 or RGBA (alpha) slots.
 //! * Only sources in use are captured: `render.sources.used` when the renderer publishes it,
 //!   else every source referenced by a scene node.
+//! * Temporary previews ([`preview`]): Settings → Devices shows a live thumbnail of any camera,
+//!   opened at a light mode while leased, or taken from the source already capturing it.
 //!
-//! Query `sources`; actions `source.restart|seek|reopen|assign|save_controls`; preflight
-//! `health.sources`.
+//! Query `sources`, `video_in.preview`; actions `source.restart|seek|reopen|assign|save_controls`,
+//! `video_in.preview`; preflight `health.sources`.
 
 pub mod camera;
 pub mod config;
 pub mod controls;
 pub mod frame;
 pub mod media;
+pub mod preview;
 pub mod status;
 
 use anyhow::{Result, anyhow};
@@ -58,6 +61,7 @@ struct State {
     health: Option<(String, String)>,
     /// Source names currently wanted by the renderer/scenes.
     wanted: HashSet<String>,
+    previews: preview::Previews,
 }
 
 type Shared = Arc<Mutex<State>>;
@@ -67,6 +71,7 @@ pub async fn start(ctx: EngineCtx) -> Result<()> {
     let shared: Shared = Arc::new(Mutex::new(State::default()));
     let bus = ctx.hub.subscribe();
     let actions = ctx.hub.route_actions("source");
+    let preview_actions = ctx.hub.route_actions("video_in");
     ctx.hub.declare(
         "health.sources",
         Meta {
@@ -78,9 +83,10 @@ pub async fn start(ctx: EngineCtx) -> Result<()> {
         },
     );
     register_query(&ctx, shared.clone());
+    register_preview_query(&ctx, shared.clone());
     reload(&ctx, &shared);
     update_usage(&ctx, &shared).await;
-    tokio::spawn(run(ctx, shared, bus, actions));
+    tokio::spawn(run(ctx, shared, bus, actions, preview_actions));
     Ok(())
 }
 
@@ -89,6 +95,7 @@ async fn run(
     shared: Shared,
     mut bus: tokio::sync::broadcast::Receiver<Arc<Bus>>,
     mut actions: tokio::sync::mpsc::UnboundedReceiver<se_proto::Command>,
+    mut preview_actions: tokio::sync::mpsc::UnboundedReceiver<se_proto::Command>,
 ) {
     let mut config = ctx.config.clone();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -122,8 +129,18 @@ async fn run(
                     }
                 }
             }
+            Some(cmd) = preview_actions.recv() => {
+                if let se_proto::Op::Action { name, args } = &cmd.op {
+                    match preview_action(&shared, name, args).await {
+                        Ok(Some(msg)) => ctx.hub.log("info", OWNER, msg),
+                        Ok(None) => {}
+                        Err(e) => ctx.hub.log("error", OWNER, format!("{name}: {e}")),
+                    }
+                }
+            }
             _ = tick.tick() => {
                 update_usage(&ctx, &shared).await;
+                update_previews(&shared).await;
                 publish_health(&ctx, &shared);
             }
         }
@@ -220,6 +237,11 @@ fn declare(ctx: &EngineCtx, def: &SourceDef) {
         hub.declare(&format!("source.{n}.position"), Meta::float(0.0, [0.0, 1.0e7]).readonly().owner(OWNER).unit("s"));
         hub.declare(&format!("source.{n}.duration"), Meta::float(0.0, [0.0, 1.0e7]).readonly().owner(OWNER).unit("s"));
         hub.declare(&format!("source.{n}.playing"), Meta::boolean(false).readonly().owner(OWNER));
+        hub.declare(&format!("source.{n}.media"), Meta::string("").readonly().owner(OWNER).describe("timeline media id of the file (`file:<hash>`)"));
+        hub.declare(
+            &format!("source.{n}.isrc"),
+            Meta::string("").readonly().owner(OWNER).describe("ISRC from the file's tags (timelines: `media = \"isrc:<code>\"`)"),
+        );
     }
 }
 
@@ -244,9 +266,112 @@ fn wanted(ctx: &EngineCtx) -> HashSet<String> {
     scene_sources(&ctx.config.borrow())
 }
 
+/// A source's `device` (identity, glob, or `/dev/…` path) among present cameras.
+fn resolve_camera(spec: &str, cams: &[se_devices::DeviceInfo]) -> Option<String> {
+    if spec.starts_with('/') {
+        let target = std::fs::canonicalize(spec).ok()?;
+        return cams.iter().find(|c| std::path::Path::new(&c.path) == target).map(|c| c.identity.clone());
+    }
+    cams.iter().find(|c| c.identity == spec).or_else(|| cams.iter().find(|c| se_devices::identity::glob(spec, &c.identity))).map(|c| c.identity.clone())
+}
+
+async fn scan_cameras() -> Vec<se_devices::DeviceInfo> {
+    tokio::task::spawn_blocking(se_devices::scan_cameras).await.ok().and_then(Result::ok).unwrap_or_default()
+}
+
+async fn join_all(stopping: Vec<preview::Stopping>) {
+    if !stopping.is_empty() {
+        let _ = tokio::task::spawn_blocking(move || stopping.into_iter().for_each(preview::Stopping::join)).await;
+    }
+}
+
+/// Camera identity → the source whose capture thread owns it (capturing, or trying to).
+fn holders(st: &State, cams: &[se_devices::DeviceInfo]) -> HashMap<String, preview::Holder> {
+    let mut out = HashMap::new();
+    for (name, s) in &st.sources {
+        let (Some(cam), Some(_)) = (s.def.camera(), &s.worker) else { continue };
+        let known = s.status.info.lock().identity.clone();
+        let identity = if known.is_empty() { resolve_camera(&cam.device, cams) } else { Some(known) };
+        if let Some(id) = identity {
+            let capturing = s.status.capturing.load(std::sync::atomic::Ordering::Relaxed);
+            out.insert(id, preview::Holder { source: name.clone(), capturing, tap: s.status.preview.clone() });
+        }
+    }
+    out
+}
+
+/// Cameras about to be captured by a source: stop our preview threads on them first.
+async fn release_previews_for(shared: &Shared, want: &HashSet<String>) {
+    let specs: Vec<String> = {
+        let st = shared.lock();
+        if !st.previews.has_workers() {
+            return;
+        }
+        st.sources.iter().filter(|(n, s)| want.contains(*n) && s.worker.is_none()).filter_map(|(_, s)| s.def.camera().map(|c| c.device.clone())).collect()
+    };
+    if specs.is_empty() {
+        return;
+    }
+    let cams = scan_cameras().await;
+    let ids: Vec<String> = specs.iter().filter_map(|s| resolve_camera(s, &cams)).collect();
+    let stopping = shared.lock().previews.yield_to_sources(&ids);
+    join_all(stopping).await;
+}
+
+/// Expire leases, then open/close preview threads and switch source thumbnails on/off.
+async fn update_previews(shared: &Shared) {
+    let leased = {
+        let mut st = shared.lock();
+        st.previews.leases.expire(Instant::now());
+        if st.previews.is_idle() {
+            return;
+        }
+        !st.previews.leases.is_empty()
+    };
+    let cams = if leased { scan_cameras().await } else { Vec::new() };
+    let stopping = {
+        let mut st = shared.lock();
+        let h = holders(&st, &cams);
+        st.previews.reconcile(&h, &cams)
+    };
+    join_all(stopping).await;
+}
+
+/// `video_in.preview {identity, on = true, lease = 6}`: take, renew or end a preview lease.
+/// Renewals are silent; the first request and the release are logged.
+async fn preview_action(shared: &Shared, name: &str, args: &Value) -> Result<Option<String>> {
+    if name != "video_in.preview" {
+        return Err(anyhow!("unknown action `{name}` (video_in.preview)"));
+    }
+    let identity = arg_str(args, "identity", 0).ok_or_else(|| anyhow!("needs a camera identity"))?;
+    let on = arg(args, "on", 1).is_none_or(|v| v.truthy() && v.as_str() != Some("false"));
+    let lease = match arg(args, "lease", 2) {
+        None => preview::DEFAULT_LEASE,
+        Some(v) => v
+            .as_f64()
+            .or_else(|| v.as_str().and_then(|s| se_proto::parse_duration_ms(s).map(|ms| ms as f64 / 1000.0)))
+            .filter(|s| s.is_finite() && *s >= 0.0)
+            .map(Duration::from_secs_f64)
+            .ok_or_else(|| anyhow!("lease must be seconds or a duration like \"6s\""))?,
+    };
+    let msg = {
+        let mut st = shared.lock();
+        if on {
+            let new = !st.previews.leases.contains(&identity);
+            st.previews.leases.renew(&identity, lease, Instant::now());
+            new.then(|| format!("preview of {identity} on"))
+        } else {
+            st.previews.leases.release(&identity).then(|| format!("preview of {identity} off"))
+        }
+    };
+    update_previews(shared).await;
+    Ok(msg)
+}
+
 /// Start sources that became used, stop ones unused for longer than the grace period.
 async fn update_usage(ctx: &EngineCtx, shared: &Shared) {
     let want = wanted(ctx);
+    release_previews_for(shared, &want).await;
     let mut to_join = Vec::new();
     {
         let mut st = shared.lock();
@@ -460,6 +585,51 @@ fn register_query(ctx: &EngineCtx, shared: Shared) {
                     })
                     .collect();
                 Ok(Value::List(list))
+            })
+        }),
+    );
+}
+
+/// `video_in.preview {have: [{identity, seq}]}` → `{previews: [{identity, state, source, error,
+/// seq, width, height, jpeg}]}` for every leased camera. `jpeg` (base64) is left out when the
+/// client already has picture `seq`.
+fn register_preview_query(ctx: &EngineCtx, shared: Shared) {
+    use base64::Engine;
+    ctx.hub.register_query(
+        "video_in.preview",
+        Arc::new(move |_n, args| {
+            let shared = shared.clone();
+            let have: HashMap<String, u64> = args
+                .get_path("have")
+                .and_then(Value::as_list)
+                .unwrap_or(&[])
+                .iter()
+                .filter_map(|v| Some((v.get_path("identity")?.as_str()?.to_string(), u64::try_from(v.get_path("seq")?.as_i64()?).ok()?)))
+                .collect();
+            Box::pin(async move {
+                let reports = {
+                    let st = shared.lock();
+                    st.previews.report(&holders(&st, &[]), &have, se_clock::now())
+                };
+                let b64 = base64::engine::general_purpose::STANDARD;
+                let list = reports
+                    .into_iter()
+                    .map(|r| {
+                        let mut v = Value::map()
+                            .with("identity", r.identity)
+                            .with("state", r.state)
+                            .with("source", r.source.map(Value::Str).unwrap_or(Value::Null))
+                            .with("error", r.error);
+                        if let Some(p) = r.picture {
+                            v = v.with("seq", p.seq as i64).with("width", p.width as i64).with("height", p.height as i64);
+                            if !p.jpeg.is_empty() {
+                                v = v.with("jpeg", b64.encode(&p.jpeg));
+                            }
+                        }
+                        v
+                    })
+                    .collect();
+                Ok(Value::map().with("previews", Value::List(list)))
             })
         }),
     );

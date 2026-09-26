@@ -1,4 +1,4 @@
-# Extras: setup wizard, giveaways, credits, TTS, remote mods, backups
+# Extras: setup wizard, giveaways, credits, TTS, remote mods, backups, rehearsal
 
 Operator notes for the M11 features. Config lives in `project.toml`; every section is optional
 and hot-reloads (a broken section is logged and the previous settings stay active).
@@ -121,7 +121,35 @@ systemctl --user start stream-engine
 ```
 
 Actions: `retention.backup_now`, `retention.prune_sessions`, `retention.prune_recordings`,
-`retention.scan`; query `retention`; preflight `health.backup`, `health.recordings`.
+`retention.scan`; query `retention`; preflight `health.backup`, `health.recordings`. Failed
+backups, a nearly full recordings disk and going over budget also ask for a desktop notification
+(`notify.send`, at most once per kind every 6 h; see
+[desktop-integration.md](desktop-integration.md#notifications)).
+
+## Rehearsal
+
+Show mode `rehearsal` (the mode menu in the top bar, `streamctl mode rehearsal`) is a practice run
+with nothing going out (§17.2). The top bar shows "Practice run: nothing goes out".
+
+| Part | In rehearsal |
+|---|---|
+| Viewers | pretend viewers: simulator events (chat, follows, subs, cheers, redeems, tips, now and then a raid or a small gift bomb) at random, about one every `every` |
+| OBS | `obs.stream.start` is skipped (event `obs.dry_run`); recording still works — see [obs.md](obs.md) |
+| Lights | outputs hold the look they had when rehearsal started; the Lights view shows the practice; an output with `rehearsal = true` gets it live — see [lights.md](lights.md) §8 |
+| Twitch | every Twitch-changing action is a dry run (`twitch.dry_run`), real events still arrive — see [twitch.md](twitch.md) |
+| Chat effects, alerts, rules | run as when live (`[policy] effect_modes` includes `rehearsal`) |
+
+Leaving the mode stops the pretend viewers and puts the outputs back on the live show. If OBS is
+already streaming when rehearsal starts, the engine log warns that viewers can see it.
+
+```toml
+[rehearsal]
+simulate = true      # pretend viewers while rehearsing
+every = "20s"        # about one event this often (random 0.5–1.5×), 1s..1h
+presets = []         # simulator presets to draw from, e.g. ["chat", "follow", "raid"]; empty = the built-in mix
+```
+
+State: `show.rehearsal.simulating`.
 
 ## TikTok LIVE (best effort)
 

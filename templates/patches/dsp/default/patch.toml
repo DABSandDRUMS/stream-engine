@@ -1,9 +1,10 @@
-# {{label}} — a `dsp` patch: a WebAssembly audio effect (block ABI v1, docs/patches.md).
+# {{label}} — a `dsp` patch: a WebAssembly audio effect (block ABI v2, docs/patches.md).
 # Source in src/lib.rs; rebuild main.wasm with ./build.sh (needs
 # `rustup target add wasm32-unknown-unknown`). The engine hot-swaps main.wasm on save.
 #
 # Params reach the module as f32 slots in alphabetical order after the 8-float header:
-# drive = slot 0, output = slot 1, tone = slot 2.
+# drive = slot 0, output = slot 1, tone = slot 2. The last trigger's payload follows the 64
+# slots (tier = float 74): `streamctl do patch.{{id}}.trigger tier=3` drives harder.
 # Insert it on a bus: audio chains reference `{ patch = "{{id}}" }`.
 kind        = "dsp"
 entry       = "main.wasm"

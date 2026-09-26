@@ -7,7 +7,6 @@ use crate::protocol::{FromHost, PROTOCOL_VERSION, ToHost};
 use crate::sources::{self, HostSettings, Owner, Spec};
 use parking_lot::Mutex;
 use se_api::Auth;
-use se_api::auth::Scope;
 use se_core::Input;
 use se_hub::{EngineCtx, Hub};
 use se_patch::{PatchSet, Patches};
@@ -323,8 +322,7 @@ impl Supervisor {
                 return;
             }
         };
-        let scope = spec.owner.scope_id().to_string();
-        self.auth.add(&token, &format!("web.{scope}"), Scope::Patch(scope));
+        self.auth.add(&token, &format!("web.{}", spec.owner.scope_id()), spec.scope());
         let media = self.media.entry(slot.clone()).or_insert_with(|| Arc::new(Mutex::new(Media::new(&self.hub, &slot)))).clone();
         declare(&self.hub, &slot);
         let mut src = Source {
@@ -354,6 +352,13 @@ impl Supervisor {
     fn update(&mut self, slot: &str, spec: Spec) {
         let Some(src) = self.sources.get_mut(slot) else { return };
         let old = std::mem::replace(&mut src.spec, spec);
+        if old.grants != src.spec.grants {
+            // same token, new permissions: the page keeps working without a reload
+            self.auth.add(&src.token, &format!("web.{}", src.spec.owner.scope_id()), src.spec.scope());
+            let msg = format!("{slot}: page permissions now {:?}", src.spec.grants);
+            tracing::info!(target: "se_web", "{msg}");
+            self.hub.log("info", "web", msg);
+        }
         let Some(id) = src.browser else { return };
         let new = &src.spec;
         let mut msgs = Vec::new();

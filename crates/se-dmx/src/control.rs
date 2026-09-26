@@ -636,6 +636,10 @@ impl Ctl {
                     }
                 }
             }
+            Bus::Event(e) if e.ty == "mode.changed" => {
+                let on = e.payload.get_path("to").and_then(Value::as_str) == Some("rehearsal");
+                self.shared.rehearsal.store(on, Ordering::Relaxed);
+            }
             Bus::Event(e) if e.ty == "lights.flash" => {
                 let p = e.origin.default_priority();
                 if let Err(err) = self.flash(&e.payload, e.origin, e.actor.clone(), p, Some(e.id)) {
@@ -760,6 +764,8 @@ impl Ctl {
 
     pub fn tick(&mut self) {
         self.second += 1;
+        // mode.changed sets it at once; this catches a restored or missed mode
+        self.shared.rehearsal.store(self.hub.snapshot.load().str("show.mode") == Some("rehearsal"), Ordering::Relaxed);
         let status = self.shared.status.lock().clone();
         let (stats, limited) = {
             let mut m = self.shared.monitor.lock();
@@ -770,7 +776,8 @@ impl Ctl {
         let failed: Vec<&&output::OutputStatus> = enabled.iter().filter(|s| s.state == "fail").collect();
         let errors = self.show.errors.len() + self.view.read().plan_errors.len();
         let jitter_ms = stats.jitter_p99_us / 1000.0;
-        let mut detail: Vec<String> = enabled.iter().map(|s| format!("{} {}: {}", s.id, s.state, s.detail)).collect();
+        let mut detail: Vec<String> =
+            enabled.iter().map(|s| format!("{} {}: {}{}", s.id, s.state, s.detail, if s.held { " (holding its look during rehearsal)" } else { "" })).collect();
         detail.push(format!(
             "{:.1} fps · jitter p99 {:.2} ms (max {:.2} ms) · {}",
             stats.fps,
@@ -926,6 +933,7 @@ pub async fn run(ctx: EngineCtx) -> anyhow::Result<Lights> {
         stop: Default::default(),
         scheduling: parking_lot::Mutex::new(String::new()),
         frames: Default::default(),
+        rehearsal: Default::default(),
         alloc_violations: Default::default(),
         alive: std::sync::atomic::AtomicBool::new(true),
         cid: cid(&ctx.db),

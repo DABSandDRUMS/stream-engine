@@ -2,7 +2,7 @@
 //! library, and user shaders (shader/particles patches, project transitions) compiled with the
 //! generated `se_patch::wgsl` header. User compile errors map back to the patch source line.
 
-use crate::effects::{self, Exec, LIBRARY};
+use crate::effects::{self, LIBRARY};
 use crate::gpu::{ShaderError, scoped, shader_module};
 use crate::plan::Blend;
 use crate::resources::{COLOR, Layouts};
@@ -107,7 +107,6 @@ impl Pipelines {
         for e in LIBRARY {
             let module = m(e.name, &effects::module_source(e))?;
             fx.push(fullscreen(device, e.name, &l.fx_pipeline, &module, "vs", "fs", None));
-            debug_assert!(matches!(e.exec, Exec::Simple | Exec::Blur | Exec::Lut));
         }
         let blur_m = m("blur passes", &format!("{}\n{BLUR_PASSES_WGSL}", effects::COMMON_WGSL))?;
         let blur_down = fullscreen(device, "blur down", &l.fx_pipeline, &blur_m, "vs", "fs_down", None);
@@ -117,6 +116,13 @@ impl Pipelines {
         let fade = patch_fullscreen(device, l, "fade", &format!("{}{FADE_WGSL}", fade_layout.header())).map_err(|e| format!("built-in fade: {e}"))?;
         Ok(Pipelines { composite, composite_copy, convert, blit, flash, effects: fx, blur_down, blur_h, blur_v, fade })
     }
+}
+
+/// Compile a fused pointwise chain ([`effects::fused_source`]); uses the effect bind group.
+pub fn compile_fused(device: &wgpu::Device, l: &Layouts, chain: &[u8]) -> Result<wgpu::RenderPipeline, String> {
+    let label = chain.iter().map(|i| LIBRARY[*i as usize].name).collect::<Vec<_>>().join("+");
+    let module = shader_module(device, &label, &effects::fused_source(chain)).map_err(|e| format!("fused effects `{label}`: {e}"))?;
+    scoped(device, || fullscreen(device, &label, &l.fx_pipeline, &module, "vs", "fs", None)).map_err(|e| format!("fused effects `{label}`: {e}"))
 }
 
 /// A manifest describing a project transition shader, so it gets the same generated header
@@ -138,6 +144,7 @@ pub fn transition_manifest(name: &str, params: &[(String, se_patch::ParamSpec)])
         description: String::new(),
         size: None,
         fps: None,
+        grants: Vec::new(),
     }
 }
 

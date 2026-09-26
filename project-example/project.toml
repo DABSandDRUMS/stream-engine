@@ -101,13 +101,13 @@ z = 10
 [overlays.labels]
 canvases = ["wide"]
 rect.wide = [0.0, 0.955, 1.0, 0.045]
-when = "mode == 'live' || mode == 'brb' || mode == 'rehearsal'"
+when = "mode == 'live' || mode == 'brb' || mode == 'ad_break' || mode == 'rehearsal'"
 z = 10
 
 [overlays.eventlist]
 canvases = ["wide"]
 rect.wide = [0.01, 0.4, 0.2, 0.45]
-when = "mode == 'brb'"
+when = "mode == 'brb' || mode == 'ad_break'"
 z = 10
 
 [overlays.countdown]
@@ -120,6 +120,20 @@ canvases = ["wide", "tall"]
 when = "mode == 'outro'"
 z = 50
 
+# Twitch polls and predictions: on screen while one runs, then the result for a few seconds
+# (the page keeps `patch.<id>.showing` on for that). `rect` has the pages' `size` aspect.
+[overlays.poll]
+canvases = ["wide"]
+rect.wide = [0.015, 0.52, 0.3, 0.4]
+when = "twitch.poll.active || patch.poll.showing"
+z = 15
+
+[overlays.prediction]
+canvases = ["wide"]
+rect.wide = [0.015, 0.13, 0.3, 0.3407]
+when = "twitch.prediction.active || patch.prediction.showing"
+z = 15
+
 # Clips (§18): hype markers during the show, clip job after it (docs/clips.md).
 [clips]
 auto_process = true        # queue the clip job when the session closes
@@ -127,7 +141,7 @@ encoder = "auto"           # NVENC, libx264 when OBS holds every NVENC session
 tall_source = "auto"       # tall canvas recording when present, else a 9:16 crop of the wide one
 tall_crop_center = 0.5
 # Optional hooks (argv; JSON on stdin → JSON on stdout), off by default:
-# rank_command = ["~/bin/rank-clips"]     # e.g. an LLM pass: {candidates:[…]} → {clips:[{key, score, in, out, title}]}
+# rank_command = ["/usr/share/stream-engine/scripts/rank-clips-llm.py"]  # AI ranking via SE_RANK_URL/SE_RANK_MODEL (docs/clips.md)
 # upload_command = ["~/bin/upload-clip"]  # {id, wide, tall, captions, title, …} → {url}
 
 [clips.hype]
@@ -149,6 +163,14 @@ device = "default"          # ALSA capture PCM (PipeWire default source)
 model = "base.en"           # tiny.en | base.en | small.en | /path/to/ggml-model.bin
 max_seconds = 12
 confirm = ["panic", "mode", "clean"]
+
+# Rehearsal (§17.2, docs/extras.md): mode `rehearsal` is a practice run. OBS won't start the
+# stream, Twitch actions are dry runs, DMX outputs without `rehearsal = true` hold their last
+# look, and the simulator plays pretend viewers.
+[rehearsal]
+simulate = true
+every = "20s"               # about one event this often (random 0.5–1.5×)
+presets = []                # simulator presets to draw from; empty = the built-in mix
 
 # Giveaways (§14.1): chat-entry giveaways with weighted entries; run them from the Giveaway view
 # or `giveaway.open|close|draw|reset`. A viewer's weight = best role weight + sub_month_bonus ×
@@ -269,6 +291,12 @@ chat_as = "broadcaster"       # or "bot"
 emotes = ["7tv", "bttv", "ffz"]
 latency = "2.5s"              # viewer-side latency estimate for chat → screen alignment
 ad_warning = "60s"            # twitch.ad.upcoming this long before a scheduled ad
+
+# Chat picks the next transition: `!transition <name>` (commands/show.toml) votes for a minute;
+# the next take that doesn't name one uses the winner (docs/render.md#choosing-the-transition).
+[transition_vote]
+window = "60s"
+choices = ["fade", "morph", "zoomblur", "glitch", "morph_glitch"]
 
 # Policy for chat-, bits-, and points-originated actions (§12.1, docs/twitch.md#policy).
 [policy]

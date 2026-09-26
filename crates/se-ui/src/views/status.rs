@@ -7,7 +7,7 @@ use crate::panels::Panel;
 use egui::{Align, Layout, RichText};
 use se_proto::{Op, Value};
 use se_ui_kit::theme::{font_bold, font_semibold, mix, radius, type_scale};
-use se_ui_kit::widgets::{self, Kind, Size, icon};
+use se_ui_kit::widgets::{self, Kind, Size, Tone, icon};
 
 /// Something the streamer should know about, in plain words, with where to fix it.
 #[derive(Clone, Debug, PartialEq)]
@@ -86,7 +86,9 @@ fn friendly(app: &App, check: &str, status: &str, detail: &str) -> Option<String
     let fail = status == "fail";
     Some(match check.split('.').next().unwrap_or(check) {
         "obs" if check == "obs" => {
-            if fail {
+            if fail && detail.contains("no frames") {
+                "OBS isn't getting your video.".into()
+            } else if fail {
                 "OBS isn't open.".into()
             } else {
                 "OBS needs a look: our video isn't in its scenes yet.".into()
@@ -95,8 +97,13 @@ fn friendly(app: &App, check: &str, status: &str, detail: &str) -> Option<String
         "audio" if check == "audio.mic" => "Your microphone is silent. Is it muted or unplugged?".into(),
         "audio" if check == "audio.obs" => "OBS can't hear Stream Engine's sound yet. Sound → \"Add our sound to OBS\" fixes it.".into(),
         "audio" => "Something's off with the sound. See Sound → Mix → Advanced.".into(),
-        "twitch" => "Twitch isn't set up yet.".into(),
+        "twitch" if detail.contains("not authorized") || detail.contains("no Client ID") => "Twitch isn't set up yet.".into(),
+        "twitch" if ["token", "scopes", "revoked"].iter().any(|w| detail.contains(w)) => "Twitch needs you to sign in again: Community → Twitch.".into(),
+        "twitch" if fail => "Twitch isn't connected right now. It reconnects by itself; if it stays, see Community → Twitch.".into(),
+        "twitch" => "Twitch needs a look: see Community → Twitch.".into(),
         "night_light" => "Night light is on, so your screens look warmer than your stream. Turn it off while you adjust colours.".into(),
+        "idle_inhibitor" => "Your screen may lock during the show. It normally stays awake by itself once you start.".into(),
+        "gpu" => "The graphics card is running hot or nearly full.".into(),
         "mixer" => {
             if fail {
                 "Can't find your mixing desk on the network. Is it switched on?".into()
@@ -128,7 +135,7 @@ fn friendly(app: &App, check: &str, status: &str, detail: &str) -> Option<String
         "dmx" | "lights" => "The lights box isn't connected.".into(),
         "deck" | "midi" | "input" => "A controller isn't connected.".into(),
         "voice" => "Voice control isn't ready.".into(),
-        "render" | "gpu" => "Video is struggling to keep up.".into(),
+        "render" => "Video is struggling to keep up.".into(),
         "cef" | "patches" => "An overlay has a problem.".into(),
         "tts" => "The read-out voice isn't ready.".into(),
         "disk" => "You're running low on disk space.".into(),
@@ -289,6 +296,209 @@ pub fn warnings(app: &App) -> Vec<Warning> {
     w
 }
 
+// ---- Go live checklist (§15.8: preflight all green, or acknowledged) ------------------------------
+
+/// Optional extras: not set up doesn't hold up going live.
+const OPTIONAL_EXTRAS: [&str; 3] = ["relay", "youtube", "tiktok"];
+
+/// How a preflight check reads in the checklist, most urgent first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Level {
+    Fail,
+    Warn,
+    /// An optional extra that isn't set up.
+    Optional,
+    Pass,
+}
+
+pub fn level(check: &str, status: &str) -> Level {
+    let base = check.split('.').next().unwrap_or(check);
+    match status {
+        "pass" => Level::Pass,
+        "fail" => Level::Fail,
+        "warn" if OPTIONAL_EXTRAS.contains(&base) => Level::Optional,
+        _ => Level::Warn,
+    }
+}
+
+/// Going on air needs every check green (optional extras may be off) or "Go live anyway".
+/// `None`: the checks haven't answered.
+pub fn may_go_live(levels: Option<&[Level]>, ack: bool) -> bool {
+    ack || levels.is_some_and(|l| l.iter().all(|l| matches!(l, Level::Pass | Level::Optional)))
+}
+
+/// A plain sentence for a check that passed.
+fn ready_text(check: &str, detail: &str) -> String {
+    match check {
+        "obs" => "OBS is open and getting your video.",
+        "twitch" => "Connected to Twitch.",
+        "devices" => "Everything you use is plugged in.",
+        "sources" => "Your cameras have a picture.",
+        "audio.mic" => "Your microphone is picking up sound.",
+        "audio.obs" => "OBS can hear Stream Engine.",
+        "dmx" => "The lights box is connected.",
+        "mixer" => "The mixing desk is connected.",
+        "disk" => return format!("Enough disk space ({detail})."),
+        "idle_inhibitor" => "Your screen will stay awake during the show.",
+        "gpu" => "The graphics card has room to spare.",
+        "night_light" => "Night light is off.",
+        "backup" => "Backups are up to date.",
+        "recordings" => "Recordings fit in the space you allowed.",
+        _ => return format!("{}: ready.", check_info(check).0),
+    }
+    .into()
+}
+
+pub struct Check {
+    pub level: Level,
+    pub text: String,
+    pub open: Option<Panel>,
+}
+
+/// The checklist from a `preflight` reply: most urgent first, each sentence once.
+fn checklist(app: &App, list: &[Value]) -> Vec<Check> {
+    let mut out: Vec<Check> = Vec::new();
+    for v in list {
+        let s = |k: &str| v.get_path(k).and_then(Value::as_str).unwrap_or("");
+        let (name, status, detail) = (s("name"), s("status"), s("detail"));
+        let lv = level(name, status);
+        let (title, open) = check_info(name);
+        let text = match lv {
+            Level::Pass => ready_text(name, detail),
+            Level::Optional => format!("{title}: not set up (optional)."),
+            Level::Fail | Level::Warn => friendly(app, name, status, detail).unwrap_or_else(|| format!("{title}: {detail}")),
+        };
+        if !out.iter().any(|c| c.text == text) {
+            out.push(Check { level: lv, text, open: open.filter(|_| matches!(lv, Level::Fail | Level::Warn)) });
+        }
+    }
+    out.sort_by_key(|c| c.level);
+    out
+}
+
+/// The "Before you go live" window.
+#[derive(Default)]
+pub struct GoLive {
+    pub open: bool,
+    /// "Go live anyway" is on.
+    pub ack: bool,
+    /// `preflight` replies already seen when it opened: only newer ones count.
+    seq: u64,
+    opened: Option<std::time::Instant>,
+    asked: Option<std::time::Instant>,
+}
+
+/// The Go live button: run every check and show the list.
+pub fn open_golive(app: &mut App) {
+    let now = std::time::Instant::now();
+    app.golive = GoLive { open: true, ack: false, seq: app.m.q_seq("preflight"), opened: Some(now), asked: Some(now) };
+    app.m.query("preflight", Value::Null);
+}
+
+fn golive_window(app: &mut App, ctx: &egui::Context) {
+    let t = app.t.clone();
+    // keep it current while open: disk, GPU, something fixed meanwhile
+    if app.golive.asked.is_none_or(|a| a.elapsed().as_secs_f32() > 3.0) {
+        app.golive.asked = Some(std::time::Instant::now());
+        app.m.query("preflight", Value::Null);
+    }
+    let fresh = app.m.q_seq("preflight") > app.golive.seq;
+    let failed = app.m.query_errors.contains_key("preflight") || app.golive.opened.is_some_and(|o| o.elapsed().as_secs() >= 6);
+    let checks: Option<Vec<Check>> = fresh.then(|| checklist(app, app.m.q_list("preflight")));
+    let levels: Option<Vec<Level>> = checks.as_ref().map(|c| c.iter().map(|c| c.level).collect());
+    let problems = checks.as_ref().map_or(0, |c| c.iter().filter(|c| matches!(c.level, Level::Fail | Level::Warn)).count());
+    let mut ack = app.golive.ack;
+    let (mut start, mut fix, mut close) = (None, None, false);
+    let resp = egui::Modal::new(egui::Id::new("golive")).show(ctx, |ui| {
+        ui.set_width(600.0);
+        ui.label(RichText::new("Before you go live").font(font_semibold(type_scale::LARGE)).color(t.fg));
+        ui.add_space(10.0);
+        match &checks {
+            None if failed => {
+                widgets::callout(
+                    ui,
+                    &t,
+                    Tone::Warn,
+                    icon::WARN,
+                    "The checks didn't answer",
+                    "Stream Engine couldn't check everything. You can still go live.",
+                    None,
+                );
+            }
+            None => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(RichText::new("Checking everything…").color(t.text_dim));
+                });
+            }
+            Some(_) if problems == 0 => {
+                widgets::callout(ui, &t, Tone::Ok, icon::CHECK, "Everything is ready", "Pick how you want to start.", None);
+            }
+            Some(_) => {
+                let title = if problems == 1 { "1 thing isn't ready".to_string() } else { format!("{problems} things aren't ready") };
+                widgets::callout(ui, &t, Tone::Warn, icon::WARN, &title, "Fix them first, or switch on \"Go live anyway\".", None);
+            }
+        }
+        if let Some(checks) = &checks {
+            ui.add_space(8.0);
+            egui::ScrollArea::vertical().max_height(380.0).auto_shrink([false, true]).show(ui, |ui| {
+                for c in checks {
+                    ui.horizontal(|ui| {
+                        let (ic, col) = match c.level {
+                            Level::Fail => (icon::CROSS, t.bright_red),
+                            Level::Warn => (icon::WARN, t.yellow),
+                            Level::Optional => (icon::DOT, t.text_dim),
+                            Level::Pass => (icon::CHECK, t.green),
+                        };
+                        ui.label(RichText::new(ic).color(col));
+                        let fg = if matches!(c.level, Level::Fail | Level::Warn) { t.fg } else { t.text_dim };
+                        ui.add(egui::Label::new(RichText::new(&c.text).color(fg)).wrap());
+                        if let Some(p) = c.open {
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if widgets::button_ex(ui, &t, None, "Fix", Kind::Secondary, Size::Small, 0.0, true).clicked() {
+                                    fix = Some(p);
+                                }
+                            });
+                        }
+                    });
+                    ui.add_space(2.0);
+                }
+            });
+        }
+        if problems > 0 || (checks.is_none() && failed) {
+            ui.add_space(10.0);
+            widgets::toggle_row(ui, &t, "Go live anyway", "I've looked at these and want to start.", &mut ack);
+        }
+        ui.add_space(14.0);
+        let ok = may_go_live(levels.as_deref(), ack);
+        ui.horizontal(|ui| {
+            if widgets::button_ex(ui, &t, Some(icon::CLOCK), "Starting-soon screen first", Kind::Secondary, Size::Medium, 0.0, ok).clicked() {
+                start = Some("preshow");
+            }
+            if widgets::button_ex(ui, &t, Some(icon::LIVE), "Go live right now", Kind::Live, Size::Medium, 0.0, ok).clicked() {
+                start = Some("live");
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if widgets::button_ex(ui, &t, None, "Not now", Kind::Ghost, Size::Medium, 0.0, true).clicked() {
+                    close = true;
+                }
+            });
+        });
+    });
+    app.golive.ack = ack;
+    if let Some(mode) = start {
+        // mode first: OBS judges stream.start after it (rehearsal never streams)
+        set_mode(app, mode);
+        obs(app, "obs.stream.start");
+        app.golive = GoLive::default();
+    } else if let Some(p) = fix {
+        app.golive = GoLive::default();
+        app.open_panel(p);
+    } else if close || resp.should_close() {
+        app.golive = GoLive::default();
+    }
+}
+
 /// Start OBS detached from the UI (closing the UI must not close OBS).
 pub fn open_obs(app: &mut App) {
     match std::process::Command::new("setsid").args(["-f", "obs"]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn() {
@@ -398,6 +608,12 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         if app.m.b("obs.record.active") {
             widgets::badge(ui, &t, "Recording", t.tally_program());
         }
+        if app.m.connected && mode == "rehearsal" {
+            let viewers = if app.m.b("show.rehearsal.simulating") { "Pretend viewers cheer, follow and chat now and then. " } else { "" };
+            widgets::badge(ui, &t, "Practice run: nothing goes out", t.accent).on_hover_text(format!(
+                "{viewers}The stream doesn't start, the lights show the practice in the Lights view (your room lights keep their look), and nothing is changed on Twitch. Pick another mode to finish."
+            ));
+        }
 
         // ---- right side: big actions ------------------------------------------------------------
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -427,22 +643,9 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                 }
             } else {
                 let r = widgets::button_ex(ui, &t, Some(icon::LIVE), "Go live", Kind::Live, Size::Large, 150.0, app.m.connected);
-                egui::Popup::menu(&r).show(|ui| {
-                    ui.set_min_width(280.0);
-                    ui.label(RichText::new("How do you want to start?").font(font_semibold(type_scale::LARGE)));
-                    ui.add_space(6.0);
-                    if widgets::button_ex(ui, &t, Some(icon::CLOCK), "Starting-soon screen first", Kind::Secondary, Size::Medium, 260.0, true).clicked() {
-                        obs(app, "obs.stream.start");
-                        set_mode(app, "preshow");
-                        ui.close();
-                    }
-                    ui.add_space(4.0);
-                    if widgets::button_ex(ui, &t, Some(icon::LIVE), "Go live right now", Kind::Live, Size::Medium, 260.0, true).clicked() {
-                        obs(app, "obs.stream.start");
-                        set_mode(app, "live");
-                        ui.close();
-                    }
-                });
+                if r.on_hover_text("Checks that everything is ready, then starts").clicked() {
+                    open_golive(app);
+                }
             }
             if on_air && mode != "live" && app.m.connected {
                 if widgets::button_ex(ui, &t, Some(icon::LIVE), "Go live", Kind::Primary, Size::Large, 0.0, true).clicked() {
@@ -466,6 +669,9 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     });
     let r = ui.max_rect();
     ui.painter().hline(r.x_range(), r.bottom() - 0.5, egui::Stroke::new(1.0, t.border));
+    if app.golive.open {
+        golive_window(app, &ui.ctx().clone());
+    }
 }
 
 #[cfg(test)]
@@ -484,5 +690,20 @@ mod tests {
         assert_eq!(mode_label("preshow"), "Starting soon");
         assert_eq!(mode_label("ad_break"), "Ad break");
         assert_eq!(mode_label("my_custom"), "My custom");
+    }
+
+    #[test]
+    fn going_live_needs_all_green_or_an_acknowledgement() {
+        use Level::*;
+        assert_eq!(level("tiktok", "warn"), Optional, "an extra that isn't set up");
+        assert_eq!(level("youtube.quota", "warn"), Optional);
+        assert_eq!(level("youtube", "fail"), Fail, "a broken extra still counts");
+        assert_eq!(level("twitch", "warn"), Warn, "Twitch is not an optional extra here");
+        assert_eq!(level("disk", "unknown"), Warn);
+        assert!(may_go_live(Some(&[Pass, Optional, Pass]), false));
+        assert!(!may_go_live(Some(&[Pass, Warn]), false));
+        assert!(may_go_live(Some(&[Fail, Warn]), true));
+        assert!(!may_go_live(None, false), "no answer yet");
+        assert!(may_go_live(None, true), "no answer, but acknowledged");
     }
 }

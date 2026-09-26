@@ -809,6 +809,13 @@ async fn route_actions(obs: Arc<Obs>, mut rx: mpsc::UnboundedReceiver<Command>) 
         };
         let (obs, name) = (obs.clone(), name.clone());
         tokio::spawn(async move {
+            // Rehearsal never goes on air (§17.2). Ask the core rather than the snapshot: a
+            // "mode, then stream.start" pair from one client is then judged after the mode change.
+            if op == "stream.start" && obs.ctx.hub.with_core(|core| Value::Bool(core.mode_str() == "rehearsal")).await.truthy() {
+                obs.ctx.hub.log("info", TARGET, "rehearsal: not going on air (obs.stream.start skipped; recording still works)");
+                obs.ctx.hub.emit(Event::new("obs.dry_run", Origin::Obs, Value::map().with("action", name.as_str())));
+                return;
+            }
             match obs.command(op).await {
                 Ok(v) => obs.ctx.hub.log("info", TARGET, format!("{name}: {}", if v.is_null() { "ok".to_string() } else { v.to_string() })),
                 Err(e) => obs.ctx.hub.log("error", TARGET, format!("{name} failed: {e}")),

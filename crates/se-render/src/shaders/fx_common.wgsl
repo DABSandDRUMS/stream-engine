@@ -1,4 +1,14 @@
 // Shared prelude of every built-in effect. Textures hold premultiplied, sRGB-encoded RGBA.
+
+// One stage of a fused pass: a pointwise effect's params and strength. Strength 0 = skipped.
+struct FxStage {
+    params: array<vec4<f32>, 4>,
+    strength: f32,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
+};
+
 struct FxUniforms {
     resolution: vec2<f32>,   // target size in px
     time: f32,               // seconds (master clock)
@@ -9,6 +19,7 @@ struct FxUniforms {
     bass: f32,
     seed: f32,
     _pad: f32,
+    stages: array<FxStage, 8>, // fused passes only (MAX_FUSED stages, in chain order)
 };
 
 @group(0) @binding(0) var<uniform> fx: FxUniforms;
@@ -34,6 +45,17 @@ fn vs(@builtin(vertex_index) i: u32) -> FxVsOut {
 // Effect param by index (0 = amount, 1 = level, 2.. = own params).
 fn param(i: u32) -> f32 {
     return fx.params[i / 4u][i % 4u];
+}
+
+// The single-pass effect as a stage (pointwise effects run through the same function whether
+// they run alone or fused with their neighbours).
+fn fx_stage() -> FxStage {
+    return FxStage(fx.params, fx.strength, 0.0, 0.0, 0.0);
+}
+
+// Stage param by index (same numbering as `param`).
+fn stage_param(st: FxStage, i: u32) -> f32 {
+    return st.params[i / 4u][i % 4u];
 }
 
 fn region_size() -> vec2<f32> {

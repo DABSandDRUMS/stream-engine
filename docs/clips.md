@@ -118,9 +118,84 @@ out: {"clips": [{"key": "p5060000", "score": 9.1, "in": 51.5, "out": 66.0, "titl
 ```
 
 Invalid in/out (outside the transcript or the length limits) are ignored; a failing ranker
-falls back to the deterministic ranking. `upload_command` gets the clip (`id`, `wide`, `tall`,
-thumbnails, `captions`, `title`, `duration`, `score`, …) and may answer `{"url": "…"}`;
-`upload_on_approve = true` runs it on approval.
+(non-zero exit, unparseable stdout, or still running after `rank_timeout`, default `"120s"`)
+falls back to the deterministic ranking and the reason lands in the job report. The engine runs
+the argv with its own environment and working directory; only a leading `~/` of the program is
+expanded. Candidates missing from `clips` keep their deterministic values; `drop` removes one.
+
+### The bundled LLM ranker
+
+`scripts/rank-clips-llm.py` (Python 3, standard library only; installed as
+`/usr/share/stream-engine/scripts/rank-clips-llm.py`) sends the candidates to any
+OpenAI-compatible chat completions endpoint (Ollama, llama.cpp, vLLM, OpenAI, …). The prompt
+carries each candidate's hype score, reasons, labels, peak, current in/out, transcript window and
+its transcript condensed to timed sentences (split like the clip job: `.`/`!`/`?` or a ≥ 0.8 s
+pause). The model scores 0–10, picks in/out, titles, or drops each one; the script asks for JSON
+mode (retrying without it on HTTP 400) and also digs the JSON out of prose, code fences and
+`<think>` blocks.
+
+Every answer is checked before it reaches the engine: known keys only, candidate keys it was
+given, finite numbers (score clamped to 0–10), in < out, each snapped to a sentence start/end
+within 1 s and padded like the deterministic trim, inside the transcript window, length within
+`min_len`–`max_len`. An invalid in/out is left out (score and title still count); an answer with
+nothing valid is left out.
+
+| Env | |
+|---|---|
+| `SE_RANK_URL` | base URL (`http://127.0.0.1:11434/v1`) or the full `…/chat/completions` URL (required) |
+| `SE_RANK_MODEL` | model name (required) |
+| `SE_RANK_TIMEOUT` | seconds for the whole run, default `90`; keep it below `rank_timeout` |
+| `SE_RANK_BATCH` | candidates per request, default `8`; lower it for models with a small context window |
+| `SE_RANK_KEY` | API key; unset → keyring (below); no key is fine for local servers |
+
+Missing config, an HTTP error, a timeout, an unparseable reply, or no usable answer at all: one
+line on stderr, exit 1, and the engine keeps its deterministic ranking. The key is never printed.
+
+Enable it in `project.toml` (the repo path works too, e.g. `~/Github/stream-engine/scripts/…`):
+
+```toml
+[clips]
+rank_command = ["/usr/share/stream-engine/scripts/rank-clips-llm.py"]
+rank_timeout = "120s"
+```
+
+Give the engine's service the environment (the hook inherits it): `systemctl --user edit
+stream-engine`, add a drop-in, then `systemctl --user restart stream-engine`. Local Ollama:
+
+```ini
+[Service]
+Environment=SE_RANK_URL=http://127.0.0.1:11434/v1 SE_RANK_MODEL=qwen2.5:7b-instruct
+```
+
+Hosted (key from the keyring, below):
+
+```ini
+[Service]
+Environment=SE_RANK_URL=https://api.openai.com/v1 SE_RANK_MODEL=gpt-4o-mini
+```
+
+Or keep it all in `project.toml` by wrapping it with `env`:
+
+```toml
+rank_command = ["env", "SE_RANK_URL=http://127.0.0.1:11434/v1", "SE_RANK_MODEL=qwen2.5:7b-instruct",
+                "/usr/share/stream-engine/scripts/rank-clips-llm.py"]
+```
+
+A hosted API key goes in the keyring next to the engine's own secrets (service `stream-engine`),
+not in the unit file:
+
+```sh
+secret-tool store --label="stream-engine clips.rank_key" service stream-engine username clips.rank_key
+# paste the key at the prompt; the script reads it with:
+secret-tool lookup service stream-engine username clips.rank_key
+```
+
+Try it by hand on any JSON in the input format above:
+`SE_RANK_URL=… SE_RANK_MODEL=… scripts/rank-clips-llm.py < candidates.json`.
+
+`upload_command` gets the clip (`id`, `wide`, `tall`, thumbnails, `captions`, `title`,
+`duration`, `score`, …) and may answer `{"url": "…"}`; `upload_on_approve = true` runs it on
+approval.
 
 ## Settings
 

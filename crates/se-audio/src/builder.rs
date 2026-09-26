@@ -59,6 +59,18 @@ pub enum Conv {
     Component(usize),
 }
 
+/// `patch.<id>.payload.*` (published by the core with the trigger edge) → payload floats of a
+/// dsp patch, in `TriggerPayload::floats` order. Bound before `.active`, so a sync that sees a
+/// new edge delivers its payload first.
+fn payload_binds(id: &str) -> Vec<(String, u8, Conv)> {
+    use se_core::triggers::{PAYLOAD_COLOR, PAYLOAD_FIELDS};
+    let mut v: Vec<(String, u8, Conv)> = PAYLOAD_FIELDS.iter().enumerate().map(|(k, f)| (format!("patch.{id}.payload.{f}"), k as u8, Conv::Float)).collect();
+    for c in 0..4 {
+        v.push((format!("patch.{id}.payload.user_color"), (PAYLOAD_COLOR + c) as u8, Conv::Component(c)));
+    }
+    v
+}
+
 impl Conv {
     pub fn apply(&self, v: &Value) -> Option<f32> {
         match self {
@@ -226,6 +238,9 @@ impl Ctx<'_> {
                         for s in &slots {
                             self.bind(format!("patch.{id}.{}", s.param), target(FxWhat::Param(1 + s.slot as u16)), s.conv.clone(), s.default);
                             pinfo.push(Value::Str(format!("patch.{id}.{}", s.param)));
+                        }
+                        for (addr, k, conv) in payload_binds(id) {
+                            self.bind(addr, target(FxWhat::Payload(k)), conv, 0.0);
                         }
                         let triggered = def.trigger || self.dsp.has_trigger(id);
                         self.bind(format!("patch.{id}.env"), target(FxWhat::Param(0)), Conv::Float, if triggered { 0.0 } else { 1.0 });
@@ -500,6 +515,9 @@ pub fn build(cfg: &AudioConfig, generation: u32, ports: &mut PortTable, bank: Sa
                         p.conv.clone(),
                         p.default,
                     );
+                }
+                for (addr, p, conv) in payload_binds(&s.patch) {
+                    c.bind(addr, Target::Fx { chain: ChainRef::Source(k as u8), slot: 0, what: FxWhat::Payload(p) }, conv, 0.0);
                 }
                 c.bind(format!("patch.{}.env", s.patch), Target::Fx { chain: ChainRef::Source(k as u8), slot: 0, what: FxWhat::Param(0) }, Conv::Float, 1.0);
                 c.declare(format!("audio.source.{}.gain", s.patch), db_meta(s.gain_db, -60.0, 12.0, "dsp source level"));

@@ -103,13 +103,24 @@ pass.
 Effect-layer shader patches work the same way (`fx = [{ name = "patch.<id>" }]`); with a trigger
 they also run at canvas level while triggered.
 
+**Fused passes.** `grade`, `chroma_key`, `vignette`, and `fade_to_black` only look at the pixel
+they write, so neighbours of that kind in one chain run as a single pass. At load and on every
+reload, each chain (a source's, a node's, a scene's, `canvas_fx` + the canvas globals,
+`output_fx` + the output globals) gets one pipeline for its pointwise effects in chain order,
+built on the loader thread. Per frame, consecutive active pointwise effects of the chain run
+through it (inactive ones are skipped inside the pass); anything else in between — `blur`,
+`lut`, effects that sample neighbours, shader patches — keeps its own pass and splits the run.
+The result equals one pass per effect (up to 8-bit rounding between passes, which the fused
+pass no longer has). `perf.fx_passes` counts effect passes in the last frame and
+`perf.fx_fused` the effects that ran inside fused passes (also in query `render`).
+
 ## Transitions
 
 Driven by the core's `show.transition.*` state, interpolated by master-clock time every frame:
 
 - `kind = "morph"`: nodes showing the same source animate rect/crop/radius/opacity/rotation with
   `ease`; others enter/exit with `enter`/`exit` (`fade`, `scale`, `slide_left|right|up|down`,
-  `none`; per node overrides).
+  `none`, or a custom shader style; per node overrides).
 - `kind = "shader"`: both scenes render to textures and `shader` blends them. The file gets the
   generated patch header: `se.progress` (0→1), `se_input` (outgoing), `se_input_b` (incoming),
   `se_sampler`, extra TOML keys as params `p_<name>()`; entry point `fs`. `shader = "patch.<id>"`
@@ -121,11 +132,89 @@ gl-transitions GlitchMemories, MIT), `morph_glitch` (combined). Ported shaders k
 header. A shader that fails to compile keeps its last good version (else a crossfade) and the
 error is published at `render.transition.<name>.error`.
 
+### Custom enter/exit styles
+
+Instead of a built-in name, `enter`/`exit` (on a morph transition or on a node) can be a shader:
+`"patch.<id>"` (a `kind = "shader"` patch; `layer = "effect"` is a good fit) or a `.wgsl` file in
+the project (`"transitions/dissolve.wgsl"`; keep it under `transitions/` so saving it reloads it).
+The node is drawn once on its own, in place and unrotated, then through the shader:
+
+- `se_input`: the node alone on a transparent layer the size of the canvas;
+- `se.region`: the node's box on that layer (uv `x0, y0, x1, y1`);
+- `se.progress`: presence, 0 = gone … 1 = fully in place (enter runs 0 → 1, exit 1 → 0, so one
+  shader serves both);
+- the usual header (`se.time`, palette, signals; a patch also gets its params).
+
+Return premultiplied color; only the part inside the node's box is shown, with its rounded
+corners, mask, rotation, and opacity applied afterwards. Until the shader compiles (or if it
+fails), the node fades instead; file errors are published at `render.style.<path>.error` and
+logged. Example wipe:
+
+```wgsl
+@fragment
+fn fs(in: SeVsOut) -> @location(0) vec4<f32> {
+    let c = textureSample(se_input, se_sampler, in.uv);
+    let x = (in.uv.x - se.region.x) / max(se.region.z - se.region.x, 1e-6);
+    return c * step(x, se.progress);
+}
+```
+
+### Choosing the transition
+
+A take that doesn't name its transition (`scene.cut wide`, deck keys, `scene.take`) picks one in
+this order; the `scene.take` event says which (`by`: `command | fixed | vote | pool | default`):
+
+1. the transition named by the command (`scene.cut wide zoomblur`, `scene.take fade 400ms`);
+2. a fixed `name` for the scene pair, else the target scene's `name`;
+3. the chat vote winner (below);
+4. a weighted pick from the scene pair's pool, else the target scene's pool (skipping the last
+   `avoid_repeat` transitions);
+5. `fade`.
+
+```toml
+# scenes/wide.toml
+[transitions]
+pool = [{ name = "morph", w = 2 }, { name = "zoomblur", w = 1 }]
+avoid_repeat = 1
+ms = [500, 800]                  # duration range (or one value); else the transition's own `ms`
+
+[transitions.from.kit]           # coming from `kit`: its own pool, duration, lights
+pool = [{ name = "glitch" }]
+ms = 400
+
+[transitions.from.brb]           # only the duration differs; the pool above still applies
+ms = 1200
+```
+
+A pair table overrides the target scene's settings key by key (`pool` with its own
+`avoid_repeat`, `ms`, `lights`, `name`); a pair with its own `pool` ignores the scene's fixed
+`name`. Unknown scenes or transitions in a pair show as project errors.
+
+**Chat vote.** With `[transition_vote]` in `project.toml`, viewers vote for the next take's
+transition with `transition.vote {name}` — the starter project maps `!transition <name>` to it
+(`commands/show.toml`, a per-viewer cooldown and role gate like any bot command):
+
+```toml
+[transition_vote]
+window = "60s"                   # only votes from the last minute count
+choices = ["fade", "morph", "zoomblur", "glitch"]   # default: every transition
+# enabled = false                # keep the table, stop counting votes
+```
+
+Each viewer has one vote (a new one replaces theirs); names match without regard to case. The
+next take without a named transition uses the most-voted one (a tie goes to the transition voted
+for first) and spends the votes; a transition named by the operator or a fixed `name` wins over
+the vote, which then waits for the following take. Votes count only in the policy's effect modes
+(`live`, `rehearsal`), like every chat effect. Live tally: `show.transition.votes`
+(`{transition: votes}`); each vote emits `transition.vote {user, name, votes}`.
+
 ## Shader and particles patches
 
 The renderer compiles `shader` and `particles` patches (the patch loader declares their params and
 triggers). The generated header is `se_patch::wgsl::Layout::header()` (time, dt, frame, env,
-resolution, progress, trigger_count, palette, params, signals — see docs/patches.md).
+resolution, progress, trigger_count, region, the last trigger's payload `se.trigger`, palette,
+params, signals — see docs/patches.md). The payload arrives with the trigger that fired the patch
+(`patch.<id>.trigger` event), in the same frame as its `trigger_count` step.
 
 - `shader`: fragment entry `fs(in: SeVsOut) -> @location(0) vec4<f32>`, premultiplied output.
 - `particles`: `sim.wgsl` (`@compute @workgroup_size(64) fn sim`) and `draw.wgsl` (`vs` with
@@ -151,7 +240,8 @@ pass caps the per-frame luminance step. State: `safety.video.limited`, `safety.v
 `perf.fps`, `perf.frame_ms` (render thread CPU), `perf.frame_ms_max`, `perf.gpu_ms` (GPU
 timestamps), `perf.pass.<sources|wide|tall|preview|atlas|output>_ms`, `perf.dropped`, `perf.late`,
 `perf.vram_mb` / `perf.vram_budget_mb` (VK_EXT_memory_budget, whole process),
-`perf.render_mb` (renderer's own textures), `render.clients`, `render.export`,
+`perf.render_mb` (renderer's own textures), `perf.fx_passes` / `perf.fx_fused` (effect passes and
+fused effects in the last frame), `render.clients`, `render.export`,
 `render.recoveries`, `health.render`, query `render`. The frame loop does no heap allocation in
 steady state (checked in debug builds by the counting allocator; the GPU API's own allocations
 are excluded).

@@ -56,10 +56,12 @@ pub struct Row<'a> {
 
 #[derive(Default)]
 pub struct Registry {
-    /// syspath (or `pipewire:<name>`) → device.
+    /// syspath (or `pipewire:<name>`, `net:<identity>`) → device.
     pub devices: BTreeMap<String, DeviceInfo>,
     pub expected: Vec<Expected>,
     pub details: HashMap<String, CameraDetails>,
+    /// Network discovery per protocol (`ucnet`, `artnet`): (working, what it is doing).
+    pub network: BTreeMap<&'static str, (bool, String)>,
 }
 
 impl Registry {
@@ -213,10 +215,15 @@ impl Registry {
             devices.push(v);
         }
         let (status, detail) = self.health();
+        let mut network = Value::map().with("firewall_hint", crate::network::FIREWALL_HINT);
+        for (proto, (ok, detail)) in &self.network {
+            network = network.with(*proto, Value::map().with("ok", *ok).with("detail", detail.as_str()));
+        }
         Value::map()
             .with("devices", Value::List(devices))
             .with("expected", Value::List(expected_list))
             .with("health", Value::map().with("status", status).with("detail", detail))
+            .with("network", network)
     }
 }
 

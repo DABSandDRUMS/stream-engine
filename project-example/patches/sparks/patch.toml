@@ -1,5 +1,6 @@
 # Sparks: GPU particles rising from the bottom while triggered (overlay layer, all canvases).
-# Fire it from a preset (`fx = [{ name = "patch.sparks" }]`) or `streamctl do patch.sparks.trigger`.
+# Fire it from a preset (`fx = [{ name = "patch.sparks" }]`) or `streamctl do patch.sparks.trigger`;
+# a payload `bits`/`amount`/`count`/`viewers` makes the burst bigger (e.g. `bits=5000`).
 kind        = "particles"
 layer       = "overlay"
 label       = "Sparks"

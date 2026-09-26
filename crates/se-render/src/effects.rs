@@ -58,6 +58,11 @@ impl Point {
 pub enum Exec {
     /// One full-screen fragment pass.
     Simple,
+    /// One full-screen pass whose output pixel depends only on the input pixel at the same
+    /// position (and that position). The WGSL is a function `fn <name>(c: vec4<f32>, uv:
+    /// vec2<f32>, st: FxStage) -> vec4<f32>`, so adjacent pointwise effects run fused in one pass
+    /// ([`fused_source`]) with the same math as their single passes.
+    Pointwise,
     /// Downsample ×4, separable gaussian at reduced resolution, composite (`fx_aux`).
     Blur,
     /// Samples a 3D LUT (`fx_lut`); the `.cube` file comes from the string param `file`.
@@ -205,7 +210,7 @@ pub static LIBRARY: &[EffectDef] = &[
         amount_default: 1.0,
         level_default: 1.0,
         point: Point::Canvas,
-        exec: Exec::Simple,
+        exec: Exec::Pointwise,
         flashy: true,
         identity: Some(&[0.0, 0.0, 1.0, 1.0, 0.0, 0.0]),
         wgsl: include_str!("shaders/fx/grade.wgsl"),
@@ -236,7 +241,7 @@ pub static LIBRARY: &[EffectDef] = &[
         amount_default: 0.0,
         level_default: 1.0,
         point: Point::Source,
-        exec: Exec::Simple,
+        exec: Exec::Pointwise,
         flashy: false,
         identity: None,
         wgsl: include_str!("shaders/fx/chroma_key.wgsl"),
@@ -248,7 +253,7 @@ pub static LIBRARY: &[EffectDef] = &[
         amount_default: 0.0,
         level_default: 0.6,
         point: Point::Canvas,
-        exec: Exec::Simple,
+        exec: Exec::Pointwise,
         flashy: false,
         identity: None,
         wgsl: include_str!("shaders/fx/vignette.wgsl"),
@@ -264,7 +269,7 @@ pub static LIBRARY: &[EffectDef] = &[
         amount_default: 0.0,
         level_default: 1.0,
         point: Point::Output,
-        exec: Exec::Simple,
+        exec: Exec::Pointwise,
         flashy: false,
         identity: None,
         wgsl: include_str!("shaders/fx/fade_to_black.wgsl"),
@@ -275,9 +280,41 @@ pub fn find(name: &str) -> Option<usize> {
     LIBRARY.iter().position(|e| e.name == name)
 }
 
-/// Full WGSL module for a library effect.
+/// Most stages one fused pass runs (`FxUniforms.stages` in `fx_common.wgsl`).
+pub const MAX_FUSED: usize = 8;
+
+/// Full WGSL module for a library effect (entry points `vs`, `fs`).
 pub fn module_source(def: &EffectDef) -> String {
-    format!("{COMMON_WGSL}\n{}", def.wgsl)
+    match def.exec {
+        Exec::Pointwise => format!(
+            "{COMMON_WGSL}\n{}\n@fragment\nfn fs(in: FxVsOut) -> @location(0) vec4<f32> {{\n    return {}(src(in.uv), in.uv, fx_stage());\n}}\n",
+            def.wgsl, def.name
+        ),
+        _ => format!("{COMMON_WGSL}\n{}", def.wgsl),
+    }
+}
+
+/// WGSL module running the pointwise library effects `chain` (library indices, ≤ [`MAX_FUSED`])
+/// in one pass: stage `k` reads `fx.stages[k]` and is skipped at strength 0, so any ordered
+/// subset of the chain runs through the same pipeline.
+pub fn fused_source(chain: &[u8]) -> String {
+    debug_assert!(chain.len() <= MAX_FUSED);
+    let mut s = format!("{COMMON_WGSL}\n");
+    let mut seen = [false; 256];
+    for &i in chain {
+        let def = &LIBRARY[i as usize];
+        debug_assert_eq!(def.exec, Exec::Pointwise, "{} is not fusable", def.name);
+        if !std::mem::replace(&mut seen[i as usize], true) {
+            s += def.wgsl;
+            s += "\n";
+        }
+    }
+    s += "@fragment\nfn fs(in: FxVsOut) -> @location(0) vec4<f32> {\n    var c = src(in.uv);\n";
+    for (k, &i) in chain.iter().enumerate() {
+        s += &format!("    if fx.stages[{k}].strength > 0.0 {{\n        c = {}(c, in.uv, fx.stages[{k}]);\n    }}\n", LIBRARY[i as usize].name);
+    }
+    s += "    return c;\n}\n";
+    s
 }
 
 #[cfg(test)]
@@ -301,15 +338,32 @@ mod tests {
         }
     }
 
+    fn validate(label: &str, src: &str) -> naga::Module {
+        let module = naga::front::wgsl::parse_str(src).unwrap_or_else(|err| panic!("{label}: {}", err.emit_to_string(src)));
+        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+            .validate(&module)
+            .unwrap_or_else(|err| panic!("{label}: {}", err.emit_to_string(src)));
+        module
+    }
+
     #[test]
     fn every_library_shader_validates() {
         for e in LIBRARY {
-            let src = module_source(e);
-            let module = naga::front::wgsl::parse_str(&src).unwrap_or_else(|err| panic!("{}: {}", e.name, err.emit_to_string(&src)));
-            naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
-                .validate(&module)
-                .unwrap_or_else(|err| panic!("{}: {}", e.name, err.emit_to_string(&src)));
+            let module = validate(e.name, &module_source(e));
             assert!(module.entry_points.iter().any(|ep| ep.name == "fs"), "{} lacks fs", e.name);
+        }
+    }
+
+    #[test]
+    fn fused_chains_validate_with_repeats_and_full_length() {
+        let pw: Vec<u8> = (0..LIBRARY.len() as u8).filter(|i| LIBRARY[*i as usize].exec == Exec::Pointwise).collect();
+        assert!(pw.len() >= 2, "need at least two fusable effects");
+        // every effect repeated (same function called by two stages) and a full MAX_FUSED chain
+        let repeated: Vec<u8> = pw.iter().flat_map(|i| [*i, *i]).collect();
+        let full: Vec<u8> = pw.iter().copied().cycle().take(MAX_FUSED).collect();
+        for chain in [&repeated[..repeated.len().min(MAX_FUSED)], &full[..]] {
+            let src = fused_source(chain);
+            validate(&format!("{chain:?}"), &src);
         }
     }
 }

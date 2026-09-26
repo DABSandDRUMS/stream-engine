@@ -1,6 +1,8 @@
 //! Media-file sources: FFmpeg demux + decode (NVDEC through the `*_cuvid` decoders when
 //! available, CPU otherwise), converted into NV12 (opaque) or RGBA (straight alpha) video slots
-//! and paced against the master clock (loop, rate, pause, seek).
+//! and paced against the master clock (loop, rate, pause, seek). Each file also publishes its
+//! timeline identity (`file:<hash>`, ISRC from its tags) and feeds timelines following it the
+//! exact position of every shown frame (§2.7).
 
 use crate::config::{FileDef, HwAccel, SourceDef};
 use crate::status::{CpuMeter, OWNER, Publisher, Status};
@@ -8,12 +10,17 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, TryRecvError};
 use ff::codec::packet::Mut as _;
 use ff::ffi;
 use ffmpeg_next as ff;
+use parking_lot::Mutex;
+use se_clock::timecode::{ObsKind, ObsThrottle, TcObs};
+use se_core::Input;
+use se_core::timeline::{local_media_key, normalize_isrc};
 use se_hub::Hub;
 use se_hub::media::{PixelFormat, VideoWriter};
 use se_proto::{Event, Origin, Value};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 pub enum Cmd {
     Stop,
@@ -331,6 +338,13 @@ fn play(hub: &Arc<Hub>, def: &mut Arc<SourceDef>, st: &Status, writer: &mut Vide
     pubs.set("decoder", Value::Str(decoder_name.clone()));
     pubs.set("duration", Value::Float((duration * 1000.0).round() / 1000.0));
     pubs.set("error", Value::Str(String::new()));
+    let mut tags: Vec<(String, String)> = ictx.metadata().iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    for s in ictx.streams() {
+        tags.extend(s.metadata().iter().map(|(k, v)| (k.to_string(), v.to_string())));
+    }
+    let isrc = isrc_from_tags(tags.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    pubs.set("media", Value::Str(String::new()));
+    let mut feed = Feed::new(hub.clone(), &name, &file.path, isrc);
 
     let a_paused = format!("source.{name}.paused");
     let a_rate = format!("source.{name}.rate");
@@ -356,6 +370,7 @@ fn play(hub: &Arc<Hub>, def: &mut Arc<SourceDef>, st: &Status, writer: &mut Vide
     pubs.set("playing", Value::Bool(true));
 
     loop {
+        feed.poll(pubs);
         // commands
         match rx.try_recv() {
             Ok(Cmd::Stop) | Err(TryRecvError::Disconnected) => return Exit::Stop,
@@ -404,6 +419,11 @@ fn play(hub: &Arc<Hub>, def: &mut Arc<SourceDef>, st: &Status, writer: &mut Vide
                             pace.pending = Some(se_clock::now());
                             let due = pace.due(pts);
                             publish(writer, &frame, slot_fmt, stride, w, h, &mut scaler, bt709, full, due);
+                            if paused {
+                                feed.locate(pts);
+                            } else {
+                                feed.frame(pts, due);
+                            }
                         }
                     }
                     _ => skip_until = None,
@@ -416,6 +436,7 @@ fn play(hub: &Arc<Hub>, def: &mut Arc<SourceDef>, st: &Status, writer: &mut Vide
             if paused && paused_since.is_none() {
                 paused_since = Some(se_clock::now());
                 pubs.set("playing", Value::Bool(false));
+                feed.stop(last_pts, false);
             }
             match rx.recv_timeout(Duration::from_millis(20)) {
                 Ok(Cmd::Stop) | Err(RecvTimeoutError::Disconnected) => return Exit::Stop,
@@ -450,6 +471,7 @@ fn play(hub: &Arc<Hub>, def: &mut Arc<SourceDef>, st: &Status, writer: &mut Vide
                 } else {
                     ended = true;
                     pubs.set("playing", Value::Bool(false));
+                    feed.stop(last_pts, true);
                     hub.emit(Event::new("source.ended", Origin::System, Value::map().with("source", name.as_str())));
                 }
                 continue;
@@ -500,6 +522,7 @@ fn play(hub: &Arc<Hub>, def: &mut Arc<SourceDef>, st: &Status, writer: &mut Vide
             continue;
         }
         publish(writer, &frame, slot_fmt, stride, w, h, &mut scaler, bt709, full, due);
+        feed.frame(pts, due);
         last_due = due;
         let now = se_clock::now();
         fpsm.frame(now);
@@ -589,5 +612,191 @@ fn next_frame(
             Err(ff::Error::InvalidData) => {}
             Err(e) => return Err(e),
         }
+    }
+}
+
+// ---- timeline identity and position (§2.7) ------------------------------------------------
+
+/// `file:` + the first 16 hex characters of the BLAKE3 hash of the file's bytes: exactly
+/// `se_analysis::offline::media_id`, so a timeline's `media = "file:<hash>"` and its offline
+/// beat grid share the key. Hashed streaming (videos are large).
+pub fn file_media_id(path: &Path) -> std::io::Result<String> {
+    let mut h = blake3::Hasher::new();
+    h.update_reader(std::fs::File::open(path)?)?;
+    Ok(format!("file:{}", &h.finalize().to_hex().as_str()[..16]))
+}
+
+/// ISRC from container/stream tags (`ISRC` in Vorbis comments, MP4 and Matroska; `TSRC` in
+/// ID3), normalized; the first valid one wins.
+pub fn isrc_from_tags<'a>(tags: impl IntoIterator<Item = (&'a str, &'a str)>) -> Option<String> {
+    tags.into_iter().filter(|(k, _)| k.eq_ignore_ascii_case("isrc") || k.eq_ignore_ascii_case("tsrc")).find_map(|(_, v)| normalize_isrc(v))
+}
+
+/// Media ids by path, valid while size and mtime are unchanged (reopen/loop don't re-hash).
+static IDS: Mutex<Vec<(PathBuf, u64, Option<SystemTime>, String)>> = Mutex::new(Vec::new());
+
+/// Timeline keys and the playback (source name) driving each: the first playback of a file
+/// holds its key until it stops, so two sources showing the same file don't fight.
+static CLAIMS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+/// Hash `path` off the playback thread (cached); the receiver yields the id or `None`.
+fn media_id_async(path: PathBuf) -> Receiver<Option<String>> {
+    let (tx, rx) = crossbeam_channel::bounded(1);
+    let stamp = std::fs::metadata(&path).ok().map(|m| (m.len(), m.modified().ok()));
+    if let Some((len, mtime)) = stamp
+        && let Some(id) = IDS.lock().iter().find(|(p, l, m, _)| *p == path && *l == len && *m == mtime).map(|e| e.3.clone())
+    {
+        let _ = tx.send(Some(id));
+        return rx;
+    }
+    let spawned = std::thread::Builder::new().name("se-media-hash".into()).spawn(move || {
+        let id = file_media_id(&path).ok();
+        if let (Some(id), Some((len, mtime))) = (&id, stamp) {
+            let mut ids = IDS.lock();
+            ids.retain(|(p, ..)| *p != path);
+            ids.push((path, len, mtime, id.clone()));
+        }
+        let _ = tx.send(id);
+    });
+    if spawned.is_err() {
+        tracing::warn!(target: "video-in", "media identity: could not start the hashing thread");
+    }
+    rx
+}
+
+fn claim(key: &str, source: &str) -> bool {
+    let mut c = CLAIMS.lock();
+    match c.iter().find(|(k, _)| k == key) {
+        Some((_, owner)) => owner == source,
+        None => {
+            c.push((key.to_string(), source.to_string()));
+            true
+        }
+    }
+}
+
+fn release_claims(source: &str) {
+    CLAIMS.lock().retain(|(_, owner)| owner != source);
+}
+
+/// Publishes a media file's identity (`source.<n>.media`, `.isrc`) and feeds the timelines
+/// following it (`media = "file:<hash>"` / `"isrc:<code>"`) the exact position of every shown
+/// frame at its master-clock time, as replayable `Input::Timecode` observations.
+struct Feed {
+    hub: Arc<Hub>,
+    source: String,
+    pending: Option<Receiver<Option<String>>>,
+    isrc: Option<String>,
+    keys: Vec<String>,
+    thr: ObsThrottle,
+    last: Option<TcObs>,
+}
+
+impl Feed {
+    fn new(hub: Arc<Hub>, source: &str, path: &Path, isrc: Option<String>) -> Feed {
+        Feed {
+            hub,
+            source: source.to_string(),
+            pending: Some(media_id_async(path.to_path_buf())),
+            isrc,
+            keys: Vec::new(),
+            // ≈15 observations/s while running; discontinuities always pass
+            thr: ObsThrottle::new(66_000_000, 0.1),
+            last: None,
+        }
+    }
+
+    /// Pick up the identity once hashed.
+    fn poll(&mut self, pubs: &mut Publisher) {
+        let Some(rx) = &self.pending else { return };
+        let id = match rx.try_recv() {
+            Ok(id) => id,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => None,
+        };
+        self.pending = None;
+        pubs.set("media", Value::Str(id.clone().unwrap_or_default()));
+        pubs.set("isrc", Value::Str(self.isrc.clone().unwrap_or_default()));
+        self.keys = id.into_iter().chain(self.isrc.as_ref().map(|c| format!("isrc:{c}"))).map(|m| local_media_key(&m)).collect();
+        // a stop/locate that happened while hashing still counts
+        if let Some(o) = self.last.take().filter(|o| o.kind != ObsKind::Run) {
+            self.send(o);
+        }
+    }
+
+    fn send(&mut self, o: TcObs) {
+        self.last = Some(o);
+        if self.keys.is_empty() || !self.thr.pass(&o) {
+            return;
+        }
+        for k in &self.keys {
+            if claim(k, &self.source) {
+                self.hub.submit(Input::Timecode { source: k.clone(), obs: o });
+            }
+        }
+    }
+
+    /// A frame with presentation time `pts` (s) goes on screen at master-clock `due`.
+    fn frame(&mut self, pts: f64, due: u64) {
+        self.send(TcObs::run(pts, due));
+    }
+
+    /// Parked at `pts` after a seek while paused.
+    fn locate(&mut self, pts: f64) {
+        self.send(TcObs { seconds: pts, ts: se_clock::now(), kind: ObsKind::Locate, rate: None });
+    }
+
+    /// Paused or finished at `pts`; `done` hands the timeline keys back.
+    fn stop(&mut self, pts: f64, done: bool) {
+        if self.last.is_some_and(|o| o.kind == ObsKind::Stop && o.seconds == pts) {
+            return;
+        }
+        self.send(TcObs { seconds: pts, ts: se_clock::now(), kind: ObsKind::Stop, rate: None });
+        if done {
+            release_claims(&self.source);
+        }
+    }
+}
+
+impl Drop for Feed {
+    fn drop(&mut self) {
+        if let Some(o) = self.last {
+            self.stop(o.seconds, true);
+        }
+        release_claims(&self.source);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_id_matches_the_offline_analysis_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("clip.bin");
+        // larger than one BLAKE3 chunk and one reader buffer
+        let bytes: Vec<u8> = (0..200_003u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8).collect();
+        std::fs::write(&p, &bytes).unwrap();
+        assert_eq!(file_media_id(&p).unwrap(), se_analysis::offline::media_id(&bytes));
+        assert!(file_media_id(&dir.path().join("missing.mp4")).is_err());
+    }
+
+    #[test]
+    fn isrc_comes_from_either_tag_spelling_and_is_normalized() {
+        assert_eq!(isrc_from_tags([("title", "x"), ("TSRC", "us-rc1-76-07839")]), Some("USRC17607839".into()));
+        assert_eq!(isrc_from_tags([("isrc", "not an isrc"), ("ISRC", "GBAYE0601498")]), Some("GBAYE0601498".into()), "first valid one");
+        assert_eq!(isrc_from_tags([("comment", "USRC17607839")]), None, "only ISRC/TSRC tags");
+    }
+
+    #[test]
+    fn the_first_playback_of_a_file_holds_its_timeline_key() {
+        let key = "media:file:test-claims";
+        assert!(claim(key, "a"));
+        assert!(claim(key, "a"), "the holder keeps it");
+        assert!(!claim(key, "b"), "a second playback of the same file doesn't drive it");
+        release_claims("a");
+        assert!(claim(key, "b"), "free again once the first stops");
+        release_claims("b");
     }
 }

@@ -751,6 +751,14 @@ impl Names {
         if name.is_empty() {
             return "…".into();
         }
+        // a value filled in when the reaction runs: `{scene}`, `{patch.ad_break.return_scene}`
+        if let Some(inner) = name.strip_prefix('{').and_then(|n| n.strip_suffix('}')) {
+            return match inner {
+                "scene" => "the scene on air".into(),
+                s if s.ends_with("scene") => "the scene from before".into(),
+                _ => friendly_text(name),
+            };
+        }
         list.iter().find(|(n, _)| n == name).map_or_else(|| nice_name(name), |(_, l)| l.clone())
     }
 }
@@ -2124,6 +2132,15 @@ mod tests {
             commands: vec!["preset.fire hype".into()],
             ..RuleDraft::new()
         }
+    }
+
+    #[test]
+    fn values_filled_in_later_read_as_words() {
+        let scenes = vec![("duo".to_string(), "Duo".to_string())];
+        assert_eq!(Names::label(&scenes, "duo"), "Duo");
+        assert_eq!(Names::label(&scenes, "{scene}"), "the scene on air");
+        assert_eq!(Names::label(&scenes, "{patch.ad_break.return_scene}"), "the scene from before");
+        assert!(!Names::label(&scenes, "{user}").contains('{'));
     }
 
     #[test]

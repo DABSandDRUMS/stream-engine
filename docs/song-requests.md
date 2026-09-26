@@ -12,7 +12,7 @@ request queue with a UI-editable policy, and control of the player page. The UI 
    with one `videos.list` call (1 unit) and stores it in the keyring (`youtube.api_key`); the
    command is redacted from session logs and the audit table. `youtube.key.clear` removes it.
 3. The `youtube` web source (scene `duo`) loads `/web/player.html`. Sign the CEF profile into
-   the YouTube account (Premium = no ads in the player, §13.3).
+   the YouTube account (Premium = no ads in the player, §13.3). Placement rules below.
 4. Optional: the public queue page and Ko-fi tips through the relay — see `docs/relay.md`.
 
 Without a key, requests still work for songs already in the library; `queue.lookup` = `off`
@@ -118,6 +118,26 @@ Audio path: CEF renders the page (Patches slice, CPU paint path) and delivers it
 to the **`music`** bus (`audio/graph.toml`) → ducking, analysis (`music.*` signals), effects →
 PipeWire node `se-music` → OBS. The player's own volume (`song.volume`) sits before the bus
 fader.
+
+### On screen: the player and the now playing card
+
+YouTube's player terms (§13.3): nothing may cover the player, and the "now playing" overlay goes
+beside it. The example `duo` scene follows that:
+
+```toml
+{ src = "youtube",          rect = [0.755, 0.065, 0.225, 0.225], when = "queue.now.id" },  # top right, 16:9
+{ src = "patch.nowplaying", rect = [0.578, 0.19, 0.172, 0.10],  when = "queue.now.id" },  # just left of it
+```
+
+Project overlays are drawn over every scene, so keep their `rect`s clear of the player too: in
+the example the chat box starts below it (`[overlays.chatbox] rect.wide` from y = 0.34) and the
+alert box ends left of it (x ≤ 0.75). Moving the player means checking `[overlays.*]` again.
+
+The `nowplaying` web patch (scene source) shows `queue.now.title`, the requester
+(`queue.now.user`), and a progress bar from `queue.position`; it fades out between songs.
+Params: `label` ("Now playing"), `show_requester`, `align` (`right` lines the text up toward a
+player on its right, `left` for a player on its left), `accent`, `text_color`, `card_bg`,
+`font`. The page renders at its node's size, so give it any shape that fits beside the player.
 
 ## Crash recovery
 

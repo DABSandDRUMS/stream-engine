@@ -11,6 +11,7 @@ use crate::helix::{Helix, HelixError, Method, first};
 use crate::normalize::{Emote, Lookup, Normalizer};
 use crate::rewards::{self, RewardMap};
 use crate::time::{parse_rfc3339, unix_ms, unix_s};
+use crate::users::{self, List, Users};
 use parking_lot::{Mutex, RwLock};
 use se_core::policy::{PolicyCfg, RewardDef};
 use se_hub::{Bus, EngineCtx, Hub};
@@ -22,6 +23,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 
 const OWNER: &str = "twitch";
+/// How often the moderator and VIP lists are re-read.
+const ROLES_EVERY: Duration = Duration::from_secs(600);
 
 fn list_meta() -> Meta {
     Meta { ty: ValueType::List, default: Value::List(Vec::new()), ..Default::default() }
@@ -69,7 +72,8 @@ struct Directory {
     broadcaster_id: String,
     bot_id: Option<String>,
     follows: HashMap<String, Entry>,
-    roles: HashMap<String, Vec<Role>>,
+    /// Users/roles cache (chat badges + moderator/VIP lists), for events without badges.
+    users: Users,
     emotes: EmoteSet,
     rewards: RewardMap,
     min_follow_s: i64,
@@ -89,7 +93,7 @@ impl Lookup for Directory {
         self.min_follow_s
     }
     fn cached_roles(&self, user_id: &str) -> Option<Vec<Role>> {
-        self.roles.get(user_id).cloned()
+        self.users.roles(user_id)
     }
     fn badge_url(&self, set_id: &str, id: &str) -> Option<String> {
         self.emotes.badges.get(&format!("{set_id}/{id}")).cloned()
@@ -166,6 +170,8 @@ pub struct Service {
     automod: Mutex<Vec<Value>>,
     users: Mutex<HashMap<String, String>>,
     sources: Mutex<Sources>,
+    /// Last error reading each moderator/VIP list (warned once until it works again).
+    roles_errors: Mutex<[Option<String>; 2]>,
 }
 
 impl Service {
@@ -223,6 +229,7 @@ impl Service {
             automod: Mutex::new(Vec::new()),
             users: Mutex::new(HashMap::new()),
             sources: Mutex::new(Sources::default()),
+            roles_errors: Mutex::new([None, None]),
         })
     }
 
@@ -295,9 +302,13 @@ impl Service {
         if let Err(e) = followers::migrate(&self.ctx.db) {
             self.hub.log("error", OWNER, format!("follower cache: {e:#}"));
         }
+        if let Err(e) = users::migrate(&self.ctx.db) {
+            self.hub.log("error", OWNER, format!("users/roles cache: {e:#}"));
+        }
         {
             let mut d = self.dir.write();
             d.follows = followers::load(&self.ctx.db);
+            d.users = users::load(&self.ctx.db, unix_s());
         }
         if let Ok(Some(v)) = self.ctx.db.kv_get("twitch", "delay.manual_ms") {
             self.delay.lock().manual_ms = v.as_i64();
@@ -390,6 +401,7 @@ impl Service {
                     me.sync_rewards().await;
                     me.refresh_emotes().await;
                     me.preload_followers().await;
+                    me.sync_roles().await;
                     me.poll_stream().await;
                 });
             }
@@ -502,13 +514,11 @@ impl Service {
         let s = |k: &str| p.get_path(k).map(|v| v.to_string()).unwrap_or_default();
         match e.ty.as_str() {
             "twitch.chat" => {
-                if let Some(a) = &e.actor {
-                    let mut d = self.dir.write();
-                    if d.roles.len() > 20_000 {
-                        d.roles.clear();
+                if let Some(a) = e.actor.as_ref().filter(|a| a.id != "anonymous") {
+                    let row = self.dir.write().users.saw(&a.id, &s("login"), &a.roles, unix_s());
+                    if let Some(row) = row {
+                        users::store(&self.ctx.db, &[row]);
                     }
-                    let roles: Vec<Role> = a.roles.iter().copied().filter(|r| *r != Role::Follower).collect();
-                    d.roles.insert(a.id.clone(), roles);
                 }
                 let now = Instant::now();
                 self.chat_times.lock().push_back(now);
@@ -606,6 +616,7 @@ impl Service {
         let mut last_ads = Instant::now() - Duration::from_secs(3600);
         let mut last_validate = Instant::now();
         let mut last_emotes = Instant::now();
+        let mut last_roles = Instant::now();
         let mut last_rate = -1.0f32;
         loop {
             tokio::select! {
@@ -663,6 +674,10 @@ impl Service {
                     if last_emotes.elapsed() >= Duration::from_secs(1800) {
                         last_emotes = Instant::now();
                         self.refresh_emotes().await;
+                    }
+                    if last_roles.elapsed() >= ROLES_EVERY {
+                        last_roles = Instant::now();
+                        self.sync_roles().await;
                     }
                     self.set("twitch.helix.remaining", self.helix.remaining.load(std::sync::atomic::Ordering::Relaxed));
                 }
@@ -789,6 +804,32 @@ impl Service {
                 tracing::info!(target: "twitch", "follower cache: {n} followers loaded");
             }
             Err(e) => self.hub.log("warn", OWNER, format!("follower preload failed: {e}")),
+        }
+    }
+
+    /// Moderator and VIP lists → users/roles cache. A list that can't be read (e.g. a grant
+    /// from before its scope was added) keeps its last good copy.
+    async fn sync_roles(&self) {
+        let Some(bid) = self.broadcaster_id() else { return };
+        for (i, l) in List::ALL.into_iter().enumerate() {
+            match users::fetch(&self.helix, &bid, l).await {
+                Ok(members) => {
+                    let now = unix_s();
+                    let changed = self.dir.write().users.apply_list(l, &members, now);
+                    users::store(&self.ctx.db, &changed);
+                    users::store_synced(&self.ctx.db, l, now);
+                    self.roles_errors.lock()[i] = None;
+                    tracing::info!(target: "twitch", "roles: {} {}", members.len(), l.as_str());
+                }
+                Err(e) => {
+                    let msg = format!("can't read the channel's {} ({e}); roles for events without chat badges use what chat showed", l.as_str());
+                    let mut errs = self.roles_errors.lock();
+                    if errs[i].as_deref() != Some(msg.as_str()) {
+                        self.hub.log("warn", OWNER, msg.clone());
+                        errs[i] = Some(msg);
+                    }
+                }
+            }
         }
     }
 
@@ -1060,6 +1101,25 @@ impl Service {
                                 .with("followed_at", e.filter(|e| e.followed_at > 0).map(|e| Value::Int(e.followed_at)).unwrap_or_default())
                                 .with("age_s", e.and_then(|e| e.age_s(now)).unwrap_or(-1)))
                         }
+                        // `{user_id}` → that viewer's cached roles; else the lists
+                        "twitch.users" => {
+                            let d = me.dir.read();
+                            if let Some(uid) = args.get_path("user_id").map(|v| v.to_string()) {
+                                let roles = d.users.roles(&uid);
+                                return Ok(Value::map()
+                                    .with("known", roles.is_some())
+                                    .with("roles", Value::from(roles.unwrap_or_default().into_iter().map(se_core::policy::role_name).collect::<Vec<_>>())));
+                            }
+                            let list = |l: List| {
+                                Value::List(d.users.listed(l).into_iter().map(|(id, login)| Value::map().with("id", id).with("login", login)).collect())
+                            };
+                            Ok(Value::map()
+                                .with("moderators", list(List::Mods))
+                                .with("vips", list(List::Vips))
+                                .with("moderators_synced_at", d.users.synced_at(List::Mods))
+                                .with("vips_synced_at", d.users.synced_at(List::Vips))
+                                .with("known", d.users.len() as i64))
+                        }
                         "twitch.scopes" => Ok(Value::map()
                             .with("broadcaster", Value::from(crate::config::SCOPES.iter().map(|s| s.to_string()).collect::<Vec<_>>()))
                             .with("bot", Value::from(crate::config::BOT_SCOPES.iter().map(|s| s.to_string()).collect::<Vec<_>>()))),
@@ -1088,7 +1148,13 @@ impl Service {
         let who = c.actor.as_ref().map(|a| a.name.clone());
         let mutating = !matches!(
             name.as_str(),
-            "twitch.auth.start" | "twitch.auth.cancel" | "twitch.auth.logout" | "twitch.rewards.sync" | "twitch.emotes.refresh" | "twitch.delay.set"
+            "twitch.auth.start"
+                | "twitch.auth.cancel"
+                | "twitch.auth.logout"
+                | "twitch.rewards.sync"
+                | "twitch.emotes.refresh"
+                | "twitch.users.refresh"
+                | "twitch.delay.set"
         );
         if mutating && self.dry_run() {
             self.hub.log("info", OWNER, format!("[rehearsal dry-run] {}", c.op.describe()));
@@ -1309,6 +1375,10 @@ impl Service {
             }
             "twitch.emotes.refresh" => {
                 self.refresh_emotes().await;
+                Ok(())
+            }
+            "twitch.users.refresh" => {
+                self.sync_roles().await;
                 Ok(())
             }
             "twitch.delay.set" => {

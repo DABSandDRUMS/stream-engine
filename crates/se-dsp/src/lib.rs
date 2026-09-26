@@ -9,7 +9,7 @@
 //! * [`wasm`] (feature `wasm`): `dsp` WebAssembly patches as effects (fixed block ABI).
 //!
 //! Real-time contract: after construction nothing here allocates, locks, or does I/O in
-//! `process`/`set_param`/`trigger`. Buffers are sized for [`MAX_BLOCK`] frames up front.
+//! `process`/`set_param`/`trigger`/`set_payload`. Buffers are sized for [`MAX_BLOCK`] frames up front.
 
 // Delay networks and filter banks index several parallel arrays by the same position; index
 // loops are the clearest form there.
@@ -151,6 +151,11 @@ pub trait Effect: Send {
     /// release. Performance effects (stutter, tape stop, vinyl brake, reverse, …) start and
     /// stop here; the default ignores it.
     fn trigger(&mut self, _on: bool) {}
+
+    /// Float `k` of the last trigger's payload (the engine's `TriggerPayload::floats` order),
+    /// set in the same block as the trigger edge. Only `dsp` patches read it; the default
+    /// ignores it.
+    fn set_payload(&mut self, _k: usize, _value: f32) {}
 
     /// Process one stereo block in place. `l.len() == r.len() <= MAX_BLOCK`.
     fn process(&mut self, ctx: &Ctx, l: &mut [f32], r: &mut [f32]);

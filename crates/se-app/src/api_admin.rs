@@ -23,7 +23,7 @@ fn scope_name(s: &Scope) -> String {
     match s {
         Scope::Full => "full".into(),
         Scope::ReadOnly => "read".into(),
-        Scope::Patch(id) => format!("patch:{id}"),
+        Scope::Patch(id, _) => format!("patch:{id}"),
         Scope::Mod => "mod".into(),
     }
 }

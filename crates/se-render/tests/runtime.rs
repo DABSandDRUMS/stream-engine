@@ -91,6 +91,38 @@ fn particles_overlay_follows_its_envelope() {
     assert!(lit(&tall) > 50, "overlay on every canvas");
 }
 
+/// The payload of the trigger that fired a shader patch reaches its header (`se.trigger`) and
+/// replaces the previous one on the next trigger.
+#[test]
+fn trigger_payload_reaches_shader_patches() {
+    use se_core::triggers::TriggerPayload;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(root, "project.toml", PROJECT);
+    write_file(root, "scenes/s.toml", "[canvas.wide]\nnodes = [{ src = \"patch.probe\" }]\n");
+    write_file(root, "patches/probe/patch.toml", "kind = \"shader\"\nlayer = \"source\"\ntrigger = { hold = \"1s\" }\n");
+    write_file(
+        root,
+        "patches/probe/main.wgsl",
+        "@fragment\nfn fs(in: SeVsOut) -> @location(0) vec4<f32> {\n    let t = se.trigger;\n    return vec4<f32>(t.bits / 10000.0, t.tier / 4.0, t.user_color.b * f32(se.trigger_count), 1.0);\n}\n",
+    );
+    let mut h = Harness::new(root);
+    assert_eq!(h.reports.lock().patches, vec![("probe".to_string(), Ok(()))]);
+    h.set("show.scene.program", "s");
+    h.frame();
+    assert_eq!(px(&h.read(WIDE), 160, 90), [0, 0, 0, 255], "nothing fired yet");
+    let fire = |h: &mut Harness, payload: Value| {
+        let p = TriggerPayload::from_event(&payload, None).floats();
+        h.r.apply(se_render::renderer::Msg::PatchTrigger { patch: "probe".into(), payload: p });
+        h.frame();
+        px(&h.read(WIDE), 160, 90)
+    };
+    let cheer = fire(&mut h, Value::map().with("bits", 5000).with("color", "#0000ff"));
+    assert!(cheer[0].abs_diff(128) <= 1 && cheer[1] == 0 && cheer[2] == 255, "bits 5000, blue user, count 1: {cheer:?}");
+    let sub = fire(&mut h, Value::map().with("tier", 2));
+    assert!(sub[0] == 0 && sub[1].abs_diff(128) <= 1 && sub[2] == 0, "the next trigger replaces the payload: {sub:?}");
+}
+
 fn wait_demand(server: &FramesServer, canvas: u32, dmabuf: bool, shm: bool) {
     for _ in 0..200 {
         let d = server.demand(canvas);

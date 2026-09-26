@@ -775,7 +775,7 @@ Target: within one render frame of analysis latency.
   - broadcast: `channel:manage:broadcast` (markers), `channel:manage:raids`
   - ads: `channel:read:ads`, `channel:manage:ads`
   - followers and shoutouts: `moderator:read:followers`, `moderator:manage:shoutouts`
-  - moderation: `moderator:manage:banned_users`, `moderator:manage:chat_messages`, `moderator:manage:automod`, `moderator:manage:blocked_terms`, plus `channel:moderate` (required by the `channel.ban` / `channel.unban` EventSub types; verified against the EventSub reference 2026-09)
+  - moderation: `moderator:manage:banned_users`, `moderator:manage:chat_messages`, `moderator:manage:automod`, `moderator:manage:blocked_terms`, plus `channel:moderate` (required by the `channel.ban` / `channel.unban` EventSub types; verified against the EventSub reference 2026-09); `moderation:read` and `channel:read:vips` for the moderator/VIP lists in the users/roles cache
 - **Ad breaks:** an `ad_break` event switches mode to `ad_break` (scene with a countdown, music up, chat effects paused), and it returns automatically. A warning shows in the UI ahead of scheduled ads.
 - **Measure stream delay** for chat time alignment (§3.2).
 - **Third-party emotes:** 7TV, BTTV, and FFZ public APIs for chat overlays (cached; animated formats decoded to GPU textures).

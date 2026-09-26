@@ -2,9 +2,9 @@
 //! wasmtime/cranelift at load and run on the audio thread as an [`Effect`] with a fixed block
 //! ABI, a per-block time budget, and click-free auto-bypass on overrun, trap, or memory growth.
 //!
-//! # ABI v1
+//! # ABI v1 and v2
 //! The module has **no imports** and exports `memory` plus:
-//! * `se_dsp_abi() -> i32`: must return 1.
+//! * `se_dsp_abi() -> i32`: 1 or 2 (v2 adds the trigger payload block, below).
 //! * `init(sample_rate: f32, channels: i32, max_frames: i32) -> i32`: 0 = ok, < 0 = error.
 //!   All guest allocation happens here; linear memory may not grow afterwards.
 //! * `input_buffer() -> i32`, `output_buffer() -> i32`, `params_buffer() -> i32`: byte offsets
@@ -18,6 +18,12 @@
 //! [`PARAMS_LEN`] f32: `[0]` trigger envelope 0–1, `[1]` bpm, `[2]` beat phase 0–1, `[3]` bar
 //! phase 0–1, `[4]` trigger count (+1 on every trigger-on edge), `[5..8]` reserved (0), then
 //! `[8 + k]` = patch param slot `k` (the manifest's params in alphabetical order).
+//!
+//! ABI v2 appends [`PAYLOAD_LEN`] floats at [`PAYLOAD_BASE`] (so the block is
+//! [`PARAMS_LEN_V2`] long): the last trigger's payload — `[72]` amount, `[73]` bits, `[74]` tier,
+//! `[75]` months, `[76]` viewers, `[77]` count, `[78]` user hash 0–1, `[79]` reserved, `[80..84]`
+//! user colour r, g, b, a, `[84..88]` reserved (the engine's `TriggerPayload::floats` order).
+//! The engine updates it in the same block as the trigger edge, never after it.
 //!
 //! # Real-time behaviour
 //! [`WasmFx::process`], [`Effect::set_param`], and [`Effect::trigger`] never allocate, lock, or
@@ -60,16 +66,22 @@ use wasmtime::{
     Config, Engine, ExternType, Instance, Memory, Module, OptLevel, ResourceLimiter, Store, StoreContextMut, Trap, TypedFunc, UpdateDeadline, ValType,
 };
 
-/// Block ABI version implemented by this host.
-pub const ABI_VERSION: i32 = 1;
+/// Newest block ABI version implemented by this host (v1 modules still load).
+pub const ABI_VERSION: i32 = 2;
 /// Channels passed to `init` (planar stereo).
 pub const CHANNELS: usize = 2;
 /// Header floats at the start of the params block.
 pub const HEADER_LEN: usize = 8;
 /// Patch param slots after the header.
 pub const WASM_PARAM_SLOTS: usize = 64;
-/// Total f32 values in the params block.
+/// Total f32 values in the params block (ABI v1).
 pub const PARAMS_LEN: usize = HEADER_LEN + WASM_PARAM_SLOTS;
+/// First float of the trigger payload (ABI v2).
+pub const PAYLOAD_BASE: usize = PARAMS_LEN;
+/// Floats of the trigger payload block (ABI v2; the first 12 are used).
+pub const PAYLOAD_LEN: usize = 16;
+/// Total f32 values in the params block (ABI v2).
+pub const PARAMS_LEN_V2: usize = PARAMS_LEN + PAYLOAD_LEN;
 /// Header index: trigger envelope 0–1.
 pub const H_ENV: usize = 0;
 /// Header index: tempo (bpm).
@@ -268,9 +280,9 @@ impl WasmHost {
         Ok(WasmHost { engine, ticker })
     }
 
-    /// Compile (AOT, cranelift) and validate a module against ABI v1: no imports, the
+    /// Compile (AOT, cranelift) and validate a module against the block ABI: no imports, the
     /// required exports with exact signatures, a 32-bit unshared memory within
-    /// [`MEMORY_LIMIT`], and `se_dsp_abi() == 1`. Call off the audio thread.
+    /// [`MEMORY_LIMIT`], and `se_dsp_abi()` 1 or 2. Call off the audio thread.
     pub fn compile(&self, wasm: &[u8]) -> Result<WasmModule, String> {
         let module = Module::new(&self.engine, wasm).map_err(|e| format!("invalid wasm module: {e:#}"))?;
         if let Some(i) = module.imports().next() {
@@ -303,10 +315,11 @@ impl WasmHost {
         arm(&mut store, deadline_ticks(SETUP_DEADLINE));
         let instance = Instance::new(&mut store, &module, &[]).map_err(|e| format!("instantiation failed: {e:#}"))?;
         let abi = call0(&mut store, &instance, "se_dsp_abi")?;
-        if abi != ABI_VERSION {
-            return Err(format!("se_dsp_abi() returned {abi}; this host implements ABI {ABI_VERSION}"));
+        if !(1..=ABI_VERSION).contains(&abi) {
+            return Err(format!("se_dsp_abi() returned {abi}; this host implements ABI 1–{ABI_VERSION}"));
         }
-        Ok(WasmModule { engine: self.engine.clone(), module, ticker: self.ticker.clone(), has_reset, has_latency })
+        let params_len = if abi >= 2 { PARAMS_LEN_V2 } else { PARAMS_LEN };
+        Ok(WasmModule { engine: self.engine.clone(), module, ticker: self.ticker.clone(), has_reset, has_latency, params_len })
     }
 }
 
@@ -368,6 +381,8 @@ pub struct WasmModule {
     ticker: Arc<Ticker>,
     has_reset: bool,
     has_latency: bool,
+    /// Params block length of the module's ABI.
+    params_len: usize,
 }
 
 impl WasmModule {
@@ -405,12 +420,13 @@ impl WasmModule {
         };
         let input = region(&mut store, "input_buffer", audio_bytes)?;
         let output = region(&mut store, "output_buffer", audio_bytes)?;
-        let params = region(&mut store, "params_buffer", PARAMS_LEN * 4)?;
+        let params_len = self.params_len;
+        let params = region(&mut store, "params_buffer", params_len * 4)?;
         let overlaps = |a: usize, alen: usize, b: usize, blen: usize| a < b + blen && b < a + alen;
         if input.1 != output.1 && overlaps(input.1, audio_bytes, output.1, audio_bytes) {
             return Err("input and output buffers partially overlap".into());
         }
-        if overlaps(params.1, PARAMS_LEN * 4, input.1, audio_bytes) || overlaps(params.1, PARAMS_LEN * 4, output.1, audio_bytes) {
+        if overlaps(params.1, params_len * 4, input.1, audio_bytes) || overlaps(params.1, params_len * 4, output.1, audio_bytes) {
             return Err("the params buffer overlaps the audio buffers".into());
         }
         let latency = if self.has_latency {
@@ -442,7 +458,8 @@ impl WasmModule {
             out_ptr: output,
             params_ptr: params,
             mem_len,
-            params: [0.0; PARAMS_LEN],
+            params: [0.0; PARAMS_LEN_V2],
+            params_len,
             triggers: 0,
             trig_on: false,
             source,
@@ -568,7 +585,9 @@ pub struct WasmFx {
     out_ptr: (i32, usize),
     params_ptr: (i32, usize),
     mem_len: usize,
-    params: [f32; PARAMS_LEN],
+    params: [f32; PARAMS_LEN_V2],
+    /// Floats of `params` the module's ABI version reads.
+    params_len: usize,
     triggers: u32,
     trig_on: bool,
     source: bool,
@@ -616,7 +635,7 @@ impl WasmFx {
             put(mem, inp, l);
             put(mem, inp + stride, r);
         }
-        put(mem, self.params_ptr.1, &self.params);
+        put(mem, self.params_ptr.1, &self.params[..self.params_len]);
 
         arm(&mut self.store, self.deadline_ticks);
         let start = Instant::now();
@@ -736,6 +755,12 @@ impl Effect for WasmFx {
             self.triggers = (self.triggers + 1) % TRIGGER_WRAP;
         }
         self.trig_on = on;
+    }
+
+    fn set_payload(&mut self, k: usize, value: f32) {
+        if k < PAYLOAD_LEN {
+            self.params[PAYLOAD_BASE + k] = value;
+        }
     }
 
     fn process(&mut self, ctx: &Ctx, l: &mut [f32], r: &mut [f32]) {

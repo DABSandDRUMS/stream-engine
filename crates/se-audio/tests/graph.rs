@@ -344,3 +344,17 @@ threshold = -30
     assert_eq!(snares, 3, "snare hits at 0.5, 1.5, 2.5 s");
     assert!(vel.iter().all(|v| (0.0..=1.0).contains(v)));
 }
+
+/// A dsp patch's trigger payload (`patch.<id>.payload.*`) is bound before its `.active` edge:
+/// one parameter sync that sees a new trigger delivers the payload first, so the module never
+/// counts the new trigger with the previous payload.
+#[test]
+fn dsp_patch_payload_is_delivered_before_the_trigger_edge() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../project-example");
+    let r = Rig::with_root("[buses.band]\nfx = [{ name = \"ringmod\", patch = \"ringmod\" }]", &root);
+    let pos = |addr: &str| r.built.params.iter().position(|p| p.addr == addr).unwrap_or_else(|| panic!("{addr} not bound"));
+    let active = pos("patch.ringmod.active");
+    for f in se_core::triggers::PAYLOAD_FIELDS.iter().map(|f| format!("patch.ringmod.payload.{f}")).chain(["patch.ringmod.payload.user_color".to_string()]) {
+        assert!(pos(&f) < active, "{f} bound after the edge");
+    }
+}

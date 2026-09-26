@@ -51,6 +51,9 @@ pub struct Stats {
     pub arena_overflow: AtomicBool,
     /// Last frame sequence per canvas (frames.sock `seq`, monotonic across device loss).
     pub canvas_seq: [AtomicU64; 4],
+    /// Effect passes in the last frame, and effects that ran inside fused passes.
+    fx_passes: AtomicU32,
+    fx_fused: AtomicU32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -74,6 +77,8 @@ pub struct StatsView {
     pub device_ok: bool,
     pub recoveries: u64,
     pub alloc_violations: u64,
+    pub fx_passes: u32,
+    pub fx_fused: u32,
 }
 
 impl Stats {
@@ -82,6 +87,10 @@ impl Stats {
         if ms > f(&self.frame_ms_max) {
             set(&self.frame_ms_max, ms);
         }
+    }
+    pub fn set_fx(&self, passes: u32, fused: u32) {
+        self.fx_passes.store(passes, Ordering::Relaxed);
+        self.fx_fused.store(fused, Ordering::Relaxed);
     }
     pub fn set_fps(&self, v: f32) {
         set(&self.fps, v);
@@ -134,6 +143,8 @@ impl Stats {
             device_ok: self.device_ok.load(Ordering::Relaxed),
             recoveries: self.recoveries.load(Ordering::Relaxed),
             alloc_violations: self.alloc_violations.load(Ordering::Relaxed),
+            fx_passes: self.fx_passes.load(Ordering::Relaxed),
+            fx_fused: self.fx_fused.load(Ordering::Relaxed),
         };
         set(&self.frame_ms_max, 0.0);
         v

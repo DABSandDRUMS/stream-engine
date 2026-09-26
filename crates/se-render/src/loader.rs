@@ -1,16 +1,17 @@
-//! Loader thread: compiles user shaders (shader/particles patches, project transitions) and
-//! decodes assets (LUTs, masks) off the render thread (§3.4, §21). A failed compile publishes the
+//! Loader thread: compiles user shaders (shader/particles patches, project transitions), the
+//! plan's fused effect chains (`crate::fuse`), and decodes assets (LUTs, masks) off the render
+//! thread (§3.4, §21). A failed compile publishes the
 //! error with the patch source line and sends nothing, so the renderer keeps the last good
 //! pipeline; after a device loss the last good sources are recompiled for the new device.
 
 use crate::lut::Lut;
-use crate::pipelines::{UserPipes, compile_fullscreen, compile_particles, transition_manifest};
+use crate::pipelines::{UserPipes, compile_fullscreen, compile_fused, compile_particles, transition_manifest};
 use crate::plan::{Plan, ShaderSource, TrKind};
 use crate::renderer::{AssetRequest, Msg, PipeKey};
 use crate::resources::{Layouts, WINDOW};
 use crossbeam_channel::{Receiver, Sender};
 use se_patch::Kind;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -33,6 +34,8 @@ pub trait Report: Send {
     /// `Ok(())` clears the error.
     fn patch(&self, id: &str, result: Result<(), String>);
     fn transition(&self, name: &str, result: Result<(), String>);
+    /// A custom enter/exit style file (project-relative path).
+    fn style(&self, path: &str, result: Result<(), String>);
 }
 
 /// One compile unit: sources + the layout its header comes from.
@@ -119,6 +122,19 @@ fn units(plan: &Plan) -> Vec<Result<Unit, (PipeKey, String)>> {
         });
         out.push(unit.map_err(|e| (key, e)));
     }
+    for st in &plan.styles {
+        let ShaderSource::File(rel) = st else { continue };
+        let rel = rel.to_string_lossy().to_string();
+        let key = PipeKey::Style(rel.clone());
+        let name = Path::new(&rel).file_stem().map_or_else(|| rel.clone(), |s| s.to_string_lossy().to_string());
+        let unit = project_path(&plan.project_root, &rel).and_then(|p| read(&p)).map(|s| Unit {
+            key: key.clone(),
+            layout: se_patch::wgsl::Layout::new(&transition_manifest(&name, &[])),
+            kind: UnitKind::Fullscreen,
+            sources: vec![(rel.clone(), s)],
+        });
+        out.push(unit.map_err(|e| (key, e)));
+    }
     out
 }
 
@@ -139,12 +155,14 @@ pub struct Loader {
     live: HashMap<PipeKey, u64>,
     /// Last source that compiled, per key (recompiled after a device loss).
     last_good: HashMap<PipeKey, Unit>,
+    /// Fused effect chains compiled for the current device.
+    fused: HashSet<Vec<u8>>,
 }
 
 impl Loader {
     pub fn spawn(rx: Receiver<LoaderCmd>, out: Sender<Msg>, report: Box<dyn Report>) -> std::io::Result<std::thread::JoinHandle<()>> {
         std::thread::Builder::new().name("se-render-loader".into()).spawn(move || {
-            let mut l = Loader { rx, out, report, device: None, plan: None, live: HashMap::new(), last_good: HashMap::new() };
+            let mut l = Loader { rx, out, report, device: None, plan: None, live: HashMap::new(), last_good: HashMap::new(), fused: HashSet::new() };
             l.run();
         })
     }
@@ -155,6 +173,7 @@ impl Loader {
                 LoaderCmd::Device { device, layouts, generation } => {
                     self.device = Some((device, layouts, generation));
                     self.live.clear();
+                    self.fused.clear();
                     // restore last good pipelines first (a broken current source must not
                     // leave the new device without the old version)
                     let good: Vec<Unit> = self.last_good.values().cloned().collect();
@@ -176,6 +195,7 @@ impl Loader {
 
     fn sync(&mut self) {
         let Some(plan) = self.plan.clone() else { return };
+        self.sync_fused(&plan);
         for u in units(&plan) {
             match u {
                 Ok(u) => {
@@ -188,10 +208,29 @@ impl Loader {
         }
     }
 
+    /// Compile the plan's fused effect chains that this device does not have yet.
+    fn sync_fused(&mut self, plan: &Plan) {
+        let Some((device, layouts, generation)) = &self.device else { return };
+        for chain in crate::fuse::chains(plan) {
+            if self.fused.contains(&chain) {
+                continue;
+            }
+            match compile_fused(device, layouts, &chain) {
+                Ok(pipeline) => {
+                    let _ = self.out.send(Msg::Fused { device_gen: *generation, chain: chain.clone().into_boxed_slice(), pipeline });
+                }
+                // built-in shaders: a failure is an engine bug; those effects keep their own passes
+                Err(e) => tracing::error!(target: "render", "{e}"),
+            }
+            self.fused.insert(chain);
+        }
+    }
+
     fn report(&self, key: &PipeKey, r: Result<(), String>) {
         match key {
             PipeKey::Patch(id) => self.report.patch(id, r),
             PipeKey::Transition(n) => self.report.transition(n, r),
+            PipeKey::Style(p) => self.report.style(p, r),
         }
     }
 

@@ -25,6 +25,7 @@ pub const T0: u64 = 10_000_000_000;
 pub struct Reports {
     pub patches: Vec<(String, Result<(), String>)>,
     pub transitions: Vec<(String, Result<(), String>)>,
+    pub styles: Vec<(String, Result<(), String>)>,
 }
 
 pub struct TestReport(pub Arc<Mutex<Reports>>);
@@ -35,6 +36,9 @@ impl Report for TestReport {
     }
     fn transition(&self, name: &str, result: Result<(), String>) {
         self.0.lock().transitions.push((name.to_string(), result));
+    }
+    fn style(&self, path: &str, result: Result<(), String>) {
+        self.0.lock().styles.push((path.to_string(), result));
     }
 }
 
@@ -51,6 +55,8 @@ pub struct Harness {
     pub slots: VideoSlots,
     pub root: PathBuf,
     pub stats: Arc<Stats>,
+    /// Apply fused effect pipelines from the loader (false = every effect runs its own pass).
+    pub fuse: bool,
     loader_thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -118,7 +124,16 @@ impl Harness {
         Self::with_frames(root, None)
     }
 
+    /// A harness whose renderer never receives fused effect pipelines (the reference path).
+    pub fn unfused(root: &Path) -> Harness {
+        Self::build(root, None, false)
+    }
+
     pub fn with_frames(root: &Path, frames: Option<Arc<se_frames::FramesServer>>) -> Harness {
+        Self::build(root, frames, true)
+    }
+
+    fn build(root: &Path, frames: Option<Arc<se_frames::FramesServer>>, fuse: bool) -> Harness {
         let cfg = load_config(root);
         let manifests: Vec<Arc<se_patch::Manifest>> = se_patch::scan(root).into_iter().map(|m| Arc::new(m.unwrap())).collect();
         let plan = Arc::new(Plan::build(&cfg, &manifests, root.to_path_buf()));
@@ -147,6 +162,7 @@ impl Harness {
             slots: VideoSlots::default(),
             root: root.to_path_buf(),
             stats,
+            fuse,
             loader_thread,
         };
         h.settle();
@@ -192,7 +208,9 @@ impl Harness {
                 any = true;
             }
             if let Ok(m) = self.msgs.recv_timeout(Duration::from_millis(150)) {
-                self.r.apply(m);
+                if self.fuse || !matches!(m, Msg::Fused { .. }) {
+                    self.r.apply(m);
+                }
                 any = true;
             }
             if any {

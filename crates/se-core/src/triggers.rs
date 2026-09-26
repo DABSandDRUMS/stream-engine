@@ -2,9 +2,11 @@
 //!
 //! Triggering `X` sets `X.env` (0–1 envelope) and `X.active`, and emits the event
 //! `X.trigger` with the payload. Patches, video effects, and audio effects read the envelope.
+//! Patch triggers also publish the payload's numbers ([`TriggerPayload`]) as `X.payload.*` in
+//! the same tick, so shader and dsp patches see the payload of the trigger that just fired.
 
 use crate::config::Conflict;
-use se_proto::{Id, Ts, Value};
+use se_proto::{Actor, Id, Ts, Value};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -116,6 +118,8 @@ pub struct TriggerRt {
     pub env_id: usize,
     pub active_id: usize,
     pub level: f64,
+    /// `X.payload.*` state ids ([`PAYLOAD_FIELDS`], then `user_color`); patch triggers only.
+    pub payload_ids: Vec<usize>,
 }
 
 impl TriggerRt {
@@ -171,6 +175,95 @@ impl TriggerRt {
     }
 }
 
+/// Scalar fields of [`TriggerPayload`] in float order (`X.payload.<field>`, `se.trigger.<field>`
+/// in shaders, the dsp params block); `user_color` follows as 4 floats at [`PAYLOAD_COLOR`].
+pub const PAYLOAD_FIELDS: [&str; 7] = ["amount", "bits", "tier", "months", "viewers", "count", "user_hash"];
+/// Float index of `user_color` (r, g, b, a) in [`TriggerPayload::floats`].
+pub const PAYLOAD_COLOR: usize = 8;
+/// Length of [`TriggerPayload::floats`].
+pub const PAYLOAD_FLOATS: usize = 12;
+
+/// The numbers of a trigger's payload and actor that every patch receives (§6.3).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TriggerPayload {
+    /// How big the event was: payload `amount`, else `bits`, `count`, `viewers`.
+    pub amount: f32,
+    pub bits: f32,
+    pub tier: f32,
+    pub months: f32,
+    pub viewers: f32,
+    pub count: f32,
+    /// Stable 0–1 hash of the user (actor id, else payload `user_id`, else `user`); 0 without one.
+    pub user_hash: f32,
+    /// The user's chat colour (payload `color`, `#rrggbb`), else a hue picked by `user_hash`;
+    /// transparent without a user. sRGB-encoded like the palette.
+    pub user_color: [f32; 4],
+}
+
+fn number(v: &Value) -> Option<f32> {
+    match v {
+        Value::Str(s) => s.trim().parse::<f64>().ok(),
+        v => v.as_f64(),
+    }
+    .filter(|f| f.is_finite())
+    .map(|f| f as f32)
+}
+
+/// 24-bit FNV-1a of `s` as 0..1 (exact in f32).
+fn hash01(s: &str) -> f32 {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in s.bytes() {
+        h = (h ^ b as u32).wrapping_mul(0x0100_0193);
+    }
+    (h >> 8) as f32 / (1u32 << 24) as f32
+}
+
+/// Fully saturated, bright colour of hue `h` (0..1).
+fn hue(h: f32) -> [f32; 4] {
+    let c = |n: f32| {
+        let k = (n + h * 6.0) % 6.0;
+        1.0 - 0.75 * k.min(4.0 - k).clamp(0.0, 1.0)
+    };
+    [c(5.0), c(3.0), c(1.0), 1.0]
+}
+
+impl TriggerPayload {
+    /// From the `X.trigger` event's payload and actor.
+    pub fn from_event(payload: &Value, actor: Option<&Actor>) -> TriggerPayload {
+        let get = |k: &str| payload.get_path(k).and_then(number);
+        let user = match actor.filter(|a| !a.id.is_empty()) {
+            Some(a) => Some(format!("{}:{}", a.platform, a.id)),
+            None => payload.get_path("user_id").or_else(|| payload.get_path("user")).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string),
+        };
+        let user_hash = user.as_deref().map_or(0.0, hash01);
+        let chat_color = payload.get_path("color").and_then(Value::as_str).and_then(se_proto::value::parse_hex_color);
+        let user_color = match (chat_color, &user) {
+            (Some(c), _) => c,
+            (None, Some(_)) => hue(user_hash),
+            (None, None) => [0.0; 4],
+        };
+        let bits = get("bits").unwrap_or(0.0);
+        let count = get("count").unwrap_or(0.0);
+        let viewers = get("viewers").unwrap_or(0.0);
+        TriggerPayload {
+            amount: get("amount").or(get("bits")).or(get("count")).or(get("viewers")).unwrap_or(0.0),
+            bits,
+            tier: get("tier").unwrap_or(0.0),
+            months: get("months").unwrap_or(0.0),
+            viewers,
+            count,
+            user_hash,
+            user_color,
+        }
+    }
+
+    /// Flat layout: [`PAYLOAD_FIELDS`] in order, one reserved 0, then `user_color`.
+    pub fn floats(&self) -> [f32; PAYLOAD_FLOATS] {
+        let [r, g, b, a] = self.user_color;
+        [self.amount, self.bits, self.tier, self.months, self.viewers, self.count, self.user_hash, 0.0, r, g, b, a]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,5 +315,34 @@ mod tests {
         let v = Value::map().with("attack", "100ms").with("hold", "4s").with("release", "1s").with("retrigger", "stack");
         let s = TriggerSpec::from_value(&v).unwrap();
         assert_eq!((s.attack_ms, s.hold_ms, s.release_ms), (100, Some(4000), 1000));
+    }
+
+    #[test]
+    fn payload_numbers_user_hash_and_colour() {
+        let cheer = Value::map().with("bits", 5000).with("message", "hi").with("user", "drumfan42");
+        let actor = Actor { platform: "twitch".into(), id: "123".into(), name: "drumfan42".into(), roles: Vec::new() };
+        let p = TriggerPayload::from_event(&cheer, Some(&actor));
+        assert_eq!((p.amount, p.bits, p.tier), (5000.0, 5000.0, 0.0), "amount falls back to bits");
+        assert!(p.user_hash > 0.0 && p.user_hash < 1.0);
+        assert_eq!(p.user_color[3], 1.0, "a user always gets an opaque colour");
+        // the same user hashes the same whatever the event; another user differs
+        let sub = TriggerPayload::from_event(&Value::map().with("tier", "2").with("months", 7), Some(&actor));
+        assert_eq!((sub.tier, sub.months, sub.amount), (2.0, 7.0, 0.0), "numeric strings count");
+        assert_eq!(sub.user_hash, p.user_hash);
+        assert_eq!(sub.user_color, p.user_color);
+        let other = Actor { id: "124".into(), ..actor.clone() };
+        assert_ne!(TriggerPayload::from_event(&cheer, Some(&other)).user_hash, p.user_hash);
+        // explicit amount wins over bits; a chat colour wins over the hashed hue
+        let tip = Value::map().with("amount", 3.5).with("bits", 100).with("color", "#FF8000");
+        let t = TriggerPayload::from_event(&tip, Some(&actor));
+        assert_eq!(t.amount, 3.5);
+        assert_eq!(t.user_color, [1.0, 128.0 / 255.0, 0.0, 1.0]);
+        // no user at all: hash 0, transparent colour; raids size by viewers
+        let raid = TriggerPayload::from_event(&Value::map().with("viewers", 300), None);
+        assert_eq!((raid.amount, raid.viewers, raid.user_hash, raid.user_color), (300.0, 300.0, 0.0, [0.0; 4]));
+        assert_eq!(TriggerPayload::from_event(&Value::Null, None), TriggerPayload::default());
+        let f = t.floats();
+        assert_eq!(f[PAYLOAD_FIELDS.iter().position(|n| *n == "amount").unwrap()], 3.5);
+        assert_eq!(&f[PAYLOAD_COLOR..PAYLOAD_COLOR + 4], &t.user_color);
     }
 }

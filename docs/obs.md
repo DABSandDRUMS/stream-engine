@@ -85,8 +85,8 @@ Hot-reloaded; a broken `[obs]` keeps the last good settings. The plugin finds th
 | Kind | Names |
 |---|---|
 | State | `obs.link`, `obs.version`, `obs.plugin.{version,installed}`, `obs.stream.{active,kbps,dropped,total,lag_ms,congestion}`, `obs.record.{active,paused,path,dir,kbps}`, `obs.fps`, `obs.render.{ms,lagged}`, `obs.encode.skipped`, `obs.stale.{wide,tall}`, `obs.fallback.active`, `obs.scene`, `obs.output.<id>.{active,kbps,dropped,total,label,canvas,kind}` (every stream/record output incl. Aitum's), `health.obs` |
-| Events | `obs.stream_started`, `obs.stream_stopped`, `obs.record_started {path,canvas}`, `obs.record_stopped {path,canvas}`, `obs.fallback {active,canvas,canvases,scene,from/to,reason}` — timestamped on the master clock |
-| Actions | `obs.stream.start|stop`, `obs.record.start|stop`, `obs.fallback.on|off`, `obs.fallback.setup`, `obs.setup` (result or error in the engine log) |
+| Events | `obs.stream_started`, `obs.stream_stopped`, `obs.record_started {path,canvas}`, `obs.record_stopped {path,canvas}`, `obs.fallback {active,canvas,canvases,scene,from/to,reason}` — timestamped on the master clock; `obs.dry_run {action}` (a stream start skipped in rehearsal) |
+| Actions | `obs.stream.start|stop`, `obs.record.start|stop`, `obs.fallback.on|off`, `obs.fallback.setup`, `obs.setup` (result or error in the engine log). In show mode `rehearsal`, `obs.stream.start` is skipped (never on air during a practice run); recording works. A mode change sent just before `obs.stream.start` counts, so "Go live" from rehearsal starts the stream. |
 | Query | `obs` (link, config, recordings, per-canvas feed stats) |
 | Clock | `hub.clock` `obs_stream` / `obs_record`: other clock = ns since the first frame of the stream / current main recording file |
 | Session meta | `recordings` = `[{canvas, path, output, start_ns, end_ns?, tracks:[{index,mixer,name,sources,devices}]}]` (one entry per file incl. splits), `clock` = serialized `se_clock::Mappings` |

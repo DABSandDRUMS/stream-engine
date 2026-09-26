@@ -1,0 +1,13 @@
+# Show commands for viewers.
+
+# Vote for the next scene transition: `!transition zoomblur`. Votes count for a minute
+# ([transition_vote] in project.toml); the next take that doesn't name a transition uses the
+# most-voted one. One vote per viewer: voting again changes it.
+[[command]]
+name = "!transition"
+action = "transition.vote"
+args = { name = "{1}" }
+min_args = 1
+usage = "@{user} pick the next transition: !transition fade, morph, zoomblur, glitch or morph_glitch"
+cooldown = { per_user = "10s" }
+modes = ["live", "rehearsal"]

@@ -414,3 +414,29 @@ fn wildcard_addresses_in_commands_hit_every_match() {
     run(&mut c, 5);
     assert_eq!(f(&c, "mixer.16r.ch.1.fader"), 0.5);
 }
+
+#[test]
+fn patch_trigger_publishes_its_payload_in_the_same_tick_as_the_edge() {
+    let mut c = core();
+    let fire = |c: &mut Core, payload: Value, user: &str| {
+        let mut cmd = Command::new(Origin::Cli, Op::Trigger { address: "patch.sparks".into(), payload });
+        cmd.actor = Some(Actor { platform: "twitch".into(), id: user.into(), name: user.into(), roles: vec![Role::Everyone] });
+        c.submit(Input::Command { cmd });
+        c.step();
+    };
+    fire(&mut c, Value::map().with("bits", 5000).with("user", "drumfan"), "u1");
+    assert!(c.get("patch.sparks.active").unwrap().truthy());
+    assert_eq!(f(&c, "patch.sparks.payload.bits"), 5000.0);
+    assert_eq!(f(&c, "patch.sparks.payload.amount"), 5000.0);
+    let first_user = f(&c, "patch.sparks.payload.user_hash");
+    assert!(first_user > 0.0 && first_user < 1.0);
+    // a stacked retrigger replaces the payload (fields it lacks go back to 0)
+    fire(&mut c, Value::map().with("tier", 2), "u2");
+    assert_eq!(f(&c, "patch.sparks.payload.tier"), 2.0);
+    assert_eq!(f(&c, "patch.sparks.payload.bits"), 0.0);
+    assert_ne!(f(&c, "patch.sparks.payload.user_hash"), first_user);
+    // only patch triggers carry payload state
+    c.submit(Input::Command { cmd: Command::new(Origin::Cli, Op::Trigger { address: "fx.glitch".into(), payload: Value::map().with("bits", 1) }) });
+    c.step();
+    assert!(c.get("fx.glitch.payload.bits").is_none());
+}

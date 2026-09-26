@@ -1,6 +1,6 @@
 [package]
 name = "se-devices"
-description = "Device registry: udev hotplug (V4L2, ALSA, MIDI, hidraw, USB serial), PipeWire nodes, stable identities, expected devices, V4L2 access"
+description = "Device registry: udev hotplug (V4L2, ALSA, MIDI, hidraw, USB serial), PipeWire nodes, network devices (UCNET consoles, Art-Net nodes), stable identities, expected devices, V4L2 access"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,6 +10,8 @@ se-proto.workspace = true
 se-core.workspace = true
 se-hub.workspace = true
 se-store.workspace = true
+# UCNET announcement parsing (PreSonus consoles)
+se-mixer.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true
@@ -20,6 +22,7 @@ toml_edit.workspace = true
 parking_lot.workspace = true
 libc.workspace = true
 udev = "0.9"
+socket2 = { version = "0.6", features = ["all"] }
 
 [build-dependencies]
 bindgen = "0.72"

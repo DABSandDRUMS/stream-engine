@@ -40,9 +40,12 @@ channel:manage:redemptions channel:manage:polls channel:manage:predictions
 channel:manage:broadcast channel:manage:raids channel:read:ads channel:manage:ads
 channel:moderate moderator:read:followers moderator:manage:shoutouts
 moderator:manage:banned_users moderator:manage:chat_messages moderator:manage:automod
-moderator:manage:blocked_terms` (`channel:moderate` is needed for the `channel.ban` /
-`channel.unban` EventSub types). Bot: `user:read:chat user:write:chat`. If a later version adds
-scopes, `twitch.auth.missing_scopes` lists them and preflight warns: authorize again.
+moderator:manage:blocked_terms moderation:read channel:read:vips` (`channel:moderate` is
+needed for the `channel.ban` / `channel.unban` EventSub types; `moderation:read` and
+`channel:read:vips` read the moderator and VIP lists for the roles cache, §3). Bot:
+`user:read:chat user:write:chat`. If a later version adds scopes, `twitch.auth.missing_scopes`
+lists them and preflight warns: authorize again (until then the roles cache uses chat badges
+only).
 
 ## 2. `[twitch]` reference
 
@@ -68,6 +71,13 @@ follow_age_s, reply_to?, bits?, bot, shared_from?}` — actor roles come from ba
 VIP, sub) plus *follower* when the cached follow is at least `[policy] follower_min_age` old.
 Fragments carry Twitch emotes (CDN urls) and 7TV/BTTV/FFZ emote words already split out.
 
+**Roles for events without badges** (cheers, redemptions, subs, raids, gift recipients) come
+from the users/roles cache in the runtime DB (`twitch_users`): the roles each viewer's chat badges
+showed last, plus the channel's moderators and VIPs from Helix (read when Twitch connects and
+every 10 minutes; `twitch.users.refresh` reads them now). When a badge and a list disagree (a new
+VIP who hasn't chatted, a removed mod with an old badge) the one seen last wins. Viewers not seen
+for 90 days are forgotten; listed moderators and VIPs are kept.
+
 `twitch.cheer {bits, message, user, anonymous}`, `twitch.sub {tier, months, is_gift, message,
 user, gift_id?, gifter?}`, `twitch.resub {tier, months, streak, message}`, `twitch.gift {count,
 tier, total, gift_id, user}` followed by one `twitch.sub` per recipient with the same `gift_id`,
@@ -91,7 +101,8 @@ items from that message or user.
 {archive?}` · `twitch.prediction.start {title, outcomes, window}` · `twitch.prediction.lock` ·
 `twitch.prediction.resolve {winner: id | title | number}` · `twitch.prediction.cancel` ·
 `twitch.shoutout {user}` · `twitch.raid {user}` · `twitch.raid.cancel` · `twitch.ad.snooze` ·
-`twitch.rewards.sync` · `twitch.emotes.refresh` · `twitch.delay.set {ms}` (negative = measured).
+`twitch.rewards.sync` · `twitch.emotes.refresh` · `twitch.users.refresh` · `twitch.delay.set {ms}`
+(negative = measured).
 
 Moderation: `mod.ban {user|user_id, reason?}`, `mod.unban`, `mod.timeout {user|user_id,
 duration_s, reason?}`, `mod.delete {message_id}`, `mod.automod.approve|deny {message_id}`,
@@ -107,7 +118,9 @@ started_at, title, category, viewers}`, `twitch.ad.{next_in_s, duration_s, snooz
 `twitch.poll`, `twitch.prediction`, `twitch.hype_train.*`, `twitch.automod.{queue, held}`,
 `twitch.rewards`, `twitch.delay_ms`; signals `twitch.viewers`, `twitch.chat_rate` (messages in
 the last minute). Queries: `emotes` → `{badges: {"set/id": url}, emotes: {code: {id, url,
-provider, animated, zero_width}}}`, `twitch.follow_age {user_id}`, `twitch.scopes`.
+provider, animated, zero_width}}}`, `twitch.follow_age {user_id}`, `twitch.scopes`,
+`twitch.users` → `{moderators, vips: [{id, login}], moderators_synced_at, vips_synced_at, known}`,
+`twitch.users {user_id}` → `{known, roles}`.
 
 Preflight `health.twitch`: fail without Client ID / authorization / EventSub; warn on missing
 scopes, refused subscriptions, reward sync problems, an unauthorized bot, or a token close to
@@ -170,8 +183,13 @@ paused = false
 
 The app creates and updates these on Twitch (they must be created by our Client ID to be
 refundable) and disables rewards whose file was removed. Redemptions stay *unfulfilled* until the
-policy accepts (→ `fires`, then `twitch.fulfill`) or rejects them (role, cost, cooldowns, limits,
-missing input, blocked input, wrong mode, mod rejection, approval timeout → `twitch.refund`).
+policy decides. It rejects them for role, cost, cooldowns, limits, missing or blocked input, the
+wrong mode, a mod's rejection, or an approval timeout (→ `twitch.refund`). An accepted
+redemption runs its `fires` in order; the first command that fails — e.g. a preset with
+`conflict = "reject"` that is already active — stops the rest and the redemption is refunded
+too (`policy.rejected` with that reason; the cooldowns and limits it took are given back). Only
+when every command ran does it get `twitch.fulfill` and the `twitch.redeem` event reach rules
+and alerts. Commands after a `wait` are only scheduled, so they can't refund it.
 
 ### For other subsystems
 

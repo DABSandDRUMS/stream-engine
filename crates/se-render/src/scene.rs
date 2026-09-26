@@ -26,6 +26,8 @@ pub struct Item {
     pub z: i64,
     pub order: u32,
     pub blend: Blend,
+    /// Custom enter/exit style during a morph: (`Plan::styles` index, presence 0–1).
+    pub style: Option<(u32, f32)>,
 }
 
 impl Item {
@@ -128,6 +130,7 @@ pub fn eval_layout(plan: &Plan, scene: usize, layout: usize, size: [f32; 2], sna
             z: res.i64(snap, n.z, n.def.z),
             order: ni as u32,
             blend: n.blend,
+            style: None,
         });
     }
 }
@@ -178,6 +181,9 @@ pub fn apply_style(it: &mut Item, style: Style, p: f32, entering: bool, size: [f
             it.rect[0] += dir[0] * k * size[0];
             it.rect[1] += dir[1] * k * size[1];
         }
+        // drawn in place through the style's shader (the renderer fades it while the shader
+        // is not compiled)
+        Style::Custom(i) => it.style = Some((i, p)),
     }
 }
 

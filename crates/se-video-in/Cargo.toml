@@ -1,6 +1,6 @@
 [package]
 name = "se-video-in"
-description = "Video sources: V4L2 camera capture (YUYV passthrough, MJPEG via turbojpeg), camera controls, signal detection, FFmpeg media files"
+description = "Video sources: V4L2 camera capture (YUYV passthrough, MJPEG via turbojpeg), camera controls, signal detection, temporary camera previews, FFmpeg media files"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -20,9 +20,12 @@ toml_edit.workspace = true
 parking_lot.workspace = true
 crossbeam-channel.workspace = true
 libc.workspace = true
+blake3 = "1"
+base64 = "0.23"
 turbojpeg = { version = "1.5", default-features = false, features = ["pkg-config"] }
 ffmpeg-next = { version = "9", default-features = false, features = ["codec", "format", "software-scaling"] }
 
 [dev-dependencies]
+se-analysis.workspace = true
 se-alloc.workspace = true
 tempfile.workspace = true

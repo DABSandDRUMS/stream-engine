@@ -8,6 +8,7 @@ pub mod addr;
 pub mod compose;
 pub mod effects;
 pub mod export;
+pub mod fuse;
 pub mod gpu;
 pub mod limiter;
 pub mod loader;

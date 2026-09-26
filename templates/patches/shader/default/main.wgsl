@@ -10,6 +10,8 @@ fn fs(in: SeVsOut) -> @location(0) vec4<f32> {
     let a = palette(PAL_ACCENT).rgb;
     let b = palette(PAL_MAGENTA).rgb;
     var col = mix(a, b, v) * (0.55 + 0.45 * sin(v * 6.2831 + t));
-    col = col * p_tint().rgb + vec3<f32>(se.env * 0.25);
+    // flash on trigger, in the colour of whoever fired it (white when nobody did)
+    let who = mix(vec3<f32>(1.0), se.trigger.user_color.rgb, se.trigger.user_color.a);
+    col = col * p_tint().rgb + who * (se.env * 0.25);
     return vec4<f32>(col, 1.0);
 }

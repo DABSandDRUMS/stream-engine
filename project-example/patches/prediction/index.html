@@ -1,0 +1,190 @@
+<!doctype html>
+<!-- Prediction overlay (state `twitch.prediction`). Browser test: /patches/prediction/index.html?token=<token>, then
+     streamctl set twitch.prediction '{"id":"x1","title":"Clean take?","active":true,"status":"","locks_at":<unix s + 60>,
+       "outcomes":[{"id":"a","title":"Yes","color":"blue","users":8,"points":12000},{"id":"b","title":"No","color":"pink","users":5,"points":7000}]}' -->
+<html>
+<head>
+<meta charset="utf-8">
+<title>prediction</title>
+<style>
+  :root { --blue: #7aa2f7; --pink: #f7768e; --fg: #fff; --bg: rgba(18, 20, 31, .88); --font: "Inter", "Noto Sans", sans-serif; }
+  html, body { margin: 0; width: 100%; height: 100%; background: transparent; overflow: hidden; }
+  body { font-family: var(--font); color: var(--fg); display: flex; flex-direction: column; justify-content: flex-start; padding: 2.5vh; box-sizing: border-box; }
+  #card {
+    position: relative; display: flex; flex-direction: column; gap: 1.8vh; padding: 3.2vh 3.6vh 4vh; border-radius: 3.4vh; background: var(--bg); overflow: hidden;
+    box-shadow: 0 1.5vh 4vh rgba(0, 0, 0, .45), inset 0 0 0 .55vh color-mix(in srgb, var(--blue) 60%, transparent);
+    text-shadow: 0 .3vh 1vh rgba(0, 0, 0, .5); transition: opacity .45s ease, transform .45s cubic-bezier(.2, 1.1, .3, 1);
+  }
+  #card.hidden { opacity: 0; transform: translateY(-6vh); }
+  .head { display: flex; align-items: center; justify-content: space-between; gap: 2vh; }
+  .chip { padding: .5vh 1.6vh; border-radius: 1.4vh; background: var(--blue); color: #111; text-shadow: none; font-size: 3.8vh; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+  .status { font-size: 4.2vh; font-weight: 600; opacity: .85; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .title { font-size: 7vh; font-weight: 800; line-height: 1.15; overflow-wrap: anywhere; max-height: 17vh; overflow: hidden; }
+  .outcomes { display: flex; flex-direction: column; gap: 1.4vh; }
+  .outcome { --c: var(--blue); position: relative; height: 9.6vh; border-radius: 1.8vh; background: rgba(255, 255, 255, .08); overflow: hidden; transition: opacity .4s; }
+  .outcome.pink { --c: var(--pink); }
+  .fill { position: absolute; inset: 0 auto 0 0; width: 0; background: color-mix(in srgb, var(--c) 55%, transparent); transition: width .8s cubic-bezier(.2, 1, .3, 1); }
+  .row { position: absolute; inset: 0; display: flex; align-items: center; justify-content: space-between; gap: 2vh; padding: 0 2.4vh; font-size: 4.8vh; font-weight: 600; }
+  .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .nums { display: flex; align-items: baseline; gap: 1.4vh; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .pct { font-weight: 800; }
+  .pts { font-size: 3.6vh; font-weight: 500; opacity: .75; }
+  .outcome.win { box-shadow: inset 0 0 0 .55vh var(--c); }
+  .outcome.win .fill { background: var(--c); }
+  .outcome.win .name::before { content: "✓ "; }
+  .outcome.lose { opacity: .45; }
+  .foot { font-size: 3.6vh; opacity: .75; }
+  .time { position: absolute; left: 0; bottom: 0; height: 1vh; width: 100%; background: var(--blue); transform-origin: left; transition: transform .3s linear; }
+</style>
+</head>
+<body>
+<div id="card" class="hidden"></div>
+<script src="/engine.js"></script>
+<script src="/web/overlay.js"></script>
+<script>
+  "use strict";
+  const O = Overlay;
+  const se = Engine.connect();
+  const ID = se.patch ? se.patch.id : "prediction";
+  const card = document.getElementById("card");
+  const P = O.params(se, {
+    result_seconds: 12, blue: "#7aa2f7", pink: "#f7768e", text_color: "#ffffff", card_bg: [0.07, 0.08, 0.12, 0.88], font: "",
+  }, (_, k) => { apply(); if (k === "result_seconds") update(); });
+  let pred = null;       // the `twitch.prediction` map
+  let activeId = "";     // last prediction seen running (its end is timed from when we saw it end)
+  let startedAt = new Map(); // id → first seen (unix s), for the betting time bar
+  let endedAt = 0, endedId = "", hideTimer = 0;
+
+  function apply() {
+    const r = document.documentElement.style;
+    r.setProperty("--blue", O.cssColor(P.blue) || "#7aa2f7");
+    r.setProperty("--pink", O.cssColor(P.pink) || "#f7768e");
+    r.setProperty("--fg", O.cssColor(P.text_color) || "#fff");
+    r.setProperty("--bg", O.cssColor(P.card_bg) || "rgba(18,20,31,.88)");
+    if (P.font) r.setProperty("--font", P.font);
+  }
+  apply();
+
+  // `patch.prediction.showing` keeps the overlay placed ([overlays.prediction] `when`) during the result
+  function show(on) {
+    card.classList.toggle("hidden", !on);
+    // write only once the engine's value is known (it arrives with the first state batch)
+    const cur = se.value(`patch.${ID}.showing`);
+    if (se.patch && se.connected && cur !== undefined && cur !== on) se.set(`patch.${ID}.showing`, on).catch(() => {});
+  }
+
+  const fmt = s => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  const plural = (n, one, many) => `${O.fmtNum(n)} ${n === 1 ? one : many}`;
+  const status = p => String(p.status || "").toLowerCase();
+
+  function statusText(p) {
+    switch (status(p)) {
+      case "locked": return "Betting closed";
+      case "resolved": return "Result";
+      case "canceled": case "cancelled": return "Canceled, points refunded";
+    }
+    const left = Math.ceil((Number(p.locks_at) || 0) - Date.now() / 1000);
+    return left > 0 ? `Betting closes in ${fmt(left)}` : "Betting closes soon";
+  }
+
+  // time bar: share of the betting window still open
+  function timeLeft(p) {
+    if (!p.active || status(p)) return 0;
+    const lock = Number(p.locks_at) || 0, start = startedAt.get(p.id) || 0;
+    const span = lock - start, left = lock - Date.now() / 1000;
+    return span > 0 ? Math.max(0, Math.min(1, left / span)) : 0;
+  }
+
+  // The card is built once per prediction (same outcomes) and updated in place, so the bars animate.
+  let built = "", els = null;
+  function build(outcomes) {
+    card.replaceChildren();
+    els = { status: O.h("span", "status"), title: O.h("div", "title"), foot: O.h("div", "foot"), time: O.h("div", "time"), rows: [] };
+    const head = O.h("div", "head");
+    head.append(O.h("span", "chip", "Prediction"), els.status);
+    const list = O.h("div", "outcomes");
+    for (const o of outcomes) {
+      const r = { el: O.h("div", "outcome"), fill: O.h("div", "fill"), name: O.h("span", "name"), pct: O.h("span", "pct"), pts: O.h("span", "pts") };
+      const nums = O.h("span", "nums");
+      nums.append(r.pts, r.pct);
+      const row = O.h("div", "row");
+      row.append(r.name, nums);
+      r.el.append(r.fill, row);
+      list.appendChild(r.el);
+      els.rows.push(r);
+    }
+    card.append(head, els.title, list, els.foot, els.time);
+  }
+
+  function render() {
+    const p = pred;
+    if (!p || !p.id) return;
+    const outcomes = Array.isArray(p.outcomes) ? p.outcomes : [];
+    const key = `${p.id}|${outcomes.map(o => o.id).join(",")}`;
+    if (key !== built) {
+      build(outcomes);
+      built = key;
+    }
+    const points = outcomes.reduce((a, o) => a + (Number(o.points) || 0), 0);
+    const users = outcomes.reduce((a, o) => a + (Number(o.users) || 0), 0);
+    const st = status(p);
+    outcomes.forEach((o, i) => {
+      const r = els.rows[i];
+      const pts = Number(o.points) || 0;
+      r.el.classList.toggle("pink", String(o.color || "").toLowerCase() === "pink");
+      r.name.textContent = String(o.title || "");
+      r.fill.style.width = `${points > 0 ? (pts / points) * 100 : 0}%`;
+      r.pct.textContent = `${points > 0 ? Math.round((pts / points) * 100) : 0}%`;
+      r.pts.textContent = plural(pts, "point", "points");
+      r.el.classList.toggle("win", st === "resolved" && o.id === p.winner);
+      r.el.classList.toggle("lose", (st === "resolved" && o.id !== p.winner) || st === "canceled" || st === "cancelled");
+    });
+    els.status.textContent = statusText(p);
+    els.title.textContent = String(p.title || "");
+    els.foot.textContent = `${plural(users, "person", "people")} in`;
+    els.time.style.transform = `scaleX(${timeLeft(p)})`;
+  }
+
+  function update() {
+    clearTimeout(hideTimer);
+    const p = pred;
+    if (!p || !p.id) return show(false);
+    if (!startedAt.has(p.id)) startedAt.set(p.id, Math.min(Date.now() / 1000, Number(p.locks_at) || Infinity));
+    render();
+    if (p.active) {
+      activeId = p.id;
+      endedAt = 0;
+      return show(true);
+    }
+    if (endedId !== p.id || !endedAt) {
+      endedId = p.id;
+      // seen running, or a reloaded page finds the result still on screen: time it from now;
+      // else it ended before this page loaded
+      const onScreen = se.value(`patch.${ID}.showing`) === true;
+      endedAt = activeId === p.id || onScreen ? Date.now() : 0;
+    }
+    const left = endedAt + Number(P.result_seconds) * 1000 - Date.now();
+    if (left <= 0) return show(false);
+    show(true);
+    hideTimer = setTimeout(() => show(false), left);
+  }
+
+  se.state("twitch.prediction", (_, v) => {
+    // `streamctl set twitch.prediction '{…}'` (testing) stores JSON text
+    if (typeof v === "string") try { v = JSON.parse(v); } catch { v = null; }
+    pred = v && typeof v === "object" && !Array.isArray(v) ? v : null;
+    update();
+  });
+  // after (re)connecting, settle once the engine's `showing` value has arrived
+  let known = false;
+  se.state(`patch.${ID}.showing`, () => { if (!known) { known = true; update(); } });
+  se.onconnect = () => { known = false; };
+  // the betting clock and time bar tick while bets are open
+  setInterval(() => {
+    if (!pred || !pred.active || !els) return;
+    els.status.textContent = statusText(pred);
+    els.time.style.transform = `scaleX(${timeLeft(pred)})`;
+  }, 250);
+</script>
+</body>
+</html>

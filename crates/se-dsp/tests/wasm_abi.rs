@@ -1,9 +1,9 @@
-//! ABI v1 validation (compile and instantiate errors) and the params-block contract.
+//! Block ABI validation (compile and instantiate errors) and the params-block contract (v1, v2).
 #![cfg(feature = "wasm")]
 
 mod wasm_support;
 
-use se_dsp::wasm::{H_BAR_PHASE, H_BEAT_PHASE, H_BPM, H_ENV, H_TRIGGERS, HEADER_LEN, PARAMS_LEN, WASM_PARAM_SLOTS};
+use se_dsp::wasm::{H_BAR_PHASE, H_BEAT_PHASE, H_BPM, H_ENV, H_TRIGGERS, HEADER_LEN, PARAMS_LEN, PARAMS_LEN_V2, PAYLOAD_BASE, WASM_PARAM_SLOTS};
 use se_dsp::{Effect, MAX_BLOCK, Transport};
 use wasm_support::*;
 
@@ -77,11 +77,17 @@ fn rejects_any_import() {
     assert_contains(&err, "env.log");
 }
 
+fn with_abi(src: &str, v: i32) -> String {
+    src.replace(r#"(func (export "se_dsp_abi") (result i32) i32.const 1)"#, &format!(r#"(func (export "se_dsp_abi") (result i32) i32.const {v})"#))
+}
+
 #[test]
 fn rejects_other_abi_versions() {
     let src = abi_module(INVERT, "", "");
-    let err = compile_err(&src.replace(r#"(func (export "se_dsp_abi") (result i32) i32.const 1)"#, r#"(func (export "se_dsp_abi") (result i32) i32.const 2)"#));
-    assert_contains(&err, "se_dsp_abi() returned 2");
+    assert!(compile(&with_abi(&src, 2)).is_ok(), "v2 is current");
+    for v in [0, 3] {
+        assert_contains(&compile_err(&with_abi(&src, v)), &format!("se_dsp_abi() returned {v}"));
+    }
 }
 
 #[test]
@@ -146,8 +152,12 @@ fn latency_export_is_validated_and_reported() {
     assert_contains(&instantiate_err(&lat(1 << 20)), "latency() = 1048576");
 }
 
-/// Writes the whole params block into the left output and the input channels swapped into
-/// the right output / rest of the left output, exposing the host's layout.
+/// Writes the first `len` floats of the params block into the left output and the input
+/// channels swapped into the right output / rest of the left output, exposing the host's layout.
+fn probe(len: usize) -> String {
+    PROBE.replace("(i32.const 72)", &format!("(i32.const {len})"))
+}
+
 const PROBE: &str = r#"
     (block $done
       (loop $l
@@ -206,4 +216,30 @@ fn source_layer_gets_silent_input() {
     let input = vec![0.7f32; 512];
     let (l, r) = run(&mut fx, &input, &input, 256);
     assert!(l.iter().chain(&r).all(|&x| x == 0.0), "an audio source never sees the bus input");
+}
+
+#[test]
+fn abi_v2_gets_the_trigger_payload_and_v1_blocks_stay_72_floats() {
+    let payload = |fx: &mut dyn Effect| {
+        for k in 0..16 {
+            fx.set_payload(k, 1000.0 + k as f32);
+        }
+    };
+    let n = 200;
+    let input: Vec<f32> = (0..n).map(|i| i as f32).collect();
+    // v2: the payload follows the param slots
+    let mut v2 = compile(&with_abi(&abi_module(&probe(PARAMS_LEN_V2), "", ""), 2)).unwrap().instantiate(SR, false, 0).unwrap();
+    payload(&mut v2);
+    v2.set_payload(16, 5.0); // outside the block: ignored
+    let (l, _) = run(&mut v2, &input, &input, n);
+    assert_eq!(PAYLOAD_BASE, PARAMS_LEN);
+    for k in 0..16 {
+        assert_eq!(l[PAYLOAD_BASE + k], 1000.0 + k as f32, "payload float {k}");
+    }
+    assert_eq!(l[PARAMS_LEN_V2], input[PARAMS_LEN_V2], "nothing written past the v2 block");
+    // v1: the host never writes past its 72 floats (guest memory after them is untouched)
+    let mut v1 = compile(&abi_module(&probe(PARAMS_LEN_V2), "", "")).unwrap().instantiate(SR, false, 0).unwrap();
+    payload(&mut v1);
+    let (l, _) = run(&mut v1, &input, &input, n);
+    assert!(l[PARAMS_LEN..PARAMS_LEN_V2].iter().all(|x| *x == 0.0), "{:?}", &l[PARAMS_LEN..PARAMS_LEN_V2]);
 }

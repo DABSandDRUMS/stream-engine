@@ -1,9 +1,7 @@
 // vignette: smooth darkening towards the corners.
-@fragment
-fn fs(in: FxVsOut) -> @location(0) vec4<f32> {
-    let c = src(in.uv);
-    let d = length(local_uv(in.uv) - 0.5) * 1.41421356;
-    let r = param(2u);
-    let v = 1.0 - smoothstep(r - param(3u), r, d) * fx.strength;
+fn vignette(c: vec4<f32>, uv: vec2<f32>, st: FxStage) -> vec4<f32> {
+    let d = length(local_uv(uv) - 0.5) * 1.41421356;
+    let r = stage_param(st, 2u);
+    let v = 1.0 - smoothstep(r - stage_param(st, 3u), r, d) * st.strength;
     return vec4<f32>(c.rgb * v, c.a);
 }

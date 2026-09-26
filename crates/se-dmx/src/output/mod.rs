@@ -66,6 +66,8 @@ pub struct OutputStatus {
     pub detail: String,
     pub frames: u64,
     pub errors: u64,
+    /// Holding the look from before rehearsal (the show runs in the visualizer only).
+    pub held: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -88,6 +90,8 @@ pub struct Shared {
     pub stop: AtomicBool,
     pub scheduling: Mutex<String>,
     pub frames: AtomicU64,
+    /// Show mode is `rehearsal`: outputs without `rehearsal = true` hold their look (§17.2).
+    pub rehearsal: AtomicBool,
     /// Heap allocations seen on the output thread inside a frame (counting allocator builds only;
     /// config reloads and reconnects are excluded).
     pub alloc_violations: AtomicU64,
@@ -157,6 +161,8 @@ enum SinkKind {
 
 struct Sink {
     status: usize,
+    /// `rehearsal = true`: keeps sending the live show while rehearsing.
+    rehearsal: bool,
     kind: SinkKind,
 }
 
@@ -164,6 +170,9 @@ struct Outputs {
     sinks: Vec<Sink>,
     status: Vec<OutputStatus>,
     dirty: bool,
+    /// The last frame sent before rehearsal started (indexed like `Rig::universes`).
+    held: Vec<[u8; 512]>,
+    holding: bool,
 }
 
 fn bcd(n: u32) -> u32 {
@@ -192,6 +201,7 @@ impl Outputs {
                 detail: if o.enabled { "not opened yet".into() } else { "disabled".into() },
                 frames: 0,
                 errors: 0,
+                held: false,
             });
             if !o.enabled {
                 continue;
@@ -259,9 +269,25 @@ impl Outputs {
                     }
                 }
             };
-            sinks.push(Sink { status: si, kind });
+            sinks.push(Sink { status: si, rehearsal: o.rehearsal, kind });
         }
-        Outputs { sinks, status, dirty: true }
+        Outputs { sinks, status, dirty: true, held: vec![[0u8; 512]; rig.universes.len()], holding: false }
+    }
+
+    /// Enter or leave rehearsal: outputs not marked `rehearsal` switch to/from the held look.
+    fn set_holding(&mut self, on: bool) {
+        self.holding = on;
+        for s in &self.sinks {
+            self.status[s.status].held = on && !s.rehearsal;
+        }
+        self.dirty = true;
+    }
+
+    /// Remember the frame just sent as the look to hold if rehearsal starts. No allocation.
+    fn keep(&mut self, universes: &[[u8; 512]]) {
+        if !self.holding && self.held.len() == universes.len() {
+            self.held.copy_from_slice(universes);
+        }
     }
 
     /// (Re)open USB devices whose retry time has come. Blocking (≤ ~1 s); returns true when
@@ -318,10 +344,11 @@ impl Outputs {
         did
     }
 
-    /// Send one frame everywhere. No allocation.
-    fn send(&mut self, universes: &[[u8; 512]], now: u64) {
+    /// Send one frame everywhere (held outputs send the held look). No allocation.
+    fn send(&mut self, live: &[[u8; 512]], now: u64) {
         for s in self.sinks.iter_mut() {
             let st = &mut self.status[s.status];
+            let universes: &[[u8; 512]] = if self.holding && !s.rehearsal && self.held.len() == live.len() { &self.held } else { live };
             match &mut s.kind {
                 SinkKind::Enttec { dev, frame, universe, next_retry, .. } => {
                     let Some(d) = dev else { continue };
@@ -588,7 +615,12 @@ pub fn spawn(
                 engine.set_plan(p.clone());
                 if outputs_changed {
                     outs.terminate(&engine.frame.universes);
+                    let kept = std::mem::take(&mut outs.held);
                     outs = Outputs::build(&p.rig, shared.cid);
+                    // a rehearsal edit to the rig keeps holding the pre-rehearsal look
+                    if kept.len() == outs.held.len() {
+                        outs.held = kept;
+                    }
                 }
                 period = (1e9 / p.rig.rate_hz as f64) as u64;
                 exclude = true;
@@ -596,6 +628,11 @@ pub fn spawn(
                 drop(cur);
             }
             exclude |= outs.connect(woke);
+            let rehearsal = shared.rehearsal.load(Ordering::Relaxed);
+            if rehearsal != outs.holding {
+                outs.set_holding(rehearsal);
+                exclude = true;
+            }
             let scope = se_alloc::Scope::begin();
             let snap = hub.snapshot.load_full();
             engine.render(&snap, woke);
@@ -612,6 +649,7 @@ pub fn spawn(
             let t0 = mono_ns();
             outs.send(&engine.frame.universes, t0);
             let t1 = mono_ns();
+            outs.keep(&engine.frame.universes);
             frames += 1;
             shared.frames.store(frames, Ordering::Relaxed);
             if !exclude && last_send != 0 {
@@ -715,5 +753,45 @@ mod tests {
         assert_eq!(s2.late_max_us, 5.0, "window resets");
         assert_eq!(s2.samples, 1001, "cumulative keeps counting");
         assert_eq!(s2.jitter_worst_us, 999.0);
+    }
+
+    #[test]
+    fn rehearsal_holds_outputs_not_marked_for_it() {
+        let listen = || {
+            let s = UdpSocket::bind("127.0.0.1:0").unwrap();
+            s.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+            s
+        };
+        let (room, test) = (listen(), listen());
+        let src = format!(
+            "[fixtures.par1]\nprofile = \"generic_rgb\"\nmode = \"3ch\"\naddress = 1\n\
+             [outputs.room]\nkind = \"artnet\"\ndestination = \"127.0.0.1\"\nport = {}\n\
+             [outputs.test]\nkind = \"artnet\"\ndestination = \"127.0.0.1\"\nport = {}\nrehearsal = true\n",
+            room.local_addr().unwrap().port(),
+            test.local_addr().unwrap().port()
+        );
+        let mut errs = Vec::new();
+        let lib = crate::profile::library(&std::collections::BTreeMap::new(), &mut errs);
+        let rig = Rig::compile(&toml::from_str(&src).unwrap(), lib, Vec::new()).unwrap();
+        let mut outs = Outputs::build(&rig, [0; 16]);
+        let first_slot = |s: &UdpSocket| {
+            let mut b = [0u8; 600];
+            let n = s.recv(&mut b).unwrap();
+            assert_eq!(n, artnet::PACKET_LEN);
+            b[18]
+        };
+        let frame = |outs: &mut Outputs, v: u8| {
+            let u = vec![[v; 512]];
+            outs.send(&u, 0);
+            outs.keep(&u);
+            (first_slot(&room), first_slot(&test))
+        };
+        assert_eq!(frame(&mut outs, 10), (10, 10));
+        outs.set_holding(true);
+        assert_eq!(outs.status.iter().map(|s| (s.id.as_str(), s.held)).collect::<Vec<_>>(), [("room", true), ("test", false)]);
+        assert_eq!(frame(&mut outs, 200), (10, 200), "the room keeps the pre-rehearsal look; the test output shows the rehearsal");
+        assert_eq!(frame(&mut outs, 90), (10, 90));
+        outs.set_holding(false);
+        assert_eq!(frame(&mut outs, 50), (50, 50), "leaving rehearsal restores every output");
     }
 }

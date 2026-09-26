@@ -1,15 +1,17 @@
 //! Device registry (§3.5): udev hotplug for V4L2 cameras/capture cards, ALSA cards and MIDI
-//! ports, hidraw, and USB serial; PipeWire audio nodes; stable identities; expected devices
-//! from `project.toml [devices.expected]` with preflight (`health.devices`).
+//! ports, hidraw, and USB serial; PipeWire audio nodes; network devices (PreSonus consoles over
+//! UCNET discovery, Art-Net nodes over ArtPoll); stable identities; expected devices from
+//! `project.toml [devices.expected]` with preflight (`health.devices`).
 //!
 //! Published state: `devices.<id>.{present,name,kind,path,identity}` where `<id>` is the
 //! expected-entry key, or a slug of the identity for devices nobody declared.
 //! Events: `devices.added` / `devices.removed` `{id, kind, name, identity, path}`.
-//! Query: `devices` (full registry incl. camera modes). Actions: `devices.rename`,
-//! `devices.expect`, `devices.forget`, `devices.rescan`.
+//! Query: `devices` (full registry incl. camera modes and network discovery state). Actions:
+//! `devices.rename`, `devices.expect`, `devices.forget`, `devices.rescan`.
 
 pub mod expected;
 pub mod identity;
+pub mod network;
 pub mod pipewire;
 pub mod registry;
 pub mod udev_scan;
@@ -25,7 +27,7 @@ use se_hub::{EngineCtx, Hub};
 use se_proto::{Event, Meta, Origin, Value, ValueType};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc, watch};
 
 const TARGET: &str = "devices";
 
@@ -37,35 +39,43 @@ struct Shared {
 pub async fn start(ctx: EngineCtx) -> Result<()> {
     let initial = tokio::task::spawn_blocking(udev_scan::scan).await?.context("udev scan")?;
     let shared = Arc::new(Shared { reg: Mutex::new(Registry::default()) });
+    let mut config_errors = None;
+    let (expected, net_config) = load_config(&ctx, &mut config_errors);
     {
         let mut reg = shared.reg.lock();
         for d in initial {
             reg.devices.insert(d.syspath.clone(), d);
         }
-        reg.expected = load_expected(&ctx, &mut None);
+        reg.expected = expected;
     }
     let (hp_tx, hp_rx) = mpsc::unbounded_channel();
     udev_scan::monitor(hp_tx).context("udev monitor")?;
     let (pw_tx, pw_rx) = mpsc::unbounded_channel();
     pipewire::monitor(pw_tx).context("pw-dump monitor")?;
+    let (net_tx, net_rx) = mpsc::unbounded_channel();
+    let (net_config, net_config_rx) = watch::channel(net_config);
+    let poll_now = network::spawn(net_config_rx, net_tx);
 
     register_query(&ctx, shared.clone());
     let actions = ctx.hub.route_actions("devices");
-    let task = Task { ctx: ctx.clone(), shared, published: BTreeMap::new(), health: None, pw_ready: false, expected_errors: None };
-    tokio::spawn(task.run(hp_rx, pw_rx, actions));
+    let task = Task { ctx: ctx.clone(), shared, published: BTreeMap::new(), health: None, pw_ready: false, config_errors, net_config, poll_now };
+    tokio::spawn(task.run(hp_rx, pw_rx, net_rx, actions));
     Ok(())
 }
 
-fn load_expected(ctx: &EngineCtx, last_errors: &mut Option<Vec<String>>) -> Vec<expected::Expected> {
+/// `[devices.expected]` and `[devices.network]`; errors are logged when they change.
+fn load_config(ctx: &EngineCtx, last_errors: &mut Option<Vec<String>>) -> (Vec<expected::Expected>, network::NetConfig) {
     let section = ctx.project_section("devices");
-    let (list, errors) = expected::parse(section.as_ref());
+    let (list, mut errors) = expected::parse(section.as_ref());
+    let (net, net_errors) = network::parse_config(section.as_ref());
+    errors.extend(net_errors);
     if last_errors.as_ref() != Some(&errors) {
         for e in &errors {
             ctx.hub.log("error", TARGET, format!("project.toml: {e}"));
         }
         *last_errors = Some(errors);
     }
-    list
+    (list, net)
 }
 
 fn register_query(ctx: &EngineCtx, shared: Arc<Shared>) {
@@ -115,7 +125,10 @@ struct Task {
     health: Option<(String, String)>,
     /// Suppress added/removed events for the first PipeWire snapshot (startup).
     pw_ready: bool,
-    expected_errors: Option<Vec<String>>,
+    config_errors: Option<Vec<String>>,
+    net_config: watch::Sender<network::NetConfig>,
+    /// Ask for Art-Net nodes right away (`devices.rescan`).
+    poll_now: Arc<Notify>,
 }
 
 impl Task {
@@ -123,6 +136,7 @@ impl Task {
         mut self,
         mut hp: mpsc::UnboundedReceiver<udev_scan::Hotplug>,
         mut pw: mpsc::UnboundedReceiver<pipewire::PwChange>,
+        mut net: mpsc::UnboundedReceiver<network::NetChange>,
         mut actions: mpsc::UnboundedReceiver<se_proto::Command>,
     ) {
         let mut config = self.ctx.config.clone();
@@ -141,9 +155,18 @@ impl Task {
                     let changes = self.apply_pw(c);
                     self.sync(&changes);
                 }
+                Some(c) = net.recv() => {
+                    let changes = self.apply_net(c);
+                    self.sync(&changes);
+                }
                 Ok(()) = config.changed() => {
-                    let list = load_expected(&self.ctx, &mut self.expected_errors);
+                    let (list, net_config) = load_config(&self.ctx, &mut self.config_errors);
                     self.shared.reg.lock().expected = list;
+                    self.net_config.send_if_modified(|c| {
+                        let changed = *c != net_config;
+                        *c = net_config;
+                        changed
+                    });
                     self.sync(&[]);
                 }
                 Some(cmd) = actions.recv() => {
@@ -225,6 +248,26 @@ impl Task {
         out
     }
 
+    fn apply_net(&mut self, c: network::NetChange) -> Vec<(bool, DeviceInfo)> {
+        let mut reg = self.shared.reg.lock();
+        match c {
+            network::NetChange::Seen { device, quiet } => {
+                let d = *device;
+                match reg.devices.insert(d.syspath.clone(), d.clone()) {
+                    None if !quiet => vec![(true, d)],
+                    _ => Vec::new(),
+                }
+            }
+            network::NetChange::Gone(key) => reg.devices.remove(&key).map(|d| vec![(false, d)]).unwrap_or_default(),
+            network::NetChange::Status { proto, ok, detail } => {
+                let level = if ok { "info" } else { "warn" };
+                self.ctx.hub.log(level, TARGET, format!("{} discovery: {detail}", proto.as_str()));
+                reg.network.insert(proto.as_str(), (ok, detail));
+                Vec::new()
+            }
+        }
+    }
+
     /// Read modes/controls for one camera (or all when `only` is None) off the async runtime.
     async fn refresh_camera_details(&mut self, only: Option<DeviceInfo>) {
         let targets: Vec<(String, String)> = match only {
@@ -261,8 +304,11 @@ impl Task {
                 hub.declare(&format!("{base}.present"), Meta::boolean(false).readonly().owner(TARGET).describe("device is connected"));
                 hub.declare(&format!("{base}.name"), Meta::string("").readonly().owner(TARGET));
                 hub.declare(&format!("{base}.kind"), Meta::string("").readonly().owner(TARGET));
-                hub.declare(&format!("{base}.path"), Meta::string("").readonly().owner(TARGET).describe("device node or PipeWire node name"));
-                hub.declare(&format!("{base}.identity"), Meta::string("").readonly().owner(TARGET).describe("stable identity (udev by-id/by-path name)"));
+                hub.declare(&format!("{base}.path"), Meta::string("").readonly().owner(TARGET).describe("device node, PipeWire node name, or network address"));
+                hub.declare(
+                    &format!("{base}.identity"),
+                    Meta::string("").readonly().owner(TARGET).describe("stable identity (udev by-id/by-path name, network MAC or console serial)"),
+                );
             }
             let o = old.cloned().unwrap_or_default();
             if old.is_none() || o.present != p.present {
@@ -322,13 +368,19 @@ impl Task {
         };
         match name {
             "devices.rescan" => {
+                // network devices answer the ArtPoll within a second; UCNET consoles announce every 3 s
+                self.poll_now.notify_one();
                 let list = tokio::task::spawn_blocking(udev_scan::scan).await??;
                 let changes = {
                     let mut reg = self.shared.reg.lock();
                     let mut changes = Vec::new();
                     let keep: std::collections::HashSet<String> = list.iter().map(|d| d.syspath.clone()).collect();
-                    let gone: Vec<String> =
-                        reg.devices.iter().filter(|(k, d)| d.kind != Kind::AudioNode && !keep.contains(*k)).map(|(k, _)| k.clone()).collect();
+                    let gone: Vec<String> = reg
+                        .devices
+                        .iter()
+                        .filter(|(k, d)| d.kind != Kind::AudioNode && !d.kind.is_network() && !keep.contains(*k))
+                        .map(|(k, _)| k.clone())
+                        .collect();
                     for k in gone {
                         if let Some(d) = reg.devices.remove(&k) {
                             changes.push((false, d));

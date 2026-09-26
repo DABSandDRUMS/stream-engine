@@ -110,6 +110,7 @@ pub fn rig(show: &Show, plan_errors: &[String], shared: &Shared) -> Value {
                 .with("detail", st.map(|s| s.detail.clone()).unwrap_or_default())
                 .with("frames", st.map(|s| s.frames as i64).unwrap_or(0))
                 .with("errors", st.map(|s| s.errors as i64).unwrap_or(0))
+                .with("held", st.is_some_and(|s| s.held))
         })
         .collect();
     let mut errors: Vec<String> = show.errors.clone();

@@ -237,6 +237,41 @@ also be overridden with `?param=value` in the URL.
 | `eventlist` | recent follows/subs/gifts/cheers/raids/tips (`stats.recent` + live events) | `max_items`, `kinds` |
 | `countdown` | starting-soon timer (starts on `mode.enter.preshow` or `patch.countdown.trigger minutes=10` / `target=20:00`) | `minutes`, `target`, `title`, `subtitle`, `show_song` |
 | `credits` | end-of-stream roll from the `credits` query (on `patch.credits.trigger` or entering `outro`) | `title`, `speed`, `chatters`, `loop` |
+| `poll` | the running Twitch poll (`twitch.poll`): question, vote bars, time left; the winner for `result_seconds` after it ends | `result_seconds`, `show_votes`, `accent`, `card_bg` |
+| `prediction` | the running Twitch prediction (`twitch.prediction`): points per outcome, betting clock, locked; the winner (or "canceled, points refunded") for `result_seconds` | `result_seconds`, `blue`, `pink`, `card_bg` |
+
+`poll` and `prediction` are placed only while one runs: `when = "twitch.poll.active ||
+patch.poll.showing"` (same for `prediction`). The page keeps `patch.<id>.showing` on while the
+card is up, so the result stays placed after `twitch.*.active` turns off, and turns it off when
+the card is gone. Start them from Community → Twitch → Polls & predictions
+(`twitch.poll.start`, `twitch.prediction.start`, …, docs/twitch.md).
+
+Two more web patches in the example are scene sources, not overlays (`layer = "source"`,
+placed as scene nodes):
+
+| patch | shows | notable params |
+|---|---|---|
+| `nowplaying` | the current song request beside the YouTube player (`queue.now.*`, `queue.position`) — docs/song-requests.md | `label`, `show_requester`, `align` |
+| `ad_break` | the ad break card: "Back in a moment", a countdown of the Twitch ad, now playing | `title`, `subtitle`, `done_text`, `show_song` |
+
+### Ad breaks in the example project
+
+When Twitch starts an ad, the policy switches the mode to `ad_break` and back when it ends
+(`[policy] ad_break_mode`, docs/twitch.md). `rules/modes.toml` does the rest:
+
+- `mode.enter.ad_break`: remember the program scene in `patch.ad_break.return_scene`, then
+  `scene.cut ad_break` (aurora background + the `ad_break` card; no cameras).
+- `twitch.ad_break` (in mode `ad_break`): `patch.ad_break.trigger seconds={duration}` starts the
+  countdown; a second ad during the break extends it. The page keeps the deadline in
+  `patch.ad_break.deadline`, so a reload continues. Set by hand (`streamctl mode ad_break`),
+  the card shows only the text.
+- `mode.exit.ad_break`: cut back to the remembered scene (`duo` if none). Going back to `brb`
+  leaves the scene to the brb rule.
+
+The `ad_break` and `brb` scenes keep the music up with a scene-layer `set` (`audio.duck.depth
+= 0`, `audio.bus.music.gain = 0`), which lapses when the scene changes. Alerts wait during the
+break (`pause_modes`), chat effects are paused (`[policy] effect_modes`), and the chat box is
+hidden (its `when`). Try it: `streamctl mode live && streamctl sim ad_break duration=30`.
 
 Testing a page in a normal browser: open
 `http://127.0.0.1:<http port>/patches/<id>/index.html?token=<API token>` and fire simulator

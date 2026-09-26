@@ -8,7 +8,7 @@
 //!   session containing a `.keep`/`keep` file (the clip pipeline protects sessions with
 //!   unreviewed clips this way).
 //! * **Recordings:** OBS's recording folder is held to a disk budget. Going over budget
-//!   publishes a warning (preflight + desktop notification) listing the oldest recordings
+//!   publishes a warning (preflight + desktop notification through `notify.send`) listing the oldest recordings
 //!   that would bring usage back under `warn_ratio × budget`. They are deleted only by the
 //!   operator (`retention.prune_recordings`) or, with `auto_delete = true`, after the
 //!   warning has stood for `grace_hours` — never while recording or on air.
@@ -429,7 +429,9 @@ fn query(s: &Status) -> Value {
         )
 }
 
-fn notify(status: &Mutex<Status>, kind: &'static str, urgency: &str, title: &str, body: &str) {
+/// Ask for a desktop notification (at most once per `kind` every 6 h; the notifier also skips it
+/// while the UI has focus).
+fn notify(ctx: &EngineCtx, status: &Mutex<Status>, kind: &'static str, urgency: &str, title: &str, body: &str) {
     let now = util::unix_now();
     {
         let mut s = status.lock();
@@ -438,9 +440,8 @@ fn notify(status: &Mutex<Status>, kind: &'static str, urgency: &str, title: &str
         }
         s.notified.insert(kind, now);
     }
-    let _ = std::process::Command::new("notify-send").args(["-a", "stream-engine", "-i", "stream-engine", "-u", urgency, title, body]).spawn().map(|mut c| {
-        std::thread::spawn(move || c.wait());
-    });
+    let args = Value::map().with("key", kind).with("title", title).with("body", body).with("urgency", urgency).with("open", "maintenance");
+    ctx.hub.command(util::action("notify.send", args));
 }
 
 struct Env {
@@ -536,7 +537,14 @@ async fn backups_step(ctx: &EngineCtx, status: &Mutex<Status>, cfg: &Settings, n
                 files = list;
                 error = Some(format!("{e:#}"));
                 ctx.hub.log("error", TARGET, format!("runtime DB backup failed: {e:#}"));
-                notify(status, "backup", "normal", "stream-engine backup failed", &format!("{e:#}"));
+                notify(
+                    ctx,
+                    status,
+                    "backup",
+                    "normal",
+                    "Backups aren't being made",
+                    "Stream Engine couldn't save its backup. Open Settings → Backups to see why.",
+                );
             }
             Err(e) => error = Some(format!("backup task: {e}")),
         }
@@ -654,7 +662,14 @@ async fn recordings_step(ctx: &EngineCtx, status: &Mutex<Status>, cfg: &Settings
     let free = free.map(|f| f + freed);
     let pending_bytes: u64 = pending.iter().map(|p| p.bytes).sum();
     let health = if free.is_some_and(|f| (f as f64) < rc.min_free_gb * GB) {
-        notify(status, "disk", "critical", "Recording disk almost full", &format!("{:.1} GB free on {}", free.unwrap_or(0) as f64 / GB, dir.display()));
+        notify(
+            ctx,
+            status,
+            "disk",
+            "critical",
+            "The recordings disk is almost full",
+            &format!("Only {:.0} GB left where your recordings go. Delete old recordings in Settings → Backups.", free.unwrap_or(0) as f64 / GB),
+        );
         util::health("fail", format!("only {:.1} GB free on the recordings disk ({})", free.unwrap_or(0) as f64 / GB, dir.display()))
     } else if !pending.is_empty() {
         let when = if rc.auto_delete {
@@ -670,7 +685,14 @@ async fn recordings_step(ctx: &EngineCtx, status: &Mutex<Status>, cfg: &Settings
             pending.len(),
             pending_bytes as f64 / GB
         );
-        notify(status, "budget", "normal", "Recordings over disk budget", &body);
+        notify(
+            ctx,
+            status,
+            "budget",
+            "normal",
+            "Recordings use more space than you allowed",
+            "Delete old recordings in Settings → Backups, or raise the limit.",
+        );
         util::health("warn", body)
     } else if total > target {
         util::health("warn", format!("recordings use {:.0} of {:.0} GB", total as f64 / GB, rc.budget_gb))

@@ -272,7 +272,7 @@ async fn renders_patch_pages_into_video_slots_and_resizes_live() {
     let target = e.http.requests.lock().iter().find(|r| r.starts_with("/patches/solid/index.html?token=")).cloned().expect("page requested with a token");
     let token = target.rsplit("token=").next().unwrap().to_string();
     assert_eq!(token.len(), 64);
-    assert_eq!(e.auth.check(&token), Some(Scope::Patch("solid".into())), "token scoped to the patch");
+    assert_eq!(e.auth.check(&token), Some(Scope::Patch("solid".into(), Vec::new())), "token scoped to the patch");
 
     // paint rate and latency
     let (n0, t0) = (f.seq, Instant::now());

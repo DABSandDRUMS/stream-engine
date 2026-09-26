@@ -442,7 +442,8 @@ async fn persist_loop(ctx: Ctx) {
                         // external commands appear as root `command` records: remember for audit
                         for r in recs.iter().filter(|r| r.kind == "command" && r.parent.is_none()) {
                             let origin = r.label.rsplit_once('(').map(|(_, o)| o.trim_end_matches(')').to_string()).unwrap_or_default();
-                            if origin != "system" {
+                            // the UI's focus reports are bookkeeping, not something the operator did
+                            if origin != "system" && !r.label.starts_with("ui.focus ") {
                                 pending.insert(r.id, (origin, None, r.label.clone()));
                             }
                         }

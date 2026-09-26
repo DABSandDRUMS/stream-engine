@@ -233,6 +233,8 @@ async fn helix(State(m): State<Mock>, method: Method, uri: Uri, h: HeaderMap, Qu
         ("POST", "/streams/markers") => {
             ok(json!([{ "id": "marker-1", "created_at": "2026-09-25T20:10:00Z", "description": body_json.get("description"), "position_seconds": 600 }]))
         }
+        ("GET", "/moderation/moderators") => ok(json!([{ "user_id": "id-modfriend", "user_login": "modfriend", "user_name": "ModFriend" }])),
+        ("GET", "/channels/vips") => ok(json!([{ "user_id": "id-vipfan", "user_login": "vipfan", "user_name": "VipFan" }])),
         _ => ok(json!([])),
     }
 }

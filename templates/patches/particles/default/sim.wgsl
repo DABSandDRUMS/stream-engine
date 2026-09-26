@@ -1,12 +1,18 @@
 // {{label}}: simulation (one invocation per particle). Dead particles (life <= 0) respawn at
-// the bottom edge with a probability that follows the trigger envelope.
+// the bottom edge with a probability that follows the trigger envelope. The trigger payload
+// (`se.trigger`) shapes the burst: bigger events (bits, gift count, raid size) spawn more, and
+// part of the sparks take the chatter's colour.
 fn spawn(i: u32) -> Particle {
     let h = i * 1664525u + se.frame * 1013904223u;
     var p: Particle;
     p.pos = vec2<f32>(se_hash(h), 1.02);
     let spread = (se_hash(h + 1u) - 0.5) * 0.25;
     p.vel = vec2<f32>(spread, -(0.3 + se_hash(h + 2u)) * p_speed());
+    let user = se.trigger.user_color;
     p.color = mix(palette(PAL_ACCENT), palette(PAL_YELLOW), se_hash(h + 3u));
+    if (se_hash(h + 7u) < 0.5 * user.a) {
+        p.color = user;
+    }
     p.life = 1.5 + se_hash(h + 4u) * 2.0;
     p.size = p_size() * (0.5 + se_hash(h + 5u));
     p.seed = se_hash(h + 6u);
@@ -23,7 +29,8 @@ fn sim(@builtin(global_invocation_id) id: vec3<u32>) {
     var p = se_particles[i];
     let dt = se.dt;
     if (p.life <= 0.0) {
-        let chance = se.env * p_rate() * dt;
+        let boost = 1.0 + min(log2(1.0 + se.trigger.amount / 100.0), 4.0);
+        let chance = se.env * p_rate() * boost * dt;
         if (se_hash(i ^ (se.frame * 2654435761u)) < chance) {
             se_particles[i] = spawn(i);
         }

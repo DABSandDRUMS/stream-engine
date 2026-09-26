@@ -238,3 +238,127 @@ fn source_lut_and_color_correction_apply() {
     h.frame();
     assert_eq!(&px(&h.read(WIDE), 20, 20)[..3], &[0, 0, 0], "brightness −1 → black");
 }
+
+/// Adjacent pointwise effects run as one fused pass with the same result as one pass each:
+/// scene chain (grade · blur · vignette · fade_to_black, blur off → one pass; blur on → the
+/// fused run splits around it) and a scissored node chain (chroma_key · grade).
+#[test]
+fn fused_effect_chains_match_unfused() {
+    let dir = project();
+    write_file(
+        dir.path(),
+        "scenes/chain.toml",
+        r#"
+fx = [
+  { name = "grade", warmth = 0.5, saturation = 1.3, lift = 0.05 },
+  { name = "blur", radius = 8.0, when = "mode == 'blur'" },
+  { name = "vignette", amount = 0.8, radius = 0.5 },
+  { name = "fade_to_black", amount = 0.3, color_r = 0.4 },
+]
+[canvas.wide]
+nodes = [
+  { src = "cam_a", rect = [0, 0, 1, 1] },
+  { src = "cam_b", rect = [0.55, 0.1, 0.4, 0.5], fx = [{ name = "chroma_key", amount = 1.0 }, { name = "grade", contrast = 1.4, exposure = 0.3 }] },
+]
+"#,
+    );
+    let mut fused = Harness::new(dir.path());
+    let mut plain = Harness::unfused(dir.path());
+    let _wf = publish_sources(&mut fused);
+    let _wp = publish_sources(&mut plain);
+    for mode in ["live", "blur"] {
+        for h in [&mut fused, &mut plain] {
+            no_transition(h, "chain");
+            h.set("show.mode", mode);
+            h.frame();
+        }
+        let (a, b) = (fused.read(WIDE), plain.read(WIDE));
+        let max = a.2.iter().zip(&b.2).map(|(x, y)| x.abs_diff(*y)).max().unwrap();
+        assert!(max <= 2, "{mode}: fused differs from unfused by up to {max}/255");
+        let (f, p) = (fused.stats.view(), plain.stats.view());
+        assert_eq!(p.fx_fused, 0);
+        if mode == "live" {
+            // scene: 3 effects → 1 pass; node: 2 → 1
+            assert_eq!(f.fx_fused, 5, "{f:?}");
+            assert_eq!(p.fx_passes - f.fx_passes, 3, "{f:?} vs {p:?}");
+            golden("fx_fused_chain", &a);
+        } else {
+            // grade | blur | [vignette, fade_to_black] + node [chroma_key, grade]
+            assert_eq!(f.fx_fused, 4, "{f:?}");
+        }
+    }
+}
+
+const WIPE_WGSL: &str = r#"
+// wipe: the node shows from its left edge up to `progress` of its width
+@fragment
+fn fs(in: SeVsOut) -> @location(0) vec4<f32> {
+    let c = textureSample(se_input, se_sampler, in.uv);
+    let x = (in.uv.x - se.region.x) / max(se.region.z - se.region.x, 1e-6);
+    return c * step(x, se.progress);
+}
+"#;
+
+fn close(a: [u8; 4], b: [u8; 4]) -> bool {
+    a.iter().zip(&b).all(|(x, y)| x.abs_diff(*y) <= 3)
+}
+
+/// Morph enter/exit styles can be shaders: a `.wgsl` file (entering node) and a shader patch
+/// (leaving node) get the node alone in `se_input`, its rect in `se.region`, and its presence in
+/// `se.progress`; a style that does not compile falls back to a fade and reports the error.
+#[test]
+fn custom_enter_exit_styles_draw_nodes_through_their_shader() {
+    let dir = project();
+    let root = dir.path();
+    write_file(root, "transitions/wipe.wgsl", WIPE_WGSL);
+    write_file(root, "patches/wipe_out/patch.toml", "kind = \"shader\"\nentry = \"main.wgsl\"\nlayer = \"effect\"\n");
+    write_file(root, "patches/wipe_out/main.wgsl", WIPE_WGSL);
+    write_file(root, "transitions/wipe.toml", "kind = \"morph\"\nms = 1000\nease = \"linear\"\nenter = \"transitions/wipe.wgsl\"\nexit = \"patch.wipe_out\"\n");
+    write_file(root, "transitions/broken.wgsl", "@fragment\nfn fs(in: SeVsOut) -> @location(0) vec4<f32> {\n    return nope;\n}\n");
+    write_file(root, "transitions/broken.toml", "kind = \"morph\"\nms = 1000\nease = \"linear\"\nenter = \"transitions/broken.wgsl\"\nexit = \"fade\"\n");
+    write_file(
+        root,
+        "scenes/wiped.toml",
+        "[canvas.wide]\nnodes = [{ src = \"cam_a\", rect = [0, 0, 1, 1] }, { src = \"patch.aurora\", rect = [0.05, 0.05, 0.4, 0.4] }]\n",
+    );
+    let mut h = Harness::new(root);
+    {
+        let r = h.reports.lock();
+        assert!(r.patches.iter().all(|(_, res)| res.is_ok()), "{:?}", r.patches);
+        assert!(r.styles.iter().any(|(p, res)| p == "transitions/wipe.wgsl" && res.is_ok()), "{:?}", r.styles);
+        let broken = r.styles.iter().find(|(p, _)| p == "transitions/broken.wgsl").expect("broken style reported");
+        assert!(broken.1.as_ref().is_err_and(|e| e.contains("transitions/broken.wgsl:3")), "{:?}", broken.1);
+    }
+    let _w = publish_sources(&mut h);
+    no_transition(&mut h, "one");
+    h.frame();
+    let from = h.read(WIDE);
+    no_transition(&mut h, "wiped");
+    h.frame();
+    let to = h.read(WIDE);
+    let (enter_l, enter_r, exit_l, exit_r) = ((40, 45), (120, 45), (210, 130), (285, 130));
+    assert!(!close(px(&from, enter_l.0, enter_l.1), px(&to, enter_l.0, enter_l.1)), "entering node must be visible");
+    assert!(!close(px(&from, exit_l.0, exit_l.1), px(&to, exit_l.0, exit_l.1)), "leaving node must be visible");
+
+    // 0.4: the full-screen cam_a (in both scenes) stays below the leaving node until halfway
+    at_progress(&mut h, "one", "wiped", "wipe", 0.4);
+    h.frame();
+    let mid = h.read(WIDE);
+    let at = |img: &(u32, u32, Vec<u8>), p: (u32, u32)| px(img, p.0, p.1);
+    // entering (file style, presence 0.4): its left part is in, the right part not yet
+    assert!(close(at(&mid, enter_l), at(&to, enter_l)), "{:?} vs {:?}", at(&mid, enter_l), at(&to, enter_l));
+    assert!(close(at(&mid, enter_r), at(&from, enter_r)), "{:?} vs {:?}", at(&mid, enter_r), at(&from, enter_r));
+    // leaving (patch style, presence 0.6): its left part is still there, the right part gone
+    assert!(close(at(&mid, exit_l), at(&from, exit_l)), "{:?} vs {:?}", at(&mid, exit_l), at(&from, exit_l));
+    assert!(close(at(&mid, exit_r), at(&to, exit_r)), "{:?} vs {:?}", at(&mid, exit_r), at(&to, exit_r));
+
+    // a style that does not compile fades instead: presence 0.4 = 40 % of the entering node
+    at_progress(&mut h, "one", "wiped", "broken", 0.4);
+    h.frame();
+    let faded = h.read(WIDE);
+    let (a, b, m) = (at(&from, enter_r), at(&to, enter_r), at(&faded, enter_r));
+    for c in 0..3 {
+        let want = a[c] as f32 * 0.6 + b[c] as f32 * 0.4;
+        assert!((m[c] as f32 - want).abs() <= 4.0, "channel {c}: {m:?} vs 60 % {a:?} + 40 % {b:?}");
+    }
+}

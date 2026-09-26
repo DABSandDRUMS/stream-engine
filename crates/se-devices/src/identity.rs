@@ -3,7 +3,8 @@
 //! An identity survives reboots and replugging: it is the udev `by-id` name when the device
 //! has a USB serial (`usb-Sonix_Technology_Co.__Ltd._USB_Camera_SN0001-video-index0`), else
 //! the `by-path` name (`pci-0000:05:00.0-video-index2` = AVMatrix VC42 input 3), else a name
-//! built from `ID_PATH`. PipeWire nodes use their `node.name`.
+//! built from `ID_PATH`. PipeWire nodes use their `node.name`. Network devices use their MAC
+//! (`mac-00:50:c2:12:34:56`), consoles their serial (`ucnet-RA1E24110101`); see [`crate::network`].
 
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -17,10 +18,14 @@ pub enum Kind {
     Hid,
     Serial,
     AudioNode,
+    /// PreSonus StudioLive console found by UCNET discovery.
+    Ucnet,
+    /// Art-Net node (DMX over Ethernet) found by ArtPoll.
+    ArtNet,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 6] = [Kind::Camera, Kind::AudioCard, Kind::Midi, Kind::Hid, Kind::Serial, Kind::AudioNode];
+    pub const ALL: [Kind; 8] = [Kind::Camera, Kind::AudioCard, Kind::Midi, Kind::Hid, Kind::Serial, Kind::AudioNode, Kind::Ucnet, Kind::ArtNet];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -30,7 +35,14 @@ impl Kind {
             Kind::Hid => "hid",
             Kind::Serial => "serial",
             Kind::AudioNode => "audio_node",
+            Kind::Ucnet => "ucnet",
+            Kind::ArtNet => "artnet",
         }
+    }
+
+    /// Found on the network (not by udev or PipeWire).
+    pub fn is_network(self) -> bool {
+        matches!(self, Kind::Ucnet | Kind::ArtNet)
     }
 
     pub fn parse(s: &str) -> Option<Kind> {
@@ -40,6 +52,8 @@ impl Kind {
             "hidraw" => Some(Kind::Hid),
             "tty" | "dmx" => Some(Kind::Serial),
             "pipewire" | "node" => Some(Kind::AudioNode),
+            "mixer" | "presonus" => Some(Kind::Ucnet),
+            "art-net" | "art_net" | "dmx_node" => Some(Kind::ArtNet),
             _ => None,
         })
     }
@@ -52,22 +66,23 @@ pub struct DeviceInfo {
     pub identity: String,
     /// Human-readable name (`Studio 24c`, `AVMatrix HWS Capture 1`).
     pub name: String,
-    /// Device node (`/dev/video0`, `/dev/snd/midiC2D0`, `/dev/hidraw8`) or PipeWire node name.
+    /// Device node (`/dev/video0`, `/dev/snd/midiC2D0`, `/dev/hidraw8`), PipeWire node name, or
+    /// network address (`10.0.0.187:53000`).
     pub path: String,
-    /// sysfs path (udev devices) or `pipewire:<id>`; the key for removal.
+    /// sysfs path (udev devices), `pipewire:<id>`, or `net:<identity>`; the key for removal.
     pub syspath: String,
-    /// `usb`, `pci`, `pipewire`, …
+    /// `usb`, `pci`, `pipewire`, `network`, …
     pub bus: String,
     /// USB vendor/product ids.
     pub usb: Option<(u16, u16)>,
-    /// USB serial (`ID_SERIAL_SHORT`).
+    /// USB serial (`ID_SERIAL_SHORT`) or a console's serial number.
     pub serial: Option<String>,
     /// Port path (`ID_PATH`).
     pub port: Option<String>,
     pub driver: String,
     /// ALSA card id (`S24c`) for sound devices; V4L2 bus info for cameras.
     pub card: String,
-    /// Kind-specific extras (PipeWire media class/channels, ALSA card number, …).
+    /// Kind-specific extras (PipeWire media class/channels, ALSA card number, network ip/mac, …).
     pub extra: BTreeMap<String, String>,
 }
 

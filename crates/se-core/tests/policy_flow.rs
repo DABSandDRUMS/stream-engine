@@ -130,6 +130,48 @@ fn redeem_outside_live_is_refunded() {
 }
 
 #[test]
+fn redeem_of_a_reject_preset_that_is_already_active_is_refunded_not_fulfilled() {
+    let files = vec![
+        file("project", "project", "schema = 1\n[policy.veto]\nredeem = false"),
+        file("presets", "solo", "hold = \"2s\"\nconflict = \"reject\"\nset = { \"fx.solo.amount\" = 1.0 }"),
+        file("rewards", "solo", "title = \"Drum solo\"\ncost = 500\nmax_per_stream = 2\nfires = \"preset.solo\""),
+    ];
+    let cfg = Config::build(&files);
+    assert!(cfg.errors.is_empty(), "{:?}", cfg.errors);
+    let mut c = Core::new(cfg, 1_000 * MS);
+    live(&mut c);
+    // the owner already has the solo running
+    c.submit(ui(Op::PresetFire { name: "solo".into(), payload: Value::Null }));
+    run(&mut c, 5);
+    assert!(c.get("preset.solo.active").unwrap().truthy());
+    let solo = |red: &str, user: &str| {
+        let Input::Event { mut event } = redeem(red, user) else { unreachable!() };
+        event.payload = event.payload.with("reward", "Drum solo").with("reward_key", "solo").with("cost", 500);
+        Input::Event { event }
+    };
+    c.submit(solo("r1", "a"));
+    let out = run(&mut c, 10);
+    let acts = actions(&out);
+    assert!(!acts.iter().any(|(n, _)| n == "twitch.fulfill"), "{acts:?}");
+    let refund = acts.iter().find(|(n, _)| n == "twitch.refund").expect("refund");
+    assert_eq!(refund.1.get_path("redemption_id").and_then(Value::as_str), Some("r1"));
+    let evs = events(&out);
+    assert!(!evs.iter().any(|e| e.ty == "twitch.redeem" || e.ty == "policy.accepted"), "a refunded redemption never reaches alerts");
+    let rej = evs.iter().find(|e| e.ty == "policy.rejected").expect("rejected");
+    assert_eq!(rej.payload.get_path("reason").and_then(Value::as_str), Some("preset `solo` is already active"));
+    // once the solo is over the reward works, and the refunded one didn't use up the per-stream limit
+    run(&mut c, 2_500);
+    assert!(!c.get("preset.solo.active").unwrap().truthy());
+    for (red, user) in [("r2", "b"), ("r3", "c")] {
+        c.submit(solo(red, user));
+        let out = run(&mut c, 10);
+        assert!(actions(&out).iter().any(|(n, a)| n == "twitch.fulfill" && a.get_path("redemption_id").and_then(Value::as_str) == Some(red)));
+        c.submit(ui(Op::PresetRelease { name: "solo".into() }));
+        run(&mut c, 5);
+    }
+}
+
+#[test]
 fn ad_break_switches_mode_and_returns() {
     let mut c = core();
     live(&mut c);

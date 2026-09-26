@@ -19,6 +19,7 @@ pub mod normalize;
 pub mod rewards;
 pub mod service;
 pub mod time;
+pub mod users;
 
 use std::sync::Arc;
 

@@ -400,6 +400,7 @@ impl Loader {
                     .with("entry", m.entry.as_str())
                     .with("trigger", m.has_trigger)
                     .with("params", params)
+                    .with("grants", m.grants.iter().map(|g| Value::Str(g.clone())).collect::<Vec<_>>())
                     .with("env", snap.f32(&format!("patch.{id}.env")).unwrap_or(0.0) as f64)
                     .with("active", snap.bool(&format!("patch.{id}.active")));
                 if let Some([w, h]) = m.size {

@@ -2,8 +2,10 @@
 //! source, evaluated inside the deterministic core tick.
 //!
 //! * **Sources:** `internal` (show clock: `timeline.play|pause|stop|locate|jog`), `manual`
-//!   (jog/locate, optional scrub signal), `media:<id>` (follows `song.position` while
-//!   `song.media` is `<id>`), `mtc[:port]`, `ltc[:input]` (observations from the I/O glue).
+//!   (jog/locate, optional scrub signal), `media:yt:<id>` (follows `song.position` while the
+//!   song player's `song.media` is `<id>`), `media:file:<hash>` / `media:isrc:<code>` (exact
+//!   frame positions from local media playback, observation key `media:<id>`), `mtc[:port]`,
+//!   `ltc[:input]` (observations from the I/O glue).
 //! * **Chase:** external sources go through [`se_clock::timecode::chase`] (lock with jitter
 //!   tolerance, freewheel on dropout). On a jump the timeline applies the *tracked state* at
 //!   the new time — the latest stateful command per target (`set`, cue-list cue, latching
@@ -27,14 +29,37 @@ use se_proto::{Command, Ease, Event, Meta, Op, Origin, PRIORITY_MANUAL, PRIORITY
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Observation source key for media players (`song.position`).
+/// Observation source key for the song player (`song.position`).
 pub const MEDIA: &str = "media";
-/// Signal carrying the current media position (seconds).
+/// Signal carrying the song player's position (seconds).
 pub const SONG_POSITION: &str = "song.position";
-/// State carrying the current media key (`yt:<videoId>`).
+/// State carrying the song player's media key (`yt:<videoId>`). Its only producer is the song
+/// queue (se-songs); local media playback reports `file:`/`isrc:` positions as
+/// `Input::Timecode` under [`local_media_key`] instead.
 pub const SONG_MEDIA: &str = "song.media";
 /// Player state (`playing`, `paused`, `buffering`, …).
 pub const SONG_STATE: &str = "song.state";
+
+/// Observation key for local media playback of `id` (`file:<hash>` or `isrc:<code>`).
+pub fn local_media_key(id: &str) -> String {
+    format!("media:{id}")
+}
+
+/// Canonical ISRC: 12 characters, uppercase, without the usual `-`/space separators; `None`
+/// when it isn't one (`CC-XXX-YY-NNNNN`: country, registrant, year, designation).
+pub fn normalize_isrc(s: &str) -> Option<String> {
+    let c: String = s.chars().filter(|c| !matches!(c, '-' | ' ' | '_')).map(|c| c.to_ascii_uppercase()).collect();
+    let b = c.as_bytes();
+    let ok =
+        b.len() == 12 && b[..2].iter().all(u8::is_ascii_uppercase) && b[2..5].iter().all(u8::is_ascii_alphanumeric) && b[5..].iter().all(u8::is_ascii_digit);
+    ok.then_some(c)
+}
+
+/// Chase for local media: positions come with the exact master-clock time of each shown
+/// frame, so the lock is tight and quick.
+fn local_media_chase() -> ChaseConfig {
+    ChaseConfig { jitter: 0.02, jump: 0.25, freewheel: 0.5, dropout: 0.25, window: 0.5, lock_count: 2, slew: 0.05 }
+}
 
 pub const STATUSES: &[&str] = &["idle", "disabled", "stopped", "paused", "playing", "waiting", "locking", "locked", "freewheel", "lost"];
 
@@ -49,7 +74,8 @@ const EPS: f64 = 1e-6;
 pub enum SourceDef {
     Internal,
     Manual,
-    /// `yt:<videoId>`, `file:<hash>`, `isrc:<code>`: matched against `song.media`.
+    /// `yt:<videoId>` (matched against the song player's `song.media`), `file:<hash>`,
+    /// `isrc:<code>` (local media playback, see [`local_media_key`]).
     Media(String),
     /// Port pattern (empty = the project's default MTC input).
     Mtc(String),
@@ -76,7 +102,12 @@ impl SourceDef {
                     if !ok {
                         return Err(format!("unknown source `{s}` (internal, manual, mtc[:port], ltc[:input], media:yt:<id>|file:<hash>|isrc:<code>)"));
                     }
-                    SourceDef::Media(id.to_string())
+                    match id.strip_prefix("isrc:") {
+                        Some(code) => {
+                            SourceDef::Media(format!("isrc:{}", normalize_isrc(code).ok_or_else(|| format!("`{code}` is not an ISRC (CC-XXX-YY-NNNNN)"))?))
+                        }
+                        None => SourceDef::Media(id.to_string()),
+                    }
                 }
             }
         })
@@ -87,6 +118,7 @@ impl SourceDef {
         match self {
             SourceDef::Internal => "internal".into(),
             SourceDef::Manual => "manual".into(),
+            SourceDef::Media(id) if Self::is_local_media(id) => local_media_key(id),
             SourceDef::Media(_) => MEDIA.into(),
             SourceDef::Mtc(p) if p.is_empty() => "mtc".into(),
             SourceDef::Mtc(p) => format!("mtc:{p}"),
@@ -109,6 +141,11 @@ impl SourceDef {
 
     pub fn is_timecode(&self) -> bool {
         matches!(self, SourceDef::Mtc(_) | SourceDef::Ltc(_))
+    }
+
+    /// `file:`/`isrc:` ids follow local media playback; `yt:` follows the song player.
+    fn is_local_media(id: &str) -> bool {
+        !id.starts_with("yt:")
     }
 }
 
@@ -417,7 +454,11 @@ impl TimelineDef {
             Some(v) => return Err(format!("priority must be 1..{} (got {v})", PRIORITY_MANUAL - 1)),
         };
         let length = t.get("length").map(|v| parse_time(v, rate)).transpose()?;
-        let mut chase = if source.is_timecode() { ChaseConfig::timecode(rate) } else { ChaseConfig::media() };
+        let mut chase = match &source {
+            s if s.is_timecode() => ChaseConfig::timecode(rate),
+            SourceDef::Media(id) if SourceDef::is_local_media(id) => local_media_chase(),
+            _ => ChaseConfig::media(),
+        };
         if let Some(c) = t.get("chase") {
             let c = c.as_table().ok_or("`chase` must be a table")?;
             chase.jitter = dur_secs(c, "jitter", chase.jitter)?;
@@ -1179,7 +1220,12 @@ impl Core {
                     rt.seen_jumps = src.jumps;
                     jumped = true;
                 }
-                let bound = !matches!(def_source, SourceDef::Media(_)) || media_now == id;
+                // the song player's media binds by `song.media`; local media by being observed
+                let bound = match &def_source {
+                    SourceDef::Media(m) if SourceDef::is_local_media(m) => st != ChaseStatus::Idle,
+                    SourceDef::Media(_) => media_now == id,
+                    _ => true,
+                };
                 let holding = matches!(st, ChaseStatus::Stopped | ChaseStatus::Lost);
                 let want = rt.armed && bound && st != ChaseStatus::Idle && !(holding && rt.def.release_on_stop);
                 let status = if !rt.armed {

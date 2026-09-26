@@ -50,6 +50,8 @@ pub enum ChainRef {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FxWhat {
     Param(u16),
+    /// Trigger payload float `k` (`se_core::triggers::TriggerPayload::floats`), dsp patches.
+    Payload(u8),
     Wet,
     Dry,
     Enabled,
@@ -587,6 +589,7 @@ impl Graph {
                 if let Some(s) = self.fx_slot(chain, slot) {
                     match what {
                         FxWhat::Param(p) => s.set_param(p as usize, v),
+                        FxWhat::Payload(k) => s.set_payload(k as usize, v),
                         FxWhat::Wet => s.set_wet(v),
                         FxWhat::Dry => s.set_dry(v),
                         FxWhat::Enabled => s.set_enabled(v > 0.5),

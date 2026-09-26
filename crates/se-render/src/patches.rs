@@ -1,5 +1,6 @@
 //! Runtime of shader and particles patches (§6.1, §6.3): uniform blocks filled through the
-//! generated-header layout (time, env, params, signals, palette, resolution), the particle
+//! generated-header layout (time, env, trigger payload, params, signals, palette, resolution,
+//! region), the particle
 //! storage buffer, and the passes that render a patch layer. Pipelines arrive compiled from the
 //! loader thread; a failed recompile keeps the previous pipeline (last good version).
 
@@ -7,6 +8,7 @@ use crate::addr::Resolved;
 use crate::pipelines::UserPipes;
 use crate::plan::PatchPlan;
 use crate::resources::{Arena, BindCache, Layouts, Tex};
+use se_core::triggers::PAYLOAD_FLOATS;
 use se_hub::Snapshot;
 use std::sync::Arc;
 
@@ -29,6 +31,8 @@ pub struct PatchRt {
     pub particles: Option<wgpu::Buffer>,
     storage_id: u32,
     pub trigger_count: u32,
+    /// Payload of the last trigger (`se.trigger`).
+    pub trigger: [f32; PAYLOAD_FLOATS],
     last_sim_frame: u64,
     pub last_render_ns: [u64; 2],
     pub min_interval_ns: u64,
@@ -56,6 +60,7 @@ impl PatchRt {
             particles,
             storage_id: NEXT_STORAGE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             trigger_count: 0,
+            trigger: [0.0; PAYLOAD_FLOATS],
             last_sim_frame: u64::MAX,
             last_render_ns: [0; 2],
             min_interval_ns: m.fps.map_or(0, |f| 1_000_000_000 / f.max(1) as u64),
@@ -75,7 +80,8 @@ impl PatchRt {
         plan.manifest.particles.as_ref().map_or(0, |p| p.count)
     }
 
-    /// Fill the uniform block and push it into the arena.
+    /// Fill the uniform block and push it into the arena. `region`: uv rect of the node the pass
+    /// runs for (full target otherwise).
     #[allow(clippy::too_many_arguments)]
     pub fn uniforms(
         &mut self,
@@ -84,6 +90,7 @@ impl PatchRt {
         res: &Resolved,
         fi: &FrameInputs,
         resolution: [f32; 2],
+        region: [f32; 4],
         progress: f32,
         env_override: Option<f32>,
         arena: &mut Arena,
@@ -92,16 +99,21 @@ impl PatchRt {
         let params = &plan.params;
         let defaults = &plan.defaults;
         let types = &self.layout.params;
-        self.layout.write(
-            &mut self.buf,
-            fi.time,
-            fi.dt,
-            fi.frame,
+        let fixed = se_patch::wgsl::Fixed {
+            time: fi.time,
+            dt: fi.dt,
+            frame: fi.frame,
             env,
             resolution,
             progress,
-            self.trigger_count,
-            &fi.palette,
+            trigger_count: self.trigger_count,
+            region,
+            trigger: &self.trigger,
+            palette: &fi.palette,
+        };
+        self.layout.write(
+            &mut self.buf,
+            &fixed,
             |i, _| {
                 let d = defaults.get(i).copied().unwrap_or([0.0; 4]);
                 match (params.get(i), types.get(i).map(|t| t.1)) {

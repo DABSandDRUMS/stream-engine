@@ -1,0 +1,22 @@
+# Ad break card for the `ad_break` scene (scenes/ad_break.toml): "back in a moment", a countdown
+# of the Twitch ad length, and the song that is playing. rules/modes.toml fires
+# `patch.ad_break.trigger seconds=<ad length>` when Twitch starts an ad; the deadline is kept in
+# `patch.ad_break.deadline`, so a page reload continues. Without a length (mode set by hand)
+# the card shows only the text.
+kind        = "web"
+entry       = "index.html"
+layer       = "source"
+label       = "Ad break"
+description = "Back-in-a-moment card with the ad countdown and now playing"
+fps         = 30
+params.title        = { type = "string", default = "Back in a moment" }
+params.subtitle     = { type = "string", default = "Short ad break. Thanks for sticking around!" }
+params.done_text    = { type = "string", default = "Almost back…", description = "Shown when the countdown ran out but the ads are still playing" }
+params.show_song    = { type = "bool",   default = true }
+params.deadline     = { type = "float",  default = 0.0, description = "Unix ms the ads end (set by the page)" }
+params.return_scene = { type = "string", default = "duo", description = "Scene to go back to after the break (set by rules/modes.toml)" }
+params.accent       = { type = "color",  default = "#7aa2f7" }
+params.text_color   = { type = "color",  default = "#ffffff" }
+params.card_bg      = { type = "color",  default = [0.07, 0.08, 0.12, 0.72] }
+params.font         = { type = "string", default = "" }
+trigger = { attack = "0ms", hold = "100ms", release = "0ms", retrigger = "replace" }

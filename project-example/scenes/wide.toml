@@ -17,3 +17,10 @@ nodes = [
 pool = [{ name = "morph", w = 2 }, { name = "zoomblur", w = 1 }]
 avoid_repeat = 1
 ms = [500, 800]
+# Scene pairs: settings for takes coming from one scene (anything not set comes from above).
+[transitions.from.kit]
+pool = [{ name = "glitch" }]   # close-up → wide: a short glitch burst
+ms = 450
+
+[transitions.from.brb]
+ms = 1200                      # back from the break: slower, same pool

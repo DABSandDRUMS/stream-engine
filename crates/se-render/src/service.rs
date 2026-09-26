@@ -107,6 +107,8 @@ fn declare(hub: &Hub, plan: &Plan) {
     hub.declare("perf.vram_mb", ro(Meta::float(0.0, [0.0, 65536.0]).unit("MB").describe("VRAM used by this process (VK_EXT_memory_budget)")));
     hub.declare("perf.vram_budget_mb", ro(Meta::float(0.0, [0.0, 65536.0]).unit("MB").describe("VRAM budget reported by the driver")));
     hub.declare("perf.render_mb", ro(Meta::float(0.0, [0.0, 65536.0]).unit("MB").describe("Renderer's own textures and buffers")));
+    hub.declare("perf.fx_passes", ro(Meta::int(0, [0.0, 4096.0]).describe("Video effect passes in the last frame (a fused run counts once)")));
+    hub.declare("perf.fx_fused", ro(Meta::int(0, [0.0, 4096.0]).describe("Video effects that ran inside fused passes in the last frame")));
     hub.declare("render.sources.used", list_meta("Sources the renderer currently shows (program, preview, multiview)"));
     hub.declare("render.atlas.layout", list_meta("Multiview atlas tiles: [{source, rect: [x, y, w, h]}] normalized"));
     hub.declare("render.gpu", ro(Meta::string("").describe("GPU adapter")));
@@ -169,6 +171,15 @@ impl Report for HubReport {
         self.0.declare(&addr, ro(Meta::string("").describe("Transition shader compile error")));
         if let Err(e) = &result {
             self.0.log("error", "render", format!("transition `{name}`: {e} (keeping the last good version, else a crossfade)"));
+        }
+        self.0.publish(&addr, Value::Str(result.err().unwrap_or_default()));
+    }
+    fn style(&self, path: &str, result: Result<(), String>) {
+        let seg: String = path.trim_end_matches(".wgsl").chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).collect();
+        let addr = format!("render.style.{seg}.error");
+        self.0.declare(&addr, ro(Meta::string("").describe("Enter/exit style shader compile error")));
+        if let Err(e) = &result {
+            self.0.log("error", "render", format!("style `{path}`: {e} (keeping the last good version, else a fade)"));
         }
         self.0.publish(&addr, Value::Str(result.err().unwrap_or_default()));
     }
@@ -277,7 +288,9 @@ fn register_query(ctx: &EngineCtx, stats: Arc<Stats>, frames: Option<Arc<FramesS
                     .with("render_mb", v.own_mb as f64)
                     .with("recoveries", v.recoveries as i64)
                     .with("flash_limited", v.limited)
-                    .with("alloc_violations", v.alloc_violations as i64);
+                    .with("alloc_violations", v.alloc_violations as i64)
+                    .with("fx_passes", v.fx_passes as i64)
+                    .with("fx_fused", v.fx_fused as i64);
                 let passes: Vec<Value> = PASSES.iter().zip(v.pass_ms).map(|(n, ms)| Value::map().with("pass", *n).with("ms", ms as f64)).collect();
                 m = m.with("passes", Value::List(passes));
                 if let Some(f) = &frames {
@@ -530,7 +543,8 @@ impl Io {
                                 let level = e.payload.get_path("amount").or_else(|| e.payload.get_path("level")).and_then(Value::as_f32).map(|v| v.clamp(0.0, 1.0));
                                 let _ = self.ctl.send(Ctl::Msg(Msg::TriggerLevel { effect: fx.to_string(), level }));
                             } else if let Some(id) = base.strip_prefix("patch.") {
-                                let _ = self.ctl.send(Ctl::Msg(Msg::PatchTrigger { patch: id.to_string() }));
+                                let payload = se_core::triggers::TriggerPayload::from_event(&e.payload, e.actor.as_ref()).floats();
+                                let _ = self.ctl.send(Ctl::Msg(Msg::PatchTrigger { patch: id.to_string(), payload }));
                             }
                         }
                     }
@@ -584,6 +598,8 @@ fn publish_stats(hub: &Hub, stats: &Stats, frames: Option<&FramesServer>, plan: 
     hub.publish("perf.vram_mb", Value::Float(v.vram_mb.round() as f64));
     hub.publish("perf.vram_budget_mb", Value::Float(v.vram_budget_mb.round() as f64));
     hub.publish("perf.render_mb", Value::Float(v.own_mb.round() as f64));
+    hub.publish("perf.fx_passes", Value::Int(v.fx_passes as i64));
+    hub.publish("perf.fx_fused", Value::Int(v.fx_fused as i64));
     hub.publish("safety.video.limited", Value::Bool(v.limited));
     hub.publish("safety.video.limit", Value::Float(r2(v.limit)));
     hub.publish("safety.video.flash_rate", Value::Float(r2(v.flash_rate)));

@@ -210,6 +210,10 @@ pub struct App {
     last_frame_ms: f32,
     /// Engine unreachable: since when, and the "Start Stream Engine" click.
     pub down: views::status::EngineDown,
+    /// The "Before you go live" checklist.
+    pub golive: views::status::GoLive,
+    /// Last `ui.focus` report: (connection, focused).
+    focus_sent: Option<(u64, bool)>,
 }
 
 impl App {
@@ -245,6 +249,8 @@ impl App {
             project_root: None,
             last_frame_ms: 0.0,
             down: Default::default(),
+            golive: Default::default(),
+            focus_sent: None,
         }
     }
 
@@ -545,6 +551,21 @@ impl App {
         }
     }
 
+    /// Tell the engine whether a Stream Engine window has keyboard focus (§16.3: desktop
+    /// notifications only while none has). Sent on change and after every (re)connect; the
+    /// engine drops a report once this process is gone.
+    fn report_focus(&mut self, ctx: &egui::Context) {
+        if !self.m.connected {
+            return;
+        }
+        let focused = ctx.input(|i| i.focused || i.raw.viewports.values().any(|v| v.focused == Some(true)));
+        let now = (self.m.conn_gen, focused);
+        if self.focus_sent != Some(now) {
+            self.focus_sent = Some(now);
+            self.m.action("ui.focus", Value::map().with("focused", focused).with("pid", std::process::id() as i64));
+        }
+    }
+
     fn toasts(&mut self, ctx: &egui::Context) {
         let t = self.t.clone();
         egui::Area::new(egui::Id::new("toasts")).anchor(egui::Align2::RIGHT_BOTTOM, [-20.0, -20.0]).order(egui::Order::Foreground).show(ctx, |ui| {
@@ -675,6 +696,7 @@ impl eframe::App for App {
         self.m.pump();
         self.ui_events(ctx);
         self.engine_info();
+        self.report_focus(ctx);
         self.m.refresh(&[
             "presets",
             "scenes",

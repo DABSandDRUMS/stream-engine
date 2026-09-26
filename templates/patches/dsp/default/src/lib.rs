@@ -1,28 +1,36 @@
-//! {{label}}: a stream-engine `dsp` patch (WebAssembly block ABI v1).
+//! {{label}}: a stream-engine `dsp` patch (WebAssembly block ABI v2).
 //!
-//! ABI: no imports; export `memory`, `se_dsp_abi() -> 1`, `init(rate, channels, max_frames)`,
+//! ABI: no imports; export `memory`, `se_dsp_abi() -> 2`, `init(rate, channels, max_frames)`,
 //! `input_buffer()`, `output_buffer()`, `params_buffer()` (byte offsets), `process(in, out,
 //! frames, params)`, and optionally `reset()` / `latency()`. Buffers are planar f32: channel
 //! `c` starts at `ptr + c * max_frames * 4`. The params block is `[env, bpm, beat_phase,
-//! bar_phase, trigger_count, 0, 0, 0, slot0, slot1, …]` with the `patch.toml` params in
-//! alphabetical order. All memory is static: never allocate after `init`.
+//! bar_phase, trigger_count, 0, 0, 0, slot0 … slot63, payload0 … payload15]`: the `patch.toml`
+//! params in alphabetical order, then the payload of the last trigger (amount, bits, tier,
+//! months, viewers, count, user hash 0–1, 0, user colour r g b a, 4 × 0). All memory is
+//! static: never allocate after `init`.
 //!
-//! DSP: one-pole tone filter → `tanh`-style soft clip scaled by `drive` → output gain. The
-//! engine applies the trigger envelope to the wet signal, so `env` is not used here.
+//! DSP: one-pole tone filter → `tanh`-style soft clip scaled by `drive` (a sub's tier pushes it
+//! further) → output gain. The engine applies the trigger envelope to the wet signal, so `env`
+//! is not used here.
 #![no_std]
 
 #[cfg(not(target_arch = "wasm32"))]
 compile_error!("build for wasm32-unknown-unknown (see build.sh)");
 
-const ABI_VERSION: i32 = 1;
+const ABI_VERSION: i32 = 2;
 const CHANNELS: usize = 2;
 const MAX_FRAMES: usize = 1024;
 const HEADER: usize = 8;
 const SLOTS: usize = 64;
+/// Trigger payload block (ABI v2).
+const PAYLOAD: usize = HEADER + SLOTS;
+const PAYLOAD_LEN: usize = 16;
 
 const P_DRIVE: usize = HEADER;
 const P_OUTPUT: usize = HEADER + 1;
 const P_TONE: usize = HEADER + 2;
+/// Sub tier of the last trigger (0 when the event had none).
+const T_TIER: usize = PAYLOAD + 2;
 
 struct State {
     ready: bool,
@@ -40,7 +48,7 @@ struct State {
 static mut STATE: State = State { ready: false, sr: 48000.0, max_frames: MAX_FRAMES, lp: [0.0; CHANNELS], drive: 0.0, gain: 1.0, tone: 0.5, primed: false };
 static mut INPUT: [f32; CHANNELS * MAX_FRAMES] = [0.0; CHANNELS * MAX_FRAMES];
 static mut OUTPUT: [f32; CHANNELS * MAX_FRAMES] = [0.0; CHANNELS * MAX_FRAMES];
-static mut PARAMS: [f32; HEADER + SLOTS] = [0.0; HEADER + SLOTS];
+static mut PARAMS: [f32; HEADER + SLOTS + PAYLOAD_LEN] = [0.0; HEADER + SLOTS + PAYLOAD_LEN];
 
 fn state() -> &'static mut State {
     // SAFETY: wasm32 guests are single-threaded and every export takes this reference once.
@@ -127,7 +135,8 @@ pub extern "C" fn process(input: i32, output: i32, frames: i32, params: i32) {
     // SAFETY: the host passes the offsets returned by `*_buffer()`; they lie inside memory.
     let param = |k: usize| unsafe { (params as usize as *const f32).add(k).read() };
 
-    let drive = finite_or(param(P_DRIVE), 0.4).clamp(0.0, 1.0);
+    let tier = finite_or(param(T_TIER), 0.0).clamp(0.0, 3.0);
+    let drive = (finite_or(param(P_DRIVE), 0.4) + 0.15 * tier).clamp(0.0, 1.0);
     let gain = db_to_gain(finite_or(param(P_OUTPUT), 0.0).clamp(-24.0, 6.0));
     let tone = finite_or(param(P_TONE), 0.5).clamp(0.0, 1.0);
     if !s.primed {

@@ -4,7 +4,9 @@ use se_core::config::Dur;
 use serde::Deserialize;
 
 /// OAuth scopes requested for the broadcaster account (§11, confirmed against the EventSub and
-/// Helix reference: `channel.ban`/`channel.unban` additionally need `channel:moderate`).
+/// Helix reference: `channel.ban`/`channel.unban` additionally need `channel:moderate`; the
+/// users/roles cache reads the moderator and VIP lists with `moderation:read` and
+/// `channel:read:vips`).
 pub const SCOPES: &[&str] = &[
     "user:read:chat",
     "user:write:chat",
@@ -26,6 +28,8 @@ pub const SCOPES: &[&str] = &[
     "moderator:manage:chat_messages",
     "moderator:manage:automod",
     "moderator:manage:blocked_terms",
+    "moderation:read",
+    "channel:read:vips",
 ];
 
 /// Scopes for the optional bot account (it only reads and writes chat).
