@@ -1373,8 +1373,9 @@ These can't be detected from the machine; they are facts, not design decisions:
 4. **HDMI 3 and the MSI capture:** what's meant to be plugged into them.
 5. **Studio 24c inputs:** which mic or instrument is on input 1 and input 2.
 
-### 28.4 Machine setup steps (need sudo; run by the owner)
-- `sudo pacman -S realtime-privileges espeak-ng` and `sudo usermod -aG realtime $USER` (log out and back in), then confirm PipeWire's `data-loop` thread runs `SCHED_FIFO`.
+### 28.4 Machine setup steps
+- [x] 2026-09-25: installed `realtime-privileges` and `espeak-ng`; added the user to `realtime` (rtprio 98, memlock unlimited, nice -11).
+- [ ] After the next login: confirm PipeWire's `data-loop` thread runs `SCHED_FIFO`.
 - Optional diagnostics: `sudo pacman -S usbutils vulkan-tools`.
 
 ---
