@@ -14,7 +14,8 @@
 # the engine, waits for it to come back, and compares.
 #
 # Engine: --start launches a private dev engine from a copy of --project (default project-example)
-# in a fresh dir under $TMPDIR (own socket, SE_RUNTIME_DIR, data dir, ports) with every hardware
+# in a fresh dir under $SE_SOAK_DIR (default ~/.cache/stream-engine/soak, on disk: /tmp is RAM
+# with a per-user quota; own socket, SE_RUNTIME_DIR, data dir, ports) with every hardware
 # and network subsystem off (SE_DISABLE; audio, devices, video-in, input, mixer are never started,
 # nor twitch/songs/tiktok/extras/tts/clips/obs/lights/web); the core, alerts, bot, patches and
 # timelines run. The renderer stays off because a second compositor on the GPU steals frame time
@@ -98,7 +99,9 @@ cli="$bin_dir/streamctl"
 [[ -n "$cli" ]] || { echo "streamctl not found (cargo build -p se-cli)" >&2; exit 2; }
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 2; }
 
-work="$(mktemp -d "${TMPDIR:-/tmp}/se-soak.XXXXXX")"
+soak_root="${SE_SOAK_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/stream-engine/soak}"
+mkdir -p "$soak_root"
+work="$(mktemp -d "$soak_root/se-soak.XXXXXX")"
 pid="" sim_pid="" own_pid=""
 cleanup() {
   if [[ -n "$sim_pid" ]]; then kill "$sim_pid" 2>/dev/null || true; wait "$sim_pid" 2>/dev/null || true; fi

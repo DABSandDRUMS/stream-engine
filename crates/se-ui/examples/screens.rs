@@ -2,7 +2,7 @@
 //! engine (the default socket, or `--socket <path>`). For design review without touching the
 //! desktop:
 //!
-//!     cargo run -p se-ui --example screens -- [--size 1720x1080] [--out /tmp/se-screens] [--only live]
+//!     cargo run -p se-ui --example screens -- [--size 1720x1080] [--out ~/.cache/stream-engine/screens] [--only live]
 //!
 //! Video panes show the scene layout (headless has no dmabuf import); everything else is live
 //! engine state.
@@ -32,7 +32,9 @@ fn main() {
             Some((a.parse::<f32>().ok()?, b.parse::<f32>().ok()?))
         })
         .unwrap_or((1720.0, 1080.0));
-    let out = PathBuf::from(arg("--out").unwrap_or_else(|| "/tmp/se-screens".into()));
+    // on disk, not in /tmp (RAM with a per-user quota)
+    let cache = std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").expect("HOME")).join(".cache"));
+    let out = arg("--out").map(PathBuf::from).unwrap_or_else(|| cache.join("stream-engine/screens"));
     let only = arg("--only");
     std::fs::create_dir_all(&out).expect("create output dir");
     let opts = se_ui::UiOpts { socket: arg("--socket").map(PathBuf::from), layout: Some("single".into()), program_only: false };
