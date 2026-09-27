@@ -396,7 +396,7 @@ fn start_new_scene(app: &mut App) {
 fn left_column(app: &mut App, ui: &mut egui::Ui, list: &[(String, String, i64)], current: &str, h: f32, now: f64) {
     let t = app.t.clone();
     let pad = 2.0 * spacing::L + 2.0;
-    let list_h = (list.len().max(1) as f32 * 40.0).min((h * 0.34).max(80.0));
+    let list_h = (list.len().max(1) as f32 * (SCENE_ROW_H + ui.spacing().item_spacing.y)).min((h * 0.4).max(SCENE_ROW_H + 8.0));
     widgets::panel(ui, &t, |ui| {
         ui.set_width(ui.available_width());
         if widgets::pane_header(ui, &t, "Scenes", Some(list.len()), Some("New scene")) {
@@ -418,32 +418,89 @@ fn left_column(app: &mut App, ui: &mut egui::Ui, list: &[(String, String, i64)],
     });
 }
 
+/// Height of a scene row: a 16:9 thumbnail with the name, state and key beside it.
+const SCENE_ROW_H: f32 = 60.0;
+
 fn scene_rows(app: &mut App, ui: &mut egui::Ui, list: &[(String, String, i64)], current: &str) {
     let t = app.t.clone();
     let program = app.m.str("show.scene.program").to_string();
     let preview = app.m.str("show.scene.preview").to_string();
+    let on_air = crate::views::status::on_air(app);
+    // Live pictures for the thumbnails: the scene that's up next is the engine's preview
+    // canvas; the others are drawn from their layers' live source tiles (the atlas).
+    use crate::frames::Canvas;
+    let hz = app.atlas_hz().min(10.0);
+    let _ = crate::views::monitor::texture(app, Canvas::Atlas, hz);
+    let pv_tex = crate::views::monitor::texture(app, Canvas::Preview, hz);
     if list.is_empty() {
         widgets::hint(ui, &t, "No scenes yet.");
     }
     for (name, label, key) in list {
-        let (state, tip) = if *name == program && crate::views::status::on_air(app) {
+        let (state, word) = if *name == program && on_air {
             (Some(t.tally_program()), "On air")
         } else if *name == preview {
             (Some(t.tally_preview()), "Up next")
         } else {
             (None, "")
         };
-        // an icon slot for the tally dot
-        let r = widgets::list_row(ui, &t, " ", &nice(label), "", "", name == current);
-        if let Some(c) = state {
-            ui.painter().circle_filled(egui::pos2(r.rect.left() + 20.0, r.rect.center().y), 4.0, c);
+        let layers = app
+            .m
+            .q_list("scenes")
+            .iter()
+            .find(|s| s.get_path("name").and_then(Value::as_str) == Some(name.as_str()))
+            .and_then(|s| s.get_path("nodes").and_then(Value::as_list))
+            .map_or(0, |l| l.len());
+        let count = match layers {
+            0 => "No layers".to_string(),
+            1 => "1 layer".to_string(),
+            n => format!("{n} layers"),
+        };
+        let sub = if word.is_empty() { count } else { format!("{word} · {count}") };
+        let title = nice(label);
+        let selected = name == current;
+        let (rect, r) = ui.allocate_exact_size(Vec2::new(ui.available_width(), SCENE_ROW_H), egui::Sense::click());
+        r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, &title));
+        if ui.is_rect_visible(rect) {
+            let p = ui.painter();
+            if selected || r.hovered() {
+                let fill = if selected { t.selection } else { se_ui_kit::theme::mix(t.surface, t.fg, 0.04) };
+                p.rect_filled(rect, egui::CornerRadius::same(radius::CONTROL), fill);
+            }
+            let th = SCENE_ROW_H - 12.0;
+            let thumb = egui::Rect::from_min_size(rect.left_top() + Vec2::new(6.0, 6.0), Vec2::new(th * 16.0 / 9.0, th));
+            match pv_tex.as_ref().filter(|_| *name == preview) {
+                Some(ft) => {
+                    let uv = egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0));
+                    let shape = egui::epaint::RectShape::filled(thumb, egui::CornerRadius::same(radius::TILE), egui::Color32::WHITE).with_texture(ft.id, uv);
+                    p.add(egui::Shape::Rect(shape));
+                }
+                None => crate::views::monitor::scene_thumb(app, ui, thumb, name),
+            }
+            let (edge, width) = match state {
+                Some(c) => (c, 2.0),
+                None => (t.border, 1.0),
+            };
+            p.rect_stroke(thumb, egui::CornerRadius::same(radius::TILE), egui::Stroke::new(width, edge), egui::StrokeKind::Outside);
+            // key chip on the right, name and state between
+            let cap = egui::Rect::from_center_size(egui::pos2(rect.right() - 20.0, rect.center().y), Vec2::new(22.0, 22.0));
+            p.rect(cap, 5, t.inset, egui::Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
+            p.text(cap.center(), egui::Align2::CENTER_CENTER, key.to_string(), font_mono(type_scale::SMALL), t.text_dim);
+            let x = thumb.right() + 10.0;
+            let w = (cap.left() - 8.0 - x).max(20.0);
+            let line = |text: String, font: egui::FontId, color: egui::Color32| {
+                let mut job = egui::text::LayoutJob::simple_singleline(text, font, color);
+                job.wrap = egui::text::TextWrapping::truncate_at_width(w);
+                ui.fonts_mut(|f| f.layout_job(job))
+            };
+            let g1 = line(title.clone(), font_medium(type_scale::BODY), t.fg);
+            let g2 = line(sub, se_ui_kit::theme::font(type_scale::SMALL), state.unwrap_or(t.text_dim));
+            let top = rect.center().y - (g1.size().y + 2.0 + g2.size().y) / 2.0;
+            p.galley(egui::pos2(x, top), g1.clone(), t.fg);
+            p.galley(egui::pos2(x, top + g1.size().y + 2.0), g2, t.text_dim);
         }
-        let cap = egui::Rect::from_center_size(egui::pos2(r.rect.right() - 22.0, r.rect.center().y), Vec2::new(22.0, 22.0));
-        ui.painter().rect(cap, 5, t.inset, egui::Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
-        ui.painter().text(cap.center(), egui::Align2::CENTER_CENTER, key.to_string(), font_mono(type_scale::SMALL), t.text_dim);
-        let r = r.on_hover_text(if tip.is_empty() { format!("Key {key}") } else { format!("{tip} · key {key}") });
+        let r = r.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("Key {key}"));
         if r.clicked() {
-            if name == current {
+            if selected {
                 // the scene's own settings
                 app.build.canvas.selected = None;
                 app.build.comp.pinned = None;
@@ -1585,6 +1642,12 @@ fn add_fx_menu(app: &mut App, ui: &mut egui::Ui, scene: &str, host: FxHost, text
 }
 
 // ---- when a layer shows ------------------------------------------------------------------------------
+
+/// Whether a layer's show condition lets it show right now (no condition, or one that can't be
+/// read, counts as showing).
+pub(crate) fn node_showing(app: &App, scene: &str, id: &str) -> bool {
+    node_when(app, scene, id).is_none_or(|w| when_now(app, &w).unwrap_or(true))
+}
 
 /// A layer's show condition from the loaded scene definition (first canvas that has the layer).
 fn node_when(app: &App, scene: &str, id: &str) -> Option<String> {

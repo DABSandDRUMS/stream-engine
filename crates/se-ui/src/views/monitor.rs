@@ -111,16 +111,21 @@ fn badge(p: &egui::Painter, rect: Rect, text: &str, color: Color32) {
 /// Node boxes of `scene` on `canvas` from the live scene addresses (bindings and edits show),
 /// filled with the node's source tile from the atlas when available.
 pub fn schematic(app: &App, p: &egui::Painter, rect: Rect, scene: &str, canvas: &str) {
-    schematic_ex(app, p, rect, scene, canvas, true);
+    schematic_ex(app, p, rect, scene, canvas, false);
 }
 
-/// [`schematic`] with or without layer names (thumbnails are too small for them).
-pub fn schematic_ex(app: &App, p: &egui::Painter, rect: Rect, scene: &str, canvas: &str, labels: bool) {
+/// [`schematic`], or (`thumbnail`) a small picture of what the scene shows right now: no layer
+/// names, and layers whose show condition is off right now are left out.
+pub fn schematic_ex(app: &App, p: &egui::Painter, rect: Rect, scene: &str, canvas: &str, thumbnail: bool) {
+    let labels = !thumbnail;
     let t = &app.t;
     let atlas = app.frames.texture(Canvas::Atlas).filter(|f| f.age.as_millis() < DEAD_MS);
     let tiles = if atlas.is_some() { atlas_tiles(app) } else { Vec::new() };
     let [cw, ch] = canvas_size(canvas);
     for n in scene_nodes(app, scene, canvas) {
+        if thumbnail && !crate::views::composition::node_showing(app, scene, &n.id) {
+            continue;
+        }
         let r = Rect::from_min_size(
             Pos2::new(rect.left() + (n.rect[0] + n.offset[0] / cw) * rect.width(), rect.top() + (n.rect[1] + n.offset[1] / ch) * rect.height()),
             Vec2::new(n.rect[2] * rect.width(), n.rect[3] * rect.height()),
@@ -284,7 +289,7 @@ pub fn multiview(app: &mut App, ui: &mut egui::Ui, tile_h: f32) {
 pub fn scene_thumb(app: &App, ui: &egui::Ui, rect: Rect, scene: &str) {
     let p = ui.painter_at(rect);
     p.rect_filled(rect, CornerRadius::same(radius::TILE), Color32::from_rgb(6, 7, 9));
-    schematic_ex(app, &p, rect.shrink(3.0), scene, "wide", false);
+    schematic_ex(app, &p, rect.shrink(3.0), scene, "wide", true);
 }
 
 #[cfg(test)]
