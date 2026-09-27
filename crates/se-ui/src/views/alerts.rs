@@ -1,7 +1,7 @@
-//! Notifications and goals (§14.1–14.2), three views in the list-detail grammar:
-//! - [`ui`] (Notifications → Alerts): the alerts, grouped by event, and the selected one's
+//! Alerts and goals (§14.1–14.2), two views in the list-detail grammar:
+//! - [`ui`] (Automation → Alerts): the alerts, grouped by event, and the selected one's
 //!   inspector (when, content and variations, sound & voice, duration & priority, also run).
-//! - [`delivery_ui`] (Notifications → Look & timing): the source that draws them, how they take
+//!   The list's first row, "Look & timing", opens the source that draws them, how they take
 //!   turns, and the live queue (on screen, waiting with the mod-skip countdown, shown recently).
 //! - [`goals_ui`] (Community → Goals): goals as a list with progress, plus this stream's numbers.
 //!
@@ -319,12 +319,14 @@ fn sound_name(s: &str) -> String {
     nice(s.strip_prefix("alert_").unwrap_or(s))
 }
 
-// ---- Notifications → Alerts ----------------------------------------------------------------------
+// ---- Automation → Alerts ------------------------------------------------------------------------
 
 #[derive(Clone, Default)]
 struct Form {
     /// Selected alert (`file|index|`).
     selected: Option<String>,
+    /// "Look & timing" is open in the detail pane instead of an alert.
+    look: bool,
     /// New alert being set up.
     draft: Option<Draft>,
     /// Just created (file, name): selected once it shows up in `alerts.config`.
@@ -463,11 +465,16 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
 
     status_bar(app, ui, &live, loaded.then_some(list.len()));
     ui.add_space(spacing::M);
-    let ((pick, create), _) = widgets::split(
+    let look = form.look;
+    let ((pick, create, open_look), _) = widgets::split(
         ui,
         300.0,
-        |ui| alert_list(ui, &t, &rows, sel_key.as_deref()),
+        |ui| alert_list(ui, &t, &rows, sel_key.as_deref(), look),
         |ui| {
+            if look {
+                delivery_ui(app, ui);
+                return;
+            }
             egui::ScrollArea::vertical().id_salt("alerts-detail").auto_shrink([false, false]).show(ui, |ui| {
                 if form.draft.is_some() {
                     new_alert(app, ui, &mut form, &cfg);
@@ -478,7 +485,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                     &t,
                     icon::ALERT,
                     "Alerts",
-                    "A notification that pops up on stream when someone follows, subs, cheers, raids or tips.",
+                    "A pop-up on stream when someone follows, subs, cheers, raids or tips.",
                     Some("New alert"),
                 ) {
                     form.draft = Some(Draft::default());
@@ -489,19 +496,29 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     if create {
         form.draft = Some(Draft::default());
         form.selected = None;
+        form.look = false;
     }
     if let Some(k) = pick {
         form.selected = Some(k);
+        form.draft = None;
+        form.look = false;
+    }
+    if open_look {
+        form.look = true;
+        form.selected = None;
         form.draft = None;
     }
     ui.data_mut(|d| d.insert_temp(id, form));
 }
 
-/// The list pane: alerts grouped by event. Returns (clicked alert, "+" clicked).
-fn alert_list(ui: &mut egui::Ui, t: &Theme, rows: &[Row], selected: Option<&str>) -> (Option<String>, bool) {
+/// The list pane: "Look & timing", then the alerts grouped by event. Returns (clicked alert,
+/// "+" clicked, "Look & timing" clicked).
+fn alert_list(ui: &mut egui::Ui, t: &Theme, rows: &[Row], selected: Option<&str>, look: bool) -> (Option<String>, bool, bool) {
     let create = widgets::pane_header(ui, t, "Alerts", Some(rows.len()), Some("New alert"));
     let mut pick = None;
+    let mut open_look = false;
     egui::ScrollArea::vertical().id_salt("alerts-list").auto_shrink([false, false]).show(ui, |ui| {
+        open_look = widgets::list_row(ui, t, icon::SLIDERS, "Look & timing", "Where alerts show, turns, the queue", "", look).clicked();
         if rows.is_empty() {
             widgets::hint(ui, t, "No alerts yet.");
         }
@@ -518,7 +535,7 @@ fn alert_list(ui: &mut egui::Ui, t: &Theme, rows: &[Row], selected: Option<&str>
             }
         }
     });
-    (pick, create)
+    (pick, create, open_look)
 }
 
 /// Show whether configured alerts can be displayed; never imply a blank show has live alerts.
@@ -529,7 +546,15 @@ fn status_bar(app: &mut App, ui: &mut egui::Ui, live: &Value, configured: Option
     let health = app.m.get("health.alerts").cloned().unwrap_or_default();
     // One control: the button says what it does next.
     if configured == Some(0) {
-        widgets::callout(ui, &t, Tone::Warn, icon::ALERT, "No alerts set up", "Create an alert below, then add a notification source to your scenes to show it.", None);
+        widgets::callout(
+            ui,
+            &t,
+            Tone::Warn,
+            icon::ALERT,
+            "No alerts set up",
+            "Create an alert below, then add a source that shows alerts to your scenes.",
+            None,
+        );
         return;
     }
     if configured.is_none() {
@@ -1303,7 +1328,7 @@ fn variations(app: &mut App, ui: &mut egui::Ui, form: &mut Form, a: &Value, k: &
     }
 }
 
-// ---- Notifications → Look & timing ---------------------------------------------------------------
+// ---- Automation → Alerts → Look & timing ----------------------------------------------------------
 
 /// Reply key for project.toml (placement of the notification source).
 const PROJECT_KEY: &str = "alerts.delivery.project";
@@ -1381,7 +1406,7 @@ fn canvases_words(canvases: Option<&Vec<String>>) -> String {
     shown.iter().map(|x| canvas_name(x)).collect::<Vec<_>>().join(" and ")
 }
 
-pub fn delivery_ui(app: &mut App, ui: &mut egui::Ui) {
+fn delivery_ui(app: &mut App, ui: &mut egui::Ui) {
     let id = egui::Id::new("alerts-delivery");
     let mut form: Delivery = ui.data_mut(|d| d.get_temp::<Delivery>(id)).unwrap_or_default();
     if poll(ui, &mut form.last_live, 0.25) {
@@ -1428,14 +1453,14 @@ fn shown_by(app: &mut App, ui: &mut egui::Ui, form: &Delivery, sources: &[Value]
         |ui| {
             if sources.is_empty() {
                 if app.m.q("patches").is_none() {
-                    widgets::hint(ui, &t, "Looking for the notification source…");
+                    widgets::hint(ui, &t, "Looking for the source that shows alerts…");
                 } else if widgets::empty_state(
                     ui,
                     &t,
                     icon::ALERT,
-                    "No notification source yet",
+                    "No source shows alerts yet",
                     "Alerts need a web source on every scene to draw them. Add one under Sources.",
-                    Some("Add a notification source"),
+                    Some("Add a source for alerts"),
                 ) {
                     app.open_view(crate::app::ViewId::Sources);
                 }
@@ -1480,7 +1505,7 @@ fn source_block(app: &mut App, ui: &mut egui::Ui, t: &Theme, form: &Delivery, p:
         _ => ("Working", t.green),
     };
     let mut on = enabled || st == "suspended";
-    widgets::detail_header(ui, t, icon::IMAGE, &source_title(p), "Web source that draws the notifications", |ui| {
+    widgets::detail_header(ui, t, icon::IMAGE, &source_title(p), "Web source that draws the alerts", |ui| {
         if widgets::toggle(ui, t, &mut on).on_hover_text(if on { "Turn off" } else { "Turn on" }).changed() {
             act(app, if on { "patch.enable" } else { "patch.disable" }, Value::map().with("id", id.clone()));
         }

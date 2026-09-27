@@ -701,7 +701,7 @@ impl Step {
             Step::LayerVisible => "Show or hide a layer",
             Step::Setting => "Change a setting",
             Step::Animation => "Play a source's animation",
-            Step::Notify => "Show a notification",
+            Step::Notify => "Show an alert",
             Step::Say => "Say something in chat",
             Step::Sound => "Play a sound",
             Step::Mix => "Recall a sound mix",
@@ -758,7 +758,7 @@ impl Step {
             Step::Setting if a0.is_empty() => "pick a setting",
             Step::Setting if args.get(1).is_none_or(|v| v.trim().is_empty()) => "say what to set it to",
             Step::Animation if empty => "pick a source",
-            Step::Notify if empty => "pick a notification",
+            Step::Notify if empty => "pick an alert",
             Step::Say if empty => "type what to say",
             Step::Sound if empty => "pick a sound",
             Step::Mix if empty => "pick a sound mix",
@@ -1167,9 +1167,9 @@ fn step_phrase(cmd: &str, n: &Names) -> String {
         Step::Setting if !arg(2).is_empty() => format!("fade {} to {} over {}", setting_words(a0), value_words(arg(1)), arg(2)),
         Step::Setting => format!("set {} to {}", setting_words(a0), value_words(arg(1))),
         Step::Animation => format!("play {}", Names::label(&n.animations, a0)),
-        Step::Notify if a0.is_empty() => "show a notification".into(),
+        Step::Notify if a0.is_empty() => "show an alert".into(),
         Step::Notify => match n.alerts.iter().find(|(w, _)| w == a0) {
-            Some((_, l)) => format!("show the {l} notification"),
+            Some((_, l)) => format!("show the {l} alert"),
             None => format!("send the “{}” event", nice_name(&a0.replace('.', " "))),
         },
         Step::Say if a0.is_empty() => "say …".into(),
@@ -2643,7 +2643,7 @@ fn setting_args(app: &mut App, ui: &mut egui::Ui, t: &Theme, key: &str, args: &[
     changed.then(|| build_step(Step::Setting, &[&addr, &v, &d]))
 }
 
-/// Which notification to show, and the name it shows. Returns (new command, open Notifications).
+/// Which notification to show, and the name it shows. Returns (new command, open Alerts).
 fn notify_args(ui: &mut egui::Ui, t: &Theme, names: &Names, id: (&str, usize), args: &[String], when: &str) -> (Option<String>, bool) {
     let a0 = args.first().map(String::as_str).unwrap_or("");
     if names.alerts.is_empty() && a0.is_empty() {
@@ -2652,9 +2652,9 @@ fn notify_args(ui: &mut egui::Ui, t: &Theme, names: &Names, id: (&str, usize), a
             t,
             widgets::Tone::Info,
             icon::ALERT,
-            "No notifications set up yet",
-            "Set one up in Notifications, then pick it here.",
-            Some("Open Notifications"),
+            "No alerts set up yet",
+            "Set one up in Automation → Alerts, then pick it here.",
+            Some("Open Alerts"),
         );
         return (None, open);
     }
@@ -2671,7 +2671,7 @@ fn notify_args(ui: &mut egui::Ui, t: &Theme, names: &Names, id: (&str, usize), a
     };
     let mut out = None;
     ui.horizontal_wrapped(|ui| {
-        if let Some(ty) = pick_name(ui, (id.0, "notify", id.1), a0, &names.alerts, "Pick a notification", 240.0) {
+        if let Some(ty) = pick_name(ui, (id.0, "notify", id.1), a0, &names.alerts, "Pick an alert", 240.0) {
             // a viewer's own name when the trigger answers something a viewer did
             let u = if user.is_empty() && fields_for(when).contains(&"user") { "{user}".to_string() } else { user.clone() };
             out = Some(rebuild(&ty, &u));
@@ -2913,7 +2913,7 @@ mod tests {
         };
         assert_eq!(step_phrase("set scene.duo.node.cam_face.fx.rgb_split.enabled true", &n), "turn on RGB split on Cam face in Duo");
         assert_eq!(step_phrase("set scene.duo.node.cam_face.visible false", &n), "hide Cam face in Duo");
-        assert_eq!(step_phrase("emit twitch.follow user=Alex", &n), "show the Follow notification");
+        assert_eq!(step_phrase("emit twitch.follow user=Alex", &n), "show the Follow alert");
         assert_eq!(step_phrase("set audio.bus.music.gain 0.5", &n), "set music volume to 0.5");
     }
 

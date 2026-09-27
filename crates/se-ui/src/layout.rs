@@ -26,7 +26,7 @@ pub const MAIN_APP_ID: &str = "stream-engine";
 /// App-id of the confidence (program) window.
 pub const CONFIDENCE_APP_ID: &str = "stream-engine.program";
 /// Page ids a layout can open on (see `app::Page`).
-pub const PAGES: [&str; 10] = ["live", "scenes", "sources", "notifications", "automation", "sound", "lights", "community", "recordings", "settings"];
+pub const PAGES: [&str; 9] = ["live", "scenes", "sources", "automation", "sound", "lights", "community", "recordings", "settings"];
 /// Live-page right-rail tabs.
 pub const RAIL_TABS: [&str; 4] = ["events", "chat", "queue", "mod"];
 

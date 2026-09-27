@@ -30,7 +30,7 @@ Missing data never breaks a view: it shows an explanatory empty state.
 | Mix | `audio.bus.<b>.{gain (dB, Meta range),mute,ducked}`, signals `audio.<b>.level|peak`; `mixer.16r.{connected,channels}`, `mixer.16r.ch.<n>.{fader,mute,name,db}`, signal `mixer.16r.meter.ch.<n>` | `set` on gain/fader/mute |
 | Lights bar (`lights::overview_strip`) | queries `lights.rig` (fixtures → "not set up yet"), `lights.palettes` (`look_active`), `lights.cuelists`; `lights.master`, `lights.blackout`, `lights.cuelist.<cl>.{playing,cue}`, on air (`status::on_air`) | `set lights.master` / `lights.blackout`, `lights.cue {look}` / `lights.release {look}`, `lights.go {cuelist}` / `lights.release {cuelist}` (starting on air asks first) |
 
-## Edit pages: Scenes, Sources, Notifications, Automation, Sound, Lights
+## Edit pages: Scenes, Sources, Automation, Sound, Lights
 
 | Area | Reads | Sends |
 |---|---|---|
@@ -40,7 +40,7 @@ Missing data never breaks a view: it shows an explanatory empty state.
 | Transitions | queries `transitions`, `config.transitions` (every file as parsed: `label`, `kind`, `shader`, `ms`, `ease`, `enter`, `exit`, settings), `config.scenes` (pools → "where it's used"), `patches` (transition-layer shader patches as starting points), `scenes`; `project.read {path: transitions/<id>.toml}`; looks and slider ranges from `se_core::transitions`; `show.scene.program`, `show.direct`, `show.live_since` / OBS output state (on air) | `project.write {path, text}` (new, edits saved 0.6 s after the last change, duplicate), `project.write {path, delete}`, `project.write {path: scenes/<s>.toml, set: {"transitions.pool": […], "transitions.name": null, "transitions.from.<s>.pool": …}}` (use in a scene / take out on delete); Try it (off air): `scene.cut {scene: from, transition: cut}` when needed, then `scene.go {to}` + `scene.take {transition, ms}` (direct mode: `scene.cut {to, transition}`) |
 | Canvas editor | `scene.<s>.node.<id>.{rect,crop,radius,z}.<canvas>`, `.visible` | `set` while dragging (live preview), `set_base` on release (→ `scenes/<s>.toml`, comments kept), `release` |
 | Lights | `lights.rig`, `lights.palettes`, `lights.cuelists`, `lights.output`, `lights.master`, `health.dmx` | `lights.cue|release|go|back|goto|knob|panic`, `set lights.master`, project writes for fixture and look edits |
-| Notifications → Alerts / Look & timing / Read-out voice | `alerts`, `alerts.config`, `patches`, `project.assets`, `tts`, project settings | `alerts.pause|resume|veto|approve`, alert file edits via `project.write`, patch settings, `tts.skip|clear` |
+| Automation → Alerts (and its Look & timing), Sound → Read-out voice | `alerts`, `alerts.config`, `patches`, `project.assets`, `tts`, project settings | `alerts.pause|resume|veto|approve`, alert file edits via `project.write`, patch settings, `tts.skip|clear` |
 | Automation → Events / Actions / Buttons / Chat / Modulation / Timelines | `rules`, `config.rules`, `presets`, `config.presets`, `controllers.deck`, `controllers.midi`, `bot.commands`, `bindings`, `config.bindings`, `timelines`, live signals | `project.write` for rules, saved actions and bindings; `deck.assign`, `midi.learn`, `bot.command.save`, timeline edits |
 | Console | logs, query `errors`, `patch.<id>.error` | opens `file:line` in `$EDITOR` |
 

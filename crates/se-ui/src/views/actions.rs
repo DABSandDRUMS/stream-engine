@@ -1169,7 +1169,7 @@ fn use_words(u: &Use, list: &[Item]) -> (&'static str, String) {
         "rewards" => (icon::TWITCH, format!("Channel points reward “{name}”")),
         "presets" => (icon::BOLT, format!("Saved action “{}”", list.iter().find(|i| i.id == stem).map(|i| i.label.clone()).unwrap_or_else(|| nice(stem)))),
         "bindings" => (icon::WAVE, format!("Modulation “{}” (only while it runs)", nice(&name))),
-        "alerts" => (icon::ALERT, format!("Notification “{name}”")),
+        "alerts" => (icon::ALERT, format!("Alert “{name}”")),
         "scenes" => (icon::SCENE, format!("Scene “{name}”")),
         "layouts" => (icon::KEYBOARD, "A keyboard shortcut".into()),
         k => (icon::LINK, format!("{} “{name}”", nice(k))),

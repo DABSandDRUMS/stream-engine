@@ -33,9 +33,8 @@ streams and clips. The sidebar only appears under **Edit**.
 |---|---|---|
 | **Scenes** | Arrange sources in scenes and choose their look. | **Scenes**, **Effects**, **Transitions** |
 | **Sources** | Create cameras, media, web and generated visuals; import material. | **Sources**, **Files** |
-| **Notifications** | Set up viewer alerts and how they appear. | **Alerts**, **Look & timing**, **Read-out voice** |
-| **Automation** | Decide what happens when an event or control fires, and what follows live signals. | **Events**, **Buttons & pedals**, **Chat commands**, **Actions**, **Modulation**, **Timelines** |
-| **Sound** | Levels for everything your viewers hear. | **Mix**, **Mixing desk** |
+| **Automation** | Decide what happens when an event or control fires (including viewer alerts), and what follows live signals. | **Events**, **Alerts**, **Buttons & pedals**, **Chat commands**, **Actions**, **Modulation**, **Timelines** |
+| **Sound** | Levels for everything your viewers hear, and the read-out voice. | **Mix**, **Mixing desk**, **Read-out voice** |
 | **Lights** | Set up fixtures and looks, run cue lists, set brightness and blackout. | One console |
 | **Community** | Chat bot, song requests, Twitch, goals and giveaways. | **Chat bot**, **Song requests**, **Twitch**, **Goals**, **Giveaways** |
 | **Settings** | Devices, accounts, backups, history and troubleshooting. | **Get started**, **Devices**, **Accounts & app**, **Backups**, **History**, **Performance**, **Troubleshooting** |
@@ -98,7 +97,7 @@ you make. **How scenes switch** sets the default or a scene-to-scene exception. 
 also pick its own transition in the scene inspector. **Try it** is available off air; switching
 on air uses the preview and **Take** controls in Overview.
 
-### Automation and notifications
+### Automation and alerts
 
 **Automation → Events** adds a trigger for a stream, music, show or control event. Pick when
 it happens, optional conditions and what actions run. **Automation → Actions** stores a named
@@ -107,11 +106,12 @@ assigns controls; **Chat commands** assigns viewer commands. **Modulation** link
 signal (a level, beat, LFO or fader) to a numeric setting. A ∿ next to a setting opens its
 signal links; a ⚡ next to a switch shows what changes it and lets you add a trigger.
 
-**Notifications → Alerts** edits viewer-facing alerts, their sound, voice and actions.
-**Look & timing** chooses the display source, placement and queue behavior. **Read-out voice**
-sets up speech. Notifications are temporary and queued; they are not scene layers or saved
-actions. Add a notification source to the scene (or pin it above every scene) before
-expecting alerts on the video.
+**Automation → Alerts** edits viewer-facing alerts (follow, sub, cheer, raid, tip), their
+sound, voice and actions. Its first row, **Look & timing**, chooses the display source,
+placement and queue behavior. **Sound → Read-out voice** sets up speech. Alerts are temporary
+and queued, so one at a time shows; they are not scene layers or saved actions. Add a source
+that draws alerts to the scene (or pin it above every scene) before expecting them on the
+video.
 
 ### Undo a change, or go back to an earlier version
 

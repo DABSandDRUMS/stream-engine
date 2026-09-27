@@ -73,7 +73,7 @@ fn check_info(check: &str) -> (&'static str, Option<Panel>) {
         "clips" | "recordings" => ("Recordings", Some(Panel::View(ViewId::Sessions))),
         "backup" => ("Backups", Some(Panel::View(ViewId::Maintenance))),
         "versions" => ("Project history", Some(Panel::View(ViewId::History))),
-        "alerts" => ("Notifications", Some(Panel::View(ViewId::Alerts))),
+        "alerts" => ("Alerts", Some(Panel::View(ViewId::Alerts))),
         "bot" => ("Chat bot", Some(Panel::View(ViewId::ChatBot))),
         "player" => ("Song requests", Some(Panel::View(ViewId::Songs))),
         "disk" => ("Disk space", Some(Panel::View(ViewId::Maintenance))),

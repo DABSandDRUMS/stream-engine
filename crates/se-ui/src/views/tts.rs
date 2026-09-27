@@ -1,4 +1,4 @@
-//! Notifications → Read-out voice (§14.4). One page in three sections: **Voice** (the local
+//! Sound → Read-out voice (§14.4). One page in three sections: **Voice** (the local
 //! voice's state, the usual voice, speed, volume and a test box), **Read-out rules** (which
 //! alerts read messages aloud, voice rules, length and queue limits) and **Queue** (what's being
 //! read now, what's waiting, skip and clear). The on/off switch and Save sit in the header.

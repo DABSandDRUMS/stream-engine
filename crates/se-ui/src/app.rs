@@ -22,7 +22,6 @@ pub enum Page {
     Live,
     Scenes,
     Sources,
-    Notifications,
     Automation,
     Sound,
     Lights,
@@ -32,26 +31,13 @@ pub enum Page {
 }
 
 /// Sidebar groups of Edit pages (Settings is pinned at the bottom).
-pub const SIDEBAR: &[(&str, &[Page])] = &[
-    ("Show", &[Page::Scenes, Page::Sources, Page::Notifications, Page::Automation]),
-    ("Production", &[Page::Sound, Page::Lights]),
-    ("Channel", &[Page::Community]),
-];
+pub const SIDEBAR: &[(&str, &[Page])] =
+    &[("Show", &[Page::Scenes, Page::Sources, Page::Automation]), ("Production", &[Page::Sound, Page::Lights]), ("Channel", &[Page::Community])];
 
 impl Page {
-    pub const COUNT: usize = 10;
-    pub const ALL: [Page; Page::COUNT] = [
-        Page::Live,
-        Page::Scenes,
-        Page::Sources,
-        Page::Notifications,
-        Page::Automation,
-        Page::Sound,
-        Page::Lights,
-        Page::Community,
-        Page::Recordings,
-        Page::Settings,
-    ];
+    pub const COUNT: usize = 9;
+    pub const ALL: [Page; Page::COUNT] =
+        [Page::Live, Page::Scenes, Page::Sources, Page::Automation, Page::Sound, Page::Lights, Page::Community, Page::Recordings, Page::Settings];
 
     /// Which master tab the page lives under.
     pub fn master(self) -> Master {
@@ -67,7 +53,6 @@ impl Page {
             Page::Live => "live",
             Page::Scenes => "scenes",
             Page::Sources => "sources",
-            Page::Notifications => "notifications",
             Page::Automation => "automation",
             Page::Sound => "sound",
             Page::Lights => "lights",
@@ -86,7 +71,6 @@ impl Page {
             Page::Live => "Overview",
             Page::Scenes => "Scenes",
             Page::Sources => "Sources",
-            Page::Notifications => "Notifications",
             Page::Automation => "Automation",
             Page::Sound => "Sound",
             Page::Lights => "Lights",
@@ -101,7 +85,6 @@ impl Page {
             Page::Live => icon::LIVE,
             Page::Scenes => icon::LAYERS,
             Page::Sources => icon::CAMERA,
-            Page::Notifications => icon::ALERT,
             Page::Automation => icon::BOLT,
             Page::Sound => icon::VOLUME,
             Page::Lights => icon::LIGHT,
@@ -117,8 +100,9 @@ impl Page {
             Page::Live => "",
             Page::Scenes => "Arrange sources into layers, give layers effects, and choose how scenes change.",
             Page::Sources => "Everything that makes picture or sound: cameras, videos, images, web pages and generated visuals.",
-            Page::Notifications => "What viewers see and hear when they follow, subscribe, cheer or raid.",
-            Page::Automation => "Triggers run actions. Modulation makes settings follow music, beats and controls.",
+            Page::Automation => {
+                "What happens by itself: alerts and triggers for stream events, controls and chat commands, and settings that follow music and beats."
+            }
             Page::Sound => "Levels for everything your viewers hear.",
             Page::Lights => "Turn looks on and off, run cue lists, and set the overall brightness.",
             Page::Community => "Chat bot, song requests, Twitch, goals and giveaways.",
@@ -133,16 +117,16 @@ impl Page {
             Page::Live => &[],
             Page::Scenes => &[(ViewId::Composition, "Scenes"), (ViewId::Effects, "Effects"), (ViewId::Transitions, "Transitions")],
             Page::Sources => &[(ViewId::Sources, "Sources"), (ViewId::Media, "Files")],
-            Page::Notifications => &[(ViewId::Alerts, "Alerts"), (ViewId::AlertDelivery, "Look & timing"), (ViewId::Tts, "Read-out voice")],
             Page::Automation => &[
                 (ViewId::Reactions, "Events"),
+                (ViewId::Alerts, "Alerts"),
                 (ViewId::Controllers, "Buttons & pedals"),
                 (ViewId::Chatbot, "Chat commands"),
                 (ViewId::Actions, "Actions"),
                 (ViewId::Modulation, "Modulation"),
                 (ViewId::Timeline, "Timelines"),
             ],
-            Page::Sound => &[(ViewId::Audio, "Mix"), (ViewId::Mixer, "Mixing desk")],
+            Page::Sound => &[(ViewId::Audio, "Mix"), (ViewId::Mixer, "Mixing desk"), (ViewId::Tts, "Read-out voice")],
             Page::Lights => &[(ViewId::Lights, "Lights")],
             Page::Community => &[
                 (ViewId::ChatBot, "Chat bot"),
@@ -215,7 +199,6 @@ pub enum ViewId {
     Sources,
     Media,
     Alerts,
-    AlertDelivery,
     Tts,
     Reactions,
     Controllers,
@@ -249,7 +232,6 @@ impl ViewId {
         (ViewId::Sources, icon::CAMERA, "Sources"),
         (ViewId::Media, icon::IMAGE, "Files"),
         (ViewId::Alerts, icon::ALERT, "Alerts"),
-        (ViewId::AlertDelivery, icon::SLIDERS, "Notification look & timing"),
         (ViewId::Tts, icon::MIC, "Read-out voice"),
         (ViewId::Reactions, icon::BOLT, "Events"),
         (ViewId::Controllers, icon::CONTROLLER, "Buttons & pedals"),
@@ -364,7 +346,6 @@ impl App {
             ViewId::Sources => views::sources::ui(self, ui),
             ViewId::Media => views::media::ui(self, ui),
             ViewId::Alerts => views::alerts::ui(self, ui),
-            ViewId::AlertDelivery => views::alerts::delivery_ui(self, ui),
             ViewId::Tts => views::tts::ui(self, ui),
             ViewId::Reactions => views::rules::ui(self, ui),
             ViewId::Controllers => views::controllers::ui(self, ui),

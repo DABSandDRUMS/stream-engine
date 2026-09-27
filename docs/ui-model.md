@@ -14,7 +14,7 @@ Files ──► Source ──► Layer (in a Scene) ──► Canvas (Main / Ver
 Trigger ──► Actions ────────────────────┤  (discrete: turn on/off, set, fire)
 Signal  ──► Modulation ─────────────────┘  (continuous: follow a level, beat, LFO, fader)
 
-Event ──► Notification (queued, temporary) ──► shown by a notification source
+Event ──► Alert (queued, temporary) ──► shown by a source that draws alerts
 ```
 
 | Term | What it is | Where it lives |
@@ -29,7 +29,7 @@ Event ──► Notification (queued, temporary) ──► shown by a notificati
 | **Trigger** | Something that happens: a button or pedal, a chat command, a stream event (follow, cheer, raid…), an audio event (kick, drop, beat), a show event (scene changed, mode), a timeline cue. | Automation |
 | **Action** | What to do when a trigger fires: switch scene, turn an effect on/off, set or animate a setting, play a sound, run a light cue, show a notification, say something in chat… A **saved action** is a named list of actions any trigger can run; it can last a while, toggle, or stay on until released. | Automation → Actions |
 | **Modulation** | A live link from a signal (audio level, bass, beat, LFO, MIDI fader, viewer count) to any numeric setting: layer offset follows the kick, effect strength follows the bass. | ∿ next to any setting; all links in Automation → Modulation |
-| **Notification** | A temporary, queued presentation for a viewer event (follow, sub, cheer…): text, image, sound, voice, duration, priority, veto. Drawn by a notification source placed on every scene. | Notifications |
+| **Alert** | A temporary, queued presentation for a viewer event (follow, sub, cheer…): text, image, sound, voice, duration, priority, veto. Drawn by a source that shows alerts, placed in a scene or on every scene. | Automation → Alerts |
 
 Rules of thumb:
 
@@ -41,7 +41,8 @@ Rules of thumb:
   ("turn layer effect on"), not a different kind of effect.
 - Discrete changes are **actions**; continuous following is **modulation**. Both target the same
   settings.
-- Notifications are not automation: they have their own queue and look. A trigger can *show* one.
+- An alert is an event-driven reaction, so it lives in Automation, but it has its own queue and
+  look (one at a time, veto window). A trigger can also *show* one.
 
 ## Pages
 
@@ -50,10 +51,9 @@ Overview   Edit   Clipping
            ├─ SHOW
            │   ├─ Scenes          Scenes · Effects · Transitions
            │   ├─ Sources         Sources · Files
-           │   ├─ Notifications   Alerts · Look & timing · Read-out voice
-           │   └─ Automation      Events · Buttons & pedals · Chat commands · Actions · Modulation · Timelines
+           │   └─ Automation      Events · Alerts · Buttons & pedals · Chat commands · Actions · Modulation · Timelines
            ├─ PRODUCTION
-           │   ├─ Sound           Mix · Mixing desk
+           │   ├─ Sound           Mix · Mixing desk · Read-out voice
            │   └─ Lights
            ├─ CHANNEL
            │   └─ Community       Chat bot · Song requests · Twitch · Goals · Giveaways
