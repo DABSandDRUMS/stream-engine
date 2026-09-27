@@ -97,6 +97,9 @@ pub fn transition_state(plan: &Plan, snap: &Snapshot, res: &Resolved, now: u64) 
 #[allow(clippy::too_many_arguments)]
 pub fn eval_layout(plan: &Plan, scene: usize, layout: usize, size: [f32; 2], snap: &Snapshot, res: &Resolved, whens: &mut Whens, out: &mut Vec<Item>) {
     let s = &plan.scenes[scene];
+    // Offsets and corner radius are in pixels of the layout's own canvas (1920 wide for Main); a
+    // canvas drawn at another size (the half-size preview) scales them with its picture.
+    let px = size[0] / plan.canvases[layout].width.max(1) as f32;
     for (ni, n) in s.layouts[layout].nodes.iter().enumerate() {
         if !res.bool(snap, n.visible, n.def.visible) {
             continue;
@@ -109,7 +112,7 @@ pub fn eval_layout(plan: &Plan, scene: usize, layout: usize, size: [f32; 2], sna
         let r = res.vec4(snap, n.rect, n.def.rect);
         let c = res.vec4(snap, n.crop, n.def.crop);
         let scale = res.f32(snap, n.scale, n.def.scale).max(0.0);
-        let off = [res.f32(snap, n.offset_x, n.def.offset[0]), res.f32(snap, n.offset_y, n.def.offset[1])];
+        let off = [res.f32(snap, n.offset_x, n.def.offset[0]) * px, res.f32(snap, n.offset_y, n.def.offset[1]) * px];
         let base = [r[0] * size[0], r[1] * size[1], r[2] * size[0], r[3] * size[1]];
         let center = [base[0] + base[2] * 0.5 + off[0], base[1] + base[3] * 0.5 + off[1]];
         let wh = [base[2] * scale, base[3] * scale];
@@ -124,7 +127,7 @@ pub fn eval_layout(plan: &Plan, scene: usize, layout: usize, size: [f32; 2], sna
             node: ni as u32,
             rect: [center[0] - wh[0] * 0.5, center[1] - wh[1] * 0.5, wh[0], wh[1]],
             crop: [x0, y0, x1, y1],
-            radius: res.f32(snap, n.radius, n.def.radius).max(0.0) * scale,
+            radius: res.f32(snap, n.radius, n.def.radius).max(0.0) * scale * px,
             opacity: res.f32(snap, n.opacity, n.def.opacity).clamp(0.0, 1.0),
             rotation: res.f32(snap, n.rotation, n.def.rotation).to_radians(),
             z: res.i64(snap, n.z, n.def.z),
@@ -331,6 +334,28 @@ mod tests {
         let p = plan();
         assert_eq!(eval(&p, "b", &snapshot(&[("show.mode", Value::Str("offline".into()))], &[])).len(), 1);
         assert_eq!(eval(&p, "b", &snapshot(&[("show.mode", Value::Str("live".into()))], &[])).len(), 2);
+    }
+
+    #[test]
+    fn offsets_and_radius_scale_with_a_smaller_canvas() {
+        let p = plan();
+        let snap = snapshot(&[("scene.b.node.cam2.offset_x", Value::Float(200.0)), ("scene.b.node.cam2.scale", Value::Float(1.25))], &[]);
+        let at = |size: [f32; 2]| {
+            let mut res = Resolved::default();
+            res.update(&snap, &p.state, &p.signals);
+            let mut whens = Whens::default();
+            whens.reset(p.whens.len());
+            let mut out = Vec::new();
+            eval_layout(&p, p.scene_index["b"], WIDE, size, &snap, &res, &mut whens, &mut out);
+            out.into_iter().find(|i| p.sources[i.source as usize].name == "cam2").unwrap()
+        };
+        let full = at([1920.0, 1080.0]);
+        let half = at([960.0, 540.0]);
+        // the half-size preview is the full picture scaled down: a 1.25x picture panned 200 px keeps
+        // 40 px past the left edge at 1920 wide, and 20 px at 960 wide
+        assert_eq!(full.rect, [-40.0, -135.0, 2400.0, 1350.0]);
+        assert_eq!(half.rect, [-20.0, -67.5, 1200.0, 675.0]);
+        assert_eq!((full.radius, half.radius), (12.5, 6.25));
     }
 
     fn morph_at(p: &Plan, t: f32, snap: &Snapshot) -> Vec<Item> {
