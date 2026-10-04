@@ -35,6 +35,9 @@ pub fn chains(plan: &Plan) -> Vec<Vec<u8>> {
     for sc in &plan.scenes {
         for l in &sc.layouts {
             lists.push([&l.fx, &[]]);
+            for group in &l.groups {
+                lists.push([&group.fx, &[]]);
+            }
             for n in &l.nodes {
                 lists.push([&n.fx, &[]]);
             }

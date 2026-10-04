@@ -3,6 +3,7 @@
 
 pub mod db;
 pub mod project;
+pub mod fx;
 pub mod secrets;
 pub mod session;
 pub mod versions;

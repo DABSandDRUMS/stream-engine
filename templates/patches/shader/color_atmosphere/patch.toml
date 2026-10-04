@@ -1,0 +1,15 @@
+# Color Atmosphere — a living film grade: split toning (tinted shadows, warm or cool highlights)
+# that slowly drifts between two shades of the chosen mood over phrases, with a small saturation
+# lift on strong hits. Skin tones are protected from the shadow tint. Subtle by default.
+# Attach: fx = [{ name = "patch.color_atmosphere" }] on a camera source, scene node, or canvas.
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "effect"
+label       = "Color Atmosphere"
+description = "Slowly drifting split-tone color grade with a saturation lift on big hits"
+params.amount = { type = "float", default = 0.45, range = [0.0, 1.5], description = "Overall grade strength" }
+params.mood   = { type = "enum", default = "warm_club", options = ["warm_club", "cool_night", "sunset", "neon"], description = "Color mood (shadow / highlight tints)" }
+params.drift  = { type = "float", default = 0.7, range = [0.0, 1.0], description = "How far the grade wanders between the mood's two shades" }
+params.punch  = { type = "float", default = 0.5, range = [0.0, 1.0], description = "Saturation lift on kicks, snares and the trigger" }
+params.skin   = { type = "float", default = 0.7, range = [0.0, 1.0], description = "Keep skin tones natural (1 = fully protected)" }
+budget = { gpu_ms = 0.15 }

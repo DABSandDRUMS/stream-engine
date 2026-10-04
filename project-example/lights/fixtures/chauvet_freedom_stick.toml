@@ -1,0 +1,15 @@
+# Original Freedom Stick UM Rev. 5 pp. 10–11 and official ShowXpress 50CH profile.
+# Manual ch.50 only prints 0–31 "No function"; official profile specifies dimmer 0–255.
+# This mode uses the SUPPLEMENTARY PROFILE interpretation, not a silently corrected manual.
+name = "Chauvet Freedom Stick (original)"
+manufacturer = "Chauvet"
+kind = "bar"
+notes = "Wireless D-Fi. Sixteen logical RGB groups; physical direction/pairing unverified. Channel 50 uses official ShowXpress dimmer interpretation, pending hardware verification. Blackout zeros all RGB, never relies only on ch.50."
+[modes.50ch]
+cells = 16
+cells_first = true
+cell_channels = ["red", "green", "blue"]
+channels = [
+  { role = "strobe", label = "Fixture-wide strobe", range = [11, 255], open = 0, restriction = "Blocked without calibrated Hz mapping; steady byte 0." },
+  { role = "dimmer", label = "Managed master dimmer", restriction = "Official ShowXpress 0–255 interpretation conflicts with incomplete manual; hardware verification required. Master opens while any pixel is lit; brightness is scaled per RGB pixel, blackout zeros all RGB." },
+]

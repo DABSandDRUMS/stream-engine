@@ -60,6 +60,8 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
             ui.add_space(spacing::L);
             scenes(app, ui);
             ui.add_space(spacing::L);
+            crate::views::auto_sequence::overview_strip(app, ui);
+            ui.add_space(spacing::L);
             crate::views::lights::overview_strip(app, ui);
             if geo.fx_w <= 0.0 {
                 // narrower windows: the show controls come before the camera strip
@@ -429,19 +431,44 @@ fn rail_panel(app: &mut App, ui: &mut egui::Ui) {
     if widgets::tabs(ui, &t, &mut idx, &refs) {
         app.show.rail = RailTab::ALL[idx].0;
     }
-    match app.show.rail {
-        RailTab::Events => rail::events(app, ui),
-        RailTab::Chat => rail::chat(app, ui),
-        RailTab::Queue => rail::queue(app, ui),
-        RailTab::Mod => rail::moderation(app, ui),
-    }
+    ui.add_space(spacing::S);
+    let body = ui.available_rect_before_wrap();
+    // Chat stays pinned; tabs select only the lower pane. Both panes scroll independently.
+    // Leave room for the search, at least one message, and the composer on short windows.
+    let available = (body.height() - spacing::M).max(0.0);
+    let chat_h = (available * 0.6).max(220.0).min(available * 0.7);
+    let chat_rect = Rect::from_min_size(body.min, Vec2::new(body.width(), chat_h));
+    let detail_rect = Rect::from_min_max(egui::pos2(body.left(), chat_rect.bottom() + spacing::M), body.max);
+    ui.scope_builder(egui::UiBuilder::new().id_salt("pinned-chat").max_rect(chat_rect), |ui| {
+        ui.set_clip_rect(chat_rect.intersect(ui.clip_rect()));
+        ui.label(RichText::new("Chat").font(font_semibold(type_scale::LARGE)).color(t.fg));
+        ui.add_space(spacing::XS);
+        rail::chat(app, ui);
+    });
+    ui.painter().hline(body.x_range(), chat_rect.bottom() + spacing::M / 2.0, Stroke::new(1.0, t.border));
+    ui.scope_builder(egui::UiBuilder::new().id_salt("rail-detail").max_rect(detail_rect), |ui| {
+        ui.set_clip_rect(detail_rect.intersect(ui.clip_rect()));
+        let heading = match app.show.rail {
+            RailTab::Queue => "Song queue",
+            RailTab::Events => "Activity",
+            RailTab::Mod => "Mod",
+        };
+        ui.label(RichText::new(heading).font(font_semibold(type_scale::LARGE)).color(t.fg));
+        ui.add_space(spacing::XS);
+        match app.show.rail {
+            RailTab::Queue => rail::queue(app, ui),
+            RailTab::Events => rail::events(app, ui),
+            RailTab::Mod => rail::moderation(app, ui),
+        }
+    });
 }
 
 // ---- sound ---------------------------------------------------------------------------------------
 
 fn sound_bar(app: &mut App, ui: &mut egui::Ui) {
     let t = app.t.clone();
-    let buses = mix::buses(app);
+    mix::refresh_sources(app, ui);
+    let sources = mix::source_channels(app);
     // vertically centre the row in the dock
     let chip_h = 66.0;
     ui.add_space(((ui.available_height() - chip_h) / 2.0).max(0.0));
@@ -455,39 +482,38 @@ fn sound_bar(app: &mut App, ui: &mut egui::Ui) {
             }
         });
         ui.add_space(spacing::L);
-        if buses.is_empty() {
-            widgets::hint(ui, &t, if app.m.connected { "No sound channels yet. Set them up in Sound." } else { "Waiting for the engine…" });
+        if sources.is_empty() {
+            widgets::hint(ui, &t, if app.m.connected { "No audio sources. Add an input in Sound." } else { "Waiting for the engine…" });
             return;
         }
         let gap = 10.0;
-        let w = ((ui.available_width() - gap * (buses.len() as f32 - 1.0)) / buses.len() as f32).clamp(120.0, 360.0);
+        let w = ((ui.available_width() - gap * (sources.len() as f32 - 1.0)) / sources.len() as f32).clamp(160.0, 360.0);
         egui::ScrollArea::horizontal().id_salt("sound").max_height(chip_h).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = gap;
-                for b in &buses {
-                    bus_chip(app, ui, b, w);
+                for source in &sources {
+                    source_chip(app, ui, source, w);
                 }
             });
         });
     });
 }
 
-fn bus_chip(app: &mut App, ui: &mut egui::Ui, b: &str, w: f32) {
+fn source_chip(app: &mut App, ui: &mut egui::Ui, source: &mix::SourceChannel, w: f32) {
     let t = app.t.clone();
-    let gain_a = format!("audio.bus.{b}.gain");
-    let mute_a = format!("audio.bus.{b}.mute");
+    let gain_a = format!("{}.gain", source.address);
+    let mute_a = format!("{}.mute", source.address);
     let range = app.m.meta.get(&gain_a).and_then(|m| m.range).unwrap_or([-60.0, 12.0]);
     let db = app.m.f(&gain_a);
     let muted = app.m.b(&mute_a);
-    let level = app.m.sig(&format!("audio.{b}.level")).unwrap_or(0.0);
-    let ducked = app.m.f(&format!("audio.bus.{b}.ducked")) < -0.5;
+    let level = app.m.sig(&format!("{}.level", source.meter)).unwrap_or(0.0);
     let (rect, _) = ui.allocate_exact_size(Vec2::new(w, 66.0), Sense::hover());
     ui.painter().rect(rect, CornerRadius::same(radius::CONTROL), t.surface, Stroke::new(1.0, t.border), StrokeKind::Inside);
     let inner = rect.shrink2(Vec2::new(10.0, 7.0));
     ui.scope_builder(egui::UiBuilder::new().max_rect(inner).layout(Layout::top_down(Align::Min)), |ui| {
         ui.spacing_mut().item_spacing.y = 4.0;
         ui.horizontal(|ui| {
-            let label = if ducked { format!("{} · lowered", mix::bus_label(b)) } else { mix::bus_label(b) };
+            let label = &source.label;
             ui.add(egui::Label::new(RichText::new(label).font(font_medium(type_scale::SMALL + 0.5)).color(if muted { t.text_faint } else { t.fg })).truncate());
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let (ic, tip) = if muted { (icon::MUTE, "Unmute") } else { (icon::VOLUME, "Mute") };
@@ -512,5 +538,52 @@ fn bus_chip(app: &mut App, ui: &mut egui::Ui, b: &str, w: f32) {
     });
     if !app.m.meta.contains_key(&gain_a) && app.m.connected {
         app.fetch_meta_once(&gain_a);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui_kittest::{Harness, kittest::Queryable};
+
+    #[test]
+    fn compact_rail_keeps_chat_and_composer_above_queue() {
+        struct LiveApp(App);
+        impl eframe::App for LiveApp {
+            fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
+                egui::Panel::top("header").exact_size(100.0).show(ui, |_| {});
+                super::ui(&mut self.0, ui);
+            }
+        }
+        let mut h = Harness::builder().with_size([1024.0, 600.0]).build_eframe(|cc| {
+            let mut app = App::new(
+                cc,
+                crate::UiOpts { socket: Some("/nonexistent/se-ui-compact-rail-test.sock".into()), layout: Some("single".into()), program_only: false },
+            );
+            app.show.rail = RailTab::Queue;
+            app.m.state.insert("twitch.auth.status".into(), Value::from("authorized"));
+            for i in 0..20 {
+                app.m.chat_messages.push_back(se_proto::Event::new(
+                    "twitch.chat",
+                    se_proto::Origin::System,
+                    Value::map().with("user", "viewer").with("message", if i == 19 { "Latest visible message".into() } else { format!("Message {i}") }),
+                ));
+            }
+            app.m.queries.insert("queue".into(), Value::map().with("open", true).with("upcoming", Value::List(vec![])));
+            LiveApp(app)
+        });
+        h.run_steps(4);
+        let chat = h.get_by_label("Latest visible message").rect();
+        let send = h.get_by_label("Send").rect();
+        let queue = h.get_by_label("Song queue").rect();
+        assert!(chat.bottom() <= send.top(), "the latest message stays above the composer");
+        assert!(send.bottom() <= queue.top() - spacing::M, "the whole composer stays inside the chat pane");
+        h.get_by_label("No songs yet");
+        for tab in [RailTab::Events, RailTab::Mod, RailTab::Queue] {
+            h.state_mut().0.show.rail = tab;
+            h.run_steps(4);
+            h.get_by_label("Latest visible message");
+            h.get_by_label("Send");
+        }
     }
 }

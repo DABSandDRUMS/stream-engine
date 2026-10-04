@@ -63,6 +63,118 @@ PCI path + input index, so `pci-0000:05:00.0-video-index0` is always HDMI 1.
 cameras every format × size × frame rate (DV timings for HDMI inputs), the current format,
 the HDMI input status, and the control names.
 
+### Local HWS capture-driver repair
+
+On the show machine, the distribution HWS driver from Linux 7.2.5 produced repeated
+`AMD-Vi: IO_PAGE_FAULT` writes from `0000:05:00.0`. The repair sources are in
+`~/.local/src/hws-stream-fix-7.2.5.1`; `upstream.json` records the pinned kernel
+and vendor reference sources. This is a local driver patch, not an upstream release.
+
+The patch keeps a coherent DMA ring alive for each HDMI input for the entire device
+lifetime. A threaded IRQ copies the first and second hardware halves into CPU-backed
+V4L2 buffers, publishing only a complete pair. Consumer queue rotation never changes
+the card's DMA translations. STREAMOFF drains IRQ completion before returning buffers;
+device removal disables PCI bus mastering before freeing the rings. The additional CPU
+copy is intentional: it removes the unsafe direct-to-consumer DMA lifetime.
+
+The VC42 uses one managed MSI vector instead of legacy INTx. The legacy route stalled
+under sustained consumer frame copies: all four completion bits stayed pending while
+Linux reported the IRQ enabled, unmasked and inactive. A module reload or isolated
+PCIe bus reset did not sustain capture. MSI passed the same four-input copy/starvation
+regression and restored advancing engine inputs. The exact legacy transport failure
+is not established; do not interpret this as proof of a GPU or camera-power fault.
+The IRQ thread acknowledges its observed completion flags before copying so a new
+half arriving during the copy retains its own pending bit. The DMA-ring lifetime
+repair and copy-consistency checks remain in place.
+
+IRQ numbers change with MSI allocation: identify the line by `0000:05:00.0`, not a
+hard-coded IRQ24. Kernel startup should report `IRQ mode: threaded MSI`.
+
+Install and reload **off-air**, with Stream Engine and every other capture client stopped:
+
+```sh
+systemctl --user stop stream-engine.service
+sudo cp -r --no-preserve=ownership ~/.local/src/hws-stream-fix-7.2.5.1 /usr/src/
+# Fresh registration only: skip `dkms add` when this package is already registered.
+sudo dkms add -m hws-stream-fix -v 7.2.5.1
+sudo dkms build -m hws-stream-fix -v 7.2.5.1 -k "$(uname -r)" --force
+sudo dkms install -m hws-stream-fix -v 7.2.5.1 -k "$(uname -r)" --force
+sudo modprobe -r hws
+sudo modprobe hws
+sudo udevadm settle --timeout=15
+modinfo -F filename hws
+cat /sys/module/hws/srcversion
+modinfo -F srcversion hws
+```
+
+The selected module should be under `updates/dkms`, and its `srcversion` must match
+the running module. Installation alone does not replace an already-loaded driver.
+DKMS rebuilds the patch on kernel updates; a successful rebuild is not proof that a
+new kernel preserves the hardware behavior.
+
+Before restarting the engine, run the real-device regression:
+
+```sh
+cd ~/.local/src/hws-stream-fix-7.2.5.1
+make check
+cc -O2 -std=gnu11 -Wall -Wextra -Werror -pthread tests/capture-cycle.c -o /tmp/hws-capture-cycle
+cursor=$(journalctl -k -b -n 1 -o json --no-pager | jq -r '.__CURSOR')
+/tmp/hws-capture-cycle /dev/video0 /dev/video1 /dev/video2 /dev/video3
+journalctl -k -b --after-cursor "$cursor" --no-pager -g 'IO_PAGE_FAULT|IRQ storm|NVRM'
+rm /tmp/hws-capture-cycle
+systemctl --user start stream-engine.service
+```
+
+Use the current HWS device nodes, not arbitrary USB camera nodes. The hardware check
+captures 2,160 frames per connected input across six STREAMON/STREAMOFF, unmap and
+reallocation cycles, alternating normal queues with deliberate single-buffer starvation.
+Each frame is copied into a reusable consumer allocation before requeueing. This load
+reproduced the legacy IRQ stall that the earlier 120-frame, metadata-only cycles missed.
+It queues only one buffer during starvation even if VB2 allocates a spare. An input
+reporting NO_SIGNAL instead exercises 18 fallback frames across the same six cycles;
+there is no physical frame clock to validate on an unplugged input. The check rejects
+error frames, invalid payload bounds, non-monotonic completions and an incorrect
+whole-frame rate on connected inputs. Require no new capture DMA faults, then inspect the actual camera
+images and exercise the engine/OBS workload off-air. A short clean run does not
+establish long-duration whole-PC stability or prove that the independent NVIDIA
+mapping failures have the same cause.
+
+The installed/running MSI + early-ack revision has `srcversion`
+`C4CCD7CD8FD55205C3AEDE5`. Its off-air check included fresh decoded pixels from all
+four leased previews, both OBS DMA-BUF canvases, a 258.65 s app HEVC 1080p60 master
+with exactly one 48 kHz stereo FLAC mix track, NVENC p5 loopback streaming, native
+GPU browser windows and the running DMX transport. The eight steady-load samples
+kept BAR1 at 134/256 MiB used, CPU frame time 2.53–5.56 ms and GPU time 2.79–4.88 ms.
+Renderer dropped/late/recovery counters did not increase; the recorder's one
+already-counted dropped frame did not increase during sampling. OBS added two
+render misses over 14,664 frames and no encoder skips. Both canvases had zero
+producer-fence timeouts; DMX ran at 44 fps with 0.28 ms p99 jitter. No new capture
+DMA, NVIDIA or kernel-fault messages appeared through owned-client teardown.
+The bounded local receiver expired and induced an expected OBS reconnect before
+the test stream was stopped; this was not a Twitch/uplink test.
+
+Kit capture measured roughly 54–58 fps during those load samples, even though
+the canvas and recording run at 60 fps; do not claim four lossless 60 fps inputs
+from configured rates or zero app-side drop counters. Apple Music's existing
+16R main-mix route, hardware FX and routing were not changed. The app still
+records only the Studio24c stereo mix, without a second Apple Music capture.
+
+Device presence and a successful DV-timing query are not capture-liveness checks.
+The local driver can fall back to cached geometry/frame rate. Inspect
+`source.<name>.fps`, `source.<name>.signal` and the `frames` / `measured_fps`
+fields in `streamctl --json query sources`; the query's `fps` field is configured,
+not measured. If frame counts and the card's `/proc/interrupts` count stop advancing,
+confirm continuous HDMI output physically before treating this as an app problem.
+A channel-level `source.reopen` does not reset the shared card core or interrupt gates.
+Any card reset/module reload requires an approved off-air interruption, all capture
+clients stopped and administrator authentication. Do not add repeated reopen loops
+or roll back to the DMA-unsafe distribution driver to conceal a stalled capture path.
+
+If a driver revision fails, restore only a previously verified local module with the
+coherent-ring lifetime repair, with capture clients stopped and administrator approval.
+Do not roll back to the distribution HWS driver: its observed DMA faults can crash the
+workstation. Keep IOMMU protection enabled.
+
 ## Expected devices (preflight)
 
 `project.toml`:
@@ -150,6 +262,61 @@ Every camera input on the Devices page shows a live thumbnail, even before a sou
   closed page or crashed UI releases it within seconds. A source that starts using the camera
   takes it over: the preview is stopped first.
 
+### Private camera and desktop video over Tailscale
+
+The private viewers use continuous **H264 WebRTC**, not thumbnail polling or VNC video:
+
+| Viewer | Workstation URL | Source |
+|---|---|---|
+| Camera | `https://omarchy.tailc04968.ts.net:10001/` | Existing `cam_wide` capture, 1920×1080 at 30 fps |
+| Desktop | `https://omarchy.tailc04968.ts.net:10000/` | DP-2 monitor containing Stream Engine, 3440×1440 at 30 fps |
+| Mouse/keyboard control | `https://omarchy.tailc04968.ts.net:10002/vnc.html?autoconnect=true&resize=scale` | Existing noVNC/WayVNC control path |
+
+The WebRTC viewers are view-only. The original desktop URL now serves encoded video;
+VNC is retained separately for input. Existing Serve routes on 443 and 8443 are unchanged.
+No viewer records files, captures audio, changes lighting, or exposes engine commands.
+
+`se-camera-stream` reads the engine's `preview` SHM canvas through `frames.sock`, releases
+skipped buffers promptly, and feeds FFmpeg NVENC directly without a second V4L2 capture.
+The project's `private_camera` preview scene contains only `cam_wide`; `[render]` sets
+preview scale to 1 and disables preview canvas/output FX. **Selecting a different preview
+scene changes this camera feed**; it is not an independent preview selection.
+The desktop publisher uses the installed `gpu-screen-recorder`, H264 baseline, 6 Mbps,
+30 fps and a one-second keyframe interval. The camera publisher uses approximately 4 Mbps.
+
+Stock [MediaMTX v1.21.1](https://github.com/bluenviron/mediamtx/releases/tag/v1.21.1)
+receives both publishers on loopback RTSP/TCP port 18554. Its player/WHEP listener is
+loopback-only on 18889; ICE UDP binds only the workstation's Tailscale IP, port 18189,
+with no public STUN server. `scripts/camera-preview.py` is a standard-library-only
+owner gateway, using port 18770 for the camera and 18771 with `--default-stream desktop`
+for the desktop. Its allowed routes are the two player pages, `reader.js`, and WHEP
+signaling; administrative and publishing HTTP routes are not exposed.
+
+The installed user units are `stream-engine-camera-relay.service`,
+`stream-engine-camera-publisher.service`, `stream-engine-camera-preview.service`,
+`stream-engine-desktop-publisher.service` and `stream-engine-desktop-preview.service`.
+They restart indefinitely on helper failure. A replaced canvas or engine disconnect
+restarts the camera publisher with fresh mappings; the stock player reconnects after
+stream loss and displays errors while unavailable. The frame writer allows bounded
+cold encoder initialization, then limits stalled writes to 100 ms rather than queueing
+old video or retaining the engine's whole buffer ring.
+
+Remote encoded-video access must use **Tailscale Serve, not Funnel**. Serve strips
+supplied identity headers and injects the authenticated peer's `Tailscale-User-Login`;
+each gateway request requires exactly one header matching the configured owner.
+Missing/wrong/duplicate identities and cross-site embedding are denied; external-link
+document navigation is allowed. Loopback origins trust local processes. VNC retains its
+existing tailnet access boundary; it is not served by this owner-checking video gateway.
+
+Verification from the owner's MacBook Tailscale peer: actual camera and desktop pictures,
+1920×1080 camera video arriving at about 30 fps, and 3440×1440 desktop video arriving at
+about 29 fps. Camera frame metadata showed approximately 51 ms from receiver arrival to
+presentation; this is **not a measured end-to-end capture latency**. Both streams are
+H264 baseline. Owner gateway denial/navigation/header-stripping checks passed.
+The camera recovered after the offline engine upgrade; VNC HTML remained reachable
+from the remote peer. Camera exposure and white balance still limit color judgments;
+video delivery is not certification of fixture timing, mode, or wireless reception.
+
 ## Sources (`sources/<name>.toml`)
 
 The file stem is the source name used by scenes (`src = "cam_kit"`) and the name of its video
@@ -194,8 +361,17 @@ loop like videos. RGB and palette pictures (PNG, GIF) keep full color and transp
 YUV files (video, JPEG) use NV12. SVG is not a source format.
 
 Only sources in use are captured: the renderer's `render.sources.used` list, or (until the
-renderer publishes it) every source referenced by a scene. A source that stops being used keeps
-capturing for 5 s so transitions don't reopen devices.
+renderer publishes it) every source referenced by a scene, plus every source the recorder taps
+(camera ISO recordings, `source = "camera:<n>"` in `[recording]`). A source that stops being used
+keeps capturing for 5 s so transitions don't reopen devices.
+
+**Recording taps.** A camera is opened once; the recorder receives the same frames the renderer
+gets (YUYV as captured, or MJPEG decoded to RGBA, with the master-clock capture time) through a
+small queue per recording. A tapped camera is captured even when no scene shows it, and is released
+5 s after its last recording stops. A recorder that falls behind loses its oldest queued frames
+(counted by the recorder); the live picture and the capture thread never wait for it. Without a
+recording the capture path is unchanged. `video_in.<n>.taps` shows how many recordings hold
+the source.
 
 ### Addresses per source
 
@@ -205,6 +381,7 @@ capturing for 5 s so transitions don't reopen devices.
 | `source.<n>.fps`, `.dropped`, `.cpu` | readback | measured rate, dropped frames, capture-thread CPU (% of one core) |
 | `source.<n>.width/height/format/matrix/range` | readback | slot layout; YUV matrix/range for the shader |
 | `source.<n>.capturing`, `.path`, `.device`, `.error` | readback | worker state |
+| `video_in.<n>.taps` | readback | recordings holding the source (captured while > 0) |
 | `source.<n>.ctrl.<control>` | parameter | camera control with the device's real range; scenes/presets/bindings can set it |
 | `source.<n>.color.{brightness,contrast,saturation,gamma,temperature,tint}`, `.lut`, `.lut_amount` | parameter | color correction applied by the renderer |
 | `source.<n>.paused`, `.rate`, `.loop` | parameter | media files |

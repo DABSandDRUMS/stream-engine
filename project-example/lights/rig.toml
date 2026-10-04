@@ -4,6 +4,8 @@
 [output]
 rate_hz = 44.0
 rt_priority = 40
+# Commissioning interlock, independent of individual output enable switches.
+armed = false
 
 # Detected ENTTEC DMX USB PRO. Enable output only after deliberately configuring the fixtures.
 [outputs.usb]

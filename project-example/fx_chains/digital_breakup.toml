@@ -1,0 +1,6 @@
+label = "Digital breakup"
+fx = [
+  { id = "blocks", name = "pixelate", amount = 0.40, level = 1.0, size = 12.0 },
+  { id = "fringe", name = "rgb_split", amount = 0.45, level = 1.0, spread = 0.008, angle = 0.0 },
+  { id = "tear", name = "glitch", amount = 0.30, level = 1.0, blocks = 0.20, shift = 0.10, color = 0.15, speed = 0.75 },
+]

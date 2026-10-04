@@ -65,6 +65,8 @@ pub struct CanvasOpts {
     /// Grid step normalized to the canvas (e.g. `1/48`): drawn, and snapped to when `snap`.
     pub grid: Option<f32>,
     pub snap: bool,
+    /// Preserve the selected layer's proportions without requiring Shift.
+    pub keep_aspect: bool,
     /// Snap distance in screen pixels.
     pub snap_px: f32,
     /// Action-safe (93%) and title-safe (90%) frames.
@@ -89,6 +91,7 @@ impl CanvasOpts {
             canvas_px,
             grid: None,
             snap: true,
+            keep_aspect: false,
             snap_px: 8.0,
             safe_area: false,
             tiktok_guides: false,
@@ -765,7 +768,7 @@ fn draft(st: &DragState, pointer: Pos2, canvas: Rect, scale: f32, mods: Modifier
     let mut out = Draft { rect: st.rect, crop: st.crop, radius: st.radius, guide_x: None, guide_y: None };
     let snapped = match st.kind {
         EditKind::Move => Some(snap_move(offset(st.rect, dn), &targets, thr)),
-        EditKind::Resize(h) => Some(snap_resize(st.rect, h, dn, mods.shift, &targets, thr)),
+        EditKind::Resize(h) => Some(snap_resize(st.rect, h, dn, opts.keep_aspect || mods.shift, &targets, thr)),
         EditKind::Crop(e) => {
             (out.rect, out.crop) = crop_edge(st.rect, st.crop, e, dn);
             None
@@ -1656,6 +1659,27 @@ mod tests {
         assert_rect(e.rect, [0.1 + 40.0 / cw, 0.1 + 20.0 / ch, 0.3, 0.3]);
         // Nothing is emitted after the release.
         assert!(rig.frame(vec![], Modifiers::NONE).edit.is_none());
+    }
+
+    #[test]
+    fn aspect_locked_resize_without_shift() {
+        let mut rig = Rig::new(vec![node("a", [0.1, 0.2, 0.3, 0.2])]);
+        rig.selected = Some("a".into());
+        rig.opts.keep_aspect = true;
+        let start = rig.nodes[0].rect;
+        let corner = rig.screen("a").right_bottom();
+        let (during, done) = rig.drag(corner, corner + vec2(60.0, 5.0), Modifiers::NONE);
+        for edit in [during.edit.unwrap(), done.edit.unwrap()] {
+            assert!(close(edit.rect[2] / edit.rect[3], start[2] / start[3]));
+            assert!(edit.rect[2] > start[2]);
+            assert!(close(edit.rect[0], start[0]) && close(edit.rect[1], start[1]));
+        }
+        let start = rig.nodes[0].rect;
+        let edge = rig.screen("a").right_center();
+        let (_, done) = rig.drag(edge, edge + vec2(40.0, 0.0), Modifiers::NONE);
+        let rect = done.edit.unwrap().rect;
+        assert!(close(rect[2] / rect[3], start[2] / start[3]));
+        assert!(close(rect[1] + rect[3] * 0.5, start[1] + start[3] * 0.5));
     }
 
     #[test]

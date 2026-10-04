@@ -1,5 +1,6 @@
 //! Runtime behavior on the real GPU: last-good pipelines on broken WGSL, particles, frames.sock
-//! export (dmabuf ring + sync_file fences, shm fallback content), and the no-allocation rule.
+//! export (dmabuf ring + sync_file fences, shm fallback content), effect frame state
+//! (`feedback`/`history`), and the no-allocation rule.
 
 mod common;
 
@@ -123,6 +124,205 @@ fn trigger_payload_reaches_shader_patches() {
     assert!(sub[0] == 0 && sub[1].abs_diff(128) <= 1 && sub[2] == 0, "the next trigger replaces the payload: {sub:?}");
 }
 
+/// `se.trigger_age` counts seconds from the first frame after a trigger and restarts on the
+/// next one; before any trigger it is huge.
+#[test]
+fn trigger_age_counts_from_each_trigger() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(root, "project.toml", PROJECT);
+    write_file(root, "scenes/s.toml", "[canvas.wide]\nnodes = [{ src = \"patch.probe\" }]\n");
+    write_file(root, "patches/probe/patch.toml", "kind = \"shader\"\nlayer = \"source\"\ntrigger = { hold = \"10s\" }\n");
+    write_file(root, "patches/probe/main.wgsl", "@fragment\nfn fs(in: SeVsOut) -> @location(0) vec4<f32> {\n    return vec4<f32>(min(se.trigger_age, 1.0), 0.0, 0.0, 1.0);\n}\n");
+    let mut h = Harness::new(root);
+    assert_eq!(h.reports.lock().patches, vec![("probe".to_string(), Ok(()))]);
+    h.set("show.scene.program", "s");
+    let at = |h: &mut Harness, ms: u64| {
+        h.frame_at(T0 + ms * 1_000_000);
+        px(&h.read(WIDE), 160, 90)[0]
+    };
+    assert_eq!(at(&mut h, 0), 255, "never triggered");
+    let fire = |h: &mut Harness| h.r.apply(se_render::renderer::Msg::PatchTrigger { patch: "probe".into(), payload: [0.0; se_core::triggers::PAYLOAD_FLOATS] });
+    fire(&mut h);
+    assert_eq!(at(&mut h, 1000), 0, "the first frame after the trigger");
+    assert!(at(&mut h, 1500).abs_diff(128) <= 1, "half a second later");
+    fire(&mut h);
+    assert_eq!(at(&mut h, 1600), 0, "a new trigger restarts the age");
+    assert!(at(&mut h, 1850).abs_diff(64) <= 1, "a quarter second after the second trigger");
+}
+
+/// Enum params of a patch drawn without a slot (source/overlay/global effect) reach the shader
+/// as the option index, both the manifest default and a live value.
+#[test]
+fn enum_params_reach_unslotted_patches_as_indices() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(root, "project.toml", PROJECT);
+    write_file(root, "scenes/s.toml", "[canvas.wide]\nnodes = [{ src = \"patch.probe\" }]\n");
+    write_file(root, "patches/probe/patch.toml", "kind = \"shader\"\nlayer = \"source\"\nparams.mode = { type = \"enum\", options = [\"a\", \"b\", \"c\", \"d\"], default = \"c\" }\n");
+    write_file(root, "patches/probe/main.wgsl", "@fragment\nfn fs(in: SeVsOut) -> @location(0) vec4<f32> {\n    return vec4<f32>(f32(p_mode()) / 4.0, 0.0, 0.0, 1.0);\n}\n");
+    let mut h = Harness::new(root);
+    assert_eq!(h.reports.lock().patches, vec![("probe".to_string(), Ok(()))]);
+    h.set("show.scene.program", "s");
+    h.frame();
+    assert!(px(&h.read(WIDE), 160, 90)[0].abs_diff(128) <= 1, "default `c` = index 2");
+    h.set("patch.probe.mode", "b");
+    h.frame();
+    assert!(px(&h.read(WIDE), 160, 90)[0].abs_diff(64) <= 1, "live `b` = index 1");
+}
+
+const HALF_FEEDBACK_WGSL: &str = "@fragment\nfn fs(in: SeVsOut) -> @location(0) vec4<f32> {\n    let c = textureSampleLevel(se_input, se_sampler, in.uv, 0.0);\n    let p = textureSampleLevel(se_prev, se_sampler, in.uv, 0.0);\n    return p * 0.5 + c * 0.5;\n}\n";
+
+fn red_at(h: &mut Harness, x: u32) -> f32 {
+    px(&h.read(WIDE), x, 90)[0] as f32 / 255.0
+}
+
+fn close(actual: f32, expected: f32, what: &str) {
+    assert!((actual - expected).abs() <= 2.5 / 255.0, "{what}: {actual:.3} != {expected:.3}");
+}
+
+/// `se_prev` is the attachment instance's own previous output: `prev * 0.5 + input * 0.5` over
+/// white converges 0.5 → 0.75 → 0.875, two slots of the same patch keep separate state, a
+/// paused slot restarts from transparent, and a patch without `feedback` is unaffected.
+#[test]
+fn feedback_effects_see_their_own_previous_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(root, "project.toml", PROJECT);
+    write_file(
+        root,
+        "scenes/s.toml",
+        "[canvas.wide]\nnodes = [{ id = 'l', src = 'color:#ffffff', rect = [0, 0, 0.5, 1], fx = [{ id = 'a', name = 'patch.half' }, { id = 'b', name = 'patch.half' }] }, { id = 'r', src = 'color:#ffffff', rect = [0.5, 0, 0.5, 1], fx = [{ id = 'p', name = 'patch.plain' }] }]\n",
+    );
+    write_file(root, "patches/half/patch.toml", "kind = \"shader\"\nlayer = \"effect\"\nfeedback = true\n");
+    write_file(root, "patches/half/main.wgsl", HALF_FEEDBACK_WGSL);
+    write_file(root, "patches/plain/patch.toml", "kind = \"shader\"\nlayer = \"effect\"\n");
+    write_file(root, "patches/plain/main.wgsl", "@fragment\nfn fs(in: SeVsOut) -> @location(0) vec4<f32> {\n    return textureSampleLevel(se_input, se_sampler, in.uv, 0.0) * 0.5;\n}\n");
+    let mut h = Harness::new(root);
+    let mut reports = h.reports.lock().patches.clone();
+    reports.sort_by(|x, y| x.0.cmp(&y.0));
+    assert_eq!(reports, vec![("half".to_string(), Ok(())), ("plain".to_string(), Ok(()))]);
+    h.set("show.scene.program", "s");
+    // a_n = (a_{n-1} + 1) / 2; b_n = (b_{n-1} + a_n) / 2 (slot b gets slot a's output as input)
+    let (mut a, mut b) = (0.0f32, 0.0f32);
+    for n in 1..=4 {
+        h.frame();
+        a = (a + 1.0) * 0.5;
+        b = (b + a) * 0.5;
+        close(red_at(&mut h, 80), b, &format!("chained feedback slots, frame {n}"));
+        close(red_at(&mut h, 240), 0.5, &format!("plain effect, frame {n}"));
+    }
+    // bypass slot a for a frame: b keeps converging on its own
+    h.set("scene.s.node.l.fx.a.enabled", false);
+    h.frame();
+    let b_alone = red_at(&mut h, 80);
+    close(b_alone, (b + 1.0) * 0.5, "slot b while a is bypassed");
+    // re-enabled, slot a restarts from a cleared se_prev (0.5), not from its old 0.94
+    h.set("scene.s.node.l.fx.a.enabled", true);
+    h.frame();
+    close(red_at(&mut h, 80), (b_alone + 0.5) * 0.5, "slot a restarted after the pause");
+}
+
+/// The global instance of a triggered feedback effect keeps state per canvas while its
+/// envelope is up and starts over after it was off.
+#[test]
+fn feedback_global_instance_runs_canvas_wide() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(root, "project.toml", PROJECT);
+    write_file(root, "scenes/s.toml", "[canvas.wide]\nnodes = [{ id = 'w', src = 'color:#ffffff', fx = [{ id = 'ref', name = 'patch.half', enabled = false }] }]\n");
+    write_file(root, "patches/half/patch.toml", "kind = \"shader\"\nlayer = \"effect\"\nfeedback = true\ntrigger = { hold = \"10s\" }\n");
+    write_file(root, "patches/half/main.wgsl", HALF_FEEDBACK_WGSL);
+    let mut h = Harness::new(root);
+    assert_eq!(h.reports.lock().patches, vec![("half".to_string(), Ok(()))]);
+    h.set("show.scene.program", "s");
+    h.set("patch.half.env", 1.0);
+    for expected in [0.5, 0.75, 0.875] {
+        h.frame();
+        close(red_at(&mut h, 160), expected, "global instance");
+    }
+    h.set("patch.half.env", 0.0);
+    h.frame();
+    close(red_at(&mut h, 160), 1.0, "envelope down: no effect");
+    h.set("patch.half.env", 1.0);
+    h.frame();
+    close(red_at(&mut h, 160), 0.5, "next fire starts from a cleared se_prev");
+}
+
+/// A triggered patch effect with an explicit `triggered = true` attachment is scoped: it runs
+/// in that attachment on its envelope and gets no canvas-wide global instance.
+#[test]
+fn triggered_attachment_scopes_patch_effect() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(root, "project.toml", PROJECT);
+    write_file(
+        root,
+        "scenes/s.toml",
+        "[canvas.wide]\nnodes = [{ id = 'a', src = 'color:#ffffff', rect = [0, 0, 0.5, 1], fx = [{ id = 'x', name = 'patch.dim', triggered = true }] }, { id = 'b', src = 'color:#ffffff', rect = [0.5, 0, 0.5, 1] }]\n",
+    );
+    write_file(root, "patches/dim/patch.toml", "kind = \"shader\"\nlayer = \"effect\"\ntrigger = { hold = \"10s\" }\n");
+    write_file(root, "patches/dim/main.wgsl", "@fragment\nfn fs(in: SeVsOut) -> @location(0) vec4<f32> {\n    return textureSampleLevel(se_input, se_sampler, in.uv, 0.0) * 0.5;\n}\n");
+    let mut h = Harness::new(root);
+    assert_eq!(h.reports.lock().patches, vec![("dim".to_string(), Ok(()))]);
+    h.set("show.scene.program", "s");
+    h.frame();
+    close(red_at(&mut h, 80), 1.0, "envelope down: node a untouched");
+    h.set("patch.dim.env", 1.0);
+    h.frame();
+    close(red_at(&mut h, 80), 0.5, "triggered attachment on node a");
+    close(red_at(&mut h, 240), 1.0, "node b: no global instance");
+}
+
+/// `feedback = "state"`: `se_prev` returns what the shader wrote to `@location(1)` last frame,
+/// independent of the visible output (here the output shows half the state).
+#[test]
+fn feedback_state_is_separate_from_the_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(root, "project.toml", PROJECT);
+    write_file(root, "scenes/s.toml", "[canvas.wide]\nnodes = [{ id = 'w', src = 'color:#ffffff', fx = [{ id = 's', name = 'patch.hold' }] }]\n");
+    write_file(root, "patches/hold/patch.toml", "kind = \"shader\"\nlayer = \"effect\"\nfeedback = \"state\"\n");
+    write_file(
+        root,
+        "patches/hold/main.wgsl",
+        "@fragment\nfn fs(in: SeVsOut) -> SeOut {\n    let s = textureSampleLevel(se_prev, se_sampler, in.uv, 0.0) * 0.5 + textureSampleLevel(se_input, se_sampler, in.uv, 0.0) * 0.5;\n    return SeOut(vec4<f32>(s.rgb * 0.5, 1.0), s);\n}\n",
+    );
+    let mut h = Harness::new(root);
+    assert_eq!(h.reports.lock().patches, vec![("hold".to_string(), Ok(()))]);
+    h.set("show.scene.program", "s");
+    // state 0.5, 0.75, 0.875, 0.9375 (a copy of the output would give 0.5, 0.625, 0.656, …)
+    for state in [0.5, 0.75, 0.875, 0.9375] {
+        h.frame();
+        close(red_at(&mut h, 160), state * 0.5, "output = half the state");
+    }
+}
+
+/// `history = 3` keeps the last three input frames: `se_history_at(uv, 2)` shows the input of
+/// two frames ago once recorded (clamped to the recorded frames before that).
+#[test]
+fn history_ring_returns_older_input_frames() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(root, "project.toml", PROJECT);
+    write_file(root, "scenes/s.toml", "[canvas.wide]\nnodes = [{ id = 'n', src = 'patch.probe', fx = [{ id = 'h', name = 'patch.lag' }] }]\n");
+    write_file(root, "patches/probe/patch.toml", PROBE_TOML);
+    write_file(root, "patches/probe/main.wgsl", &probe("vec3<f32>(1.0, 0.0, 0.0)"));
+    write_file(root, "patches/lag/patch.toml", "kind = \"shader\"\nlayer = \"effect\"\nhistory = 3\n");
+    write_file(root, "patches/lag/main.wgsl", "@fragment\nfn fs(in: SeVsOut) -> @location(0) vec4<f32> {\n    return se_history_at(in.uv, 2u);\n}\n");
+    let mut h = Harness::new(root);
+    let mut reports = h.reports.lock().patches.clone();
+    reports.sort_by(|x, y| x.0.cmp(&y.0));
+    assert_eq!(reports, vec![("lag".to_string(), Ok(())), ("probe".to_string(), Ok(()))]);
+    h.set("show.scene.program", "s");
+    // input of frame k is k / 10; expected output frame by frame (age 2, clamped to the history)
+    for (k, shown) in [(1, 1), (2, 1), (3, 1), (4, 2), (5, 3), (6, 4), (7, 5)] {
+        h.set("patch.probe.level", k as f64 / 10.0);
+        h.frame();
+        close(red_at(&mut h, 160), shown as f32 / 10.0, &format!("frame {k}"));
+    }
+}
+
 fn wait_demand(server: &FramesServer, canvas: u32, dmabuf: bool, shm: bool) {
     for _ in 0..200 {
         let d = server.demand(canvas);
@@ -132,6 +332,122 @@ fn wait_demand(server: &FramesServer, canvas: u32, dmabuf: bool, shm: bool) {
         std::thread::sleep(Duration::from_millis(10));
     }
     panic!("server never saw the clients' hello");
+}
+
+/// A single published source stays at native pixel size as only the live node window changes.
+/// Exercise both node input precomposition and atomic groups, including half-size preview.
+#[test]
+fn native_fit_live_windows_clip_pixels_before_node_and_group_fx() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(root, "project.toml", PROJECT);
+    for (scene, node_fx, group) in [
+        ("direct", "", ""),
+        ("node_fx", ",fx=[{name='fade_to_black',amount=0.5}]", ""),
+        ("group", "", "\ngroups=[{id='pair',nodes=['chat']}]"),
+        ("group_fx", ",fx=[{name='fade_to_black',amount=0.5}]", "\ngroups=[{id='pair',nodes=['chat'],fx=[{name='fade_to_black',amount=0.5}]}]"),
+        ("stretch", "", ""),
+    ] {
+        let fit = if scene == "stretch" { "stretch" } else { "native" };
+        write_file(root, &format!("scenes/{scene}.toml"), &format!(
+            "[canvas.wide]\nnodes=[{{id='chat',src='cam',fit='{fit}',rect=[0.1,0.1333333333,0.2,0.3555555556]{node_fx}}}]{group}\n"
+        ));
+    }
+    let sock = root.join("frames.sock");
+    let server = Arc::new(FramesServer::start(&sock).unwrap());
+    let mut client = FramesClient::connect(&sock).unwrap();
+    client.hello(se_frames::proto::CLIENT_UI, 1 << PREVIEW, false).unwrap();
+    wait_demand(&server, PREVIEW as u32, false, true);
+    let mut h = Harness::with_frames(root, Some(server));
+    let pattern = |x: u32, y: u32| [if x / 4 % 2 == 0 { 255 } else { 0 }, if y / 4 % 2 == 0 { 255 } else { 0 }, if y >= 48 { 255 } else { 0 }, 255];
+    let mut camera = h.video("cam");
+    let pixels: Vec<u8> = (0..64).flat_map(|y| (0..64).flat_map(move |x| pattern(x, y))).collect();
+    camera.write(64, 64, 256, PixelFormat::Rgba8, 1, &pixels);
+    let verify = |h: &mut Harness, scene: &str, left: u32, top: u32, width: u32, height: u32, sx: u32, sy: u32, gain: f32| {
+        for canvas in [WIDE, PREVIEW] {
+            let divisor = if canvas == PREVIEW { 2 } else { 1 };
+            let img = h.read(canvas);
+            assert_eq!((img.0, img.1), (320 / divisor, 180 / divisor));
+            // Skip antialiased window edges, but inspect every interior source pixel/block.
+            for y in 1..height / divisor - 1 {
+                for x in 1..width / divisor - 1 {
+                    let actual = px(&img, left / divisor + x, top / divisor + y);
+                    let p = pattern(sx + x * divisor, sy + y * divisor);
+                    let expected = [((p[0] as f32) * gain).round() as u8, ((p[1] as f32) * gain).round() as u8, ((p[2] as f32) * gain).round() as u8, 255];
+                    assert!(actual.iter().zip(expected).all(|(a, b)| a.abs_diff(b) <= 2),
+                        "{scene} canvas {canvas} content ({x},{y}): {actual:?} != {expected:?}");
+                }
+            }
+        }
+    };
+    for (scene, gain) in [("direct", 1.0), ("node_fx", 0.5), ("group", 1.0), ("group_fx", 0.25)] {
+        h.set("show.scene.program", scene);
+        h.set("show.scene.preview", scene);
+        h.frame();
+        verify(&mut h, scene, 32, 24, 64, 64, 0, 0, gain);
+
+        // No new camera/browser frame or plan reload: rect writes alone clip top/right.
+        let address = format!("scene.{scene}.node.chat.rect.wide");
+        h.set(&address, Value::from([0.1f32, 56.0 / 180.0, 0.1, 32.0 / 180.0]));
+        h.frame();
+        verify(&mut h, scene, 32, 56, 32, 32, 0, 32, gain);
+        for canvas in [WIDE, PREVIEW] {
+            let d = if canvas == PREVIEW { 2 } else { 1 };
+            let img = h.read(canvas);
+            for (x, y) in [(30, 70), (66, 70), (48, 52), (48, 92)] {
+                assert_eq!(px(&img, x / d, y / d), [0, 0, 0, 255], "{scene}: clipped exterior");
+            }
+        }
+
+        // A bigger window pads above/right instead of repeating the texture's edge.
+        h.set(&address, Value::from([0.1f32, 8.0 / 180.0, 0.3, 80.0 / 180.0]));
+        h.frame();
+        verify(&mut h, scene, 32, 24, 64, 64, 0, 0, gain);
+        for canvas in [WIDE, PREVIEW] {
+            let d = if canvas == PREVIEW { 2 } else { 1 };
+            let img = h.read(canvas);
+            assert_eq!(px(&img, 48 / d, 16 / d), [0, 0, 0, 255], "{scene}: transparent top pad");
+            assert_eq!(px(&img, 112 / d, 72 / d), [0, 0, 0, 255], "{scene}: transparent right pad");
+        }
+    }
+    h.set("show.scene.program", "stretch");
+    h.set("show.scene.preview", "stretch");
+    h.set("scene.stretch.node.chat.rect.wide", Value::from([0.1f32, 56.0 / 180.0, 0.1, 32.0 / 180.0]));
+    h.frame();
+    // Ordinary stretch still scales the whole image into the shrunken window.
+    for canvas in [WIDE, PREVIEW] {
+        let d = if canvas == PREVIEW { 2 } else { 1 };
+        let img = h.read(canvas);
+        assert_eq!(px(&img, 34 / d, 58 / d)[2], 0, "stretch includes old top rows");
+        assert_eq!(px(&img, 34 / d, 82 / d)[2], 255, "stretch includes bottom rows");
+    }
+
+    // Rotation uses the window center, not the smaller native content center.
+    h.set("show.scene.program", "direct");
+    h.set("show.scene.preview", "direct");
+    h.set("scene.direct.node.chat.rotation", 90.0);
+    h.frame();
+    let img = h.read(WIDE);
+    for (x, y) in [(36, 28), (60, 52), (88, 76)] {
+        assert_eq!(px(&img, 127 - y, x - 32), pattern(x - 32, y - 24), "native rotation about window center");
+    }
+    assert_eq!(px(&img, 116, 4), [0, 0, 0, 255], "rotated top padding stays transparent");
+
+    // Explicit crop remains a source-pixel crop, including transparent unused window space.
+    h.set("scene.direct.node.chat.rotation", 0.0);
+    h.set("scene.direct.node.chat.rect.wide", Value::from([0.1f32, 24.0 / 180.0, 0.2, 64.0 / 180.0]));
+    h.set("scene.direct.node.chat.crop.wide", Value::from([0.125f32; 4]));
+    h.frame();
+    verify(&mut h, "direct crop", 32, 40, 48, 48, 8, 8, 1.0);
+    let img = h.read(WIDE);
+    assert_eq!(px(&img, 40, 32), [0, 0, 0, 255], "cropped native image pads above");
+    assert_eq!(px(&img, 88, 56), [0, 0, 0, 255], "cropped native image pads right");
+
+    // The live scale control sizes the window, not the source's glyph/pattern pixels.
+    h.set("scene.direct.node.chat.crop.wide", Value::from([0.0f32; 4]));
+    h.set("scene.direct.node.chat.scale", 0.5);
+    h.frame();
+    verify(&mut h, "direct scale", 48, 40, 32, 32, 0, 32, 1.0);
 }
 
 #[test]
@@ -245,14 +561,22 @@ fn steady_state_frames_do_not_allocate() {
     write_file(
         root,
         "scenes/a.toml",
-        "[canvas.wide]\nnodes = [{ src = \"cam_a\" }, { src = \"cam_b\", rect = [0.6, 0.6, 0.35, 0.35], radius = 24, fx = [{ name = \"grade\", warmth = 0.4 }] }]\n[canvas.tall]\nnodes = [{ src = \"cam_a\", rect = [0, 0, 1, 0.5] }, { src = \"cam_b\", rect = [0, 0.5, 1, 0.5] }]\n",
+        "[canvas.wide]\nnodes = [{ src = \"cam_a\" }, { src = \"cam_b\", rect = [0.6, 0.6, 0.35, 0.35], radius = 24, fx = [{ name = \"grade\", warmth = 0.4 }] }]\ngroups = [{ id = \"pair\", nodes = [\"cam_a\", \"cam_b\"], fx = [{ name = \"grade\", exposure = 0.1 }, { name = \"grade\", warmth = 0.2 }] }]\n[canvas.tall]\nnodes = [{ src = \"cam_a\", rect = [0, 0, 1, 0.5] }, { src = \"cam_b\", rect = [0, 0.5, 1, 0.5] }]\ngroups = [{ id = \"pair\", nodes = [\"cam_a\", \"cam_b\"], fx = [{ name = \"vignette\", amount = 0.2 }] }]\n",
+    );
+    // a frame-state effect (feedback + history) on a node: its textures are allocated once
+    write_file(root, "patches/trail/patch.toml", "kind = \"shader\"\nlayer = \"effect\"\nfeedback = true\nhistory = 2\n");
+    write_file(
+        root,
+        "patches/trail/main.wgsl",
+        "@fragment\nfn fs(in: SeVsOut) -> @location(0) vec4<f32> {\n    return max(se_history_at(in.uv, 2u), textureSampleLevel(se_prev, se_sampler, in.uv, 0.0) * 0.9);\n}\n",
     );
     write_file(
         root,
         "scenes/b.toml",
-        "[canvas.wide]\nnodes = [{ src = \"cam_b\" }, { src = \"cam_a\", rect = [0.05, 0.05, 0.3, 0.3], radius = 16 }]\n[canvas.tall]\nnodes = [{ src = \"cam_b\" }]\n",
+        "[canvas.wide]\nnodes = [{ src = \"cam_b\", fx = [{ name = \"patch.trail\" }] }, { src = \"cam_a\", rect = [0.05, 0.05, 0.3, 0.3], radius = 16 }]\ngroups = [{ id = \"pair\", nodes = [\"cam_a\", \"cam_b\"], fx = [{ name = \"grade\", exposure = 0.1 }] }]\n[canvas.tall]\nnodes = [{ src = \"cam_b\" }]\ngroups = [{ id = \"pair\", nodes = [\"cam_b\"], fx = [{ name = \"grade\", warmth = 0.2 }] }]\n",
     );
     write_file(root, "transitions/morph.toml", "kind = \"morph\"\nms = 1000\n");
+    write_file(root, "transitions/glide.toml", "kind = \"glide\"\nms = 1000\n");
     let mut h = Harness::new(root);
     let mut a = h.video("cam_a");
     let mut b = h.video("cam_b");
@@ -271,11 +595,14 @@ fn steady_state_frames_do_not_allocate() {
             h.frame_at(T0 + 1_000_000 + f * 16_666_667);
         }
     };
-    run(&mut h, &mut a, &mut b, 0..30);
-    h.r.wait_idle();
-    let before = h.stats.alloc_violations.load(Ordering::Relaxed);
-    run(&mut h, &mut a, &mut b, 30..150);
-    let after = h.stats.alloc_violations.load(Ordering::Relaxed);
-    assert_eq!(after - before, 0, "render thread allocated {} times in 120 steady-state frames", after - before);
-    assert!(h.stats.view().frame_ms < 50.0);
+    for kind in ["morph", "glide"] {
+        h.set("show.transition.name", kind);
+        run(&mut h, &mut a, &mut b, 0..30);
+        h.r.wait_idle();
+        let before = h.stats.alloc_violations.load(Ordering::Relaxed);
+        run(&mut h, &mut a, &mut b, 30..150);
+        let after = h.stats.alloc_violations.load(Ordering::Relaxed);
+        assert_eq!(after - before, 0, "{kind}: render thread allocated {} times in 120 steady-state frames", after - before);
+        assert!(h.stats.view().frame_ms < 50.0);
+    }
 }

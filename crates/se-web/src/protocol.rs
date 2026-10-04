@@ -1,7 +1,7 @@
 //! Engine ↔ `stream-engine-web` host protocol.
 //!
 //! * **Control:** one `AF_UNIX` / `SOCK_SEQPACKET` socket pair; the engine keeps one end and the
-//!   host inherits the other as fd 3 (`--se-ipc-fd=3`). Every message is one JSON datagram
+//!   host inherits the other as standard input (`--se-ipc-fd=0`). Every message is one JSON datagram
 //!   ([`ToHost`], [`FromHost`]); shared-memory file descriptors travel with their message as
 //!   `SCM_RIGHTS`.
 //! * **Video:** per browser, the host allocates a sealed memfd *surface* holding
@@ -18,12 +18,13 @@
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::cell::Cell;
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 /// Frames per surface: one being copied by the engine, one being painted, one spare.
 pub const FRAME_SLOTS: u32 = 3;
 /// Sample rate requested from CEF and delivered to the audio slots.
@@ -38,8 +39,15 @@ pub const MAX_MESSAGE: usize = 64 * 1024;
 pub const MAX_SIDE: u32 = 8192;
 /// CEF caps `windowless_frame_rate` at 60.
 pub const MAX_FPS: u32 = 60;
-/// Default user-visible fd number of the host's control socket.
-pub const HOST_IPC_FD: i32 = 3;
+/// The host's control socket uses the spawn implementation's standard-input file action.
+pub const HOST_IPC_FD: i32 = libc::STDIN_FILENO;
+
+/// Immutable account policy for the queue browser. Empty fields mean fail closed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct YoutubeAccount {
+    pub channel: String,
+    pub delegate: String,
+}
 
 /// Engine → host.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -52,6 +60,7 @@ pub enum ToHost {
         width: u32,
         height: u32,
         fps: u32,
+        youtube_account: Option<YoutubeAccount>,
     },
     Close {
         id: u32,
@@ -196,48 +205,65 @@ pub fn set_send_buffer(fd: BorrowedFd<'_>, bytes: usize) {
     }
 }
 
+thread_local! {
+    // Audio, frames and acknowledgements share a scratch buffer per sending thread;
+    // steady-state notifications do not allocate or contend on a global mutex.
+    static SEND_BUFFER: Cell<Vec<u8>> = const { Cell::new(Vec::new()) };
+}
+
 /// Send one message, optionally passing a file descriptor. `nonblocking` fails with
 /// `WouldBlock` instead of waiting when the peer's queue is full.
 pub fn send<T: Serialize>(sock: BorrowedFd<'_>, msg: &T, pass: Option<BorrowedFd<'_>>, nonblocking: bool) -> io::Result<()> {
-    let bytes = serde_json::to_vec(msg).map_err(io::Error::other)?;
-    if bytes.len() > MAX_MESSAGE {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("message of {} bytes exceeds {MAX_MESSAGE}", bytes.len())));
-    }
-    let mut iov = libc::iovec { iov_base: bytes.as_ptr() as *mut libc::c_void, iov_len: bytes.len() };
-    // Room for exactly one fd, 8-byte aligned as cmsghdr requires.
-    let mut cbuf = [0u64; 4];
-    // SAFETY: an all-zero msghdr is a valid "no name, no control" header.
-    let mut hdr: libc::msghdr = unsafe { std::mem::zeroed() };
-    hdr.msg_iov = &mut iov;
-    hdr.msg_iovlen = 1;
-    if let Some(fd) = pass {
-        // SAFETY: CMSG_SPACE is a pure size computation.
-        let space = unsafe { libc::CMSG_SPACE(size_of::<libc::c_int>() as u32) } as usize;
-        debug_assert!(space <= size_of_val(&cbuf));
-        hdr.msg_control = cbuf.as_mut_ptr().cast();
-        hdr.msg_controllen = space;
-        // SAFETY: msg_control points at `space` zeroed, aligned bytes, so CMSG_FIRSTHDR yields a
-        // valid header inside `cbuf` with room for one int of data.
-        unsafe {
-            let c = libc::CMSG_FIRSTHDR(&hdr);
-            (*c).cmsg_level = libc::SOL_SOCKET;
-            (*c).cmsg_type = libc::SCM_RIGHTS;
-            (*c).cmsg_len = libc::CMSG_LEN(size_of::<libc::c_int>() as u32) as usize;
-            std::ptr::write_unaligned(libc::CMSG_DATA(c).cast::<libc::c_int>(), fd.as_raw_fd());
+    SEND_BUFFER.with(|buffer| {
+        // Take rather than borrow so custom serializers can send recursively.
+        let mut bytes = buffer.take();
+        bytes.clear();
+        let result = (|| {
+            serde_json::to_writer(&mut bytes, msg).map_err(io::Error::other)?;
+            if bytes.len() > MAX_MESSAGE {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("message of {} bytes exceeds {MAX_MESSAGE}", bytes.len())));
+            }
+            let mut iov = libc::iovec { iov_base: bytes.as_ptr() as *mut libc::c_void, iov_len: bytes.len() };
+            // Room for exactly one fd, 8-byte aligned as cmsghdr requires.
+            let mut cbuf = [0u64; 4];
+            // SAFETY: an all-zero msghdr is a valid "no name, no control" header.
+            let mut hdr: libc::msghdr = unsafe { std::mem::zeroed() };
+            hdr.msg_iov = &mut iov;
+            hdr.msg_iovlen = 1;
+            if let Some(fd) = pass {
+                // SAFETY: CMSG_SPACE is a pure size computation.
+                let space = unsafe { libc::CMSG_SPACE(size_of::<libc::c_int>() as u32) } as usize;
+                debug_assert!(space <= size_of_val(&cbuf));
+                hdr.msg_control = cbuf.as_mut_ptr().cast();
+                hdr.msg_controllen = space;
+                // SAFETY: msg_control points at `space` zeroed, aligned bytes, so CMSG_FIRSTHDR
+                // yields a valid header inside `cbuf` with room for one int of data.
+                unsafe {
+                    let c = libc::CMSG_FIRSTHDR(&hdr);
+                    (*c).cmsg_level = libc::SOL_SOCKET;
+                    (*c).cmsg_type = libc::SCM_RIGHTS;
+                    (*c).cmsg_len = libc::CMSG_LEN(size_of::<libc::c_int>() as u32) as usize;
+                    std::ptr::write_unaligned(libc::CMSG_DATA(c).cast::<libc::c_int>(), fd.as_raw_fd());
+                }
+            }
+            let flags = libc::MSG_NOSIGNAL | if nonblocking { libc::MSG_DONTWAIT } else { 0 };
+            loop {
+                // SAFETY: `hdr` references `iov`/`cbuf`, which outlive the call.
+                let n = unsafe { libc::sendmsg(sock.as_raw_fd(), &hdr, flags) };
+                if n >= 0 {
+                    return Ok(());
+                }
+                let e = io::Error::last_os_error();
+                if e.kind() != io::ErrorKind::Interrupted {
+                    return Err(e);
+                }
+            }
+        })();
+        if bytes.capacity() <= MAX_MESSAGE {
+            buffer.set(bytes);
         }
-    }
-    let flags = libc::MSG_NOSIGNAL | if nonblocking { libc::MSG_DONTWAIT } else { 0 };
-    loop {
-        // SAFETY: `hdr` references `iov`/`cbuf`, which outlive the call.
-        let n = unsafe { libc::sendmsg(sock.as_raw_fd(), &hdr, flags) };
-        if n >= 0 {
-            return Ok(());
-        }
-        let e = io::Error::last_os_error();
-        if e.kind() != io::ErrorKind::Interrupted {
-            return Err(e);
-        }
-    }
+        result
+    })
 }
 
 /// Receive one message (blocking). `Ok(None)` when the peer closed the socket. A descriptor
@@ -554,6 +580,48 @@ mod tests {
         assert!(fd.is_none());
         drop(a);
         assert!(recv::<FromHost>(b.as_fd(), &mut buf).unwrap().is_none(), "EOF after the peer closes");
+    }
+
+    #[test]
+    fn send_errors_do_not_pollute_later_notifications() {
+        struct Fails;
+        impl Serialize for Fails {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                use serde::ser::{Error, SerializeSeq};
+                let mut seq = serializer.serialize_seq(None)?;
+                seq.serialize_element("partial")?;
+                Err(S::Error::custom("intentional serialization failure"))
+            }
+        }
+        let (a, b) = socketpair().unwrap();
+        assert!(send(a.as_fd(), &Fails, None, true).is_err());
+        let huge = FromHost::Log { level: "error".into(), msg: "x".repeat(MAX_MESSAGE * 2) };
+        assert_eq!(send(a.as_fd(), &huge, None, true).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+        let mut buf = Vec::new();
+        for msg in [FromHost::Pong { seq: u64::MAX }, FromHost::Audio { id: 7 }, FromHost::Pong { seq: 1 }] {
+            send(a.as_fd(), &msg, None, true).unwrap();
+            let (got, fd) = recv::<FromHost>(b.as_fd(), &mut buf).unwrap().unwrap();
+            assert_eq!(got, msg, "each packet contains only its own serialized bytes");
+            assert!(fd.is_none());
+        }
+    }
+
+    #[test]
+    fn recursive_senders_keep_each_packet_separate() {
+        struct Recursive<'a>(BorrowedFd<'a>);
+        impl Serialize for Recursive<'_> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                send(self.0, &FromHost::Pong { seq: 12 }, None, true).map_err(serde::ser::Error::custom)?;
+                FromHost::Audio { id: 8 }.serialize(serializer)
+            }
+        }
+        let (a, b) = socketpair().unwrap();
+        send(a.as_fd(), &Recursive(a.as_fd()), None, true).unwrap();
+        let mut buf = Vec::new();
+        for expected in [FromHost::Pong { seq: 12 }, FromHost::Audio { id: 8 }] {
+            let (got, _) = recv::<FromHost>(b.as_fd(), &mut buf).unwrap().unwrap();
+            assert_eq!(got, expected);
+        }
     }
 
     #[test]

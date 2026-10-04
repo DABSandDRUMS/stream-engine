@@ -1,0 +1,20 @@
+# Afterglow trails: bright details that move (stick tips, cymbal glints, chrome, lit hands)
+# leave short luminous trails that fade within a fraction of a beat; faces, walls and anything
+# static stay untouched. Uses frame feedback in state mode: the glow layer (rgb) and the last
+# input luma (a, for motion) live in the instance's own state buffer, so the picture itself is
+# never smeared. Always-on: attach it (`fx = [{ name = "patch.afterglow_trails" }]`) to the kit
+# camera source, its node, or the canvas. No manifest trigger.
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "effect"
+label       = "Afterglow Trails"
+description = "Moving highlights like sticks and cymbal glints leave short glowing trails that fade in time with the tempo"
+feedback    = "state"
+params.amount     = { type = "float", default = 1.0, range = [0.0, 2.0], description = "Trail brightness" }
+params.threshold  = { type = "float", default = 0.45, range = [0.15, 0.9], description = "How bright a detail must be to leave a trail" }
+params.length     = { type = "float", default = 0.5, range = [0.1, 2.0], unit = "beats", description = "Trail half-life in beats (120 BPM without a tempo)" }
+params.color      = { type = "color", default = "#ffb347", description = "Trail tint" }
+params.tint       = { type = "float", default = 0.7, range = [0.0, 1.0], description = "Mix between the detail's own colour (0) and the tint (1)" }
+params.hit_boost  = { type = "float", default = 0.8, range = [0.0, 2.0], description = "Extra trail brightness on kick and snare hits" }
+params.face_guard = { type = "float", default = 1.0, range = [0.0, 1.0], description = "Suppress trails on skin tones" }
+budget = { gpu_ms = 0.3 }

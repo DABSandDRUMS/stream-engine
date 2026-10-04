@@ -11,8 +11,6 @@
 #include <util/dstr.h>
 #include <util/platform.h>
 
-#define FENCE_FORCE_RELEASE_TICKS 120 /* ~2 s: a GPU that never signals must not pin buffers */
-
 static uint32_t default_width(uint32_t canvas)
 {
 	return canvas == SE_CANVAS_TALL ? 1080 : 1920;
@@ -127,6 +125,7 @@ static void drop_render_state(struct se_canvas_source *s, bool send)
 		se_frames_client_release(s->client, s->imp->epoch, (uint32_t)s->cur, s->cur_seq);
 	se_gl_fence_destroy(s->cur_fence);
 	s->cur_fence = NULL;
+	s->cur_drawn = false;
 	s->cur = -1;
 	for (uint32_t i = 0; i < SE_MAX_BUFFERS; i++) {
 		gs_texture_destroy(s->tex[i]);
@@ -143,6 +142,11 @@ static void apply_import(struct se_canvas_source *s, struct se_frames_import *im
 	drop_render_state(s, false);
 	s->imp = imp;
 	s->shm = imp->fourcc == 0;
+	if (!s->shm && !se_gl_fence_available()) {
+		drop_render_state(s, false);
+		se_frames_client_set_dmabuf(s->client, false);
+		return;
+	}
 	if (s->shm) {
 		s->tex[0] = gs_texture_create(imp->width, imp->height, GS_RGBA, 1, NULL, GS_DYNAMIC);
 		if (!s->tex[0]) {
@@ -176,15 +180,18 @@ static void apply_import(struct se_canvas_source *s, struct se_frames_import *im
 	     imp->height, s->shm ? "shm" : "dmabuf", imp->buffer_count);
 }
 
-static void retire_current(struct se_canvas_source *s)
+static bool retire_current(struct se_canvas_source *s)
 {
 	if (s->cur < 0)
-		return;
+		return true;
 	if (s->n_retired == sizeof(s->retired) / sizeof(s->retired[0]))
-		release_retired_at(s, 0, true);
-	s->retired[s->n_retired++] = (typeof(s->retired[0])){(uint32_t)s->cur, s->cur_seq, s->cur_fence, 0};
+		return false;
+	s->retired[s->n_retired++] =
+		(typeof(s->retired[0])){(uint32_t)s->cur, s->cur_seq, s->cur_fence, s->cur_drawn};
 	s->cur_fence = NULL;
+	s->cur_drawn = false;
 	s->cur = -1;
+	return true;
 }
 
 static void swap_in(struct se_canvas_source *s, const struct se_frames_ready *f)
@@ -199,7 +206,11 @@ static void swap_in(struct se_canvas_source *s, const struct se_frames_ready *f)
 		s->has_image = true;
 		return;
 	}
-	retire_current(s);
+	if (!retire_current(s)) {
+		/* No room to track another GPU hold: discard the never-sampled new frame. */
+		se_frames_client_release(s->client, imp->epoch, f->buffer, f->seq);
+		return;
+	}
 	s->cur = (int32_t)f->buffer;
 	s->cur_seq = f->seq;
 	s->has_image = true;
@@ -207,14 +218,20 @@ static void swap_in(struct se_canvas_source *s, const struct se_frames_ready *f)
 
 static void release_finished(struct se_canvas_source *s)
 {
-	const bool fences = se_gl_fence_available();
 	for (size_t i = 0; i < s->n_retired;) {
-		s->retired[i].age++;
-		bool done;
-		if (s->retired[i].fence)
-			done = se_gl_fence_signaled(s->retired[i].fence) || s->retired[i].age >= FENCE_FORCE_RELEASE_TICKS;
-		else
-			done = fences || s->retired[i].age >= 2;
+		bool done = !s->retired[i].drawn;
+		if (!done) {
+			/* A replacement fence in the same context covers every earlier draw too.
+			 * Retry allocation/wait errors; elapsed ticks never prove GPU completion. */
+			if (!s->retired[i].fence)
+				s->retired[i].fence = se_gl_fence_create();
+			enum se_gl_fence_status status = se_gl_fence_poll(s->retired[i].fence);
+			done = status == SE_GL_FENCE_COMPLETE;
+			if (status == SE_GL_FENCE_FAILED) {
+				se_gl_fence_destroy(s->retired[i].fence);
+				s->retired[i].fence = NULL;
+			}
+		}
 		if (done)
 			release_retired_at(s, i, true);
 		else
@@ -337,7 +354,10 @@ static void se_tick(void *data, float seconds)
 	se_frames_client_poll(s->client, &up);
 	if (up.import)
 		apply_import(s, up.import);
-	if (up.has_frame && s->imp && up.frame.epoch == s->imp->epoch)
+	const bool current = s->imp && se_frames_client_import_current(s->client, s->imp->epoch);
+	if (s->imp && !s->shm && !current)
+		drop_render_state(s, false);
+	if (up.has_frame && current && s->imp && up.frame.epoch == s->imp->epoch)
 		swap_in(s, &up.frame);
 	else if (up.has_frame)
 		se_frames_client_release(s->client, up.frame.epoch, up.frame.buffer, up.frame.seq);
@@ -351,6 +371,8 @@ static void se_render(void *data, gs_effect_t *unused)
 	struct se_canvas_source *s = data;
 	if (!s->has_image || !s->imp)
 		return;
+	if (!s->shm && !se_frames_client_import_current(s->client, s->imp->epoch))
+		return;
 	gs_texture_t *tex = s->shm ? s->tex[0] : (s->cur >= 0 ? s->tex[s->cur] : NULL);
 	if (!tex)
 		return;
@@ -360,7 +382,10 @@ static void se_render(void *data, gs_effect_t *unused)
 	gs_enable_framebuffer_srgb(linear_srgb);
 	gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
 	gs_eparam_t *image = gs_effect_get_param_by_name(effect, "image");
-	if (linear_srgb)
+	/* EGL DMA-BUF images replace the texture's sRGB storage with plain RGBA.
+	 * Decode those samples in the shader; uploaded shm textures retain sRGB storage. */
+	const bool shader_decode = linear_srgb && !s->shm;
+	if (linear_srgb && s->shm)
 		gs_effect_set_texture_srgb(image, tex);
 	else
 		gs_effect_set_texture(image, tex);
@@ -369,13 +394,14 @@ static void se_render(void *data, gs_effect_t *unused)
 		gs_blend_state_push();
 		gs_enable_blending(false);
 	}
-	while (gs_effect_loop(effect, "Draw"))
+	while (gs_effect_loop(effect, shader_decode ? "DrawSrgbDecompress" : "Draw"))
 		gs_draw_sprite(tex, 0, s->imp->width, s->imp->height);
 	if (opaque)
 		gs_blend_state_pop();
 	gs_enable_framebuffer_srgb(previous);
 
 	if (!s->shm) {
+		s->cur_drawn = true;
 		se_gl_fence_destroy(s->cur_fence);
 		s->cur_fence = se_gl_fence_create();
 	}

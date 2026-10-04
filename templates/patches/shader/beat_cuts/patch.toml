@@ -1,0 +1,24 @@
+# Beat Cuts — an automatic camera editor: hard cuts between up to four crop framings of the
+# input (wide, snare/hands, kick, cymbals) exactly on beat boundaries. Normally one cut per bar
+# (or per half bar / beat), extra cut-aways on beats 3 and 4 while the snare is playing a fill,
+# and a cut on every beat for a few beats after a trigger. Crops keep the frame's aspect ratio
+# and always stay inside the picture, so there are never borders.
+# Attach: fx = [{ name = "patch.beat_cuts" }] on the kit camera source, a scene node, or a canvas.
+# The bar count comes from se.time × bpm (a stable tempo is assumed).
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "effect"
+label       = "Beat Cuts"
+description = "Auto-editor that hard-cuts between close-up framings of the kit on the beat, faster in fills and after alerts"
+params.amount       = { type = "float", default = 1.0, range = [0.0, 1.0], description = "How far the close-ups zoom in (0 = always the full frame)" }
+params.mode         = { type = "enum", options = ["bar", "beat", "half_bar"], default = "bar", description = "Normal cut rate: once per bar, every beat, or on beats 1 and 3" }
+params.shots        = { type = "int", default = 4, range = [2, 4], description = "How many of the framings below to cut between (the first N)" }
+params.shot_wide    = { type = "vec4", default = [0.0, 0.0, 1.0, 1.0], range = [0.0, 1.0], description = "Framing 1, wide: x, y, width, height (uv, 0,0 top-left)" }
+params.shot_snare   = { type = "vec4", default = [0.28, 0.52, 0.46, 0.48], range = [0.0, 1.0], description = "Framing 2, snare and hands close-up: x, y, width, height (uv)" }
+params.shot_kick    = { type = "vec4", default = [0.70, 0.62, 0.30, 0.38], range = [0.0, 1.0], description = "Framing 3, kick close-up (default: the Foot Cam corner of the Main picture): x, y, width, height (uv)" }
+params.shot_cymbals = { type = "vec4", default = [0.0, 0.38, 0.46, 0.46], range = [0.0, 1.0], description = "Framing 4, hi-hat and crash close-up: x, y, width, height (uv)" }
+params.fill_cuts    = { type = "bool", default = true, description = "Cut away on beat 3 and back on beat 4 while the snare is busy (fills)" }
+params.trigger_beats = { type = "int", default = 4, range = [0, 16], description = "Beats of cut-every-beat after a trigger (0 = ignore triggers)" }
+params.settle       = { type = "float", default = 0.02, range = [0.0, 0.08], description = "Tiny extra push that settles right after each cut (fraction of the frame)" }
+params.sharpen      = { type = "float", default = 0.5, range = [0.0, 1.0], description = "Crispening of zoomed-in close-ups" }
+budget = { gpu_ms = 0.2 }

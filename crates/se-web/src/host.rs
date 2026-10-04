@@ -141,7 +141,7 @@ fn rotate_log(path: &Path) {
     }
 }
 
-/// Spawn the off-screen host with its end of a fresh control socket on fd 3.
+/// Spawn the off-screen host with its control socket mapped to standard input.
 pub fn spawn(paths: &HostPaths, args: &HostArgs, session: u64, events: mpsc::UnboundedSender<Event>) -> io::Result<Session> {
     let (ours, theirs) = protocol::socketpair()?;
     protocol::set_send_buffer(ours.as_fd(), 1 << 20);
@@ -150,7 +150,8 @@ pub fn spawn(paths: &HostPaths, args: &HostArgs, session: u64, events: mpsc::Unb
     }
     rotate_log(&args.log_file);
     let mut cmd = command(paths);
-    cmd.arg(format!("--se-ipc-fd={}", protocol::HOST_IPC_FD))
+    cmd.stdin(Stdio::from(theirs))
+        .arg(format!("--se-ipc-fd={}", protocol::HOST_IPC_FD))
         .arg(format!("--se-profile={}", args.profile.display()))
         .arg(format!("--se-log-file={}", args.log_file.display()));
     if !args.gpu {
@@ -159,24 +160,7 @@ pub fn spawn(paths: &HostPaths, args: &HostArgs, session: u64, events: mpsc::Unb
     if let Some(p) = args.devtools_port {
         cmd.arg(format!("--se-devtools-port={p}"));
     }
-    let fd = theirs.as_raw_fd();
-    // SAFETY: the closure runs in the forked child before exec and only calls the
-    // async-signal-safe dup2/fcntl on descriptors that are open in the child.
-    unsafe {
-        cmd.pre_exec(move || {
-            if fd == protocol::HOST_IPC_FD {
-                // already in place: just let it survive exec
-                if libc::fcntl(fd, libc::F_SETFD, 0) != 0 {
-                    return Err(io::Error::last_os_error());
-                }
-            } else if libc::dup2(fd, protocol::HOST_IPC_FD) < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
     let mut child = cmd.spawn()?;
-    drop(theirs);
     let pid = child.id().unwrap_or(0);
     forward_stderr(child.stderr.take());
     let (kill_tx, kill_rx) = oneshot::channel::<()>();

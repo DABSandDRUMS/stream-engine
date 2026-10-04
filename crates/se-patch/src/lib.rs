@@ -10,5 +10,5 @@ pub mod templates;
 pub mod wgsl;
 
 pub use loader::start;
-pub use manifest::{Kind, Layer, Manifest, ManifestError, ParamSpec, scan};
+pub use manifest::{Feedback, Kind, Layer, Manifest, ManifestError, ParamSpec, scan};
 pub use registry::{PatchInfo, PatchSet, Patches};

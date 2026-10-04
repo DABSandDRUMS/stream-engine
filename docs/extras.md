@@ -110,6 +110,10 @@ deleted. Over-budget recordings are only **announced** (preflight warning + desk
 listing the oldest files); they are deleted by *Clean up old recordings* (press and hold) in
 **Settings → Backups** (`retention.prune_recordings`), or — with `auto_delete = true` — after the warning has
 stood for `grace_hours`. Nothing is deleted while OBS records or the show is on air.
+With `[recording.archive]` on (the default), a show's master recordings are never budget
+candidates — the archive deletes them itself after a verified archive — and archived shows (the
+archive folder, any folder with `archive.json`) are neither counted nor deleted
+([clips.md](clips.md#after-the-show-archive)).
 
 Restore a runtime DB backup (engine stopped):
 

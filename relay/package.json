@@ -2,10 +2,13 @@
   "name": "stream-engine-relay",
   "version": "0.1.0",
   "private": true,
-  "description": "stream-engine Cloudflare relay: public song-queue page, Ko-fi webhook, engine link (Worker + Durable Object)",
+  "description": "stream-engine relay: local read-only song queue and optional Cloudflare Worker backend",
   "license": "MIT OR Apache-2.0",
   "type": "module",
   "scripts": {
+    "build-local": "esbuild src/local.ts --bundle --platform=node --target=node22 --format=esm --packages=external --outfile=dist/local.mjs && npm run check-page",
+    "check-page": "esbuild src/queue-page.ts --bundle --platform=node --format=esm --outfile=dist/queue-page.mjs --log-level=warning && node -e \"import('./dist/queue-page.mjs').then(async (m) => new Function(await m.queueScript().text()))\"",
+    "start-local": "node dist/local.mjs",
     "dev": "wrangler dev --port 8787",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
@@ -15,10 +18,16 @@
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.22.0",
     "@cloudflare/workers-types": "^5.20260926.1",
+    "@types/node": "^26.6.4",
+    "@types/ws": "^8.18.2",
     "@vitest/runner": "~4.1.0",
     "@vitest/snapshot": "~4.1.0",
+    "esbuild": "^0.28.2",
     "typescript": "^5.9.3",
     "vitest": "~4.1.0",
     "wrangler": "^4.141.0"
+  },
+  "dependencies": {
+    "ws": "^8.22.0"
   }
 }

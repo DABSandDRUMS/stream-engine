@@ -352,6 +352,14 @@ impl Supervisor {
     fn update(&mut self, slot: &str, spec: Spec) {
         let Some(src) = self.sources.get_mut(slot) else { return };
         let old = std::mem::replace(&mut src.spec, spec);
+        if old.youtube_account != src.spec.youtube_account {
+            // Account policy is immutable in the native browser; never navigate an old delegate.
+            if let Some(id) = src.browser.take() {
+                self.send(&ToHost::Close { id });
+            }
+            self.open(slot);
+            return;
+        }
         if old.grants != src.spec.grants {
             // same token, new permissions: the page keeps working without a reload
             self.auth.add(&src.token, &format!("web.{}", src.spec.owner.scope_id()), src.spec.scope());
@@ -407,7 +415,10 @@ impl Supervisor {
         let id = self.next_id;
         self.next_id += 1;
         session.routes.lock().insert(id, src.media.clone());
-        let msg = ToHost::Open { id, url: src.page_url(), width: src.spec.size.0, height: src.spec.size.1, fps: src.spec.fps };
+        let msg = ToHost::Open {
+            id, url: src.page_url(), width: src.spec.size.0, height: src.spec.size.1, fps: src.spec.fps,
+            youtube_account: src.spec.youtube_account.clone(),
+        };
         src.browser = Some(id);
         src.status = "loading";
         self.send(&msg);

@@ -1,0 +1,35 @@
+# Hype thermometer: a narrow Windows 3.1 window (mint "HYPE" caption like the stream's camera
+# windows) on the screen edge with a mercury thermometer, 10 % ticks, a red MAX label and a segment
+# meter. The level is chat rate plus the latest trigger (amount-weighted, decaying with
+# trigger_age; shaders have no memory, so only the most recent trigger counts). At max it sits
+# pinned (boiling bubbles, blinking MAX, kick shudders) until the next `cycle`-bar downbeat, then
+# bursts: the bulb strobes, mercury geysers out of the tube with a fountain of pixel sparks, a shock
+# ring leaves the bulb, the window shakes; then it drains and refills. Bars are counted from
+# time * bpm / 240 and lfo.bar (assumes a steady tempo). No manifest trigger: always drawn, each
+# chat message / cheer fired at it bumps the level.
+#
+# Firing a big effect at max: shader patches can't emit events, so mirror the gauge in a rule.
+# Chat alone fills it to chat_weight at chat_full messages per minute, and any trigger on top
+# tips it over, e.g. (in rules/*.toml):
+#   [[rule]]
+#   name = "hype max"
+#   when = "twitch.chat"
+#   if = "twitch.chat_rate >= 60"          # = chat_full
+#   do = ["preset.fire confetti"]
+#   cooldown = { global = "60s" }
+# plus `when = "twitch.cheer"`, `if = "amount >= 500"` for single cheers big enough to max it.
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "overlay"
+label       = "Hype thermometer"
+description = "A Win 3.1 thermometer on the screen edge that fills with chat rate and cheers and bursts in a mercury geyser of pixel sparks when it maxes"
+signals     = ["twitch.chat_rate"]
+params.position       = { type = "vec2",  default = [0.055, 0.62], range = [0.0, 1.0], description = "Window centre (0-1 of the layer); kept on screen" }
+params.scale          = { type = "float", default = 1.0, range = [0.5, 3.0], description = "Window size; pixels snap to whole multiples" }
+params.chat_full      = { type = "float", default = 60.0, range = [5.0, 600.0], description = "Chat messages per minute that count as full chat hype" }
+params.chat_weight    = { type = "float", default = 0.75, range = [0.0, 1.0], description = "How far full chat alone fills the gauge" }
+params.trigger_weight = { type = "float", default = 0.45, range = [0.0, 1.5], description = "Bump from a big trigger (amount 1000+); small ones give about a third" }
+params.decay          = { type = "float", default = 4.0, range = [0.3, 30.0], unit = "s", description = "Time for a trigger's bump to fall to about a third" }
+params.cycle          = { type = "int",   default = 2, range = [1, 4], description = "Bars between bursts while maxed (bursts land on the downbeat)" }
+params.caption        = { type = "color", default = "#98dbc5", description = "Caption bar colour (matches the camera windows)" }
+budget      = { gpu_ms = 0.2 }

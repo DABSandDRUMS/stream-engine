@@ -392,6 +392,7 @@ pub fn build(cfg: &AudioConfig, generation: u32, ports: &mut PortTable, bank: Sa
         input_info.push(
             Value::map()
                 .with("name", d.name.clone())
+                .with("label", d.label().to_string())
                 .with("target", d.target.clone())
                 .with("channels", Value::List(d.channels.iter().map(|c| Value::Int(*c as i64)).collect()))
                 .with("bus", d.bus.clone())
@@ -438,7 +439,7 @@ pub fn build(cfg: &AudioConfig, generation: u32, ports: &mut PortTable, bank: Sa
         };
         let port_pair = if d.node {
             let node = node_name(&d.name);
-            c.out.nodes.push(BusNode { bus: d.name.clone(), node: node.clone(), description: format!("stream-engine {}", d.name) });
+            c.out.nodes.push(BusNode { bus: d.name.clone(), node: node.clone(), description: format!("Stream Engine: {}", d.label) });
             let pl = format!("out_{}_L", d.name);
             let pr = format!("out_{}_R", d.name);
             let ix = (ports.output(&pl), ports.output(&pr));
@@ -476,6 +477,7 @@ pub fn build(cfg: &AudioConfig, generation: u32, ports: &mut PortTable, bank: Sa
         bus_info.push(
             Value::map()
                 .with("name", d.name.clone())
+                .with("label", d.label.clone())
                 .with("address", pre)
                 .with("node", if d.node { Value::Str(node_name(&d.name)) } else { Value::Null })
                 .with("to_program", d.to_program)

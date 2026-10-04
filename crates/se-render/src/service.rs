@@ -5,13 +5,13 @@
 use crate::gpu::{Gpu, GpuOptions};
 use crate::loader::{Loader, LoaderCmd, Report};
 use crate::perf::{PASSES, Stats};
-use crate::plan::{CANVAS_NAMES, LAYOUT_NAMES, PALETTE_SLOTS, Plan, SourceKind, atlas_tiles};
+use crate::plan::{CANVAS_NAMES, LAYOUT_NAMES, Plan, SourceKind, atlas_tiles};
 use crate::renderer::{AssetRequest, Inputs, Msg, Renderer};
 use crossbeam_channel::{Receiver, Sender};
 use se_frames::FramesServer;
 use se_hub::{Bus, EngineCtx, Hub, Snapshot};
 use se_patch::Manifest;
-use se_proto::{Meta, Value, ValueType};
+use se_proto::{Meta, Value, ValueType, palette::SLOTS};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -91,7 +91,8 @@ fn declare(hub: &Hub, plan: &Plan) {
         }
         hub.submit(se_core::Input::DeclareTrigger { address: format!("fx.{}", e.name), spec: se_core::triggers::TriggerSpec::default() });
     }
-    for (i, s) in PALETTE_SLOTS.iter().enumerate() {
+    declare_slot_params(hub, plan);
+    for (i, s) in SLOTS.iter().enumerate() {
         hub.declare(&format!("palette.{s}"), Meta::color(plan.settings.palette[i]).owner("render").describe("Stream palette (§16.2)"));
     }
     let ms = |d: &str| ro(Meta::float(0.0, [0.0, 1000.0]).unit("ms").describe(d));
@@ -119,12 +120,77 @@ fn declare(hub: &Hub, plan: &Plan) {
     hub.declare("safety.video.limit", ro(Meta::float(0.0, [0.0, 1.0]).describe("Flash limiter strength")));
     hub.declare("safety.video.flash_rate", ro(Meta::float(0.0, [0.0, 60.0]).unit("Hz").describe("Highest flash rate on the output")));
     hub.declare("health.render", ro(Meta { ty: ValueType::Map, default: Value::map(), ..Meta::string("") }));
+    hub.declare("health.render.freeze_frames", ro(Meta { ty: ValueType::Map, default: Value::map(), ..Meta::string("") }));
+    hub.declare("render.freeze_frames.directory", ro(Meta::string("").describe("Directory where clean freeze-frame PNG photos are saved")));
+    hub.declare("render.freeze_frames.last_path", ro(Meta::string("").describe("Most recently saved freeze-frame PNG")));
+    for (name, detail) in [
+        ("saved", "Freeze-frame PNG photos saved"),
+        ("pending", "Freeze-frame photos awaiting a rendered state, GPU readback, or disk write"),
+        ("failed", "Freeze-frame photos that could not be saved (including overflow)"),
+    ] {
+        hub.declare(&format!("render.freeze_frames.{name}"), ro(Meta::int(0, [0.0, 9.2e18]).describe(detail)));
+    }
     publish_palette(hub, plan);
+}
+
+fn declare_slot_params(hub: &Hub, plan: &Plan) {
+    let snapshot = hub.snapshot.load();
+    let declare_slots = |attaches: &[crate::plan::Attach]| {
+        use crate::plan::{EffectKind, ParamSrc, StrSrc};
+        for slot in attaches {
+            let effect = &plan.effects[slot.effect];
+            if slot.patch_slot.is_some() { continue; }
+            for (i, src) in slot.params.iter().enumerate().take(slot.nparams) {
+                let (address, default) = match *src {
+                    ParamSrc::Local(a, v) => (a, v),
+                    ParamSrc::Inherited(a, global) => (a, snapshot.get(plan.state.name(global)).and_then(Value::as_f32).unwrap_or(effect.defaults[i])),
+                    _ => continue,
+                };
+                let meta = match effect.kind {
+                    EffectKind::Builtin(index) => {
+                        let p = crate::effects::LIBRARY[index].all_params().nth(i).expect("effect param");
+                        let mut meta = Meta::float(default as f64, [p.range[0] as f64, p.range[1] as f64]).describe(p.description);
+                        if let Some(unit) = p.unit { meta = meta.unit(unit); }
+                        meta
+                    },
+                    EffectKind::Patch(_) => Meta::float(default as f64, [-1e9, 1e9]),
+                };
+                hub.declare(plan.state.name(address), meta.owner("render"));
+            }
+            let file = match &slot.file {
+                Some(StrSrc::Local(address, default)) => Some((*address, default.as_str())),
+                Some(StrSrc::Inherited(address, global)) => Some((*address, snapshot.get(plan.state.name(*global)).and_then(Value::as_str).unwrap_or(""))),
+                _ => None,
+            };
+            if let Some((address, default)) = file {
+                hub.declare(plan.state.name(address), Meta::string(default).owner("render").describe("Project-relative .cube file"));
+            }
+        }
+    };
+    for slot in &plan.patch_slots {
+        for param in &slot.params {
+            let mut meta = param.spec.meta("render");
+            meta.default = param.global.and_then(|a| snapshot.get(plan.state.name(a))).unwrap_or(&param.default).clone();
+            hub.declare(plan.state.name(param.local), meta.owner("render"));
+        }
+    }
+    for source in &plan.sources { declare_slots(&source.fx); }
+    for scene in &plan.scenes {
+        for layout in &scene.layouts {
+            declare_slots(&layout.fx);
+            for node in &layout.nodes { declare_slots(&node.fx); }
+            for group in &layout.groups { declare_slots(&group.fx); }
+        }
+    }
+    for canvas in &plan.canvases {
+        declare_slots(&canvas.fx);
+        declare_slots(&canvas.output_fx);
+    }
 }
 
 fn publish_palette(hub: &Hub, plan: &Plan) {
     let colors = if plan.settings.palette_mode_follow_theme { theme_palette().unwrap_or(plan.settings.palette) } else { plan.settings.palette };
-    for (i, s) in PALETTE_SLOTS.iter().enumerate() {
+    for (i, s) in SLOTS.iter().enumerate() {
         hub.publish(&format!("palette.{s}"), Value::from(colors[i]));
     }
 }
@@ -142,7 +208,7 @@ pub fn parse_theme_palette(src: &str) -> Option<[[f32; 4]; 8]> {
             .and_then(|s| se_proto::value::parse_hex_color(s.trim_start_matches('#')).or_else(|| se_proto::value::parse_hex_color(s)))
     };
     let mut out = crate::plan::DEFAULT_PALETTE;
-    for (i, slot) in PALETTE_SLOTS.iter().enumerate() {
+    for (i, slot) in SLOTS.iter().enumerate() {
         if let Some(c) = get(slot) {
             out[i] = c;
         }
@@ -482,6 +548,7 @@ impl Io {
             self.manifests = scan_manifests(&self.ctx.hub, &self.ctx.project_root);
         }
         let plan = build_plan(&self.ctx, &self.manifests);
+        declare_slot_params(&self.ctx.hub, &plan);
         publish_palette(&self.ctx.hub, &plan);
         publish_atlas(&self.ctx.hub, &plan);
         let _ = self.loader.send(LoaderCmd::Plan(plan.clone()));
@@ -548,7 +615,9 @@ impl Io {
                             }
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
+                        self.stats.freeze_photos.fail(0, format!("Render trigger bus missed {count} events; some freeze-frame photos may be missing. Reduce trigger bursts and check engine logs"));
+                    }
                     Err(_) => break,
                 },
                 Some(cmd) = actions.recv() => {
@@ -585,6 +654,26 @@ fn publish_atlas(hub: &Hub, plan: &Plan) {
 
 fn publish_stats(hub: &Hub, stats: &Stats, frames: Option<&FramesServer>, plan: &Plan, last_dropped: u64) -> u64 {
     let v = stats.view();
+    let photos = &stats.freeze_photos;
+    let pending = photos.pending.load(Ordering::Relaxed);
+    let saved = photos.saved.load(Ordering::Relaxed);
+    let failed = photos.failed.load(Ordering::Relaxed);
+    let directory = photos.directory.lock().clone();
+    let last_path = photos.last_path.lock().clone();
+    let error = photos.error.lock().clone();
+    hub.publish("render.freeze_frames.directory", Value::Str(directory.clone()));
+    hub.publish("render.freeze_frames.last_path", Value::Str(last_path));
+    hub.publish("render.freeze_frames.saved", Value::Int(saved as i64));
+    hub.publish("render.freeze_frames.pending", Value::Int(pending as i64));
+    hub.publish("render.freeze_frames.failed", Value::Int(failed as i64));
+    let (photo_health, photo_detail) = if !error.is_empty() {
+        ("fail", error)
+    } else if pending > 0 {
+        ("warn", format!("{pending} freeze photos pending; waiting for a rendered freeze state or the save worker. If this persists, enable the freeze target and check patch.freeze_frame.error and directory permissions/free space"))
+    } else {
+        ("pass", format!("{saved} photos saved to {directory}; {failed} previous failures"))
+    };
+    hub.publish("health.render.freeze_frames", Value::map().with("status", photo_health).with("detail", photo_detail));
     let r2 = |x: f32| ((x * 100.0).round() / 100.0) as f64;
     hub.publish("perf.gpu_ms", Value::Float(r2(v.gpu_ms)));
     hub.publish("perf.frame_ms", Value::Float(r2(v.frame_ms)));

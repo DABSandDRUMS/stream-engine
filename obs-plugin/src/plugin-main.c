@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later
  *
  * stream-engine OBS module: registers the canvas sources and runs the obs.sock control
- * channel (hello, 1 Hz status, events, recording files, commands) plus the stale-feed
+ * channel (hello, 1 Hz streaming status, events, commands) plus the stale-feed
  * monitor that drives the fallback scene. Nothing here blocks OBS's render thread: the
  * control thread only reads thread-safe libobs/frontend state and hands scene switches and
  * start/stop commands to the UI thread with obs_queue_task().
@@ -10,10 +10,8 @@
 
 #include <inttypes.h>
 #include <obs-frontend-api.h>
-#include <util/config-file.h>
 #include <util/dstr.h>
 #include <util/platform.h>
-#include <sys/stat.h>
 #include <unistd.h>
 
 OBS_DECLARE_MODULE()
@@ -204,56 +202,6 @@ static uint64_t frame_interval_ns(video_t *video)
 	return (uint64_t)vi->fps_den * 1000000000ull / vi->fps_num;
 }
 
-/* File a recording output writes at start: the muxers' "path" setting (ffmpeg_muxer,
- * mp4_output) or "url" (custom FFmpeg output). Later files of a split recording arrive through
- * the output's "file_changed" signal. */
-static bool output_file(obs_output_t *o, char *out, size_t len)
-{
-	obs_data_t *settings = obs_output_get_settings(o);
-	if (!settings)
-		return false;
-	const char *p = obs_data_get_string(settings, "path");
-	if (!p || !*p)
-		p = obs_data_get_string(settings, "url");
-	bool ok = p && *p && p[0] == '/';
-	if (ok)
-		snprintf(out, len, "%s", p);
-	obs_data_release(settings);
-	return ok;
-}
-
-/* "file_changed" from a recording output's thread, picked up by the control thread. */
-struct file_watch {
-	pthread_mutex_t mu;
-	char next[1024];
-	bool changed;
-};
-
-static void on_file_changed(void *data, calldata_t *cd)
-{
-	struct file_watch *w = data;
-	const char *next = calldata_string(cd, "next_file");
-	if (!next || !*next)
-		return;
-	pthread_mutex_lock(&w->mu);
-	snprintf(w->next, sizeof(w->next), "%s", next);
-	w->changed = true;
-	pthread_mutex_unlock(&w->mu);
-}
-
-static bool take_file_change(struct file_watch *w, char *out, size_t len)
-{
-	if (!w)
-		return false;
-	pthread_mutex_lock(&w->mu);
-	bool changed = w->changed;
-	if (changed)
-		snprintf(out, len, "%s", w->next);
-	w->changed = false;
-	pthread_mutex_unlock(&w->mu);
-	return changed;
-}
-
 static char *weak_output_name(obs_weak_output_t *weak, char *out, size_t len)
 {
 	out[0] = 0;
@@ -263,87 +211,6 @@ static char *weak_output_name(obs_weak_output_t *weak, char *out, size_t len)
 		obs_output_release(o);
 	}
 	return out;
-}
-
-/* ---- recording tracks (UI thread refresh, any-thread use) ----------------------------- */
-
-static void refresh_profile_info(void)
-{
-	char names[6][128];
-	config_t *cfg = obs_frontend_get_profile_config();
-	const char *mode = cfg ? config_get_string(cfg, "Output", "Mode") : NULL;
-	bool adv = mode && strcmp(mode, "Advanced") == 0;
-	for (int i = 0; i < 6; i++) {
-		char key[32];
-		snprintf(key, sizeof(key), "Track%dName", i + 1);
-		const char *n = adv && cfg ? config_get_string(cfg, "AdvOut", key) : NULL;
-		if (n && *n)
-			snprintf(names[i], sizeof(names[i]), "%s", n);
-		else
-			snprintf(names[i], sizeof(names[i]), "Track %d", i + 1);
-	}
-	char *dir = obs_frontend_get_current_record_output_path();
-	pthread_mutex_lock(&se_g.mu);
-	memcpy(se_g.track_names, names, sizeof(names));
-	snprintf(se_g.record_dir, sizeof(se_g.record_dir), "%s", dir ? dir : "");
-	pthread_mutex_unlock(&se_g.mu);
-	bfree(dir);
-}
-
-struct mixer_sources {
-	json_t *sources[6];
-	json_t *devices[6];
-};
-
-static bool collect_audio_source(void *param, obs_source_t *src)
-{
-	struct mixer_sources *m = param;
-	if (!(obs_source_get_output_flags(src) & OBS_SOURCE_AUDIO) || !obs_source_active(src))
-		return true;
-	uint32_t mixers = obs_source_get_audio_mixers(src);
-	obs_data_t *settings = obs_source_get_settings(src);
-	const char *device = settings ? obs_data_get_string(settings, "device_id") : NULL;
-	for (int i = 0; i < 6; i++) {
-		if (!(mixers & (1u << i)))
-			continue;
-		json_array_append_new(m->sources[i], json_string(obs_source_get_name(src)));
-		if (device && *device)
-			json_array_append_new(m->devices[i], json_string(device));
-	}
-	obs_data_release(settings);
-	return true;
-}
-
-static json_t *output_tracks(obs_output_t *o)
-{
-	struct mixer_sources m;
-	for (int i = 0; i < 6; i++) {
-		m.sources[i] = json_array();
-		m.devices[i] = json_array();
-	}
-	obs_enum_sources(collect_audio_source, &m);
-	char names[6][128];
-	pthread_mutex_lock(&se_g.mu);
-	memcpy(names, se_g.track_names, sizeof(names));
-	pthread_mutex_unlock(&se_g.mu);
-
-	json_t *tracks = json_array();
-	for (size_t idx = 0; idx < MAX_OUTPUT_AUDIO_ENCODERS; idx++) {
-		obs_encoder_t *enc = obs_output_get_audio_encoder(o, idx);
-		if (!enc)
-			break;
-		size_t mixer = obs_encoder_get_mixer_index(enc);
-		if (mixer >= 6)
-			continue;
-		json_array_append_new(tracks, json_pack("{s:I, s:I, s:s, s:O, s:O}", "index", (json_int_t)idx, "mixer",
-							(json_int_t)(mixer + 1), "name", names[mixer], "sources",
-							m.sources[mixer], "devices", m.devices[mixer]));
-	}
-	for (int i = 0; i < 6; i++) {
-		json_decref(m.sources[i]);
-		json_decref(m.devices[i]);
-	}
-	return tracks;
 }
 
 /* ---- output tracking (control thread) ------------------------------------------------ */
@@ -365,36 +232,9 @@ struct tracked {
 	double kbps;
 	int dropped, total;
 	float congestion;
-	/* current file (recording outputs) */
-	struct file_watch *watch;
-	bool file_open;
-	char path[1024];
-	uint64_t file_start_obs_ns;
 };
 
 static struct tracked tracked[MAX_TRACKED];
-
-static void send_record_path(struct tracked *t, obs_output_t *o)
-{
-	json_t *m = json_pack("{s:s, s:s, s:s, s:s, s:I}", "t", "record_path", "path", t->path, "canvas", t->canvas,
-			      "output", t->name, "start_obs_ns", (json_int_t)t->file_start_obs_ns);
-	se_stamp(m);
-	if (o)
-		json_object_set_new(m, "tracks", output_tracks(o));
-	send_json(m);
-}
-
-static void close_file(struct tracked *t, uint64_t end_obs_ns)
-{
-	if (!t->file_open)
-		return;
-	json_t *m = json_pack("{s:s, s:s, s:s, s:s, s:I}", "t", "record_end", "path", t->path, "canvas", t->canvas,
-			      "output", t->name, "end_obs_ns", (json_int_t)end_obs_ns);
-	se_stamp(m);
-	send_json(m);
-	t->file_open = false;
-	t->path[0] = 0;
-}
 
 struct enum_ctx {
 	obs_weak_output_t *weak[MAX_TRACKED];
@@ -429,25 +269,8 @@ static struct tracked *track_slot(const char *name)
 	return free_slot;
 }
 
-static void unwatch(struct tracked *t)
-{
-	if (!t->watch)
-		return;
-	/* a destroyed output no longer signals; a live one must stop before the watch is freed */
-	obs_output_t *o = obs_weak_output_get_output(t->weak);
-	if (o) {
-		signal_handler_disconnect(obs_output_get_signal_handler(o), "file_changed", on_file_changed, t->watch);
-		obs_output_release(o);
-	}
-	pthread_mutex_destroy(&t->watch->mu);
-	bfree(t->watch);
-	t->watch = NULL;
-}
-
 static void untrack(struct tracked *t)
 {
-	close_file(t, os_gettime_ns());
-	unwatch(t);
 	obs_weak_output_release(t->weak);
 	memset(t, 0, sizeof(*t));
 }
@@ -485,7 +308,7 @@ static void track_outputs(void)
 		}
 		const uint64_t now_obs = os_gettime_ns();
 		if (active && !t->active) {
-			/* file/stream t=0 is the first encoded frame: back-date by the frames sent so far */
+			/* stream t=0 is the first encoded frame: back-date by the frames sent so far */
 			uint64_t back = (uint64_t)(obs_output_get_total_frames(o) > 0 ? obs_output_get_total_frames(o) : 0) *
 					frame_interval_ns(video);
 			t->start_obs_ns = now_obs > back ? now_obs - back : now_obs;
@@ -494,29 +317,6 @@ static void track_outputs(void)
 			t->kbps = 0;
 		}
 		t->active = active;
-		if (!t->service) {
-			char path[1024];
-			if (active && !t->watch) {
-				t->watch = bzalloc(sizeof(*t->watch));
-				pthread_mutex_init(&t->watch->mu, NULL);
-				signal_handler_connect(obs_output_get_signal_handler(o), "file_changed", on_file_changed, t->watch);
-			}
-			bool split = active && t->file_open && take_file_change(t->watch, path, sizeof(path));
-			bool first = active && !t->file_open && output_file(o, path, sizeof(path));
-			if (split || first) {
-				close_file(t, now_obs);
-				snprintf(t->path, sizeof(t->path), "%s", path);
-				t->file_open = true;
-				t->file_start_obs_ns = split ? now_obs : t->start_obs_ns;
-				blog(LOG_INFO, "[stream-engine] recording file (%s, canvas %s): %s", t->name, t->canvas, t->path);
-				send_record_path(t, o);
-			} else if (!active && t->file_open) {
-				close_file(t, now_obs);
-			}
-			if (!active && t->watch) {
-				take_file_change(t->watch, path, sizeof(path)); /* drop a change that raced the stop */
-			}
-		}
 		obs_output_release(o);
 	}
 	for (size_t i = 0; i < MAX_TRACKED; i++)
@@ -562,7 +362,7 @@ static struct tracked *tracked_by_name(const char *name)
 static bool any_output_live(void)
 {
 	for (size_t i = 0; i < MAX_TRACKED; i++)
-		if (tracked[i].used && tracked[i].active)
+		if (tracked[i].used && tracked[i].service && tracked[i].active)
 			return true;
 	return false;
 }
@@ -580,21 +380,16 @@ static void send_status(uint64_t now_mono, const struct se_monitor_result *mon)
 	uint64_t obs_ns, mono_ns;
 	clock_pair(&obs_ns, &mono_ns);
 
-	char stream_name[128], record_name[128];
+	char stream_name[128];
 	pthread_mutex_lock(&se_g.mu);
-	obs_weak_output_t *sw = se_g.stream_output, *rw = se_g.record_output;
-	char scene[256], record_dir[1024];
+	obs_weak_output_t *sw = se_g.stream_output;
+	char scene[256];
 	snprintf(scene, sizeof(scene), "%s", se_g.scene_name);
-	snprintf(record_dir, sizeof(record_dir), "%s", se_g.record_dir);
 	obs_weak_output_addref(sw);
-	obs_weak_output_addref(rw);
 	pthread_mutex_unlock(&se_g.mu);
 	weak_output_name(sw, stream_name, sizeof(stream_name));
-	weak_output_name(rw, record_name, sizeof(record_name));
 	obs_weak_output_release(sw);
-	obs_weak_output_release(rw);
 	struct tracked *st = tracked_by_name(stream_name);
-	struct tracked *rt = tracked_by_name(record_name);
 
 	video_t *video = obs_get_video();
 	uint32_t skipped = video ? video_output_get_skipped_frames(video) : 0;
@@ -628,26 +423,21 @@ static void send_status(uint64_t now_mono, const struct se_monitor_result *mon)
 	json_t *outputs = json_array();
 	for (size_t i = 0; i < MAX_TRACKED; i++) {
 		struct tracked *t = &tracked[i];
-		if (!t->used || (!t->service && !t->file_open && !t->active && strcmp(t->name, record_name) != 0))
+		if (!t->used || (!t->service && !t->active))
 			continue;
 		json_t *o = json_pack("{s:s, s:s, s:s, s:b, s:f, s:i, s:i, s:f, s:s}", "name", t->name, "id", t->id, "kind",
 				      t->service ? "stream" : "record", "active", t->active, "kbps", t->kbps, "dropped",
 				      t->dropped, "total", t->total, "congestion", (double)t->congestion, "canvas", t->canvas);
-		if (t->file_open)
-			json_object_set_new(o, "path", json_string(t->path));
 		json_array_append_new(outputs, o);
 	}
 
 	json_t *m = json_object();
 	json_object_set_new(m, "t", json_string("status"));
 	json_object_set_new(m, "streaming", json_boolean(obs_frontend_streaming_active()));
-	json_object_set_new(m, "recording", json_boolean(obs_frontend_recording_active()));
-	json_object_set_new(m, "rec_paused", json_boolean(obs_frontend_recording_paused()));
 	json_object_set_new(m, "kbps", json_real(st && st->active ? st->kbps : 0.0));
 	json_object_set_new(m, "dropped", json_integer(st ? st->dropped : 0));
 	json_object_set_new(m, "total", json_integer(st ? st->total : 0));
 	json_object_set_new(m, "congestion", json_real(st && st->active ? st->congestion : 0.0));
-	json_object_set_new(m, "rec_kbps", json_real(rt && rt->active ? rt->kbps : 0.0));
 	json_object_set_new(m, "lag_ms", json_real(lag_ms));
 	json_object_set_new(m, "fps", json_real(obs_get_active_fps()));
 	json_object_set_new(m, "render_ms", json_real((double)obs_get_average_frame_time_ns() / 1e6));
@@ -658,10 +448,6 @@ static void send_status(uint64_t now_mono, const struct se_monitor_result *mon)
 	json_object_set_new(m, "obs_ns", json_integer((json_int_t)obs_ns));
 	json_object_set_new(m, "mono_ns", json_integer((json_int_t)mono_ns));
 	json_object_set_new(m, "stream_start_ns", json_integer(st && st->active ? (json_int_t)st->start_obs_ns : 0));
-	json_object_set_new(m, "record_start_ns",
-			    json_integer(rt && rt->file_open ? (json_int_t)rt->file_start_obs_ns : 0));
-	json_object_set_new(m, "record_path", json_string(rt && rt->file_open ? rt->path : ""));
-	json_object_set_new(m, "record_dir", json_string(record_dir));
 	json_object_set_new(m, "scene", json_string(scene));
 	json_object_set_new(m, "stale", stale);
 	json_object_set_new(m, "sources", sources);
@@ -697,7 +483,6 @@ static void task_restore(void *param)
 struct cmd_task {
 	json_int_t id;
 	char op[64];
-	char *dir; /* owned; optional absolute directory for record.start */
 };
 
 static void reply(json_int_t id, bool ok, const char *error, json_t *result)
@@ -707,46 +492,6 @@ static void reply(json_int_t id, bool ok, const char *error, json_t *result)
 	if (result)
 		json_object_set_new(m, "result", result);
 	send_json(m);
-}
-
-/* OBS's recording output is assembled from the profile settings on start. Write
- * both output modes, so switching Simple/Advanced doesn't silently revert to an
- * old location. Never change these settings while a file is being written. */
-static bool set_record_directory(const char *dir, char *err, size_t len)
-{
-	if (!dir || dir[0] != '/') {
-		snprintf(err, len, "recording directory must be an absolute path");
-		return false;
-	}
-	struct stat st;
-	if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode)) {
-		snprintf(err, len, "recording directory does not exist: %s", dir);
-		return false;
-	}
-	if (access(dir, W_OK | X_OK) != 0) {
-		snprintf(err, len, "recording directory is not writable: %s", dir);
-		return false;
-	}
-	config_t *cfg = obs_frontend_get_profile_config();
-	if (!cfg) {
-		snprintf(err, len, "OBS profile config is not available");
-		return false;
-	}
-	config_set_string(cfg, "SimpleOutput", "FilePath", dir);
-	config_set_string(cfg, "AdvOut", "RecFilePath", dir);
-	config_set_string(cfg, "AdvOut", "FFFilePath", dir);
-	if (config_save_safe(cfg, "tmp", NULL) != CONFIG_SUCCESS) {
-		snprintf(err, len, "cannot save OBS recording directory in profile");
-		return false;
-	}
-	refresh_profile_info();
-	char *actual = obs_frontend_get_current_record_output_path();
-	bool matches = actual && strcmp(actual, dir) == 0;
-	if (!matches)
-		snprintf(err, len, "OBS profile recording directory differs from requested path");
-	bfree(actual);
-	atomic_store(&force_status, true);
-	return matches;
 }
 
 static void task_cmd(void *param)
@@ -768,23 +513,6 @@ static void task_cmd(void *param)
 		if (active)
 			obs_frontend_streaming_stop();
 		reply(t->id, true, NULL, json_string(active ? "stopping" : "not streaming"));
-	} else if (strcmp(op, "record.start") == 0) {
-		bool already = obs_frontend_recording_active();
-		if (already) {
-			reply(t->id, true, NULL, json_string("already recording"));
-		} else if (!t->dir) {
-			reply(t->id, false, "record.start needs a show directory", NULL);
-		} else if (!set_record_directory(t->dir, err, sizeof(err))) {
-			reply(t->id, false, err, NULL);
-		} else {
-			obs_frontend_recording_start();
-			reply(t->id, true, NULL, json_pack("{s:s, s:s}", "state", "starting", "dir", t->dir));
-		}
-	} else if (strcmp(op, "record.stop") == 0) {
-		bool active = obs_frontend_recording_active();
-		if (active)
-			obs_frontend_recording_stop();
-		reply(t->id, true, NULL, json_string(active ? "stopping" : "not recording"));
 	} else if (strcmp(op, "fallback.on") == 0) {
 		int n = se_fallback_engage(SE_REASON_MANUAL, err, sizeof(err));
 		atomic_store(&force_status, true);
@@ -809,7 +537,6 @@ static void task_cmd(void *param)
 		snprintf(msg, sizeof(msg), "unknown op '%s'", op);
 		reply(t->id, false, msg, NULL);
 	}
-	bfree(t->dir);
 	bfree(t);
 }
 
@@ -838,14 +565,6 @@ static void on_connect(void *ud)
 			      SE_PLUGIN_VERSION, "canvases", source_kinds(), "pid", (int)getpid(), "config",
 			      config_json(&cfg));
 	send_json(m);
-	/* re-announce open recording files so a restarted engine can rebuild its session meta */
-	for (size_t i = 0; i < MAX_TRACKED; i++) {
-		if (!tracked[i].used || !tracked[i].file_open)
-			continue;
-		obs_output_t *o = obs_weak_output_get_output(tracked[i].weak);
-		send_record_path(&tracked[i], o);
-		obs_output_release(o);
-	}
 	atomic_store(&force_status, true);
 }
 
@@ -875,15 +594,9 @@ static void on_message(void *ud, json_t *msg)
 			blog(LOG_WARNING, "[stream-engine] cmd without id/op ignored");
 			return;
 		}
-		const char *dir = json_string_value(json_object_get(msg, "dir"));
-		if (dir && strlen(dir) >= 768) {
-			reply(json_integer_value(id), false, "recording directory is too long for OBS path reporting", NULL);
-			return;
-		}
 		struct cmd_task *task = bzalloc(sizeof(*task));
 		task->id = json_integer_value(id);
 		snprintf(task->op, sizeof(task->op), "%s", op);
-		task->dir = dir ? bstrdup(dir) : NULL;
 		blog(LOG_INFO, "[stream-engine] engine command %" PRId64 ": %s", (int64_t)task->id, task->op);
 		obs_queue_task(OBS_TASK_UI, task_cmd, task, false);
 	}
@@ -948,12 +661,10 @@ static void update_scene_name(void)
 	obs_source_release(scene);
 }
 
-static void send_event(const char *name, const char *path)
+static void send_event(const char *name)
 {
 	json_t *m = json_pack("{s:s, s:s}", "t", "event", "name", name);
 	se_stamp(m);
-	if (path)
-		json_object_set_new(m, "path", json_string(path));
 	send_json(m);
 	atomic_store(&force_status, true);
 }
@@ -964,7 +675,6 @@ static void on_frontend_event(enum obs_frontend_event event, void *data)
 	switch (event) {
 	case OBS_FRONTEND_EVENT_FINISHED_LOADING:
 	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED:
-		refresh_profile_info();
 		update_scene_name();
 		atomic_store(&loaded, true);
 		break;
@@ -977,43 +687,15 @@ static void on_frontend_event(enum obs_frontend_event event, void *data)
 		update_scene_name();
 		atomic_store(&force_status, true);
 		break;
-	case OBS_FRONTEND_EVENT_PROFILE_CHANGED:
-		refresh_profile_info();
-		break;
 	case OBS_FRONTEND_EVENT_STREAMING_STARTING:
 		capture_output(&se_g.stream_output, obs_frontend_get_streaming_output());
 		break;
 	case OBS_FRONTEND_EVENT_STREAMING_STARTED:
 		capture_output(&se_g.stream_output, obs_frontend_get_streaming_output());
-		send_event("stream_started", NULL);
+		send_event("stream_started");
 		break;
 	case OBS_FRONTEND_EVENT_STREAMING_STOPPED:
-		send_event("stream_stopped", NULL);
-		break;
-	case OBS_FRONTEND_EVENT_RECORDING_STARTING:
-		refresh_profile_info();
-		capture_output(&se_g.record_output, obs_frontend_get_recording_output());
-		break;
-	case OBS_FRONTEND_EVENT_RECORDING_STARTED: {
-		obs_output_t *o = obs_frontend_get_recording_output();
-		char path[1024] = {0};
-		if (o)
-			output_file(o, path, sizeof(path));
-		capture_output(&se_g.record_output, o);
-		send_event("record_started", path[0] ? path : NULL);
-		break;
-	}
-	case OBS_FRONTEND_EVENT_RECORDING_STOPPED: {
-		char *path = obs_frontend_get_last_recording();
-		send_event("record_stopped", path && *path ? path : NULL);
-		bfree(path);
-		break;
-	}
-	case OBS_FRONTEND_EVENT_RECORDING_PAUSED:
-		send_event("record_paused", NULL);
-		break;
-	case OBS_FRONTEND_EVENT_RECORDING_UNPAUSED:
-		send_event("record_unpaused", NULL);
+		send_event("stream_stopped");
 		break;
 	case OBS_FRONTEND_EVENT_EXIT:
 		atomic_store(&se_g.exiting, true);
@@ -1067,15 +749,12 @@ void obs_module_unload(void)
 	se_g.control = NULL;
 	for (size_t i = 0; i < MAX_TRACKED; i++) {
 		if (tracked[i].used) {
-			unwatch(&tracked[i]);
 			obs_weak_output_release(tracked[i].weak);
 			memset(&tracked[i], 0, sizeof(tracked[i]));
 		}
 	}
 	pthread_mutex_lock(&se_g.mu);
 	obs_weak_output_release(se_g.stream_output);
-	obs_weak_output_release(se_g.record_output);
 	se_g.stream_output = NULL;
-	se_g.record_output = NULL;
 	pthread_mutex_unlock(&se_g.mu);
 }

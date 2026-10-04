@@ -1,0 +1,83 @@
+{
+  "created": "2026-09-30T18:07:02.000Z",
+  "count": 1,
+  "offset": 0,
+  "recordings": [
+    {
+      "id": "d4e5f6a7-1111-4222-8333-944455566601",
+      "score": 100,
+      "title": "Bohemian Rhapsody",
+      "length": 362000,
+      "video": null,
+      "artist-credit": [
+        {
+          "name": "Panic! at the Disco",
+          "artist": {
+            "id": "b4d32cff-f19e-455f-86c4-f347d824ca61",
+            "name": "Panic! at the Disco",
+            "sort-name": "Panic! at the Disco",
+            "disambiguation": ""
+          }
+        }
+      ],
+      "first-release-date": "2016-08-05",
+      "releases": [
+        {
+          "id": "e0e0e0e0-0000-4000-8000-00000000c001",
+          "status-id": "4e304316-386d-3409-af2e-78857eec5cfe",
+          "count": 1,
+          "title": "Suicide Squad: The Album",
+          "status": "Official",
+          "release-group": {
+            "id": "a1b2c3d4-0000-4000-8000-000000000003",
+            "type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+            "primary-type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+            "title": "Suicide Squad: The Album",
+            "primary-type": "Album",
+            "secondary-types": [
+              "Soundtrack"
+            ],
+            "secondary-type-ids": [
+              "dd2a21e1-0c00-3729-a7a0-de60b84eb5d1"
+            ]
+          },
+          "date": "2016-08-05",
+          "country": "XW",
+          "release-events": [
+            {
+              "date": "2016-08-05",
+              "area": {
+                "id": "525d4e18-3d00-31b9-a58b-a146a916de8f",
+                "name": "[Worldwide]",
+                "sort-name": "[Worldwide]",
+                "iso-3166-1-codes": [
+                  "XW"
+                ]
+              }
+            }
+          ],
+          "track-count": 14,
+          "media": [
+            {
+              "position": 1,
+              "format": "Digital Media",
+              "track": [
+                {
+                  "id": "e0e0e0e0-0000-4000-8000-000000007a7a",
+                  "number": "10",
+                  "title": "Bohemian Rhapsody",
+                  "length": 362000
+                }
+              ],
+              "track-count": 14,
+              "track-offset": 0
+            }
+          ]
+        }
+      ],
+      "isrcs": [
+        "USAT21602441"
+      ]
+    }
+  ]
+}

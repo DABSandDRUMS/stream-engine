@@ -1,0 +1,14 @@
+# Pocket Bounce — a camera-operator punch-in on the kick: the frame jumps in a few percent and
+# settles with a damped spring bounce, a little harder on the bar's downbeat. Barely noticeable
+# until you bypass it. The zoom always covers the frame, so edges never show.
+# Attach: fx = [{ name = "patch.pocket_bounce" }] on a camera source, scene node, or canvas.
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "effect"
+label       = "Pocket Bounce"
+description = "Tiny punch-in zoom on every kick that springs back, harder on the downbeat"
+params.amount   = { type = "float", default = 1.0, range = [0.0, 2.0], description = "Overall strength" }
+params.zoom     = { type = "float", default = 0.022, range = [0.0, 0.12], description = "Punch-in size per kick (fraction of the frame)" }
+params.spring   = { type = "float", default = 0.5, range = [0.0, 1.0], description = "0 = one clean punch, 1 = loose bouncy settle" }
+params.rotation = { type = "float", default = 0.35, range = [0.0, 1.0], description = "Alternating rotation wobble on hits (1 = about 1 degree)" }
+budget = { gpu_ms = 0.2 }

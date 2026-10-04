@@ -5,13 +5,33 @@
   visible, the other preloads the next song. All control goes through engine.js:
     engine → page: state `song.player` (desired per-slot state) and `song.volume`
     page → engine: named query `song.player` {ev: hello|state|progress|ended|error|heartbeat}
-  Nothing is ever drawn over the player (YouTube player terms).
+  Both slots live inside one Windows 3.1 window. Chrome stays outside the IFrame players;
+  nothing is ever drawn over the video (YouTube player terms).
 -->
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <title>stream-engine player</title>
     <style>
+      @font-face {
+        font-family: "Fixedsys";
+        src: url("/web/fonts/FSEX302.ttf") format("truetype");
+      }
+      :root {
+        /* Match the overlay pack's 960px virtual screen, up to 2x at 1920px. */
+        --pixel: clamp(1px, 0.1041667vw, 2px);
+        --cap: calc(19 * var(--pixel));
+        --silver: #c0c0c0;
+        --gray: #808080;
+        --active-cap: #99dcc6;
+        --active-cap-text: #163d32;
+        --bevel: inset var(--pixel) var(--pixel) #fff,
+          inset calc(-1 * var(--pixel)) calc(-1 * var(--pixel)) var(--gray),
+          inset calc(-2 * var(--pixel)) calc(-2 * var(--pixel)) var(--gray);
+      }
+      * {
+        box-sizing: border-box;
+      }
       html,
       body {
         margin: 0;
@@ -19,6 +39,89 @@
         height: 100%;
         background: #000;
         overflow: hidden;
+      }
+      .win {
+        position: absolute;
+        inset: var(--pixel);
+        display: flex;
+        border: calc(3 * var(--pixel)) solid var(--silver);
+        outline: var(--pixel) solid #000;
+        font: calc(16 * var(--pixel))/var(--cap) "Fixedsys", monospace;
+        -webkit-font-smoothing: none;
+      }
+      .win::before {
+        /* Win 3.1 sizing-border notches, confined to the outer silver border. */
+        content: "";
+        position: absolute;
+        inset: calc(-3 * var(--pixel));
+        pointer-events: none;
+        --n: calc(var(--cap) + 3 * var(--pixel));
+        background:
+          linear-gradient(#000, #000) var(--n) 0 / var(--pixel) calc(3 * var(--pixel)) no-repeat,
+          linear-gradient(#000, #000) calc(100% - var(--n)) 0 / var(--pixel) calc(3 * var(--pixel)) no-repeat,
+          linear-gradient(#000, #000) var(--n) 100% / var(--pixel) calc(3 * var(--pixel)) no-repeat,
+          linear-gradient(#000, #000) calc(100% - var(--n)) 100% / var(--pixel) calc(3 * var(--pixel)) no-repeat,
+          linear-gradient(#000, #000) 0 var(--n) / calc(3 * var(--pixel)) var(--pixel) no-repeat,
+          linear-gradient(#000, #000) 0 calc(100% - var(--n)) / calc(3 * var(--pixel)) var(--pixel) no-repeat,
+          linear-gradient(#000, #000) 100% var(--n) / calc(3 * var(--pixel)) var(--pixel) no-repeat,
+          linear-gradient(#000, #000) 100% calc(100% - var(--n)) / calc(3 * var(--pixel)) var(--pixel) no-repeat;
+      }
+      .win-in {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        border: var(--pixel) solid #000;
+        min-width: 0;
+        min-height: 0;
+      }
+      .win-title {
+        flex: none;
+        display: flex;
+        height: calc(var(--cap) + var(--pixel));
+        border-bottom: var(--pixel) solid #000;
+        background: var(--active-cap);
+        color: var(--active-cap-text);
+        user-select: none;
+      }
+      .win-cap {
+        flex: 1;
+        min-width: 0;
+        text-align: center;
+        white-space: nowrap;
+        overflow: hidden;
+        padding: 0 calc(4 * var(--pixel));
+      }
+      .win-ctl,
+      .win-tb {
+        flex: none;
+        width: var(--cap);
+        background-color: var(--silver);
+        background-position: center;
+        background-repeat: no-repeat;
+      }
+      .win-ctl {
+        border-right: var(--pixel) solid #000;
+        background-size: calc(13 * var(--pixel)) calc(5 * var(--pixel));
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='13' height='5' shape-rendering='crispEdges'%3E%3Cpath fill='gray' d='M1 4h12v1H1zM12 1h1v4h-1z'/%3E%3Cpath d='M0 0h12v4H0z'/%3E%3Cpath fill='white' d='M1 1h10v2H1z'/%3E%3C/svg%3E");
+      }
+      .win-tb {
+        border-left: var(--pixel) solid #000;
+        background-size: calc(7 * var(--pixel)) calc(4 * var(--pixel));
+        box-shadow: var(--bevel);
+      }
+      .win-tb.min {
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='7' height='4' shape-rendering='crispEdges'%3E%3Cpath d='M0 0h7v1H0zM1 1h5v1H1zM2 2h3v1H2zM3 3h1v1H3z'/%3E%3C/svg%3E");
+      }
+      .win-tb.max {
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='7' height='4' shape-rendering='crispEdges'%3E%3Cpath d='M3 0h1v1H3zM2 1h3v1H2zM1 2h5v1H1zM0 3h7v1H0z'/%3E%3C/svg%3E");
+      }
+      .win-body {
+        flex: 1;
+        position: relative;
+        min-width: 0;
+        min-height: 0;
+        overflow: hidden;
+        background: #000;
       }
       .slot {
         position: absolute;
@@ -41,9 +144,23 @@
     </style>
   </head>
   <body>
-    <div id="slot-a" class="slot active"><div id="player-a"></div></div>
-    <div id="slot-b" class="slot"><div id="player-b"></div></div>
+    <div class="win">
+      <div class="win-in">
+        <div class="win-title">
+          <span class="win-ctl" aria-hidden="true"></span>
+          <span class="win-cap">Media Player - MUSIC VIDEO</span>
+          <span class="win-tb min" aria-hidden="true"></span>
+          <span class="win-tb max" aria-hidden="true"></span>
+        </div>
+        <div class="win-body">
+          <div id="slot-a" class="slot active"><div id="player-a"></div></div>
+          <div id="slot-b" class="slot"><div id="player-b"></div></div>
+        </div>
+      </div>
+    </div>
     <script src="/engine.js"></script>
+    <script src="/web/overlay.js"></script>
+    <script src="/patches/_lib/win31/theme.js"></script>
     <script src="/web/player.js"></script>
   </body>
 </html>

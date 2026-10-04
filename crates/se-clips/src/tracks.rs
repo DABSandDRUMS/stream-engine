@@ -1,7 +1,6 @@
-//! Which recording audio streams go into a clip (music dropped by default) and which one is
-//! transcribed. OBS records up to six tracks; the OBS adapter reports each track's name, the
-//! OBS sources routed to it, and their PipeWire nodes (`se-music`, `se-band`, …). Roles come
-//! from glob patterns in `[clips.audio.roles]`.
+//! Audio selection from the recording's configured sources. Keep every selected source by
+//! default; optional user role rules can omit entire talk-clip tracks, never separate sounds
+//! already mixed into one stream.
 
 use crate::config::{AudioConfig, MixedPolicy};
 use crate::session::TrackInfo;
@@ -13,7 +12,7 @@ pub struct AudioPlan {
     pub mix: Vec<usize>,
     /// Stream transcribed for captions/ranking.
     pub transcribe: Option<usize>,
-    /// True when every dropped role (music) is provably absent from the mix.
+    /// True when a user-configured music-role track was omitted (not source separation).
     pub music_dropped: bool,
     /// Human-readable explanation for the review UI.
     pub note: String,
@@ -65,7 +64,6 @@ pub fn plan(streams: usize, tracks: &[TrackInfo], cfg: &AudioConfig) -> AudioPla
         })
         .collect();
     let roles: Vec<BTreeSet<String>> = info.iter().map(|t| t.as_ref().map(|t| roles(t, cfg)).unwrap_or_default()).collect();
-    let known = roles.iter().any(|r| !r.is_empty());
     let dropped = |i: usize| roles[i].iter().any(|r| cfg.drop.contains(r));
     let pick_transcribe = |mix: &[usize]| -> Option<usize> {
         for want in &cfg.transcribe {
@@ -79,6 +77,22 @@ pub fn plan(streams: usize, tracks: &[TrackInfo], cfg: &AudioConfig) -> AudioPla
         }
         mix.first().copied().or(Some(0))
     };
+    if streams == 1 {
+        // A role name cannot prove that a recorded stream excludes backing music.
+        let mute = dropped(0) && matches!(cfg.mixed, MixedPolicy::Mute);
+        return AudioPlan {
+            mix: if mute { Vec::new() } else { vec![0] },
+            transcribe: pick_transcribe(&[0]),
+            music_dropped: mute,
+            note: if mute {
+                "one recorded audio stream muted by the mixed-track policy"
+            } else {
+                "one recorded audio stream kept intact; music cannot be removed separately"
+            }
+            .into(),
+        };
+    }
+    let known = roles.iter().any(|r| !r.is_empty());
     if !known {
         let mix: Vec<usize> = (0..streams).collect();
         let t = pick_transcribe(&mix);
@@ -98,56 +112,36 @@ pub fn plan(streams: usize, tracks: &[TrackInfo], cfg: &AudioConfig) -> AudioPla
                 mix: all,
                 transcribe: t,
                 music_dropped: false,
-                note: "every track carries music (single mixed track): kept — switch OBS to multitrack recording to drop music".into(),
+                note: "every recorded source matched an exclusion; mixed-track policy keeps the complete mix".into(),
             },
             MixedPolicy::Mute => {
-                AudioPlan { mix: Vec::new(), transcribe: t, music_dropped: true, note: "every track carries music (single mixed track): clip muted".into() }
+                AudioPlan { mix: Vec::new(), transcribe: t, music_dropped: true, note: "every recorded source excluded: clip muted by explicit policy".into() }
             }
         };
     }
     let names: Vec<String> =
         mix.iter().map(|i| roles[*i].iter().cloned().collect::<Vec<_>>().join("+")).map(|s| if s.is_empty() { "other".into() } else { s }).collect();
     let dropped_n = streams - mix.len();
-    AudioPlan { transcribe: pick_transcribe(&mix), music_dropped: true, note: format!("mix of {} ({} track(s) dropped)", names.join(", "), dropped_n), mix }
+    AudioPlan {
+        transcribe: pick_transcribe(&mix),
+        music_dropped: (0..streams).any(|i| dropped(i) && roles[i].contains("music")),
+        note: format!("mix of {} ({} track(s) dropped)", names.join(", "), dropped_n),
+        mix,
+    }
 }
 
-/// Musical passage: retain the song and the live performance, never add a program
-/// stream on top of its constituent tracks. Unknown layouts use one mixed stream.
+/// Song clips keep every configured recording source; labels do not prove whether a feed
+/// is an isolated instrument or an already-combined mix. Do not caption likely lyrics.
 pub fn plan_song(streams: usize, tracks: &[TrackInfo], cfg: &AudioConfig) -> AudioPlan {
     if streams == 0 {
         return plan(streams, tracks, cfg);
     }
-    let role_sets: Vec<_> = (0..streams)
-        .map(|i| {
-            tracks
-                .iter()
-                .find(|t| t.index == i)
-                .map(|t| roles(t, cfg))
-                .or_else(|| cfg.tracks.get(i).map(|name| roles(&TrackInfo { index: i, name: name.clone(), ..Default::default() }, cfg)))
-                .unwrap_or_default()
-        })
-        .collect();
-    let has_music = role_sets.iter().any(|r| r.contains("music") && !r.contains("program"));
-    let program = role_sets.iter().position(|r| r.contains("program"));
-    let mix: Vec<usize> = if has_music {
-        role_sets.iter().enumerate().filter(|(_, r)| !r.is_empty() && !r.contains("program")).map(|(i, _)| i).collect()
-    } else if let Some(program) = program {
-        // With no separately identified song bus, program is the only safe source:
-        // mixing it with the performance streams would double the live instruments.
-        vec![program]
-    } else if role_sets.iter().any(|r| !r.is_empty()) {
-        role_sets.iter().enumerate().filter(|(_, r)| !r.is_empty()).map(|(i, _)| i).collect()
-    } else {
-        vec![0]
-    };
-    let note = if has_music {
-        "song and performance kept; program excluded where separate tracks exist"
-    } else if program.is_some() {
-        "one mixed program track kept (no separate song track reported)"
-    } else {
-        "performance tracks kept; no song track reported"
-    };
-    AudioPlan { mix, transcribe: None, music_dropped: false, note: note.into() }
+    AudioPlan {
+        mix: (0..streams).collect(),
+        transcribe: None,
+        music_dropped: false,
+        note: "selected recording sources kept intact; mixed components cannot be separated".into(),
+    }
 }
 
 #[cfg(test)]
@@ -168,20 +162,20 @@ mod tests {
 
     #[test]
     fn multitrack_drops_music_and_program_and_transcribes_the_mic() {
-        let cfg = AudioConfig::default();
+        let cfg = AudioConfig { drop: vec!["music".into(), "program".into()], ..AudioConfig::default() };
         let tracks = [t(0, "Track 1", &["se-program"]), t(1, "Mic", &["se-mic"]), t(2, "Track 3", &["se-music"]), t(3, "Band", &["se-band"])];
         let p = plan(4, &tracks, &cfg);
         assert_eq!(p.mix, vec![1, 3]);
         assert_eq!(p.transcribe, Some(1));
         assert!(p.music_dropped);
-        // no mic track yet: the band mix (mics are in the 16R main mix) is transcribed
+        // No preferred mic track: use the next configured transcription role.
         let p = plan(2, &[t(0, "Band", &["se-band"]), t(1, "Music", &["se-music"])], &cfg);
         assert_eq!((p.mix.clone(), p.transcribe), (vec![0], Some(0)));
     }
 
     #[test]
     fn single_mixed_track_follows_policy_and_config_names_fill_gaps() {
-        let mut cfg = AudioConfig::default();
+        let mut cfg = AudioConfig { drop: vec!["music".into()], ..AudioConfig::default() };
         let mixed = [TrackInfo { index: 0, name: "Track 1".into(), sources: vec!["se-music".into(), "se-band".into()], ..Default::default() }];
         let p = plan(1, &mixed, &cfg);
         assert_eq!(p.mix, vec![0]);
@@ -193,20 +187,33 @@ mod tests {
         assert_eq!(p.mix, vec![0, 1, 2]);
         assert!(!p.music_dropped);
         // `[clips.audio] tracks` names streams the recording didn't describe
-        let cfg = AudioConfig { tracks: vec!["mic".into(), "music".into(), "band".into()], ..AudioConfig::default() };
+        let cfg = AudioConfig { tracks: vec!["mic".into(), "music".into(), "band".into()], drop: vec!["music".into()], ..AudioConfig::default() };
         let p = plan(3, &[], &cfg);
         assert_eq!((p.mix, p.transcribe, p.music_dropped), (vec![0, 2], Some(0), true));
     }
+
     #[test]
-    fn requested_song_keeps_music_and_performance_without_duplicate_program() {
+    fn one_mixed_source_keeps_music_in_talk_and_song_clips() {
         let cfg = AudioConfig::default();
-        let tracks = [t(0, "Program", &["se-program"]), t(1, "Mic", &["se-mic"]), t(2, "Song", &["se-music"]), t(3, "Band", &["se-band"])];
-        let song = plan_song(4, &tracks, &cfg);
-        assert_eq!(song.mix, vec![1, 2, 3]);
+        let mixed = [t(0, "Live mix", &["se-band"])];
+        let talk = plan(1, &mixed, &cfg);
+        assert_eq!(talk.mix, vec![0]);
+        assert!(!talk.music_dropped, "a band-labelled track can still contain backing music");
+        let song = plan_song(1, &mixed, &cfg);
+        assert_eq!(song.mix, vec![0]);
         assert!(!song.music_dropped);
-        assert_eq!(song.transcribe, None, "lyrics must not be captioned");
-        assert_eq!(plan(4, &tracks, &cfg).mix, vec![1, 3], "non-song behavior unchanged");
-        // If only the mixed program contains the song, use it alone.
-        assert_eq!(plan_song(3, &tracks[..2], &cfg).mix, vec![0]);
+        assert_eq!(song.transcribe, None);
+    }
+    #[test]
+    fn selected_sources_are_not_dropped_based_on_names() {
+        let cfg = AudioConfig::default();
+        let tracks = [t(0, "Program", &["mixed-input"]), t(1, "Other feed", &["network"]), t(2, "Song", &["player"])];
+        let song = plan_song(3, &tracks, &cfg);
+        assert_eq!(song.mix, vec![0, 1, 2]);
+        assert!(!song.music_dropped);
+        assert_eq!(song.transcribe, None);
+        let talk = plan(3, &tracks, &cfg);
+        assert_eq!(talk.mix, vec![0, 1, 2]);
+        assert!(!talk.music_dropped);
     }
 }

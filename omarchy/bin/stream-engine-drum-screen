@@ -1,0 +1,480 @@
+#!/usr/bin/env python3
+"""Move the whole Hyprland desk to the Philips TV, and restore it afterward.
+
+Usage: stream-engine-drum-screen [status|toggle|tv|desk]
+The saved desk survives failed transitions and reloads. Workspace moves retain
+Hyprland's layout trees and groups; closed windows cannot be resurrected.
+"""
+
+import fcntl
+import json
+import math
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+
+TV_DESCRIPTION = "Philips Consumer Electronics Company Philips FTV"
+HOME = Path.home()
+STATE_HOME = Path(os.environ.get("XDG_STATE_HOME") or HOME / ".local/state")
+STATE_DIR = STATE_HOME / "stream-engine"
+STATE_FILE = STATE_DIR / "drum-screen.json"
+OVERRIDE = STATE_HOME / "omarchy/toggles/hypr/stream-engine-drum-screen.lua"
+# The existing tv helper deliberately uses HOME, not XDG_STATE_HOME.
+TV_FLAG = HOME / ".local/state/omarchy/toggles/hypr/tv-disabled.lua"
+TV_HELPER = HOME / ".local/bin/tv"
+
+
+class SwitchError(Exception):
+    pass
+
+
+def run(*args):
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise SwitchError(f"Cannot run {args[0]}: {error}") from error
+    if result.returncode:
+        detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
+        raise SwitchError(f"{' '.join(map(str, args))}: {detail}")
+    return result.stdout.strip()
+
+
+def hypr(*args):
+    result = run("hyprctl", *args)
+    # hyprctl can return success for a dispatcher or Lua evaluation error.
+    if args[0] in ("dispatch", "eval", "reload") and result.lower() not in ("", "ok"):
+        raise SwitchError(f"hyprctl {args[0]}: {result}")
+    return result
+
+
+def query(*args):
+    try:
+        return json.loads(hypr("-j", *args))
+    except json.JSONDecodeError as error:
+        raise SwitchError("Hyprland returned invalid JSON; check the active desktop session") from error
+
+
+def lua(value):
+    if isinstance(value, dict):
+        return "{ " + ", ".join(f"{key} = {lua(item)}" for key, item in value.items()) + " }"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        if not math.isfinite(value):
+            raise SwitchError("Invalid non-finite monitor/window geometry")
+        return str(value)
+    # ASCII JSON string escapes overlap Lua except \u; use Lua decimal escapes.
+    escaped = str(value).encode("utf-8")
+    return '"' + "".join(chr(c) if 32 <= c < 127 and c not in (34, 92) else f"\\{c:03d}" for c in escaped) + '"'
+
+
+def dispatch(name, values):
+    hypr("dispatch", f"hl.dsp.{name}({lua(values)})")
+
+
+def atomic(path, content):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix="." + path.name + ".", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def file_contents(path):
+    try:
+        return path.read_text()
+    except FileNotFoundError:
+        return None
+
+
+def put_back(path, contents):
+    if contents is None:
+        path.unlink(missing_ok=True)
+    else:
+        atomic(path, contents)
+
+
+def load_state():
+    content = file_contents(STATE_FILE)
+    if content is None:
+        return {"version": 1, "mode": "desk", "snapshot": None}
+    try:
+        state = json.loads(content)
+        if state["version"] != 1 or state["mode"] not in ("desk", "tv"):
+            raise ValueError("unsupported version or mode")
+        snapshot = state.get("snapshot")
+        if snapshot is not None and (not snapshot["monitors"] or not snapshot["workspaces"]):
+            raise ValueError("empty desk snapshot")
+        return state
+    except (ValueError, KeyError, TypeError) as error:
+        raise SwitchError(f"Invalid saved desk in {STATE_FILE}; preserve it for recovery: {error}") from error
+
+
+def save_state(state):
+    atomic(STATE_FILE, json.dumps(state, indent=2) + "\n")
+
+
+def is_tv(monitor):
+    return monitor.get("description", "").startswith(TV_DESCRIPTION) or (
+        monitor.get("make") == "Philips Consumer Electronics Company" and monitor.get("model") == "Philips FTV"
+    )
+
+
+def usable(monitor):
+    return bool(monitor and not monitor.get("disabled", False)
+                and monitor.get("width", 0) > 0 and monitor.get("height", 0) > 0
+                and monitor.get("refreshRate", 0) > 0 and monitor.get("dpmsStatus", True)
+                and monitor.get("mirrorOf", "none") in ("none", "", None))
+
+
+def active_monitors():
+    return [monitor for monitor in query("monitors") if usable(monitor)]
+
+
+def find_tv():
+    deadline = time.monotonic() + 8
+    while True:
+        televisions = [monitor for monitor in query("monitors", "all") if is_tv(monitor)]
+        if len(televisions) == 1:
+            return televisions[0]
+        if len(televisions) > 1 or time.monotonic() >= deadline:
+            raise SwitchError("Philips TV not detected uniquely. Turn it on, select the computer HDMI input, and check the cable")
+        time.sleep(0.15)
+
+
+def wait_for(names):
+    # Monitor configuration/hotplug is asynchronous. Wait for state, not another
+    # attempt at the switch, and never disable a source before this succeeds.
+    deadline = time.monotonic() + 8
+    while True:
+        active = {monitor["name"]: monitor for monitor in active_monitors()}
+        if all(name in active for name in names):
+            return active
+        if time.monotonic() >= deadline:
+            missing = ", ".join(name for name in names if name not in active)
+            raise SwitchError(f"Display not active/usable: {missing}. Turn it on and check its cable/input")
+        time.sleep(0.15)
+
+
+def monitor_rule(monitor):
+    return {"output": monitor["name"],
+            "mode": f'{monitor["width"]}x{monitor["height"]}@{monitor["refreshRate"]:.5f}',
+            "position": f'{monitor["x"]}x{monitor["y"]}',
+            "scale": monitor["scale"], "transform": monitor.get("transform", 0),
+            "disabled": False}
+
+
+def rules(monitors):
+    return "\n".join(f"hl.monitor({lua(monitor_rule(monitor))})" for monitor in monitors) + "\n"
+
+
+def apply(monitors):
+    hypr("eval", rules(monitors))
+    return wait_for([monitor["name"] for monitor in monitors])
+
+
+def capture():
+    monitors = active_monitors()
+    if not monitors:
+        raise SwitchError("No usable Hyprland screen; check the desktop session")
+    clients = query("clients")
+    focused = query("activewindow")
+    return {"monitors": monitors, "workspaces": query("workspaces"),
+            "floating": [client for client in clients if client.get("floating")],
+            "focus": focused, "active_workspace": query("activeworkspace"),
+            "instance": os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")}
+
+
+def workspace_selector(workspace):
+    name = workspace.get("name", "")
+    if name.startswith("special:"):
+        return name
+    if workspace["id"] > 0:
+        return workspace["id"]
+    return "name:" + name
+
+
+def move_workspaces(owners):
+    # Live monitors create replacement empty workspaces as active content moves.
+    # These are compositor placeholders, not desktop content to migrate.
+    current = [workspace for workspace in query("workspaces")
+               if workspace.get("windows", 0) or workspace.get("ispersistent")]
+    moving = {str(workspace["id"]): owners[str(workspace["id"])] for workspace in current
+              if str(workspace["id"]) in owners}
+    for workspace in current:
+        monitor = owners.get(str(workspace["id"]))
+        if monitor and workspace.get("monitor") != monitor:
+            dispatch("workspace.move", {"workspace": workspace_selector(workspace), "monitor": monitor})
+    actual = {str(workspace["id"]): workspace.get("monitor") for workspace in query("workspaces")}
+    wrong = [key for key, monitor in moving.items() if actual.get(key) != monitor]
+    if wrong:
+        raise SwitchError("Hyprland did not move workspaces: " + ", ".join(wrong))
+
+
+def same_window(saved, current, same_instance):
+    return same_instance and saved.get("address") == current.get("address") and saved.get("pid") == current.get("pid")
+
+
+def restore_windows(snapshot, owners, monitors, fit=False):
+    current = {client["address"]: client for client in query("clients")}
+    old_monitors = {monitor["name"]: monitor for monitor in snapshot["monitors"]}
+    same_instance = snapshot["instance"] == os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+    for saved in snapshot["floating"]:
+        client = current.get(saved["address"])
+        if not client or not client.get("floating") or not same_window(saved, client, same_instance):
+            continue
+        owner = owners.get(str(client["workspace"]["id"]))
+        target = monitors.get(owner)
+        if not target:
+            continue
+        source = old_monitors.get(next((workspace["monitor"] for workspace in snapshot["workspaces"]
+                                       if workspace["id"] == saved["workspace"]["id"]), ""), target)
+        x, y = saved["at"]
+        width, height = saved["size"]
+        if fit or source["name"] != target["name"]:
+            width = min(width, int(target["width"] / target["scale"]))
+            height = min(height, int(target["height"] / target["scale"]))
+            x = target["x"] + max(0, min(x - source["x"], int(target["width"] / target["scale"]) - width))
+            y = target["y"] + max(0, min(y - source["y"], int(target["height"] / target["scale"]) - height))
+        selector = "address:" + saved["address"]
+        dispatch("window.resize", {"window": selector, "x": width, "y": height, "relative": False})
+        dispatch("window.move", {"window": selector, "x": x, "y": y, "relative": False})
+
+
+def restore_focus(snapshot, monitors, tv_mode=False):
+    workspaces = {workspace["id"]: workspace for workspace in query("workspaces")}
+    if not tv_mode:
+        for monitor in snapshot["monitors"]:
+            if monitor["name"] not in monitors:
+                continue
+            workspace = monitor.get("activeWorkspace", {})
+            if workspace.get("id", 0) > 0:
+                dispatch("focus", {"monitor": monitor["name"]})
+                dispatch("focus", {"workspace": workspace_selector(workspace)})
+            special = monitor.get("specialWorkspace", {})
+            actual_monitor = next((item for item in query("monitors") if item["name"] == monitor["name"]), {})
+            actual_special = actual_monitor.get("specialWorkspace", {})
+            if actual_special.get("id", 0) != special.get("id", 0):
+                dispatch("focus", {"monitor": monitor["name"]})
+                if actual_special.get("id", 0):
+                    dispatch("workspace.toggle_special", actual_special["name"].removeprefix("special:"))
+                if special.get("id") in workspaces:
+                    dispatch("workspace.toggle_special", special["name"].removeprefix("special:"))
+    focused = snapshot.get("focus", {})
+    same_instance = snapshot["instance"] == os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+    current = next((client for client in query("clients") if same_window(focused, client, same_instance)), None)
+    workspace = workspaces.get(snapshot["active_workspace"].get("id"))
+    if workspace and not workspace.get("name", "").startswith("special:"):
+        dispatch("focus", {"workspace": workspace_selector(workspace)})
+    if current:
+        if current["workspace"].get("name", "").startswith("special:"):
+            owner = next((item for item in query("monitors") if item["name"] == workspaces[current["workspace"]["id"]]["monitor"]), {})
+            if owner.get("specialWorkspace", {}).get("id") != current["workspace"]["id"]:
+                dispatch("focus", {"monitor": owner["name"]})
+                dispatch("workspace.toggle_special", current["workspace"]["name"].removeprefix("special:"))
+        dispatch("focus", {"window": "address:" + current["address"]})
+    elif not tv_mode:
+        focused_monitor = next((monitor for monitor in snapshot["monitors"] if monitor.get("focused")), None)
+        if focused_monitor and focused_monitor["name"] in monitors:
+            dispatch("focus", {"monitor": focused_monitor["name"]})
+
+
+def tv_command(mode):
+    if not os.access(TV_HELPER, os.X_OK):
+        raise SwitchError(f"Missing executable {TV_HELPER}; install/configure the existing tv and tv-port helpers")
+    run(str(TV_HELPER), mode)
+
+
+def reload_config():
+    hypr("reload")
+    errors = hypr("configerrors")
+    if errors:
+        raise SwitchError("Hyprland config errors: " + errors)
+
+
+def tv_override(desk, tv):
+    # At login/reload keep a usable desk if the physical TV is disconnected.
+    # tv-port on persists /var/lib/tv-port/state; its existing udev boot rule
+    # leaves the connector in normal detection mode on the next boot.
+    paths = sorted(str(path) for path in Path("/sys/class/drm").glob(f"card*-{tv['name']}/status"))
+    if not paths:
+        raise SwitchError(f"No physical DRM connector for {tv['name']}; refusing a TV-only profile")
+    content = "-- stream-engine drum screen: TV-only, with disconnected-TV desk fallback.\n" + rules(desk)
+    content += "local connected = false\n"
+    for path in paths:
+        content += f"do local f = io.open({lua(path)}, 'r'); if f then connected = connected or f:read('*l') == 'connected'; f:close() end end\n"
+    content += rules([tv]) + "if connected then\n"
+    for monitor in desk:
+        content += "  hl.monitor(" + lua({"output": monitor["name"], "disabled": True}) + ")\n"
+    return content + "end\n"
+
+
+def status(state):
+    active = active_monitors()
+    desks = [monitor for monitor in active if not is_tv(monitor)]
+    televisions = [monitor for monitor in active if is_tv(monitor)]
+    if state["mode"] == "tv":
+        if len(televisions) != 1 or desks:
+            raise SwitchError("Saved TV mode is not active (TV offline or desk fallback). Run 'desk' to recover, or turn on the TV and run 'tv'")
+        return "tv"
+    if not desks:
+        raise SwitchError("Desk screens are unavailable; run 'desk' to restore the saved profile")
+    return "desk"
+
+
+def rollback(original, old_override, old_flag, parked):
+    # A staging override enables the original screens before any source is
+    # removed; only restore a disabling flag after these screens are confirmed.
+    atomic(OVERRIDE, rules(original["monitors"]))
+    if any(is_tv(monitor) for monitor in original["monitors"]):
+        tv_command("on")
+    active = apply(original["monitors"])
+    owners = {str(workspace["id"]): workspace["monitor"] for workspace in original["workspaces"]}
+    move_workspaces(owners)
+    restore_windows(original, owners, active)
+    restore_focus(original, active)
+    if parked:
+        tv_command("off")
+    put_back(TV_FLAG, old_flag)
+    put_back(OVERRIDE, old_override)
+    reload_config()
+    active = wait_for([monitor["name"] for monitor in original["monitors"]])
+    # Remove a newly enabled TV even if the original user profile allowed it.
+    original_names = {monitor["name"] for monitor in original["monitors"]}
+    for name, monitor in active.items():
+        if is_tv(monitor) and name not in original_names:
+            hypr("eval", "hl.monitor(" + lua({"output": name, "disabled": True}) + ")")
+    move_workspaces(owners)
+    restore_windows(original, owners, active)
+    restore_focus(original, active)
+
+
+def switch(command):
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with (STATE_DIR / "drum-screen.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        state = load_state()
+        target = ("desk" if state["mode"] == "tv" else "tv") if command == "toggle" else command
+        original = capture()
+        desk = [monitor for monitor in original["monitors"] if not is_tv(monitor)]
+        if target == "tv" and state["mode"] == "desk" and desk:
+            # Keep a failed switch's pending snapshot instead of replacing the
+            # original geometry with a partially migrated desktop.
+            if not state.get("pending"):
+                state["snapshot"] = original
+            state["pending"] = True
+            save_state(state)
+        snapshot = state.get("snapshot")
+        if not snapshot:
+            if target == "desk" and desk:
+                snapshot = original
+            else:
+                raise SwitchError(f"No saved desk profile in {STATE_FILE}; enable desk screens before entering TV mode")
+        saved_desk = [monitor for monitor in snapshot["monitors"] if not is_tv(monitor)]
+        if not saved_desk:
+            raise SwitchError("The saved profile has no desk screens; enable them before switching")
+        old_override = file_contents(OVERRIDE)
+        old_flag = file_contents(TV_FLAG)
+        parked = old_flag is not None
+        try:
+            # Replacing the override is safe: this staging profile only enables
+            # screens. It also survives tv on/off's forced compositor reload.
+            staging = saved_desk + [monitor for monitor in original["monitors"] if is_tv(monitor)]
+            atomic(OVERRIDE, rules(staging))
+            if target == "tv":
+                tv_command("on")
+                tv = find_tv()
+                if not usable(tv):
+                    hypr("eval", "hl.monitor(" + lua({"output": tv["name"], "mode": "preferred", "position": "auto", "scale": 1.25, "disabled": False}) + ")")
+                active = wait_for([tv["name"]])
+                tv = active[tv["name"]]
+                final_override = tv_override(saved_desk, tv)
+                owners = {str(workspace["id"]): tv["name"] for workspace in query("workspaces")}
+                move_workspaces(owners)
+                restore_windows(original, owners, active, fit=True)
+                restore_focus(original, active, tv_mode=True)
+                # Persist only after the real TV is proven usable. Lua also
+                # preserves desk availability when the TV is absent at boot.
+                atomic(OVERRIDE, final_override)
+                reload_config()
+                status({"mode": "tv"})
+                move_workspaces({str(workspace["id"]): tv["name"] for workspace in query("workspaces")})
+                restore_focus(original, {tv["name"]: tv}, tv_mode=True)
+            else:
+                active = apply(saved_desk)
+                fallback = next((monitor["name"] for monitor in saved_desk if monitor.get("focused")), saved_desk[0]["name"])
+                owners = {str(workspace["id"]): workspace["monitor"] if workspace["monitor"] in active and not is_tv(active[workspace["monitor"]]) else fallback
+                          for workspace in snapshot["workspaces"]}
+                for workspace in query("workspaces"):
+                    owners.setdefault(str(workspace["id"]), fallback)
+                move_workspaces(owners)
+                restore_windows(snapshot, owners, active)
+                restore_focus(snapshot, active)
+                atomic(OVERRIDE, rules(saved_desk) + "hl.monitor(" + lua({"output": "desc:" + TV_DESCRIPTION, "disabled": True}) + ")\n")
+                tv_command("off")
+                reload_config()
+                active = wait_for([monitor["name"] for monitor in saved_desk])
+                if any(is_tv(monitor) for monitor in active.values()):
+                    raise SwitchError("TV is still active after parking; check tv/tv-port configuration")
+                move_workspaces(owners)
+                restore_windows(snapshot, owners, active)
+                restore_focus(snapshot, active)
+            state["mode"] = target
+            state["pending"] = False
+            save_state(state)
+            return target
+        except (SwitchError, OSError, KeyError, TypeError, ValueError) as error:
+            try:
+                rollback(original, old_override, old_flag, parked)
+            except (SwitchError, OSError, KeyError, TypeError, ValueError) as recovery:
+                raise SwitchError(f"{error}. Rollback incomplete: {recovery}. Saved desk retained at {STATE_FILE}; run 'desk' after checking cables") from error
+            raise SwitchError(f"{error}. Original usable profile restored; saved desk retained at {STATE_FILE}") from error
+
+
+def notify(message, failed=False):
+    executable = shutil.which("notify-send")
+    if executable:
+        try:
+            subprocess.run([executable, "--app-name=Stream Engine", "--urgency=" + ("critical" if failed else "normal"),
+                            "Drum screen", message], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
+def main():
+    command = sys.argv[1] if len(sys.argv) == 2 else "toggle" if len(sys.argv) == 1 else ""
+    if command not in ("status", "toggle", "desk", "tv"):
+        print("usage: stream-engine-drum-screen [status|toggle|desk|tv]", file=sys.stderr)
+        return 2
+    try:
+        result = status(load_state()) if command == "status" else switch(command)
+    except (SwitchError, OSError, KeyError, TypeError, ValueError) as error:
+        message = str(error)
+        print("stream-engine-drum-screen: " + message, file=sys.stderr)
+        if command != "status":
+            notify(message, failed=True)
+        return 1
+    print(result)
+    if command != "status":
+        notify("Entire desk moved to Philips TV" if result == "tv" else "Desk restored; Philips TV parked")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

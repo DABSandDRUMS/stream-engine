@@ -15,7 +15,7 @@
 
 use crate::app::{App, ViewId};
 use crate::views::live::nice;
-use crate::views::scene_edit::{self, FxEntry, FxHost, FxValue};
+use crate::views::scene_edit;
 use crate::views::{canvas, links, media, patches, rules, sources};
 use egui::{Align, Layout, RichText, Vec2};
 use se_proto::{Op, Value};
@@ -161,7 +161,7 @@ pub fn base_written(app: &mut App, scene: &str) {
 }
 
 /// Send a debounced edit once it's due (`force`: now).
-fn flush(app: &mut App, now: f64, force: bool) {
+pub(crate) fn flush(app: &mut App, now: f64, force: bool) {
     let Some(l) = app.build.comp.local.as_ref() else { return };
     let Some(at) = l.send_at else { return };
     if force || now >= at {
@@ -1092,21 +1092,15 @@ fn layer_inspector(app: &mut App, ui: &mut egui::Ui, scene: &str, sel: &str, tex
         |ui| look_section(app, ui, scene, sel, node.as_ref(), canvas_name, text, now),
     );
 
-    let mut add = None;
     widgets::inspector_section(
         ui,
         &t,
         ("layer-fx", scene),
         "Effects",
         true,
-        |ui| {
-            add = Some(widgets::icon_button(ui, &t, icon::PLUS, "Add effect"));
-        },
-        |ui| effect_cards(app, ui, scene, FxHost::Layer(sel), text, now),
+        |_| {},
+        |ui| effect_cards(app, ui, scene, Some(sel)),
     );
-    if let Some(r) = add {
-        egui::Popup::menu(&r).width(380.0).show(|ui| add_fx_menu(app, ui, scene, FxHost::Layer(sel), text, now));
-    }
 
     widgets::inspector_section(
         ui,
@@ -1313,6 +1307,7 @@ fn transform_section(app: &mut App, ui: &mut egui::Ui, scene: &str, sel: &str, s
         canvas::apply_rect(app, scene, canvas_name, sel, r);
     }
     let mut r = n.rect;
+    let aspect_locked = canvas::framed_window(app, scene, canvas_name, sel) && n.rect[2] > 0.0 && n.rect[3] > 0.0;
     let mut changed = false;
     for (label, a, b) in [("Position", 0, 1), ("Size", 2, 3)] {
         widgets::prop_row(ui, &t, label, |ui| {
@@ -1321,6 +1316,10 @@ fn transform_section(app: &mut App, ui: &mut egui::Ui, scene: &str, sel: &str, s
                 let range = if i < 2 { -50.0..=100.0 } else { 1.0..=200.0 };
                 if ui.add(egui::DragValue::new(&mut pct).range(range).speed(0.2).prefix(axis).suffix("%").fixed_decimals(1)).changed() {
                     r[i] = pct / 100.0;
+                    if aspect_locked && i >= 2 {
+                        let other = if i == 2 { 3 } else { 2 };
+                        r[other] = r[i] * n.rect[other] / n.rect[i];
+                    }
                     changed = true;
                 }
             }
@@ -1328,6 +1327,9 @@ fn transform_section(app: &mut App, ui: &mut egui::Ui, scene: &str, sel: &str, s
     }
     if changed {
         canvas::apply_rect(app, scene, canvas_name, sel, r);
+    }
+    if aspect_locked {
+        widgets::hint(ui, &t, "Aspect ratio locked for this video window.");
     }
     ui.add_space(spacing::XS);
     widgets::hint(ui, &t, &format!("Scale, rotation and offset move the picture without changing its box. {} lets one follow the music.", links::SINE));
@@ -1380,266 +1382,14 @@ fn look_section(app: &mut App, ui: &mut egui::Ui, scene: &str, sel: &str, n: Opt
 
 // ---- effects ----------------------------------------------------------------------------------------------
 
-fn host_key(host: FxHost) -> String {
-    match host {
-        FxHost::Layer(id) => format!("layer:{id}"),
-        FxHost::Scene => "scene".into(),
+
+/// Scene and layer FX use the same action-based slot editor as the Effects target racks.
+fn effect_cards(app: &mut App, ui: &mut egui::Ui, scene: &str, node: Option<&str>) {
+    if let Some(target) = crate::views::fx_rack::scene_target(app, scene, node) {
+        crate::views::fx_rack::chain(app, ui, &target);
     }
 }
 
-/// The effect cards of a layer or the whole scene.
-fn effect_cards(app: &mut App, ui: &mut egui::Ui, scene: &str, host: FxHost, text: &str, now: f64) {
-    let t = app.t.clone();
-    let list = scene_edit::fx_list(text, host);
-    if list.is_empty() {
-        widgets::hint(
-            ui,
-            &t,
-            match host {
-                FxHost::Layer(_) => "No effects on this layer. Add one with +.",
-                FxHost::Scene => "No effects on the whole scene. Add one with +.",
-            },
-        );
-    }
-    for e in &list {
-        effect_card(app, ui, scene, host, text, e, now);
-        ui.add_space(spacing::XS);
-    }
-}
-
-fn effect_card(app: &mut App, ui: &mut egui::Ui, scene: &str, host: FxHost, text: &str, e: &FxEntry, now: f64) {
-    let t = app.t.clone();
-    let base = match host {
-        FxHost::Layer(id) => Some(format!("scene.{scene}.node.{id}.fx.{}", e.name)),
-        FxHost::Scene => None,
-    };
-    let open_id = egui::Id::new(("comp-fx-open", scene, host_key(host), &e.name));
-    let mut open: bool = ui.data(|d| d.get_temp(open_id)).unwrap_or(false);
-    let enabled_addr = base.as_ref().map(|b| format!("{b}.enabled"));
-    let live = enabled_addr.as_ref().and_then(|a| app.m.get(a)).map(Value::truthy);
-    let mut remove = false;
-    egui::Frame::new().fill(t.inset).stroke(egui::Stroke::new(1.0, t.border)).corner_radius(radius::CONTROL).inner_margin(egui::Margin::symmetric(10, 6)).show(
-        ui,
-        |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                let mut on = live.unwrap_or(e.enabled);
-                let tip = match host {
-                    FxHost::Layer(_) => "On or off (saved)",
-                    FxHost::Scene => "On, or off: then it only shows while something fires it",
-                };
-                if widgets::toggle(ui, &t, &mut on).on_hover_text(tip).changed() {
-                    match (&enabled_addr, live) {
-                        // a switch the engine knows: live, and saved into the file by the engine
-                        (Some(a), Some(_)) if !e.bare => {
-                            app.m.command(Op::SetBase { address: a.clone(), value: Value::Bool(on) });
-                            base_written(app, scene);
-                        }
-                        _ => write_scene(app, scene, scene_edit::set_fx_enabled(text, host, &e.name, on), now),
-                    }
-                }
-                let name = RichText::new(scene_edit::effect_name(&e.name)).font(font_medium(type_scale::BODY)).color(if on { t.fg } else { t.text_dim });
-                if ui.add(egui::Label::new(name).sense(egui::Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                    open = !open;
-                }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing.x = spacing::XS;
-                    if widgets::icon_button(ui, &t, icon::TRASH, "Remove this effect").clicked() {
-                        remove = true;
-                    }
-                    if widgets::icon_button(ui, &t, if open { icon::UP } else { icon::DOWN }, if open { "Hide settings" } else { "Settings" }).clicked() {
-                        open = !open;
-                    }
-                    if let Some(a) = &enabled_addr {
-                        links::trigger_badge(app, ui, a, &scene_edit::effect_name(&e.name));
-                    }
-                });
-            });
-            if open {
-                ui.add_space(spacing::XS);
-                let about = scene_edit::effect_about(&e.name);
-                if !about.is_empty() {
-                    widgets::hint(ui, &t, about);
-                }
-                fx_settings(app, ui, scene, host, base.as_deref(), text, e, now);
-            }
-        },
-    );
-    ui.data_mut(|d| d.insert_temp(open_id, open));
-    if remove {
-        write_scene(app, scene, scene_edit::remove_fx(text, host, &e.name), now);
-    }
-}
-
-/// The settings of one effect entry: built-ins from the library table, custom effects from their
-/// manifest's numeric settings.
-#[allow(clippy::too_many_arguments)]
-fn fx_settings(app: &mut App, ui: &mut egui::Ui, scene: &str, host: FxHost, base: Option<&str>, text: &str, e: &FxEntry, now: f64) {
-    let t = app.t.clone();
-    if let Some(def) = scene_edit::effect_def(&e.name) {
-        fx_number(app, ui, scene, host, base, text, e, &NumSpec::from(&scene_edit::STRENGTH), now);
-        if def.id == "lut" {
-            let mut file = e.text("file").unwrap_or("").to_string();
-            if media::picker(app, ui, ("fx-lut", scene, host_key(host)), media::MediaKind::Lut, &mut file) {
-                let v = (!file.is_empty()).then(|| FxValue::Text(file.clone()));
-                write_scene(app, scene, scene_edit::set_fx_param(text, host, &e.name, "file", v.as_ref()), now);
-            }
-        }
-        let mut done: Vec<&str> = Vec::new();
-        for p in def.params {
-            if done.contains(&p.name) {
-                continue;
-            }
-            // red/green/blue triples read as one color
-            if let Some(stem) = p.name.strip_suffix("_r")
-                && let (Some(g), Some(b)) =
-                    (def.params.iter().find(|q| q.name == format!("{stem}_g")), def.params.iter().find(|q| q.name == format!("{stem}_b")))
-            {
-                done.extend([p.name, g.name, b.name]);
-                fx_color(app, ui, scene, host, text, e, [p, g, b], if stem == "key" { "Key color" } else { "Color" }, now);
-                continue;
-            }
-            fx_number(app, ui, scene, host, base, text, e, &NumSpec::from(p), now);
-        }
-        return;
-    }
-    // a custom effect: its numeric settings, per layer
-    let Some(id) = e.name.strip_prefix("patch.") else { return };
-    let Some(pe) = patch_entry(app, id) else {
-        widgets::hint(ui, &t, "This effect isn't in the project any more.");
-        return;
-    };
-    for q in pe.get_path("params").and_then(Value::as_list).unwrap_or(&[]) {
-        let ty = q.get_path("type").and_then(Value::as_str).unwrap_or("float");
-        if !matches!(ty, "float" | "int") {
-            continue;
-        }
-        let Some(name) = q.get_path("name").and_then(Value::as_str) else { continue };
-        let range = q.get_path("range").and_then(Value::as_list).map(|l| l.iter().filter_map(Value::as_f64).collect::<Vec<_>>()).unwrap_or_default();
-        let default = q.get_path("default").and_then(Value::as_f64).unwrap_or(0.0);
-        let (min, max) = match range.as_slice() {
-            [lo, hi] if lo < hi => (*lo, *hi),
-            _ => (default.min(0.0), default.max(1.0)),
-        };
-        let label = nice(name);
-        fx_number(app, ui, scene, host, base, text, e, &NumSpec { key: name, label: &label, default, min, max, unit: "" }, now);
-    }
-}
-
-/// A numeric effect setting: key, label, default, range and unit.
-struct NumSpec<'a> {
-    key: &'a str,
-    label: &'a str,
-    default: f64,
-    min: f64,
-    max: f64,
-    unit: &'a str,
-}
-
-impl From<&scene_edit::FxParam> for NumSpec<'static> {
-    fn from(p: &scene_edit::FxParam) -> Self {
-        NumSpec { key: p.name, label: p.label, default: p.default, min: p.min, max: p.max, unit: p.unit }
-    }
-}
-
-/// One numeric effect setting. Written in the layer's entry, it is the layer's own live setting
-/// (`scene.<s>.node.<id>.fx.<fx>.<key>`: previewed while dragged, saved by the engine, ∿);
-/// otherwise a change writes it into the entry first.
-#[allow(clippy::too_many_arguments)]
-fn fx_number(app: &mut App, ui: &mut egui::Ui, scene: &str, host: FxHost, base: Option<&str>, text: &str, e: &FxEntry, p: &NumSpec, now: f64) {
-    let t = app.t.clone();
-    let key = p.key;
-    let written = e.num(key);
-    let live = base.map(|b| format!("{b}.{key}")).filter(|a| written.is_some() && app.m.get(a).is_some());
-    let cur = live
-        .as_ref()
-        .and_then(|a| app.m.get(a))
-        .and_then(Value::as_f64)
-        .or(written)
-        .or_else(|| app.m.get(&format!("fx.{}.{key}", e.name)).and_then(Value::as_f64))
-        .unwrap_or(p.default);
-    let unit = match p.unit {
-        "" => "",
-        "px" => " px",
-        "Hz" => " Hz",
-        "EV" => " EV",
-        u => u,
-    };
-    let pct = p.unit.is_empty() && p.min == 0.0 && p.max == 1.0;
-    widgets::prop_row(ui, &t, p.label, |ui| {
-        let mut v = cur.clamp(p.min, p.max);
-        let r = slider(ui, &mut v, p.min..=p.max, if pct { "%" } else { unit }, live.is_some());
-        match &live {
-            Some(a) => commit_live(app, scene, a, &r, v),
-            None if r.changed() => write_scene_soon(app, scene, scene_edit::set_fx_param(text, host, &e.name, key, Some(&FxValue::Num(v))), now),
-            None => {}
-        }
-        if let Some(a) = &live {
-            links::modulate_button(app, ui, a, p.label, (p.min, p.max));
-        }
-    });
-}
-
-#[allow(clippy::too_many_arguments)]
-fn fx_color(app: &mut App, ui: &mut egui::Ui, scene: &str, host: FxHost, text: &str, e: &FxEntry, rgb: [&scene_edit::FxParam; 3], label: &str, now: f64) {
-    let t = app.t.clone();
-    let mut c = rgb.map(|p| e.num(p.name).unwrap_or(p.default) as f32);
-    widgets::prop_row(ui, &t, label, |ui| {
-        if egui::color_picker::color_edit_button_rgb(ui, &mut c).changed() {
-            let mut out = Ok(text.to_string());
-            for (p, v) in rgb.iter().zip(c) {
-                out = out.and_then(|x| scene_edit::set_fx_param(&x, host, &e.name, p.name, Some(&FxValue::Num(v as f64))));
-            }
-            write_scene_soon(app, scene, out, now);
-        }
-    });
-}
-
-/// "+" on Effects: every built-in that fits, then the project's own effects.
-fn add_fx_menu(app: &mut App, ui: &mut egui::Ui, scene: &str, host: FxHost, text: &str, now: f64) {
-    let t = app.t.clone();
-    let have: Vec<String> = scene_edit::fx_list(text, host).into_iter().map(|e| e.name).collect();
-    let mut pick: Option<(String, Vec<(String, FxValue)>)> = None;
-    egui::ScrollArea::vertical().max_height(460.0).show(ui, |ui| {
-        widgets::group_label(ui, &t, "Built in");
-        for e in scene_edit::EFFECTS.iter().filter(|e| e.on_layers && !(host == FxHost::Scene && e.id == "chroma_key")) {
-            ui.add_enabled_ui(!have.iter().any(|h| h == e.id), |ui| {
-                if widgets::list_row(ui, &t, icon::WAND, e.label, e.about, "", false).clicked() {
-                    pick = Some((e.id.to_string(), scene_edit::fx_defaults(e.id)));
-                }
-            });
-        }
-        let custom: Vec<Value> = app.m.q_list("patches").iter().filter(|p| p.get_path("layer").and_then(Value::as_str) == Some("effect")).cloned().collect();
-        if !custom.is_empty() {
-            widgets::group_label(ui, &t, "Your effects");
-        }
-        for p in &custom {
-            let Some(id) = p.get_path("id").and_then(Value::as_str) else { continue };
-            let name = format!("patch.{id}");
-            let about = p.get_path("description").and_then(Value::as_str).unwrap_or("");
-            ui.add_enabled_ui(!have.contains(&name), |ui| {
-                if widgets::list_row(ui, &t, icon::SPARKLE, &source_label(app, &name), about, "", false).clicked() {
-                    // numeric settings at their defaults, so each is this layer's own
-                    let params = p
-                        .get_path("params")
-                        .and_then(Value::as_list)
-                        .unwrap_or(&[])
-                        .iter()
-                        .filter(|q| matches!(q.get_path("type").and_then(Value::as_str), Some("float" | "int")))
-                        .filter_map(|q| Some((q.get_path("name")?.as_str()?.to_string(), FxValue::Num(q.get_path("default")?.as_f64()?))))
-                        .collect();
-                    pick = Some((name.clone(), params));
-                }
-            });
-        }
-    });
-    if let Some((fx, params)) = pick {
-        let params = if matches!(host, FxHost::Scene) { Vec::new() } else { params };
-        write_scene(app, scene, scene_edit::add_fx(text, host, &fx, &params), now);
-        ui.data_mut(|d| d.insert_temp(egui::Id::new(("comp-fx-open", scene, host_key(host), &fx)), true));
-        ui.close();
-    }
-}
 
 // ---- when a layer shows ------------------------------------------------------------------------------
 
@@ -2031,21 +1781,15 @@ fn scene_inspector(app: &mut App, ui: &mut egui::Ui, scene: &str, text: Option<&
         },
     );
 
-    let mut add = None;
     widgets::inspector_section(
         ui,
         &t,
         "scene-fx",
         "Scene effects",
         true,
-        |ui| {
-            add = Some(widgets::icon_button(ui, &t, icon::PLUS, "Add effect"));
-        },
-        |ui| effect_cards(app, ui, scene, FxHost::Scene, text, now),
+        |_| {},
+        |ui| effect_cards(app, ui, scene, None),
     );
-    if let Some(r) = add {
-        egui::Popup::menu(&r).width(380.0).show(|ui| add_fx_menu(app, ui, scene, FxHost::Scene, text, now));
-    }
 
     widgets::inspector_section(
         ui,

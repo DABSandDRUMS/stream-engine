@@ -725,6 +725,8 @@ fn build_with(
         manifest.recordings.push(ManifestRecording {
             path: path.to_string_lossy().into_owned(),
             canvas: rec.canvas.clone(),
+            role: rec.role.clone(),
+            source: rec.source.clone(),
             offset,
             duration,
             tracks: rec.tracks.iter().map(|t| t.name.clone()).collect(),
@@ -771,6 +773,8 @@ fn build_with(
                     manifest.notes.push("Speech transcript may include music/lyrics (band or mixed audio track)".into());
                 }
             }
+            // stopped because the show went live: no manifest, so the next run redoes it
+            Err(e) if crate::live::current().is_some_and(|h| h.stop_now()) => return Err(e),
             Err(e) => manifest.notes.push(e),
         }
     }
@@ -820,6 +824,11 @@ fn build_with(
                                 manifest.notes.push(format!("{} exited with {status}", ext.name));
                             }
                             break;
+                        }
+                        Ok(None) if crate::live::current().is_some_and(|h| h.stop_now()) => {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            return Err(crate::live::HALTED.into());
                         }
                         Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(200)),
                         Ok(None) => {
@@ -932,24 +941,46 @@ fn timeline(ctx: &EngineCtx, args: &Value) -> Result<Value, String> {
     Ok(Value::from(json!({"manifest": manifest, "lanes": lanes, "features": features, "transcript": transcript})))
 }
 
-/// Register `recording.index` and `recording.timeline`; indexing never runs on live threads.
-pub async fn start(ctx: EngineCtx) -> anyhow::Result<()> {
+/// Register `recording.index` and `recording.timeline`; indexing never runs on live threads,
+/// waits while the show is LIVE, and is stopped and redone when LIVE begins mid-build.
+pub async fn start(ctx: EngineCtx, live: crate::live::LiveGuard) -> anyhow::Result<()> {
     let (sender, mut receiver) = tokio::sync::mpsc::channel::<String>(16);
     let worker = ctx.clone();
     tokio::spawn(async move {
         while let Some(id) = receiver.recv().await {
-            let w = worker.clone();
-            let key = id.clone();
-            w.hub.emit(Event::new("recording.index.progress", Origin::System, Value::map().with("session", id.clone()).with("stage", "building")));
-            match tokio::task::spawn_blocking(move || {
-                let dir = session_dir(&w, &key)?;
-                let cfg = RecordingConfig::from_section(w.project_section("recording").as_ref())?;
-                let clips = ClipsConfig::from_section(w.project_section("clips").as_ref()).unwrap_or_default();
-                serialized_build(&dir, &key, &cfg, &clips, &w.project_root, &w.data_dir, w.hub.clock.mappings().twitch_delay_ms as i64, true)
-            })
-            .await
-            {
-                Ok(Ok(m)) => {
+            let res = loop {
+                if let Some(reason) = live.reason() {
+                    worker.hub.emit(Event::new(
+                        "recording.index.progress",
+                        Origin::System,
+                        Value::map().with("session", id.clone()).with("stage", format!("waiting for the show to end ({reason})")),
+                    ));
+                    live.wait_offline().await;
+                }
+                let w = worker.clone();
+                let key = id.clone();
+                w.hub.emit(Event::new("recording.index.progress", Origin::System, Value::map().with("session", id.clone()).with("stage", "building")));
+                let halt = live.halt(crate::live::OnHold::Cancel);
+                let res = tokio::task::spawn_blocking(move || {
+                    let clips = ClipsConfig::from_section(w.project_section("clips").as_ref()).unwrap_or_default();
+                    transcribe::niced(clips.nice, move || {
+                        crate::live::with_halt(halt, || {
+                            let dir = session_dir(&w, &key)?;
+                            let cfg = RecordingConfig::from_section(w.project_section("recording").as_ref())?;
+                            serialized_build(&dir, &key, &cfg, &clips, &w.project_root, &w.data_dir, w.hub.clock.mappings().twitch_delay_ms as i64, true)
+                        })
+                    })
+                    .and_then(|r| r)
+                })
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()));
+                if res.is_err() && live.is_live() {
+                    continue;
+                }
+                break res;
+            };
+            match res {
+                Ok(m) => {
                     let path = session_dir(&worker, &id).map(|dir| show::paths_for(&dir).manifest().display().to_string()).unwrap_or_default();
                     worker.hub.emit(Event::new(
                         "recording.index.done",
@@ -957,18 +988,7 @@ pub async fn start(ctx: EngineCtx) -> anyhow::Result<()> {
                         Value::map().with("session", id).with("path", path).with("lanes", m.lanes.len() as i64),
                     ));
                 }
-                other => worker.hub.emit(Event::new(
-                    "recording.index.failed",
-                    Origin::System,
-                    Value::map().with("session", id.clone()).with(
-                        "error",
-                        match other {
-                            Ok(Err(e)) => e,
-                            Err(e) => e.to_string(),
-                            _ => unreachable!(),
-                        },
-                    ),
-                )),
+                Err(e) => worker.hub.emit(Event::new("recording.index.failed", Origin::System, Value::map().with("session", id.clone()).with("error", e))),
             }
         }
     });
@@ -1107,7 +1127,7 @@ mod tests {
             http: "127.0.0.1:0".parse().unwrap(),
             dev: false,
         };
-        start(ctx).await.unwrap();
+        start(ctx, crate::live::LiveGuard::manual(None).0).await.unwrap();
         let window = hub.query("recording.timeline", Value::map().with("session", "s1").with("from", 2.0).with("to", 4.0).with("limit", 1)).await.unwrap();
         assert_eq!(window.get_path("lanes.songs").and_then(Value::as_list).unwrap().len(), 1);
         assert_eq!(window.get_path("lanes.markers").and_then(Value::as_list).unwrap().len(), 0);
@@ -1122,7 +1142,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn closing_a_session_indexes_in_background_and_reports_completion() {
+    async fn closing_a_session_indexes_after_the_show_and_reports_completion() {
         let root = tempfile::tempdir().unwrap();
         let mut writer = SessionWriter::open(root.path(), "closed").unwrap();
         writer.write(&LogRec::Start { t0: 1_000_000_000, period: 4_166_666, tick: 0, wall_ns: 1_700_000_000_000_000_000, restore: None }).unwrap();
@@ -1143,24 +1163,34 @@ mod tests {
             dev: false,
         };
         assert!(RecordingConfig::from_section(ctx.project_section("recording").as_ref()).unwrap().index.enabled);
-        start(ctx).await.unwrap();
+        let (live, live_tx) = crate::live::LiveGuard::manual(Some("show mode is live"));
+        start(ctx, live).await.unwrap();
         hub.publish_bus(Bus::Event(Event::new("session.closed", Origin::System, Value::map().with("session", "closed"))));
         // This fixture has no core runner: read the hub's outbound core inputs.
-        let done = tokio::task::spawn_blocking(move || {
-            loop {
-                let message = rx.recv_timeout(Duration::from_secs(5)).unwrap();
-                if let se_hub::CoreMsg::Input(se_core::Input::Event { event }) = message {
-                    if event.ty == "recording.index.failed" {
-                        panic!("index failed: {:?}", event.payload)
-                    }
-                    if event.ty == "recording.index.done" {
-                        break event.payload;
-                    }
+        let (events_tx, mut events) = tokio::sync::mpsc::unbounded_channel();
+        std::thread::spawn(move || {
+            while let Ok(message) = rx.recv_timeout(Duration::from_secs(10)) {
+                if let se_hub::CoreMsg::Input(se_core::Input::Event { event }) = message
+                    && events_tx.send(event).is_err()
+                {
+                    break;
                 }
             }
-        })
-        .await
-        .unwrap();
+        });
+        let mut next_event = async |until: &str| loop {
+            let event = tokio::time::timeout(Duration::from_secs(5), events.recv()).await.unwrap().unwrap();
+            assert_ne!(event.ty, "recording.index.failed", "{:?}", event.payload);
+            if event.ty == until {
+                break event.payload;
+            }
+        };
+        // while the show is live the index only waits
+        let waiting = next_event("recording.index.progress").await;
+        assert!(waiting.get_path("stage").and_then(Value::as_str).unwrap().starts_with("waiting for the show to end"), "{waiting:?}");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!show::paths_for(&dir).manifest().exists(), "nothing built while live");
+        live_tx.send(None).unwrap();
+        let done = next_event("recording.index.done").await;
         assert_eq!(done.get_path("session").and_then(Value::as_str), Some("closed"));
         assert!(show::paths_for(&dir).manifest().exists());
     }
@@ -1260,6 +1290,8 @@ mod tests {
         };
         let mut rec = session::Recording {
             canvas: "wide".into(),
+            role: String::new(),
+            source: String::new(),
             path: PathBuf::new(),
             start_ns: None,
             end_ns: None,

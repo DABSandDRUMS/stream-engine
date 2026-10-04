@@ -1,0 +1,26 @@
+# ADJ Inno Pocket Scan document v1.1 (2024-07-31), p.18.
+# Combined wheel is exposed as ONE discrete gobo/beam selector, not independent RGB+gobo.
+name = "ADJ Inno Pocket Scan"
+manufacturer = "ADJ"
+kind = "spot"
+beam = 14.0
+notes = "6CH. Mirror travel angles/orientation uncalibrated. Shutter open=8, closed=0. Single combined color/gobo wheel, no independent color selection. Standard dimmer mode fixed at 0."
+[modes.6ch]
+channels = [
+  { role = "pan", restriction = "8-bit mirror position; installed orientation, safe travel and byte-to-angle mapping unverified." },
+  { role = "tilt", restriction = "8-bit mirror position; installed orientation, safe travel and byte-to-angle mapping unverified." },
+  { role = "shutter", label = "Managed shutter / blocked strobe", range = [16, 131], open = 8, closed = 0, restriction = "Steady open 8, blackout 0; strobe blocked without calibrated Hz mapping. No interpolation across pulse/strobe ranges." },
+  { role = "gobo", label = "Combined color / gobo wheel", restriction = "One discrete wheel, not independent color and gobo. Only static slots 0–63; shake/scroll excluded.", slots = [
+    { value = 0, name = "Open / white" },
+    { value = 8, name = "Gobo 1 yellow" },
+    { value = 15, name = "Gobo 2 red" },
+    { value = 22, name = "Gobo 3 green" },
+    { value = 29, name = "Gobo 4 blue" },
+    { value = 36, name = "Gobo 5 RGB" },
+    { value = 43, name = "Gobo 6 UV" },
+    { value = 50, name = "Gobo 7 light blue" },
+    { value = 57, name = "Gobo 8 UV and light blue" },
+  ] },
+  "dimmer",
+  { role = "fixed", value = 0, label = "Dimmer response mode", restriction = "0 selects Standard explicitly; no movement-speed, show or reset channel exists." },
+]

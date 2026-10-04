@@ -5,14 +5,32 @@ use se_proto::parse_duration_ms;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
-/// Buses that always exist (in processing order; `program` is the sum and comes last).
-pub const BUILTIN_BUSES: &[&str] = &["band", "music", "sfx", "tts", "game", "program"];
-/// Stem buses created when an input routes to them (M12).
-pub const STEM_BUSES: &[&str] = &["drums", "mic"];
+/// Buses for app audio that always exist (in processing order; `program` is the sum and comes last).
+pub const BUILTIN_BUSES: &[&str] = &["music", "sfx", "tts", "scene", "program"];
+/// Standard buses created only when an input, route, or setting uses them. None implies hardware.
+pub const OPTIONAL_BUSES: &[&str] = &["band", "game", "drums", "mic"];
 
-/// Default `hub.audio` slot routing (pattern → bus); config entries take precedence.
+/// Operator-facing name of a bus: the names of the inputs routed into it, or what the app plays
+/// into its own buses. Never a guessed device or source.
+fn bus_label(name: &str, inputs: &[InputDef]) -> String {
+    let routed: Vec<&str> = inputs.iter().filter(|input| input.bus == name).map(InputDef::label).collect();
+    if !routed.is_empty() {
+        return routed.join(" + ");
+    }
+    match name {
+        "music" => "Music".into(),
+        "sfx" => "Sound effects".into(),
+        "tts" => "Read-out voice".into(),
+        "scene" => "Scene audio".into(),
+        "program" => "Everything".into(),
+        other => other.into(),
+    }
+}
+
+/// Default `hub.audio` slot routing (pattern → bus); config entries take precedence. Audio from
+/// scene layers (`patch.*`) shares one `scene` bus: one mixer control, not one per layer.
 pub const DEFAULT_SLOT_ROUTES: &[(&str, &str)] =
-    &[("youtube", "music"), ("web.*", "music"), ("tts", "tts"), ("tts.*", "tts"), ("sfx.*", "sfx"), ("game", "game"), ("game.*", "game"), ("patch.*", "sfx")];
+    &[("youtube", "music"), ("web.*", "music"), ("tts", "tts"), ("tts.*", "tts"), ("sfx.*", "sfx"), ("game", "game"), ("game.*", "game"), ("patch.*", "scene")];
 
 /// Slots with this prefix are never mixed into buses; they only go to `[audio.direct]` routes.
 pub const DIRECT_ONLY_PREFIX: &str = "timecode.";
@@ -48,6 +66,8 @@ pub struct FxDef {
 #[derive(Clone, Debug, PartialEq)]
 pub struct InputDef {
     pub name: String,
+    /// Operator-chosen display name (for example "16R output").
+    pub label: Option<String>,
     /// PipeWire source node: exact `node.name`, or a case-insensitive substring of
     /// `node.name` / `node.description`.
     pub target: String,
@@ -60,9 +80,18 @@ pub struct InputDef {
     pub fx: Vec<FxDef>,
 }
 
+impl InputDef {
+    /// The operator's name for this input, else its configured device target.
+    pub fn label(&self) -> &str {
+        self.label.as_deref().unwrap_or(&self.target)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct BusDef {
     pub name: String,
+    /// Operator-facing name derived from the inputs routed here (see [`bus_label`]).
+    pub label: String,
     pub gain_db: f32,
     pub mute: bool,
     pub limiter: bool,
@@ -274,6 +303,7 @@ struct RawInput {
     target: Option<String>,
     channels: Option<Vec<u32>>,
     bus: Option<String>,
+    label: Option<String>,
     gain: f32,
     mute: bool,
     delay: Option<toml::Value>,
@@ -565,22 +595,20 @@ pub fn parse(section: &toml::Table, fragments: &BTreeMap<String, toml::Table>) -
     }
     let max_delay_ms = ms(&raw.max_delay, 2000.0, "max_delay")?.clamp(10.0, 10000.0);
 
-    // inputs (default: the Studio 24c stereo input = 16R main mix → band)
-    let mut raw_inputs = raw.inputs;
-    if raw_inputs.is_empty() {
-        raw_inputs.insert("band".into(), RawInput::default());
-    }
+    // Capture is opt-in: an empty project must never attach to guessed hardware.
     let mut inputs = Vec::new();
-    for (name, ri) in raw_inputs {
+    for (name, ri) in raw.inputs {
         if !segment_ok(&name) {
             return Err(format!("bad input name `{name}`"));
         }
+        let target = ri.target.filter(|s| !s.trim().is_empty()).ok_or_else(|| format!("inputs.{name}: needs `target` (source node)"))?;
         let channels = ri.channels.unwrap_or_else(|| vec![1, 2]);
-        if channels.is_empty() || channels.len() > 2 || channels.contains(&0) {
-            return Err(format!("inputs.{name}: channels must be 1 or 2 one-based device channels"));
+        if channels.is_empty() || channels.len() > 2 || channels.contains(&0) || (channels.len() == 2 && channels[0] == channels[1]) {
+            return Err(format!("inputs.{name}: channels must be distinct, one-based device channels (one or two)"));
         }
         inputs.push(InputDef {
-            target: ri.target.unwrap_or_else(|| "Studio 24c".into()),
+            label: ri.label.map(|label| label.trim().to_string()).filter(|label| !label.is_empty()),
+            target,
             channels,
             bus: ri.bus.unwrap_or_else(|| if name == "band" { "band".into() } else { name.clone() }),
             gain_db: ri.gain,
@@ -591,18 +619,29 @@ pub fn parse(section: &toml::Table, fragments: &BTreeMap<String, toml::Table>) -
         });
     }
 
-    // buses: builtins, stems used by inputs, and explicitly configured ones
-    let mut names: Vec<String> = BUILTIN_BUSES.iter().filter(|b| **b != "program").map(|s| s.to_string()).collect();
+    // App buses always exist; standard optional buses only when something actually uses them.
+    let referenced = |name: &str| {
+        inputs.iter().any(|i| i.bus == name)
+            || raw.buses.contains_key(name)
+            || raw.slots.values().any(|slot| matches!(slot, RawSlot::Bus(b) | RawSlot::Full { bus: Some(b), .. } if b == name))
+            || raw.sounds.values().any(|sound| sound.bus.as_deref() == Some(name))
+            || raw.sources.values().any(|source| source.bus == name)
+            || raw.monitor.as_ref().is_some_and(|m| m.buses.iter().any(|b| b == name))
+            || raw.playback.as_ref().is_some_and(|p| p.buses.iter().any(|b| b == name))
+            || raw.duck.as_ref().is_some_and(|d| d.targets.iter().chain(&d.keys).flatten().any(|b| b == name))
+            || raw.analysis.buses.as_ref().is_some_and(|buses| buses.iter().any(|b| b == name))
+            || raw.analysis.beat_source.as_deref() == Some(name)
+    };
+    let mut names: Vec<String> = ["band", "music", "sfx", "tts", "scene", "game", "drums", "mic"]
+        .into_iter()
+        .filter(|b| BUILTIN_BUSES.contains(b) || referenced(b))
+        .map(str::to_string)
+        .collect();
     let add = |n: &str, names: &mut Vec<String>| {
         if n != "program" && !names.iter().any(|x| x == n) {
             names.push(n.to_string());
         }
     };
-    for s in STEM_BUSES {
-        if inputs.iter().any(|i| i.bus == *s) || raw.buses.contains_key(*s) {
-            add(s, &mut names);
-        }
-    }
     for i in &inputs {
         add(&i.bus, &mut names);
     }
@@ -628,6 +667,7 @@ pub fn parse(section: &toml::Table, fragments: &BTreeMap<String, toml::Table>) -
             },
             to_program: !is_prog && rb.and_then(|b| b.to_program).unwrap_or(true),
             node: rb.and_then(|b| b.node).unwrap_or(true),
+            label: bus_label(&n, &inputs),
             name: n,
         });
     }
@@ -806,7 +846,7 @@ pub fn parse(section: &toml::Table, fragments: &BTreeMap<String, toml::Table>) -
         beat_source: a.beat_source.unwrap_or_else(|| "auto".into()),
         min_bpm: a.min_bpm.unwrap_or(70.0),
         max_bpm: a.max_bpm.unwrap_or(180.0),
-        buses: a.buses.unwrap_or_else(|| vec!["band".into(), "music".into()]),
+        buses: a.buses.unwrap_or_else(|| ["band", "music"].into_iter().filter(|b| has_bus(b)).map(str::to_string).collect()),
         mic: a.mic,
         talk_threshold_db: a.talk_threshold.unwrap_or(-42.0),
         talk_hold_ms: ms(&a.talk_hold, 600.0, "analysis.talk_hold")?,
@@ -850,11 +890,10 @@ mod tests {
     }
 
     #[test]
-    fn defaults_are_the_24c_band_and_builtin_buses() {
+    fn empty_configuration_never_captures_hardware() {
         let c = AudioConfig::default();
-        assert_eq!(c.quantum, 256);
-        assert_eq!(c.inputs.len(), 1);
-        assert_eq!((c.inputs[0].name.as_str(), c.inputs[0].bus.as_str(), c.inputs[0].channels.clone()), ("band", "band", vec![1, 2]));
+        assert!(c.inputs.is_empty());
+        assert!(parse(&t("[inputs]"), &BTreeMap::new()).unwrap().inputs.is_empty());
         let names: Vec<&str> = c.buses.iter().map(|b| b.name.as_str()).collect();
         assert_eq!(names, BUILTIN_BUSES);
         assert!(c.buses.last().unwrap().limiter, "program limiter on by default");
@@ -862,8 +901,46 @@ mod tests {
         assert_eq!(c.route_slot("web.player"), c.bus_index("music"));
         assert_eq!(c.route_slot("tts"), c.bus_index("tts"));
         assert_eq!(c.route_slot("sfx.alert"), c.bus_index("sfx"));
+        assert_eq!(c.route_slot("patch.terminal_boot"), c.bus_index("scene"), "scene layers share one scene bus");
+        assert_eq!(c.route_slot("patch.terminal_title"), c.bus_index("scene"));
         assert_eq!(c.route_slot("timecode.ltc"), None, "timecode slots are direct-only");
         assert!(c.duck.targets.is_empty());
+    }
+
+    #[test]
+    fn standard_optional_buses_exist_only_when_something_uses_them() {
+        let names = |src: &str| parse(&t(src), &BTreeMap::new()).unwrap().buses.into_iter().map(|b| b.name).collect::<Vec<_>>();
+        let empty = names("");
+        assert!(OPTIONAL_BUSES.iter().all(|bus| !empty.iter().any(|name| name == bus)), "{empty:?}");
+        assert_eq!(parse(&t(""), &BTreeMap::new()).unwrap().analysis.buses, ["music"], "default analysis must not create a mixer feed");
+        assert!(names("[inputs.mixer]\ntarget = \"Studio 24c\"\nbus = \"band\"").contains(&"band".to_string()));
+        assert!(names("[playback]\ntarget = \"Speakers\"\nbuses = [\"music\", \"game\"]").contains(&"game".to_string()));
+        assert!(names("[slots]\n\"game.capture\" = \"game\"").contains(&"game".to_string()));
+        assert!(!names("[inputs.mixer]\ntarget = \"Studio 24c\"\nbus = \"band\"").contains(&"game".to_string()));
+        assert!(parse(&t("[duck]\ntargets = [\"nope\"]"), &BTreeMap::new()).is_err(), "unknown custom buses remain errors");
+    }
+
+    #[test]
+    fn bus_labels_come_from_the_operators_input_names_never_invented() {
+        let c = parse(&t("[inputs.band]\ntarget = \"Studio 24c\"\nlabel = \" 16R output \""), &BTreeMap::new()).unwrap();
+        assert_eq!(c.inputs[0].label(), "16R output");
+        assert_eq!(c.buses[c.bus_index("band").unwrap()].label, "16R output");
+        let unnamed = parse(&t("[inputs.band]\ntarget = \"Studio 24c\""), &BTreeMap::new()).unwrap();
+        assert_eq!(unnamed.buses[unnamed.bus_index("band").unwrap()].label, "Studio 24c", "falls back to the configured device");
+        let unused = parse(&t("[playback]\ntarget = \"Speakers\"\nbuses = [\"game\"]"), &BTreeMap::new()).unwrap();
+        assert_eq!(unused.buses[unused.bus_index("game").unwrap()].label, "game", "no made-up name for an unfed bus");
+    }
+
+    #[test]
+    fn explicit_capture_requires_a_target_and_keeps_the_selected_device() {
+        for config in ["[inputs.band]", "[inputs.band]\ntarget = \"  \""] {
+            assert!(parse(&t(config), &BTreeMap::new()).is_err());
+        }
+        let c = parse(&t("[inputs.band]\ntarget = \"My interface\"\nchannels = [3, 4]"), &BTreeMap::new()).unwrap();
+        assert_eq!(c.inputs[0].target, "My interface");
+        assert_eq!(c.inputs[0].channels, [3, 4]);
+        assert_eq!(c.inputs[0].bus, "band");
+        assert!(parse(&t("[inputs.band]\ntarget = \"My interface\"\nchannels = [1, 1]"), &BTreeMap::new()).is_err());
     }
 
     #[test]
@@ -946,7 +1023,8 @@ layer = { sound = "kick_layer", gain = -6 }
             parse_playback("[playback]\ntarget = \"Motherboard Audio Speakers\"\nchannels = [1, 2]\nbuses = [\"music\", \"sfx\", \"tts\"]").unwrap();
         assert_eq!(configured.playback.as_ref().unwrap().buses, ["music", "sfx", "tts"]);
         for forbidden in ["band", "program"] {
-            let config = format!("[playback]\ntarget = \"Motherboard Audio Speakers\"\nbuses = [\"{forbidden}\"]");
+            let config =
+                format!("[inputs.band]\ntarget = \"My capture interface\"\n[playback]\ntarget = \"Motherboard Audio Speakers\"\nbuses = [\"{forbidden}\"]");
             assert!(parse_playback(&config).unwrap_err().contains("feedback"), "{forbidden}");
         }
         assert!(
@@ -958,7 +1036,7 @@ layer = { sound = "kick_layer", gain = -6 }
     fn errors_are_specific() {
         let bad = |s: &str| parse(&t(s), &BTreeMap::new()).unwrap_err();
         assert!(bad("quantum = 7").contains("quantum"));
-        assert!(bad("[inputs.x]\nbus = \"program\"").contains("bad bus"));
+        assert!(bad("[inputs.x]\ntarget = \"My interface\"\nbus = \"program\"").contains("bad bus"));
         assert!(bad("[duck]\ntargets = [\"nope\"]").contains("unknown bus"));
         assert!(bad("[sounds.x]\ngain = 1.0").contains("needs `file`"));
         assert!(bad("[drums.pads.k]\ninput = \"nope\"").contains("unknown input"));

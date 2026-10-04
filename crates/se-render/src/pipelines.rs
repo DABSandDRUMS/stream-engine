@@ -15,6 +15,7 @@ pub const BLIT_WGSL: &str = include_str!("shaders/blit.wgsl");
 pub const FLASH_WGSL: &str = include_str!("shaders/flash.wgsl");
 pub const BLUR_PASSES_WGSL: &str = include_str!("shaders/blur_passes.wgsl");
 pub const FADE_WGSL: &str = include_str!("shaders/fade.wgsl");
+pub const GLIDE_WGSL: &str = include_str!("shaders/glide.wgsl");
 
 /// Source of a built-in transition shader (`se_core::transitions::SHADERS`; `shader = "<name>"`
 /// in a transition file). Compiled like a project transition, with the file's settings.
@@ -48,6 +49,18 @@ fn fullscreen(
     fs: &str,
     blend: Option<wgpu::BlendState>,
 ) -> wgpu::RenderPipeline {
+    fullscreen_targets(device, label, layout, module, vs, fs, &[Some(wgpu::ColorTargetState { format: COLOR, blend, write_mask: wgpu::ColorWrites::ALL })])
+}
+
+fn fullscreen_targets(
+    device: &wgpu::Device,
+    label: &str,
+    layout: &wgpu::PipelineLayout,
+    module: &wgpu::ShaderModule,
+    vs: &str,
+    fs: &str,
+    targets: &[Option<wgpu::ColorTargetState>],
+) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(label),
         layout: Some(layout),
@@ -55,12 +68,7 @@ fn fullscreen(
         primitive: wgpu::PrimitiveState::default(),
         depth_stencil: None,
         multisample: wgpu::MultisampleState::default(),
-        fragment: Some(wgpu::FragmentState {
-            module,
-            entry_point: Some(fs),
-            compilation_options: Default::default(),
-            targets: &[Some(wgpu::ColorTargetState { format: COLOR, blend, write_mask: wgpu::ColorWrites::ALL })],
-        }),
+        fragment: Some(wgpu::FragmentState { module, entry_point: Some(fs), compilation_options: Default::default(), targets }),
         multiview_mask: None,
         cache: None,
     })
@@ -81,6 +89,8 @@ pub struct Pipelines {
     pub blur_v: wgpu::RenderPipeline,
     /// Built-in crossfade transition.
     pub fade: wgpu::RenderPipeline,
+    /// Built-in composite of the `glide` transition kind ([`glide_layout`]).
+    pub glide: wgpu::RenderPipeline,
 }
 
 impl Pipelines {
@@ -124,8 +134,9 @@ impl Pipelines {
         let blur_h = fullscreen(device, "blur h", &l.fx_pipeline, &blur_m, "vs", "fs_h", None);
         let blur_v = fullscreen(device, "blur v", &l.fx_pipeline, &blur_m, "vs", "fs_v", None);
         let fade_layout = Layout::new(&transition_manifest("fade", &[]));
-        let fade = patch_fullscreen(device, l, "fade", &format!("{}{FADE_WGSL}", fade_layout.header())).map_err(|e| format!("built-in fade: {e}"))?;
-        Ok(Pipelines { composite, composite_copy, convert, blit, flash, effects: fx, blur_down, blur_h, blur_v, fade })
+        let fade = patch_fullscreen(device, &l.patch_pipeline, "fade", &format!("{}{FADE_WGSL}", fade_layout.header()), false).map_err(|e| format!("built-in fade: {e}"))?;
+        let glide = patch_fullscreen(device, &l.patch_pipeline, "glide", &format!("{}{GLIDE_WGSL}", glide_layout().header()), false).map_err(|e| format!("built-in glide: {e}"))?;
+        Ok(Pipelines { composite, composite_copy, convert, blit, flash, effects: fx, blur_down, blur_h, blur_v, fade, glide })
     }
 }
 
@@ -134,6 +145,13 @@ pub fn compile_fused(device: &wgpu::Device, l: &Layouts, chain: &[u8]) -> Result
     let label = chain.iter().map(|i| LIBRARY[*i as usize].name).collect::<Vec<_>>().join("+");
     let module = shader_module(device, &label, &effects::fused_source(chain)).map_err(|e| format!("fused effects `{label}`: {e}"))?;
     scoped(device, || fullscreen(device, &label, &l.fx_pipeline, &module, "vs", "fs", None)).map_err(|e| format!("fused effects `{label}`: {e}"))
+}
+
+/// Uniform layout of the glide composite: incoming background and independent crossfade weight.
+pub fn glide_layout() -> Layout {
+    let bg = se_patch::ParamSpec { ty: "vec4".into(), default: None, range: None, options: Vec::new(), unit: None, description: None };
+    let fade = se_patch::ParamSpec { ty: "float".into(), default: None, range: None, options: Vec::new(), unit: None, description: None };
+    Layout::new(&transition_manifest("glide", &[("bg".into(), bg), ("fade".into(), fade.clone()), ("full_scene".into(), fade)]))
 }
 
 /// A manifest describing a project transition shader, so it gets the same generated header
@@ -150,18 +168,24 @@ pub fn transition_manifest(name: &str, params: &[(String, se_patch::ParamSpec)])
         has_trigger: false,
         budget: Default::default(),
         signals: Vec::new(),
+        palette: Default::default(),
         particles: None,
         label: name.to_string(),
         description: String::new(),
         size: None,
         fps: None,
         grants: Vec::new(),
+        feedback: se_patch::Feedback::Off,
+        history: 0,
     }
 }
 
-fn patch_fullscreen(device: &wgpu::Device, l: &Layouts, label: &str, src: &str) -> Result<wgpu::RenderPipeline, ShaderError> {
+/// `state`: `feedback = "state"` effects also write `@location(1)` (their next `se_prev`).
+fn patch_fullscreen(device: &wgpu::Device, layout: &wgpu::PipelineLayout, label: &str, src: &str, state: bool) -> Result<wgpu::RenderPipeline, ShaderError> {
     let module = shader_module(device, label, src)?;
-    scoped(device, || fullscreen(device, label, &l.patch_pipeline, &module, "se_vs", "fs", None)).map_err(|message| ShaderError {
+    let target = Some(wgpu::ColorTargetState { format: COLOR, blend: None, write_mask: wgpu::ColorWrites::ALL });
+    let targets = [target.clone(), target];
+    scoped(device, || fullscreen_targets(device, label, layout, &module, "se_vs", "fs", &targets[..1 + usize::from(state)])).map_err(|message| ShaderError {
         line: None,
         column: None,
         message,
@@ -187,10 +211,13 @@ pub fn map_error(file: &str, header_lines: usize, e: &ShaderError) -> String {
 }
 
 /// Compile a fullscreen user shader (patch kind `shader`, or a transition) from its source.
+/// Effects with `feedback`/`history` use the extended `patch_frames` layout.
 pub fn compile_fullscreen(device: &wgpu::Device, l: &Layouts, file: &str, layout: &Layout, src: &str) -> Result<UserPipes, String> {
     let header = layout.header();
     let full = format!("{header}{src}");
-    patch_fullscreen(device, l, file, &full).map(UserPipes::Fullscreen).map_err(|e| map_error(file, header.lines().count(), &e))
+    let pipeline_layout = if layout.frame_state() { &l.patch_frames_pipeline } else { &l.patch_pipeline };
+    let state = layout.feedback == se_patch::Feedback::State;
+    patch_fullscreen(device, pipeline_layout, file, &full, state).map(UserPipes::Fullscreen).map_err(|e| map_error(file, header.lines().count(), &e))
 }
 
 /// Compile a particles patch (`sim.wgsl` compute + `draw.wgsl` instanced quads).
@@ -257,6 +284,7 @@ mod tests {
             ("flash", FLASH_WGSL.to_string()),
             ("blur", format!("{}\n{BLUR_PASSES_WGSL}", effects::COMMON_WGSL)),
             ("fade", format!("{}{FADE_WGSL}", Layout::new(&transition_manifest("fade", &[])).header())),
+            ("glide", format!("{}{GLIDE_WGSL}", glide_layout().header())),
         ] {
             crate::gpu::validate_wgsl(&src).unwrap_or_else(|e| panic!("{name}: {e}"));
         }

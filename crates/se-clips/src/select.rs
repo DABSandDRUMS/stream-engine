@@ -268,6 +268,7 @@ pub fn run_json(prog: &str, args: &[String], input: &serde_json::Value, timeout:
         s
     });
     let deadline = Instant::now() + timeout;
+    let halt = crate::live::current();
     let status = loop {
         match child.try_wait().map_err(|e| e.to_string())? {
             Some(s) => break s,
@@ -275,6 +276,12 @@ pub fn run_json(prog: &str, args: &[String], input: &serde_json::Value, timeout:
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(format!("{prog}: timed out after {} s", timeout.as_secs()));
+            }
+            // ranking and uploads are post-show work: they stop when the show goes live
+            None if halt.as_ref().is_some_and(crate::live::Halt::stop_now) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(halt.as_ref().map(crate::live::Halt::error).unwrap_or_default());
             }
             None => std::thread::sleep(Duration::from_millis(50)),
         }

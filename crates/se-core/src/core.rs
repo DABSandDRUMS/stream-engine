@@ -5,7 +5,7 @@
 //! inputs at the same tick indices reproduces the same state.
 
 use crate::bindings::{BindScope, BindingRt};
-use crate::config::{Config, Conflict, KnobSlot, LightsRef, PresetDef, PresetFx, SceneDef};
+use crate::config::{Config, Conflict, KnobSlot, LightsRef, PresetDef, PresetFx, Quantize, SceneDef};
 use crate::rng::Rng;
 use crate::signals::{Lfo, Signals, builtin_lfos};
 use crate::state::{Anim, Mod, Override, StateTree};
@@ -16,8 +16,12 @@ use se_proto::wire::{Provenance, TraceRec};
 use se_proto::{Actor, Command, Event, Id, Meta, Op, Origin, PRIORITY_CHAT, PRIORITY_MANUAL, PRIORITY_PRESET, Role, Ts, Value, address, next_id};
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BinaryHeap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
 
+#[path = "autoseq.rs"]
+pub mod autoseq;
+#[path = "context.rs"]
+pub mod context;
 #[path = "timeline.rs"]
 pub mod timeline;
 
@@ -126,6 +130,8 @@ pub struct RuntimeState {
     pub rng: u64,
     #[serde(default)]
     pub timelines: Vec<timeline::PersistedTimeline>,
+    #[serde(default)]
+    pub autoseq: autoseq::PersistedAutoSeq,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -134,6 +140,9 @@ pub struct PersistedPreset {
     pub priority: u16,
     pub remaining_ms: Option<u64>,
     pub payload: Value,
+    /// Default lighting retired this generation's lighting, but not its other content.
+    #[serde(default)]
+    pub lights_suppressed: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -147,8 +156,33 @@ struct ActivePreset {
     payload: Value,
     trace: Id,
     fx: Vec<String>,
-    lights: Option<LightsRef>,
+    lights: bool,
+    lights_suppressed: bool,
+    origin: Origin,
     actor: Option<Actor>,
+    /// Original rule event, retained for automatic FX gating in release commands.
+    event: Option<Event>,
+}
+
+/// Firings that may wait in one lane (`lane`); more are rejected (a reward refunds).
+const LANE_QUEUE_MAX: usize = 8;
+/// A firing that waited in its lane longer than this is dropped instead of started.
+const LANE_STALE: Ts = 30_000 * MS;
+/// A `quantize` boundary closer than this starts the preset at once.
+const QUANTIZE_MIN: Ts = 30 * MS;
+
+/// A preset firing waiting for its lane to free up or for its beat/bar (`lane`, `quantize`).
+#[derive(Clone, Debug)]
+struct PendingPreset {
+    name: String,
+    lane: Option<String>,
+    /// Quantized start time; `None` while waiting in its lane. A timed start holds its lane.
+    due: Option<Ts>,
+    queued: Ts,
+    payload: Value,
+    priority: u16,
+    origin: Origin,
+    ctx: Ctx,
 }
 
 struct RuleRt {
@@ -168,6 +202,11 @@ struct Ctx {
     actor: Option<Actor>,
     depth: u32,
     event: Option<Event>,
+    /// Operator content (scene `on_enter`/`on_exit`, rules on an operator's own event): runs
+    /// as the operator even while effects are off (`fx.enabled`).
+    operator: bool,
+    /// A default-lighting handoff retires old lighting, not the rest of a mixed preset.
+    lights_suppressed: bool,
 }
 
 struct Scheduled {
@@ -245,7 +284,11 @@ pub struct Core {
     bindings: Vec<BindingRt>,
     lfos: Vec<Lfo>,
     presets: Vec<ActivePreset>,
-    preset_queue: Vec<(String, Command)>,
+    /// Last accepted base generation; delayed acknowledgments cannot take ownership back.
+    base_lights_generation: Option<u64>,
+    preset_queue: Vec<(String, Command, Ctx)>,
+    /// Lane queues and quantized starts, oldest first.
+    pending_presets: Vec<PendingPreset>,
     triggers: BTreeMap<String, TriggerRt>,
     trigger_specs: HashMap<String, TriggerSpec>,
     scheduled: BinaryHeap<Reverse<Scheduled>>,
@@ -254,6 +297,8 @@ pub struct Core {
     redo: Vec<UndoEntry>,
     transition: Option<Transition>,
     transition_history: Vec<String>,
+    /// Each roulette's (`pick`) latest picks, newest last, for its `avoid_repeat`.
+    roulette_history: HashMap<String, Vec<String>>,
     /// Chat votes for the next take's transition: (voter id, transition, expires at).
     transition_votes: Vec<(String, String, Ts)>,
     scene_layer: Vec<usize>,
@@ -271,6 +316,10 @@ pub struct Core {
     policy: crate::policy::Policy,
     /// Timelines and the timecode sources they chase (§2.7).
     timelines: timeline::Timelines,
+    /// The auto sequence preset cycling the program scene.
+    autoseq: autoseq::AutoSeq,
+    /// Context layer (`context.*`) and the effects switch's configuration.
+    context: context::Context,
 }
 
 struct EvalScope<'a> {
@@ -396,7 +445,9 @@ impl Core {
             bindings: Vec::new(),
             lfos: Vec::new(),
             presets: Vec::new(),
+            base_lights_generation: None,
             preset_queue: Vec::new(),
+            pending_presets: Vec::new(),
             triggers: BTreeMap::new(),
             trigger_specs: HashMap::new(),
             scheduled: BinaryHeap::new(),
@@ -405,6 +456,7 @@ impl Core {
             redo: Vec::new(),
             transition: None,
             transition_history: Vec::new(),
+            roulette_history: HashMap::new(),
             transition_votes: Vec::new(),
             scene_layer: Vec::new(),
             caps: Vec::new(),
@@ -418,6 +470,8 @@ impl Core {
             history_every: (hz / 60).max(1),
             policy: crate::policy::Policy::default(),
             timelines: timeline::Timelines::default(),
+            autoseq: autoseq::AutoSeq::default(),
+            context: context::Context::default(),
         };
         c.declare_builtins();
         c.apply_config(config);
@@ -512,10 +566,13 @@ impl Core {
         self.tick_policy(now);
         self.process_events();
         self.tick_presets(now);
+        self.tick_pending_presets(now);
         self.tick_triggers(now);
         self.tick_transition(now);
         self.tick_signals(now);
+        self.tick_context(now);
         self.tick_timelines(now);
+        self.tick_autoseq(now);
         self.tick_bindings();
         self.process_events();
         self.refresh_caps();
@@ -567,11 +624,20 @@ impl Core {
             pending.readonly().owner("policy").describe("Held chat/bits/points activity waiting for a mod (veto window, approvals)"),
         );
         self.state.declare(crate::policy::PENDING_COUNT, Meta::int(0, [0.0, 1e6]).readonly().owner("policy"));
+        self.declare_autoseq_state();
+        self.declare_context_state();
     }
 
     /// Apply a new configuration (initial load and hot reload). Runtime state is kept.
     pub fn apply_config(&mut self, config: Config) {
         let now = self.now();
+        // Retire the director's exact generation before definitions/addresses are removed.
+        self.stop_musical_fx(None);
+        // Local FX authoring is reconstructed on reload; deleted settings inherit again.
+        let fx_bases: Vec<_> = self.state.params().iter().enumerate().filter_map(|(i,p)| {
+            (p.addr.contains(".fx.") || p.addr.ends_with(".fx_enabled")).then_some(i)
+        }).collect();
+        for i in fx_bases { self.state.reset_base(i); }
         // modes
         let mut mm = Meta::enumeration(&config.project.start_mode, &[]).owner("core").describe("Global show mode");
         mm.options = config.modes();
@@ -584,7 +650,8 @@ impl Core {
             self.state.set_scene(i, None);
         }
         // Deleting a definition also retires its runtime work; surviving definitions keep theirs.
-        self.preset_queue.retain(|(name, _)| config.presets.contains_key(name));
+        self.preset_queue.retain(|(name, _, _)| config.presets.contains_key(name));
+        self.pending_presets.retain(|p| config.presets.contains_key(&p.name));
         let removed: Vec<String> = self.config.presets.keys().filter(|name| !config.presets.contains_key(*name)).cloned().collect();
         for name in &removed {
             self.release_preset(name, None, false);
@@ -610,8 +677,17 @@ impl Core {
         for s in config.scenes.values() {
             declare_scene(&mut self.state, s);
         }
+        declare_other_fx(&mut self.state, &config);
         let program = self.state.get(addr::PROGRAM).and_then(Value::as_str).unwrap_or("").to_string();
         if !config.scenes.contains_key(&program) {
+            if !program.is_empty() {
+                let args = Value::map().with("layer", "base").with("owner", "scene");
+                self.exec_traced(
+                    &Op::Action { name: "lights.layer.release".into(), args },
+                    Origin::System,
+                    &Ctx { priority: Some(PRIORITY_PRESET), ..Default::default() },
+                );
+            }
             self.set_sys(addr::PROGRAM, Value::Str(first_scene(&config)));
         }
         if !config.scenes.contains_key(self.state.get(addr::PREVIEW).and_then(Value::as_str).unwrap_or("")) {
@@ -716,11 +792,14 @@ impl Core {
         }
 
         let timeline_errors = self.configure_timelines(&config);
+        let autoseq_errors = self.configure_autoseq(&config);
+        self.configure_context(&config);
         for e in &config.errors {
             self.outbox.push(Output::Log { level: "error", msg: format!("{}: {}", e.file, e.msg) });
         }
         self.config = config;
         self.config.errors.extend(timeline_errors);
+        self.config.errors.extend(autoseq_errors);
         self.apply_scene_layer();
         self.runtime_dirty = true;
     }
@@ -753,7 +832,7 @@ impl Core {
                 }
                 let id = cmd.id;
                 self.trace.add(id, cmd.causal, self.now(), "command", format!("{} ({})", cmd.op.describe(), cmd.origin.as_str()));
-                let key = cmd.key.clone().filter(|_| cmd.priority() > PRIORITY_CHAT);
+                let key = cmd.key.clone();
                 let ctx = Ctx { parent: Some(id), actor: cmd.actor.clone(), priority: cmd.priority, key, ..Default::default() };
                 let res = self.exec(&cmd.op, cmd.origin, &ctx);
                 if res.is_ok() {
@@ -778,9 +857,11 @@ impl Core {
                 }
             }
             Input::Declare { address, meta } => {
+                self.declare_auto_effect(&address);
                 self.state.declare(&address, meta);
             }
             Input::DeclareTrigger { address, spec } => {
+                self.declare_auto_effect(&address);
                 self.trigger_specs.insert(address.clone(), spec);
                 self.ensure_trigger(&address);
             }
@@ -839,6 +920,10 @@ impl Core {
         };
         self.trace.add(ev.id, ev.causal.or(ctx.parent), self.now(), "event", label);
         self.outbox.push(Output::Event(ev.clone()));
+        self.context_event(&ev);
+        if ev.ty == "lights.layer.selected" && ev.payload.get_path("layer").and_then(Value::as_str) == Some("base") && ev.payload.get_path("priority").and_then(Value::as_i64).unwrap_or(ev.origin.default_priority() as i64) > PRIORITY_CHAT as i64 {
+            self.supersede_preset_lights(&ev);
+        }
         if ctx.depth > MAX_CHAIN_DEPTH {
             self.trace.add(next_id(), Some(ev.id), self.now(), "error", "rule chain too deep (loop?)".into());
             return;
@@ -855,7 +940,7 @@ impl Core {
                 let id = next_id();
                 let who = actor.as_ref().map(|a| a.name.clone()).unwrap_or_default();
                 self.trace.add(id, event.as_ref().map(|e| e.id).or(ctx.parent), self.now(), "policy", format!("run for {who}"));
-                let c = Ctx { key: None, priority: Some(PRIORITY_CHAT), parent: Some(id), actor, depth: ctx.depth + 1, event };
+                let c = Ctx { key: None, priority: Some(PRIORITY_CHAT), parent: Some(id), actor, depth: ctx.depth + 1, event, operator: false, lights_suppressed: false };
                 self.run_list(&commands, Origin::Rule, c);
             }
             Effect::Redeem(r) => {
@@ -869,6 +954,8 @@ impl Core {
                     actor: r.actor().cloned(),
                     depth: ctx.depth + 1,
                     event: Some(r.event.clone()),
+                    operator: false,
+                    lights_suppressed: false,
                 };
                 let outcome = self.run_commands(&r.commands, Origin::Rule, c, true);
                 let mut fx = Vec::new();
@@ -991,7 +1078,16 @@ impl Core {
                 (Some(p), Some(c)) => Some(p.min(c)),
                 (p, c) => p.or(c),
             };
-            let ctx = Ctx { key: Some(format!("rule:{name}")), priority, parent: Some(id), actor: ev.actor.clone(), depth: depth + 1, event: Some(ev.clone()) };
+            let ctx = Ctx {
+                key: Some(format!("rule:{name}")),
+                priority,
+                parent: Some(id),
+                actor: ev.actor.clone(),
+                depth: depth + 1,
+                event: Some(ev.clone()),
+                operator: context::operator_event(ev),
+                lights_suppressed: false,
+            };
             self.run_list(&cmds, Origin::Rule, ctx);
         }
     }
@@ -1081,14 +1177,17 @@ impl Core {
     }
 
     fn override_key(&self, origin: Origin, ctx: &Ctx, prio: u16) -> String {
+        if prio <= PRIORITY_CHAT {
+            let actor = ctx.actor.as_ref().map(|a| a.id.as_str());
+            return match (actor, ctx.key.as_deref()) {
+                (Some(actor), Some(key)) => format!("chat:{actor}:{key}"),
+                (Some(actor), None) => format!("chat:{actor}"),
+                (None, Some(key)) => format!("chat:{key}"),
+                (None, None) => "chat".into(),
+            };
+        }
         if let Some(k) = &ctx.key {
             return k.clone();
-        }
-        if prio <= PRIORITY_CHAT {
-            if let Some(a) = &ctx.actor {
-                return format!("chat:{}", a.id);
-            }
-            return "chat".into();
         }
         if prio >= PRIORITY_MANUAL {
             return "manual".into();
@@ -1103,6 +1202,7 @@ impl Core {
     }
 
     fn exec(&mut self, op: &Op, origin: Origin, ctx: &Ctx) -> Result<(), String> {
+        if ctx.lights_suppressed && lighting_op(op) { return Ok(()); }
         let now = self.now();
         // chat effects only run in the policy's effect modes (§12.1); the simulator is exempt
         if prio_is_chat(self.priority_for(origin, ctx))
@@ -1138,6 +1238,12 @@ impl Core {
         }
         match op {
             Op::Set { address, value } => {
+                if address == context::FX_AUTO {
+                    return self.context_action(if value.truthy() { "fx.auto.on" } else { "fx.auto.off" }, origin, ctx);
+                }
+                if address == context::LIGHTS_AUTO {
+                    return self.context_action(if value.truthy() { "lights.auto.on" } else { "lights.auto.off" }, origin, ctx);
+                }
                 self.check_writable(address, origin)?;
                 let prio = self.priority_for(origin, ctx);
                 let i = self.state.ensure(address, &zero_of(value));
@@ -1159,6 +1265,18 @@ impl Core {
                 Ok(())
             }
             Op::SetBase { address, value } => {
+                if context::auto_control(address) {
+                    if !self.is_operator(origin, ctx) {
+                        return Err("only the operator can edit automatic effect controls".into());
+                    }
+                    self.declare_auto_effect(address);
+                    let id = self.state.id(address).ok_or("unknown automatic effect control")?;
+                    let value = self.state.param(id).meta.coerce(value);
+                    let old = self.state.set_base(id, value.clone());
+                    if old != value { self.runtime_dirty = true; }
+                    self.note_cause(id, ctx);
+                    return Ok(());
+                }
                 self.check_writable(address, origin)?;
                 if matches!(origin, Origin::Chat | Origin::Twitch) {
                     return Err("chat cannot edit the project".into());
@@ -1184,9 +1302,17 @@ impl Core {
                     return Err("chat can never touch the mixer".into());
                 }
                 let i = self.state.ensure(address, &zero_of(to));
-                let from = self.state.value(i).clone();
                 let to = if prio <= PRIORITY_CHAT { self.chat_clamp(address, to.clone()) } else { to.clone() };
                 let key = self.override_key(origin, ctx, prio);
+                // Continue this owner's contribution, not a stronger override or another
+                // playback's fading tail. Same-tick Set + Animate must observe the seed.
+                let from = self.state.param(i).overrides.iter()
+                    .find(|o| o.key == key && o.expires.is_none_or(|until| until > now))
+                    .map(|o| o.current(now))
+                    .unwrap_or_else(|| {
+                        self.state.refresh(i, now);
+                        self.state.value(i).clone()
+                    });
                 let expires = (prio <= PRIORITY_CHAT).then(|| now + *ms as u64 * MS + self.chat_ttl);
                 self.state.put_override(
                     i,
@@ -1204,17 +1330,22 @@ impl Core {
                 self.note_cause(i, ctx);
                 Ok(())
             }
-            Op::Trigger { address, payload } => self.fire_trigger(address, payload, origin, ctx),
+            Op::Trigger { address, payload } => {
+                self.fire_trigger(address, payload, origin, ctx)
+            }
             Op::Release { address } => {
                 let prio = self.priority_for(origin, ctx);
                 let key = self.override_key(origin, ctx, prio);
+                let release_all = prio >= PRIORITY_MANUAL && ctx.key.is_none();
                 let mut any = false;
                 if let Some(t) = self.triggers.get_mut(address) {
-                    any |= t.release(if prio >= PRIORITY_MANUAL { None } else { Some(&key) }, now);
+                    any |= t.release(if release_all { None } else { Some(&key) }, now);
                 }
                 if let Some(i) = self.state.id(address) {
                     any |= self.state.remove_override(i, &key);
-                    if prio >= PRIORITY_MANUAL && !any {
+                    // Lighting's explicit reset must clear HTP owners even when the
+                    // system itself had a contribution. Other releases retain their policy.
+                    if release_all && (!any || (prio == u16::MAX && address.starts_with("lights."))) {
                         let keys: Vec<String> = self.state.param(i).overrides.iter().map(|o| o.key.clone()).collect();
                         for k in keys {
                             any |= self.state.remove_override(i, &k);
@@ -1232,7 +1363,7 @@ impl Core {
                 let direct = self.state.get(addr::DIRECT).is_some_and(Value::truthy);
                 self.set_sys(addr::PREVIEW, Value::Str(scene.clone()));
                 self.runtime_dirty = true;
-                if direct { self.take(None, None, ctx) } else { Ok(()) }
+                if direct { self.take(None, None, origin, ctx) } else { Ok(()) }
             }
             Op::SceneCut { scene, transition } => {
                 self.require_scene(scene)?;
@@ -1240,21 +1371,24 @@ impl Core {
                     return Err("chat cannot change scenes".into());
                 }
                 self.set_sys(addr::PREVIEW, Value::Str(scene.clone()));
-                self.take(transition.clone(), None, ctx)
+                self.take(transition.clone(), None, origin, ctx)
             }
             Op::SceneTake { transition, ms } => {
                 if prio_is_chat(self.priority_for(origin, ctx)) {
                     return Err("chat cannot change scenes".into());
                 }
-                self.take(transition.clone(), *ms, ctx)
+                self.take(transition.clone(), *ms, origin, ctx)
             }
             Op::PresetFire { name, payload } => self.fire_preset(name, payload, origin, ctx),
+            Op::PresetRelease { name } if self.config.presets.get(name).is_some_and(|d| !d.pick.is_empty()) => Ok(()),
             Op::PresetRelease { name } => {
                 if self.release_preset(name, ctx.parent, true) {
-                    Ok(())
-                } else {
-                    Err(format!("preset `{name}` is not active"))
+                    return Ok(());
                 }
+                // not running yet: letting go cancels a firing still waiting for its lane or beat
+                let waiting = self.pending_presets.len();
+                self.pending_presets.retain(|p| p.name != *name);
+                if self.pending_presets.len() < waiting { Ok(()) } else { Err(format!("preset `{name}` is not active")) }
             }
             Op::ModeSet { mode } => self.set_mode(mode, origin, ctx),
             Op::Emit { ty, payload } => {
@@ -1287,6 +1421,9 @@ impl Core {
         if !address::is_valid(address, false) {
             return Err(format!("bad address `{address}`"));
         }
+        if context::auto_control(address) {
+            return Err("automatic effect controls require operator set_base".into());
+        }
         if let Some(i) = self.state.id(address)
             && self.state.param(i).meta.readonly
             && origin != Origin::System
@@ -1297,12 +1434,12 @@ impl Core {
     }
 
     fn chat_clamp(&self, address: &str, v: Value) -> Value {
-        match self.chat_caps.iter().find(|(p, _)| address::matches(p, address)) {
-            Some((_, [lo, hi])) => match (&v, v.as_f64()) {
+        match self.chat_caps.iter().find(|(p, _)| address::matches(p, address)).map(|(_, cap)| *cap) {
+            Some([lo, hi]) => match (&v, v.as_f64()) {
                 // booleans are capped as 0/1 (`[0, 0]` = chat may only turn it off)
-                (Value::Bool(_), Some(x)) => Value::Bool(x.clamp(*lo, *hi) >= 0.5),
-                (Value::Int(_), Some(x)) => Value::Int(x.clamp(*lo, *hi).round() as i64),
-                (_, Some(x)) => Value::Float(x.clamp(*lo, *hi)),
+                (Value::Bool(_), Some(x)) => Value::Bool(x.clamp(lo, hi) >= 0.5),
+                (Value::Int(_), Some(x)) => Value::Int(x.clamp(lo, hi).round() as i64),
+                (_, Some(x)) => Value::Float(x.clamp(lo, hi)),
                 _ => v,
             },
             None => v,
@@ -1373,6 +1510,8 @@ impl Core {
     }
 
     fn fire_trigger(&mut self, address: &str, payload: &Value, origin: Origin, ctx: &Ctx) -> Result<(), String> {
+        self.declare_auto_effect(address);
+        self.gate_trigger(address, origin, ctx)?;
         if !address::is_valid(address, false) {
             return Err(format!("bad address `{address}`"));
         }
@@ -1399,6 +1538,9 @@ impl Core {
             hold: hold.map(|h| h * MS),
             release: get("release").unwrap_or(spec.release_ms) * MS,
             released_at: None,
+            strength: if address.starts_with("patch.") && ctx.key.as_deref().is_some_and(|k| k.starts_with("musical_fx:")) {
+                payload.get_path("level").and_then(Value::as_f64).unwrap_or(0.25).clamp(0.18, 0.4)
+            } else { 1.0 },
             release_from: 0.0,
             key,
             payload: payload.clone(),
@@ -1417,6 +1559,7 @@ impl Core {
             }
             self.state.set_base(ids[PAYLOAD_FIELDS.len()], Value::from(p.user_color));
         }
+        self.note_auto_start(address, ctx);
         let mut e = Event::new(format!("{address}.trigger"), origin, payload.clone());
         e.actor = ctx.actor.clone();
         e.causal = ctx.parent;
@@ -1452,10 +1595,15 @@ impl Core {
 
     fn fire_preset(&mut self, name: &str, payload: &Value, origin: Origin, ctx: &Ctx) -> Result<(), String> {
         let def = self.config.presets.get(name).cloned().ok_or_else(|| format!("unknown preset `{name}`"))?;
+        if ctx.lights_suppressed && lighting_only_preset(&def) { return Ok(()); }
+        self.gate_preset(&def, origin, ctx)?;
         let caller = self.priority_for(origin, ctx);
         let chat = caller <= PRIORITY_CHAT;
         if chat && (def.confirm || def.chat == Some(false)) {
             return Err(format!("preset `{name}` is not available to chat"));
+        }
+        if !def.pick.is_empty() {
+            return self.fire_roulette(&def, payload, origin, ctx);
         }
         let active = self.presets.iter().any(|p| p.name == name);
         if active {
@@ -1470,7 +1618,7 @@ impl Core {
                     c.actor = ctx.actor.clone();
                     c.priority = ctx.priority;
                     c.causal = ctx.parent;
-                    self.preset_queue.push((name.into(), c));
+                    self.preset_queue.push((name.into(), c, ctx.clone()));
                     return Ok(());
                 }
                 Conflict::Replace => {
@@ -1483,8 +1631,138 @@ impl Core {
             let base = def.priority.unwrap_or(PRIORITY_PRESET).min(PRIORITY_MANUAL - 1);
             if chat { base.min(PRIORITY_CHAT) } else { base }
         };
-        self.start_preset(&def, payload, priority, origin, ctx);
+        let now = self.now();
+        let p = PendingPreset {
+            name: name.into(),
+            lane: def.lane.clone(),
+            due: None,
+            queued: now,
+            payload: payload.clone(),
+            priority,
+            origin,
+            ctx: ctx.clone(),
+        };
+        // the running holder of a lane re-fires by its own `conflict` (above); others wait their turn
+        if !active
+            && let Some(lane) = &def.lane
+            && self.lane_busy(lane)
+        {
+            let waiting = self.pending_presets.iter().filter(|p| p.due.is_none() && p.lane.as_ref() == Some(lane)).count();
+            if waiting >= LANE_QUEUE_MAX {
+                return Err(format!("lane `{lane}` is full ({LANE_QUEUE_MAX} waiting)"));
+            }
+            self.trace.add(next_id(), ctx.parent, now, "preset", format!("{name} waits in lane `{lane}`"));
+            self.pending_presets.push(p);
+            return Ok(());
+        }
+        self.begin_preset(&def, p);
         Ok(())
+    }
+
+    /// A roulette (`pick`) fires one of its presets, picked by weight and skipping its last
+    /// `avoid_repeat` picks while others are left, as `preset.fire <picked>` would.
+    fn fire_roulette(&mut self, def: &PresetDef, payload: &Value, origin: Origin, ctx: &Ctx) -> Result<(), String> {
+        let history = self.roulette_history.get(&def.name).map_or(&[][..], Vec::as_slice);
+        let eligible: Vec<_>;
+        let pool = if Self::automatic_effect_context(ctx) {
+            eligible = def.pick.iter().filter(|entry| self.config.presets.get(&entry.name)
+                .is_some_and(|child| self.auto_preset_ready(child, 0))).cloned().collect();
+            eligible.as_slice()
+        } else { &def.pick };
+        let picked = Self::weighted_pick(&mut self.rng, pool, def.avoid_repeat, history)
+            .ok_or_else(|| format!("roulette `{}` has nothing eligible to pick", def.name))?;
+        if self.config.presets.get(&picked).is_some_and(|d| !d.pick.is_empty()) {
+            return Err(format!("roulette `{}` picked `{picked}`, itself a roulette", def.name));
+        }
+        let trace = next_id();
+        self.trace.add(trace, ctx.parent, self.now(), "preset", format!("roulette {} picked {picked}", def.name));
+        self.fire_preset(&picked, payload, origin, &Ctx { parent: Some(trace), ..ctx.clone() })?;
+        let history = self.roulette_history.entry(def.name.clone()).or_default();
+        history.push(picked);
+        let over = history.len().saturating_sub(def.avoid_repeat);
+        history.drain(..over);
+        Ok(())
+    }
+
+    /// A lane is busy while one of its presets runs, a quantized start holds it, or firings wait in it.
+    fn lane_busy(&self, lane: &str) -> bool {
+        self.lane_held(lane) || self.pending_presets.iter().any(|p| p.lane.as_deref() == Some(lane))
+    }
+
+    fn lane_held(&self, lane: &str) -> bool {
+        self.presets.iter().any(|a| self.config.presets.get(&a.name).is_some_and(|d| d.lane.as_deref() == Some(lane)))
+            || self.pending_presets.iter().any(|p| p.due.is_some() && p.lane.as_deref() == Some(lane))
+    }
+
+    /// Start now, or at the next beat/bar boundary for `quantize` (holding its lane until then).
+    fn begin_preset(&mut self, def: &PresetDef, mut p: PendingPreset) {
+        let delay = def.quantize.map_or(0, |q| self.quantize_delay(q));
+        if delay >= QUANTIZE_MIN {
+            let now = self.now();
+            p.due = Some(now + delay);
+            self.trace.add(next_id(), p.ctx.parent, now, "preset", format!("{} starts in {} ms (quantized)", p.name, delay / MS));
+            self.pending_presets.push(p);
+            return;
+        }
+        self.start_preset(def, &p.payload, p.priority, p.origin, &p.ctx);
+    }
+
+    /// Time to the next beat (`beat.phase`) or bar (`lfo.bar`, 4 beats) at `beat.bpm`; 0 without a tempo.
+    fn quantize_delay(&self, q: Quantize) -> Ts {
+        let bpm = self.signals.get("beat.bpm").unwrap_or(0.0) as f64;
+        let (phase, beats) = match q {
+            Quantize::Beat => (self.signals.get("beat.phase"), 1.0),
+            Quantize::Bar => (self.signals.get("lfo.bar"), 4.0),
+        };
+        let Some(phase) = phase.map(f64::from).filter(|p| p.is_finite()) else { return 0 };
+        if !(bpm.is_finite() && bpm > 0.0) {
+            return 0;
+        }
+        ((1.0 - phase.clamp(0.0, 1.0)) * beats * 60.0 / bpm * 1e9) as Ts
+    }
+
+    /// Quantized starts that are due begin; a free lane takes its oldest waiting firing.
+    fn tick_pending_presets(&mut self, now: Ts) {
+        if self.pending_presets.is_empty() {
+            return;
+        }
+        while let Some(i) = self.pending_presets.iter().position(|p| p.due.is_some_and(|d| d <= now)) {
+            let p = self.pending_presets.remove(i);
+            let Some(def) = self.config.presets.get(&p.name).cloned() else { continue };
+            if let Err(error) = self.gate_preset(&def, p.origin, &p.ctx) {
+                self.trace.add(next_id(), p.ctx.parent, now, "error", error);
+                continue;
+            }
+            if self.presets.iter().any(|a| a.name == p.name) {
+                match def.conflict {
+                    Conflict::Replace => {
+                        self.release_preset(&p.name, p.ctx.parent, true);
+                    }
+                    Conflict::Reject => {
+                        self.trace.add(next_id(), p.ctx.parent, now, "error", format!("preset `{}` is already active", p.name));
+                        continue;
+                    }
+                    Conflict::Queue | Conflict::Stack => {}
+                }
+            }
+            self.start_preset(&def, &p.payload, p.priority, p.origin, &p.ctx);
+        }
+        while let Some(i) = self.pending_presets.iter().position(|p| p.due.is_none() && p.lane.as_deref().is_some_and(|l| !self.lane_held(l))) {
+            let p = self.pending_presets.remove(i);
+            let waited = now.saturating_sub(p.queued);
+            if waited > LANE_STALE {
+                let msg = format!("preset `{}` dropped: waited {} s in lane `{}`", p.name, waited / (1000 * MS), p.lane.as_deref().unwrap_or(""));
+                self.trace.add(next_id(), p.ctx.parent, now, "error", msg.clone());
+                self.log("warn", msg);
+                continue;
+            }
+            let Some(def) = self.config.presets.get(&p.name).cloned() else { continue };
+            if let Err(error) = self.gate_preset(&def, p.origin, &p.ctx) {
+                self.trace.add(next_id(), p.ctx.parent, now, "error", error);
+                continue;
+            }
+            self.begin_preset(&def, p);
+        }
     }
 
     fn start_preset(&mut self, def: &PresetDef, payload: &Value, priority: u16, origin: Origin, ctx: &Ctx) {
@@ -1492,11 +1770,12 @@ impl Core {
         let inst = next_id();
         let trace = next_id();
         self.trace.add(trace, ctx.parent, now, "preset", format!("{} (priority {priority})", def.name));
-        let key = format!("preset:{}", def.name);
+        let musical = ctx.key.as_deref() == Some("musical_fx") && ctx.event.as_ref().is_some_and(|e| e.ty == "context.musical_fx");
+        let key = if musical { format!("musical_fx:{}:{inst}", def.name) } else { format!("preset:{}", def.name) };
         let chat = priority <= PRIORITY_CHAT;
         let expires = chat.then(|| now + def.hold.map(|h| h.ns()).unwrap_or(self.chat_ttl).min(self.chat_ttl));
         for (a, v) in &def.set {
-            if chat && a.starts_with("mixer.") {
+            if (chat && a.starts_with("mixer.")) || (ctx.lights_suppressed && a.starts_with("lights.")) {
                 continue;
             }
             let v = if chat { self.chat_clamp(a, v.clone()) } else { v.clone() };
@@ -1504,10 +1783,19 @@ impl Core {
             self.state.put_override(i, Override { key: key.clone(), priority, value: v, seq: 0, expires, anim: None, origin, causal: Some(trace) });
             self.cause.insert(i, trace);
         }
-        let pctx =
-            Ctx { key: Some(key.clone()), priority: Some(priority), parent: Some(trace), actor: ctx.actor.clone(), depth: ctx.depth, event: ctx.event.clone() };
+        let pctx = Ctx {
+            key: Some(key.clone()),
+            priority: Some(priority),
+            parent: Some(trace),
+            actor: ctx.actor.clone(),
+            depth: ctx.depth,
+            event: ctx.event.clone(),
+            operator: ctx.operator,
+            lights_suppressed: ctx.lights_suppressed,
+        };
         let mut fx_addrs = Vec::new();
         let mut longest: u64 = 0;
+        let mut musical_error = None;
         for fx in &def.fx {
             let a = if fx.name.contains('.') { fx.name.clone() } else { format!("fx.{}", fx.name) };
             let mut p = Value::Map(fx.params.clone());
@@ -1529,22 +1817,37 @@ impl Core {
                 }
             }
             if let Err(e) = self.fire_trigger(&a, &p, origin, &pctx) {
-                self.trace.add(next_id(), Some(trace), now, "error", e);
+                self.trace.add(next_id(), Some(trace), now, "error", e.clone());
+                if musical { musical_error = Some(format!("musical preset `{}`: {e}", def.name)); }
             } else if !fx.name.contains('.') {
                 self.hold_effect_settings(&a, fx, &p, &key, priority, origin, trace, expires);
             }
             fx_addrs.push(a);
         }
-        if let Some(l) = &def.lights {
-            let args = Value::map()
-                .with("cue", l.cue.clone().map(Value::Str).unwrap_or_default())
-                .with("cuelist", l.cuelist.clone().map(Value::Str).unwrap_or_default())
-                .with("look", l.look.clone().map(Value::Str).unwrap_or_default())
-                .with("priority", priority as i64);
-            self.exec_traced(&Op::Action { name: "lights.cue".into(), args }, origin, &pctx);
-            if let Some(h) = l.hold {
-                longest = longest.max(h.ms());
+        if let Some(h) = def.lights.as_ref().and_then(|l| l.hold) {
+            longest = longest.max(h.ms());
+        }
+        let release_at = if chat {
+            let one_shot = def.set.is_empty() && !def.toggle && !def.until_released;
+            let hold = def.hold.map(|h| h.ns()).unwrap_or(if one_shot && longest > 0 { longest * MS } else { self.chat_ttl });
+            Some(now + hold.min(self.chat_ttl))
+        } else {
+            match def.hold {
+                Some(h) => Some(now + h.ns()),
+                None if def.set.is_empty() && !def.toggle && !def.until_released => Some(now + longest * MS),
+                None => None,
             }
+        };
+        let owns_lights = !ctx.lights_suppressed && def.lights.as_ref().is_some_and(|l| {
+            chat || l.look.is_some() || l.hold.is_some() || def.hold.is_some() || def.toggle || def.until_released || !def.set.is_empty()
+        });
+        if !ctx.lights_suppressed && let Some(l) = &def.lights {
+            let duration = l.hold.map(|h| h.ms()).or_else(|| {
+                if owns_lights { release_at.map(|r| r.saturating_sub(now) / MS) } else { None }
+            });
+            let duration = if chat { Some(duration.unwrap_or(self.chat_ttl / MS).min(self.chat_ttl / MS)) } else { duration };
+            let args = lighting_selection(l, &format!("preset:{inst}"), priority, duration);
+            self.exec_traced(&Op::Action { name: "lights.layer.select".into(), args }, origin, &pctx);
         }
         if let Some(s) = &def.sound {
             self.exec_traced(&Op::Action { name: "audio.play".into(), args: Value::map().with("sound", s.clone()) }, origin, &pctx);
@@ -1567,12 +1870,6 @@ impl Core {
         }
         let cmds = def.commands.clone();
         self.run_list(&cmds, origin, pctx);
-        let release_at = match def.hold {
-            Some(h) => Some(now + h.ns()),
-            None if def.set.is_empty() && !def.toggle && !def.until_released => Some(now + longest * MS),
-            None if chat => Some(now + self.chat_ttl),
-            None => None,
-        };
         self.presets.push(ActivePreset {
             name: def.name.clone(),
             inst,
@@ -1583,13 +1880,57 @@ impl Core {
             payload: payload.clone(),
             trace,
             fx: fx_addrs,
-            lights: held_lights(def),
+            lights: owns_lights,
+            lights_suppressed: ctx.lights_suppressed,
+            origin,
             actor: ctx.actor.clone(),
+            event: ctx.event.as_ref().filter(|e| e.ty.starts_with("context.")).cloned(),
         });
         self.set_sys(&format!("preset.{}.active", def.name), Value::Bool(true));
+        if musical {
+            self.musical_started(&def.name, inst);
+            if let Some(error) = musical_error {
+                self.release_preset_instance(inst, Some(trace));
+                self.musical_failure(error);
+            }
+        }
         let e = Event::new(format!("preset.{}.fired", def.name), origin, payload.clone()).with_causal(Some(trace));
         self.events.push_back((e, Ctx { depth: ctx.depth, parent: Some(trace), ..Default::default() }));
         self.runtime_dirty = true;
+    }
+
+    /// Only accepted base selections supersede ownership; pending or failed requests do not.
+    fn supersede_preset_lights(&mut self, ev: &Event) {
+        let generation = ev.payload.get_path("generation").and_then(Value::as_i64).and_then(|g| u64::try_from(g).ok());
+        if let Some(generation) = generation {
+            if self.base_lights_generation.is_some_and(|latest| generation <= latest) { return; }
+            self.base_lights_generation = Some(generation);
+        }
+        let owner = ev.payload.get_path("source_owner").and_then(Value::as_str);
+        let owner_inst = owner.and_then(|o| o.strip_prefix("preset:"))
+            .filter(|id| id.as_bytes().first().is_some_and(|c| matches!(*c, b'1'..=b'9')))
+            .and_then(|id| id.parse::<Id>().ok());
+        // The controller echoes the selecting command's id, allocated after its preset
+        // instance. A later firing can already be active while this acknowledgment is
+        // still in transit; it has not lost its request to this earlier selection.
+        let selected_before = ev.causal.or(owner_inst);
+        let mut changed = false;
+        let mut release = Vec::new();
+        for p in &mut self.presets {
+            if owner_inst == Some(p.inst) || !p.lights || selected_before.is_some_and(|id| p.inst > id) { continue; }
+            let Some(def) = self.config.presets.get(&p.name) else { continue };
+            p.lights = false;
+            changed = true;
+            if lighting_only_preset(def) { release.push((p.name.clone(), p.inst)); }
+        }
+        for (name, inst) in &release {
+            if self.presets.iter().any(|p| p.name == *name && !release.iter().any(|(_, id)| *id == p.inst)) {
+                self.presets.retain(|p| p.inst != *inst);
+            } else {
+                self.release_preset(name, None, false);
+            }
+        }
+        self.runtime_dirty |= changed;
     }
 
     /// Settings of a built-in effect in a preset's `fx` entry (`{ name = "glitch", speed = 2.0 }`)
@@ -1708,6 +2049,7 @@ impl Core {
             return false;
         }
         for p in &gone {
+            self.musical_released(p.inst, now);
             let key = p.key.clone();
             self.state.remove_overrides_where(|o| o.key == key);
             for a in &p.fx {
@@ -1716,17 +2058,11 @@ impl Core {
                 }
             }
             self.fade_effect_settings(name, &key, now);
-            if let Some(l) = &p.lights {
-                let args = Value::map()
-                    .with("cue", l.cue.clone().map(Value::Str).unwrap_or_default())
-                    .with("cuelist", l.cuelist.clone().map(Value::Str).unwrap_or_default())
-                    .with("look", l.look.clone().map(Value::Str).unwrap_or_default());
-                self.outbox.push(Output::Action(Command::new(Origin::Rule, Op::Action { name: "lights.release".into(), args }).caused_by(Some(p.trace))));
-            }
+            self.release_preset_lights(p);
             let id = next_id();
             self.trace.add(id, parent.or(Some(p.trace)), now, "preset", format!("{name} released"));
             if run_on_release && let Some(def) = self.config.presets.get(name).cloned() {
-                let ctx = Ctx { key: Some(key.clone()), priority: Some(p.priority), parent: Some(id), actor: p.actor.clone(), ..Default::default() };
+                let ctx = Ctx { key: Some(key.clone()), priority: Some(p.priority), parent: Some(id), actor: p.actor.clone(), event: p.event.clone(), lights_suppressed: p.lights_suppressed, ..Default::default() };
                 self.run_list(&def.on_release, Origin::Rule, ctx);
             }
             let _ = (p.inst, p.started);
@@ -1737,24 +2073,66 @@ impl Core {
             let e = Event::new(format!("preset.{name}.released"), Origin::System, Value::Null);
             self.events.push_back((e, Ctx::default()));
             // start a queued firing
-            if let Some(pos) = self.preset_queue.iter().position(|(n, _)| n == name) {
-                let (_, c) = self.preset_queue.remove(pos);
-                self.submit(Input::Command { cmd: c });
+            if let Some(pos) = self.preset_queue.iter().position(|(n, _, _)| n == name) {
+                let (_, c, ctx) = self.preset_queue.remove(pos);
+                self.schedule(now, c.op, c.origin, ctx);
             }
         }
         self.runtime_dirty = true;
         true
     }
 
+    /// The musical director owns one generation, not the preset name or a shared manual key.
+    fn release_preset_instance(&mut self, inst: Id, parent: Option<Id>) -> bool {
+        let Some(index) = self.presets.iter().position(|p| p.inst == inst) else { return false };
+        let p = self.presets.remove(index);
+        let now = self.now();
+        self.state.remove_overrides_where(|o| o.key == p.key);
+        for address in &p.fx {
+            if let Some(trigger) = self.triggers.get_mut(address) { trigger.release(Some(&p.key), now); }
+        }
+        self.fade_effect_settings(&p.name, &p.key, now);
+        self.musical_released(inst, now);
+        self.trace.add(next_id(), parent.or(Some(p.trace)), now, "preset", format!("{} released", p.name));
+        if !self.presets.iter().any(|a| a.name == p.name) {
+            self.set_sys(&format!("preset.{}.active", p.name), Value::Bool(false));
+            self.events.push_back((Event::new(format!("preset.{}.released", p.name), Origin::System, Value::Null), Ctx::default()));
+            if let Some(pos) = self.preset_queue.iter().position(|(name, _, _)| name == &p.name) {
+                let (_, command, ctx) = self.preset_queue.remove(pos);
+                self.schedule(now, command.op, command.origin, ctx);
+            }
+        }
+        self.runtime_dirty = true;
+        true
+    }
+
+    fn release_preset_lights(&mut self, p: &ActivePreset) {
+        if !p.lights {
+            return;
+        }
+        let args = Value::map().with("layer", "base").with("owner", format!("preset:{}", p.inst));
+        let ctx = Ctx { priority: Some(p.priority), parent: Some(p.trace), actor: p.actor.clone(), ..Default::default() };
+        self.exec_traced(&Op::Action { name: "lights.layer.release".into(), args }, p.origin, &ctx);
+    }
+
     fn tick_presets(&mut self, now: Ts) {
         let expired = |p: &ActivePreset| p.release_at.is_some_and(|r| now >= r);
+        while let Some(inst) = self.presets.iter().find(|p| p.key.starts_with("musical_fx:") && expired(p)).map(|p| p.inst) {
+            self.release_preset_instance(inst, None);
+        }
         let mut due: Vec<String> = self.presets.iter().filter(|p| expired(p)).map(|p| p.name.clone()).collect();
         due.dedup();
         for n in due {
             let live = self.presets.iter().filter(|p| p.name == n && !expired(p)).count();
             if live > 0 {
-                // Stacked instances share the preset's override key; the layer stays until the last one ends.
-                self.presets.retain(|p| !(p.name == n && expired(p)));
+                // State/effect overrides share the preset key, but lighting belongs to
+                // each runtime instance and must retire even while another stack is live.
+                let (gone, keep): (Vec<ActivePreset>, Vec<ActivePreset>) =
+                    std::mem::take(&mut self.presets).into_iter().partition(|p| p.name == n && expired(p));
+                self.presets = keep;
+                for p in &gone {
+                    self.release_preset_lights(p);
+                }
             } else {
                 self.release_preset(&n, None, true);
             }
@@ -1763,7 +2141,7 @@ impl Core {
 
     // ---- scenes ----------------------------------------------------------------------
 
-    fn take(&mut self, transition: Option<String>, ms: Option<u32>, ctx: &Ctx) -> Result<(), String> {
+    fn take(&mut self, transition: Option<String>, ms: Option<u32>, origin: Origin, ctx: &Ctx) -> Result<(), String> {
         let now = self.now();
         let to = self.state.get(addr::PREVIEW).and_then(Value::as_str).unwrap_or("").to_string();
         let from = self.state.get(addr::PROGRAM).and_then(Value::as_str).unwrap_or("").to_string();
@@ -1801,13 +2179,27 @@ impl Core {
         let payload = Value::map().with("from", from.clone()).with("to", to.clone()).with("transition", name).with("ms", dur_ms as i64).with("by", by);
         let e = Event::new("scene.take", Origin::System, payload).with_causal(ctx.parent);
         self.events.push_back((e, Ctx { depth: ctx.depth, parent: ctx.parent, ..Default::default() }));
-        let sctx = Ctx { key: Some(format!("scene:{to}")), priority: Some(PRIORITY_PRESET), parent: ctx.parent, depth: ctx.depth, ..Default::default() };
+        let sctx = Ctx {
+            key: Some(format!("scene:{to}")),
+            priority: Some(PRIORITY_PRESET),
+            parent: ctx.parent,
+            actor: ctx.actor.clone(),
+            depth: ctx.depth,
+            // scenes are the operator's own content
+            operator: true,
+            ..Default::default()
+        };
         if let Some(old) = self.config.scenes.get(&from).cloned() {
             self.run_list(&old.on_exit, Origin::Rule, sctx.clone());
         }
         if let Some(l) = def.lights.clone().or(pool.lights.clone()).or(base.lights.clone()) {
-            let args = Value::map().with("cue", l.cue.map(Value::Str).unwrap_or_default()).with("cuelist", l.cuelist.map(Value::Str).unwrap_or_default());
-            self.exec_traced(&Op::Action { name: "lights.cue".into(), args }, Origin::Rule, &sctx);
+            // Scene actions are ordered and have no deferred per-transition release.
+            // A stable owner preserves the last successful scene on an invalid select.
+            let args = lighting_selection(&l, "scene", PRIORITY_PRESET, l.hold.map(|h| h.ms()));
+            self.exec_traced(&Op::Action { name: "lights.layer.select".into(), args }, origin, &sctx);
+        } else {
+            let args = Value::map().with("layer", "base").with("owner", "scene");
+            self.exec_traced(&Op::Action { name: "lights.layer.release".into(), args }, origin, &sctx);
         }
         self.run_list(&def.on_enter, Origin::Rule, sctx);
         if dur_ms == 0 {
@@ -1842,16 +2234,22 @@ impl Core {
     /// A weighted pick from `p`'s pool, skipping the last `avoid_repeat` transitions when others
     /// are left; `None` when nothing in it can be picked.
     fn pick_from_pool(&mut self, p: &crate::config::TransitionPool) -> Option<String> {
-        let recent: Vec<&String> = self.transition_history.iter().rev().take(p.avoid_repeat).collect();
-        let mut cands: Vec<&crate::config::PoolEntry> = p.pool.iter().filter(|e| !recent.contains(&&e.name) && e.w > 0.0).collect();
+        Self::weighted_pick(&mut self.rng, &p.pool, p.avoid_repeat, &self.transition_history)
+    }
+
+    /// A weighted pick from `pool`, skipping the last `avoid` names of `history` (newest last)
+    /// when others are left; `None` when nothing has a weight above 0.
+    fn weighted_pick(rng: &mut Rng, pool: &[crate::config::PoolEntry], avoid: usize, history: &[String]) -> Option<String> {
+        let recent: Vec<&String> = history.iter().rev().take(avoid).collect();
+        let mut cands: Vec<&crate::config::PoolEntry> = pool.iter().filter(|e| !recent.contains(&&e.name) && e.w > 0.0).collect();
         if cands.is_empty() {
-            cands = p.pool.iter().filter(|e| e.w > 0.0).collect();
+            cands = pool.iter().filter(|e| e.w > 0.0).collect();
         }
         if cands.is_empty() {
             return None;
         }
         let total: f64 = cands.iter().map(|e| e.w).sum();
-        let mut r = self.rng.f64() * total;
+        let mut r = rng.f64() * total;
         for e in &cands {
             if r < e.w {
                 return Some(e.name.clone());
@@ -2016,12 +2414,14 @@ impl Core {
             self.release_preset(&n, ctx.parent, false);
         }
         self.preset_queue.clear();
+        self.pending_presets.clear();
         self.state.remove_overrides_where(|o| o.priority < PRIORITY_MANUAL);
         for t in self.triggers.values_mut() {
             t.release(None, now);
         }
         self.scheduled.clear();
         self.timelines_panic();
+        self.autoseq_panic(ctx.parent);
         self.set_sys(addr::PANIC, Value::Bool(true));
         if self.config.presets.contains_key("panic") {
             let _ = self.fire_preset("panic", &Value::Null, Origin::System, &Ctx { parent: ctx.parent, ..Default::default() });
@@ -2034,6 +2434,7 @@ impl Core {
     }
 
     fn clean(&mut self, ctx: &Ctx) {
+        self.pending_presets.retain(|p| p.lane.is_none() && p.priority > PRIORITY_CHAT);
         let now = self.now();
         self.state.remove_overrides_where(|o| o.priority <= PRIORITY_CHAT);
         for t in self.triggers.values_mut() {
@@ -2110,6 +2511,9 @@ impl Core {
     }
 
     fn action(&mut self, name: &str, args: &Value, origin: Origin, ctx: &Ctx) -> Result<(), String> {
+        if (name.starts_with("fx.chain.") || name.starts_with("fx.slot.") || name == "fx.group.set")
+            && (matches!(origin, Origin::Chat | Origin::Twitch | Origin::Relay | Origin::Patch) || ctx.actor.is_some() || self.priority_for(origin, ctx) <= PRIORITY_CHAT)
+        { return Err(format!("cannot author project with `{name}`")); }
         let pos = |i: usize| args.get_path("args").and_then(|a| a.as_list()).and_then(|l| l.get(i)).cloned();
         let arg = |k: &str, i: usize| args.get_path(k).cloned().or_else(|| pos(i));
         let prio = self.priority_for(origin, ctx);
@@ -2130,7 +2534,56 @@ impl Core {
             return Ok(());
         }
         match name {
+            "lights.default" => {
+                if !self.is_operator(origin, ctx) {
+                    return Err("only the operator can restore default lighting".into());
+                }
+                self.context_action("lights.auto.off", origin, ctx)?;
+                // Clear old intentions before retiring instances: release_preset otherwise
+                // starts the next queued firing. Mixed presets keep their nonlighting content.
+                let cfg = &self.config;
+                let lighting_only = |name: &str| cfg.presets.get(name).is_some_and(lighting_only_preset);
+                self.pending_presets.retain(|p| !lighting_only(&p.name));
+                self.preset_queue.retain(|(name, _, _)| !lighting_only(name));
+                for p in &mut self.pending_presets { p.ctx.lights_suppressed = true; }
+                for (_, _, ctx) in &mut self.preset_queue { ctx.lights_suppressed = true; }
+                self.scheduled.retain(|s| match &s.0.op {
+                    op if lighting_op(op) => false,
+                    Op::PresetFire { name, .. } => !lighting_only(name),
+                    _ => true,
+                });
+                // Preserve delayed nonlighting commands, but strip lighting from any
+                // mixed preset they may start after the handoff.
+                let scheduled = std::mem::take(&mut self.scheduled);
+                for Reverse(mut s) in scheduled {
+                    s.ctx.lights_suppressed = true;
+                    self.scheduled.push(Reverse(s));
+                }
+                let mut retire = BTreeSet::new();
+                for p in &mut self.presets {
+                    p.lights = false;
+                    p.lights_suppressed = true;
+                    if lighting_only(&p.name) { retire.insert(p.name.clone()); }
+                }
+                for name in retire { self.release_preset(&name, ctx.parent, false); }
+                // Core has authenticated the operator, including inherited operator content.
+                // The controller receives an ordinary manual command, not a forged priority.
+                let mut c = Command::new(Origin::Ui, Op::Action { name: name.into(), args: Value::Null })
+                    .caused_by(ctx.parent);
+                c.actor = ctx.actor.clone();
+                c.ts = self.now();
+                self.outbox.push(Output::Action(c));
+                self.runtime_dirty = true;
+                Ok(())
+            }
             n if timeline::is_transport(n) => self.timeline_action(n, args),
+            n if context::is_action(n) => self.context_action(n, origin, ctx),
+            n if autoseq::is_action(n) => {
+                if prio <= PRIORITY_CHAT {
+                    return Err("chat cannot change scenes".into());
+                }
+                self.autoseq_action(n, args, ctx)
+            }
             "policy.run" => self.policy_run(args, origin, ctx),
             "mod.approve" | "mod.reject" => {
                 let id = arg("id", 0).map(|v| v.to_string()).ok_or("needs the pending item's `id`")?;
@@ -2361,12 +2814,13 @@ impl Core {
         let mut overrides = Vec::new();
         for p in self.state.params() {
             for o in &p.overrides {
-                if o.priority > PRIORITY_CHAT && o.anim.is_none() && o.expires.is_none() {
+                if o.priority > PRIORITY_CHAT && o.anim.is_none() && o.expires.is_none() && !o.key.starts_with("musical_fx:") && !lighting_playback_key(&o.key) && !lighting_activation(&p.addr) {
                     overrides.push((p.addr.clone(), o.clone()));
                 }
             }
         }
-        let bases = [addr::DIRECT].iter().filter_map(|a| Some((a.to_string(), self.state.get(a)?.clone()))).collect();
+        let mut bases: Vec<_> = [addr::DIRECT].into_iter().chain(Self::context_bases()).filter_map(|a| Some((a.to_string(), self.state.get(a)?.clone()))).collect();
+        bases.extend(self.state.params().iter().filter(|p| context::auto_control(&p.addr)).map(|p| (p.addr.clone(), p.base.clone())));
         RuntimeState {
             mode: self.mode_str().into(),
             program: self.state.get(addr::PROGRAM).and_then(Value::as_str).unwrap_or("").into(),
@@ -2376,12 +2830,13 @@ impl Core {
             presets: self
                 .presets
                 .iter()
-                .filter(|p| p.priority > PRIORITY_CHAT)
+                .filter(|p| p.priority > PRIORITY_CHAT && !p.key.starts_with("musical_fx:"))
                 .map(|p| PersistedPreset {
                     name: p.name.clone(),
                     priority: p.priority,
                     remaining_ms: p.release_at.map(|r| r.saturating_sub(now) / MS),
                     payload: p.payload.clone(),
+                    lights_suppressed: p.lights_suppressed,
                 })
                 .collect(),
             disabled_rules: self.rules.iter().filter(|r| !r.enabled).map(|r| r.def.name.clone()).collect(),
@@ -2389,12 +2844,15 @@ impl Core {
             transition_history: self.transition_history.clone(),
             rng: self.rng.state(),
             timelines: self.timelines_persist(),
+            autoseq: self.autoseq_persist(),
         }
     }
 
     /// Restore after a crash/restart without re-running preset side effects.
     pub fn restore(&mut self, rs: &RuntimeState) {
         let now = self.now();
+        // Musical moments are ephemeral; only the owner's switch preference survives restart.
+        self.stop_musical_fx(None);
         if self.config.modes().contains(&rs.mode) {
             self.set_sys(addr::MODE, Value::Str(rs.mode.clone()));
         }
@@ -2405,21 +2863,33 @@ impl Core {
             self.set_sys(addr::PREVIEW, Value::Str(rs.preview.clone()));
         }
         for (a, v) in &rs.bases {
+            if context::auto_control(a) { self.declare_auto_effect(a); }
             self.set_sys(a, v.clone());
         }
+        // Older versions stored the writable switch as a manual override. Recover its
+        // effective preference, but never retain an override that can mask switch actions.
+        let lights_auto = rs.overrides.iter().filter(|(a, _)| a == context::LIGHTS_AUTO)
+            .max_by(|(_, a), (_, b)| a.priority.cmp(&b.priority).then(a.seq.cmp(&b.seq)))
+            .map(|(_, o)| o.current(now).truthy())
+            .or_else(|| rs.bases.iter().find(|(a, _)| a == context::LIGHTS_AUTO).map(|(_, v)| v.truthy()));
         for (a, o) in &rs.overrides {
             let missing_address = a.strip_prefix("scene.").and_then(|s| s.split('.').next()).is_some_and(|name| !self.config.scenes.contains_key(name))
                 || a.strip_prefix("preset.").and_then(|s| s.split('.').next()).is_some_and(|name| !self.config.presets.contains_key(name));
             let missing_scene =
                 matches!(a.as_str(), addr::PROGRAM | addr::PREVIEW) && o.value.as_str().is_none_or(|name| !self.config.scenes.contains_key(name));
-            if missing_address || missing_scene || !configured_owner(&self.config, &o.key) {
+            if missing_address || missing_scene || !configured_owner(&self.config, &o.key) || o.key.starts_with("musical_fx:") || lighting_playback_key(&o.key) || lighting_activation(a) || matches!(a.as_str(), context::LIGHTS_AUTO | context::FX_AUTO) {
                 continue;
             }
             let i = self.state.ensure(a, &zero_of(&o.value));
             self.state.put_override(i, o.clone());
         }
+        if let Some(on) = lights_auto {
+            let ctx = Ctx { operator: true, ..Default::default() };
+            let _ = self.context_action(if on { "lights.auto.on" } else { "lights.auto.off" }, Origin::System, &ctx);
+        }
         for p in &rs.presets {
             let Some(def) = self.config.presets.get(&p.name).cloned() else { continue };
+            if lighting_only_preset(&def) { continue; }
             let fx: Vec<String> = def.fx.iter().map(|f| if f.name.contains('.') { f.name.clone() } else { format!("fx.{}", f.name) }).collect();
             self.presets.push(ActivePreset {
                 name: p.name.clone(),
@@ -2431,8 +2901,12 @@ impl Core {
                 payload: p.payload.clone(),
                 trace: next_id(),
                 fx,
-                lights: held_lights(&def),
+                // Restoring runtime state deliberately does not replay lighting.
+                lights: false,
+                lights_suppressed: p.lights_suppressed,
+                origin: Origin::System,
                 actor: None,
+                event: None,
             });
             self.set_sys(&format!("preset.{}.active", p.name), Value::Bool(true));
         }
@@ -2449,6 +2923,7 @@ impl Core {
             self.rng.set_state(rs.rng);
         }
         self.timelines_restore(&rs.timelines);
+        self.autoseq_restore(&rs.autoseq);
         self.apply_scene_layer();
         let mode = self.mode_str().to_string();
         self.policy.restored(&mode, now);
@@ -2623,6 +3098,7 @@ impl Core {
                 )
             }
             "timelines" | "timeline" => self.query_timelines(name, args)?,
+            "autoseq" => self.query_autoseq(),
             "sim.presets" => Value::List(crate::sim::PRESETS.iter().map(|(n, a)| Value::map().with("name", *n).with("args", *a)).collect()),
             "undo" => Value::map().with("undo", self.undo.len()).with("redo", self.redo.len()),
             "scene" => {
@@ -2636,6 +3112,10 @@ impl Core {
             "config.rules" => Value::from(serde_json::to_value(&self.config.rules).map_err(|e| e.to_string())?),
             "config.bindings" => Value::from(serde_json::to_value(&self.config.bindings).map_err(|e| e.to_string())?),
             "config.project" => Value::from(serde_json::to_value(&self.config.project).map_err(|e| e.to_string())?),
+            "config.sources" => Value::from(serde_json::to_value(self.config.other.get("sources")).map_err(|e| e.to_string())?),
+            "config.render" => Value::from(serde_json::to_value(self.config.project.extra.get("render")).map_err(|e| e.to_string())?),
+            "config.fx_chains" => Value::from(serde_json::to_value(&self.config.fx_chains).map_err(|e| e.to_string())?),
+            "fx.chains" => Value::from(serde_json::to_value(self.config.fx_chains.values().collect::<Vec<_>>()).map_err(|e| e.to_string())?),
             _ => return Err(format!("unknown query `{name}`")),
         })
     }
@@ -2672,6 +3152,29 @@ fn first_scene(c: &Config) -> String {
     scene_order(c).into_iter().next().unwrap_or_default()
 }
 
+/// Playback generations have no authoritative owner after process restart.
+fn lighting_playback_key(key: &str) -> bool {
+    key.starts_with("layer:") || key.starts_with("cuelist:") || key.starts_with("look:") || matches!(key, "programmer" | "highlight" | "flash")
+        || key.starts_with("chat:") && key.split(':').any(|part| matches!(part, "layer" | "cuelist" | "look" | "programmer" | "highlight" | "flash"))
+}
+
+fn lighting_activation(address: &str) -> bool {
+    address.starts_with("lights.effect.") && address.ends_with(".active")
+}
+
+fn lighting_op(op: &Op) -> bool {
+    match op {
+        Op::Set { address, .. } | Op::SetBase { address, .. } | Op::Animate { address, .. }
+        | Op::Release { address } | Op::Trigger { address, .. } => address.starts_with("lights."),
+        Op::Action { name, .. } => name.starts_with("lights."),
+        _ => false,
+    }
+}
+
+fn lighting_only_preset(def: &PresetDef) -> bool {
+    def.lights.is_some() && def.fx.is_empty() && def.set.is_empty() && def.sound.is_none() && def.mix.is_none() && def.scene.is_none() && def.mode.is_none() && def.commands.is_empty()
+}
+
 /// Runtime ownership keys outlive files in persisted state; never revive a deleted definition.
 fn configured_owner(config: &Config, key: &str) -> bool {
     if let Some(name) = key.strip_prefix("preset:") {
@@ -2689,8 +3192,12 @@ fn configured_owner(config: &Config, key: &str) -> bool {
 /// Declare the addressable parameters of a scene's nodes (§4.3).
 pub fn declare_scene(st: &mut StateTree, s: &SceneDef) {
     let base = format!("scene.{}", s.name);
+    declare_fx_host(st, &base, &s.fx, s.fx_enabled);
     let mut shared_done: Vec<String> = Vec::new();
     for (canvas, c) in &s.canvas {
+        let cp = format!("{base}.canvas.{canvas}");
+        declare_fx_host(st, &cp, &c.fx, c.fx_enabled);
+        for g in &c.groups { declare_fx_host(st, &format!("{cp}.group.{}", g.id), &g.fx, g.fx_enabled); }
         for n in &c.nodes {
             let p = format!("{base}.node.{}", n.id);
             if !shared_done.contains(&n.id) {
@@ -2707,17 +3214,7 @@ pub fn declare_scene(st: &mut StateTree, s: &SceneDef) {
                 set(st, format!("{p}.scale"), Meta::float(1.0, [0.01, 10.0]).owner("scene"), Value::Float(n.scale as f64));
                 set(st, format!("{p}.rotation"), Meta::float(0.0, [-360.0, 360.0]).unit("deg").owner("scene"), Value::Float(n.rotation as f64));
                 set(st, format!("{p}.visible"), Meta::boolean(true).owner("scene"), Value::Bool(n.visible));
-                for fx in &n.fx {
-                    let fp = format!("{p}.fx.{}", fx.name);
-                    set(st, format!("{fp}.enabled"), Meta::boolean(true).owner("scene"), Value::Bool(fx.enabled.unwrap_or(true)));
-                    for (k, v) in &fx.params {
-                        let a = format!("{fp}.{k}");
-                        let i = st.ensure(&a, v);
-                        if st.param(i).base != *v {
-                            st.set_base(i, v.clone());
-                        }
-                    }
-                }
+                declare_fx_host(st, &p, &n.fx, n.fx_enabled);
             }
             let set = |st: &mut StateTree, a: String, m: Meta, v: Value| {
                 let i = st.declare(&a, m);
@@ -2733,12 +3230,61 @@ pub fn declare_scene(st: &mut StateTree, s: &SceneDef) {
     }
 }
 
-/// The light cue a running preset owns (and releases when it ends). One-shot presets
-/// (no hold/toggle/set) fire their cue and let it run its own course, so ending the
-/// preset must not switch the look off again. A light look has no course of its own: it is
-/// always held for as long as the preset runs.
-fn held_lights(def: &PresetDef) -> Option<crate::config::LightsRef> {
-    def.lights.clone().filter(|l| l.look.is_some() || l.hold.is_some() || def.hold.is_some() || def.toggle || !def.set.is_empty())
+fn authored(st: &mut StateTree, address: &str, value: Value) {
+    let i = st.ensure(address, &value);
+    st.set_base(i, value);
+}
+
+pub fn declare_fx_host(st: &mut StateTree, prefix: &str, fx: &[crate::config::FxRef], enabled: bool) {
+    authored(st, &format!("{prefix}.fx_enabled"), Value::Bool(enabled));
+    for f in fx {
+        let p = format!("{prefix}.fx.{}", f.slot_id());
+        authored(st, &format!("{p}.enabled"), Value::Bool(f.enabled.unwrap_or(true)));
+        authored(st, &format!("{p}.triggered"), Value::Bool(f.triggered));
+        authored(st, &format!("{p}.amount"), f.params.get("amount").cloned().unwrap_or(Value::Float(1.0)));
+        for (key, value) in &f.params { authored(st, &format!("{p}.{key}"), value.clone()); }
+    }
+}
+
+fn declare_other_fx(st: &mut StateTree, config: &Config) {
+    if let Some(sources) = config.other.get("sources") {
+        for (name, table) in sources {
+            let fx: Vec<crate::config::FxRef> = table.get("fx").and_then(|v| v.clone().try_into().ok()).unwrap_or_default();
+            declare_fx_host(st, &format!("source.{name}"), &fx, table.get("fx_enabled").and_then(toml::Value::as_bool).unwrap_or(true));
+        }
+    }
+    for canvas in config.project.canvas.keys() {
+        for (kind, key) in [("canvas", "canvas_fx"), ("output", "output_fx")] {
+            let mut fx = Vec::new();
+            let mut enabled = true;
+            if let Some(toml::Value::Table(table)) = config.project.extra.get("render") {
+                    if let Some(v) = table.get(key).and_then(toml::Value::as_table).and_then(|t| t.get(canvas)) {
+                        fx = v.clone().try_into().unwrap_or_default();
+                    }
+                    if let Some(v) = table.get(&format!("{key}_enabled")).and_then(toml::Value::as_table).and_then(|t| t.get(canvas)).and_then(toml::Value::as_bool) { enabled = v; }
+            }
+            declare_fx_host(st, &format!("render.{kind}.{canvas}"), &fx, enabled);
+        }
+    }
+}
+
+/// Authored lighting references enter the same base layer as musical look controls.
+/// `cue` alone names a cuelist; with `cuelist` it locates a cue in that list.
+fn lighting_selection(lights: &LightsRef, owner: &str, priority: u16, duration: Option<u64>) -> Value {
+    let mut args = Value::map().with("layer", "base").with("owner", owner).with("priority", priority as i64);
+    if let Some(palette) = &lights.look {
+        args = args.with("palette", palette.clone());
+    }
+    if let Some(cuelist) = lights.cuelist.as_ref().or(lights.cue.as_ref()) {
+        args = args.with("cuelist", cuelist.clone());
+    }
+    if lights.cuelist.is_some() && let Some(cue) = &lights.cue {
+        args = args.with("cue", cue.clone());
+    }
+    if let Some(ms) = duration.filter(|ms| *ms > 0) {
+        args = args.with("duration", ms as i64);
+    }
+    args
 }
 
 /// Keys of a preset `fx` entry that shape its trigger (timing, strength) rather than being

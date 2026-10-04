@@ -94,6 +94,9 @@ void se_frames_client_stop(struct se_frames_client *c);
 
 /* Non-blocking; safe to call from the render thread every frame. */
 void se_frames_client_poll(struct se_frames_client *c, struct se_frames_update *out);
+/* False after disconnect, including after reconnect before a fresh canvas arrives.
+ * Consumers must stop sampling textures of an invalidated import. */
+bool se_frames_client_import_current(struct se_frames_client *c, uint64_t epoch);
 /* The consumer no longer reads `buffer` of import `epoch` (GPU work finished). */
 void se_frames_client_release(struct se_frames_client *c, uint64_t epoch, uint32_t buffer, uint64_t seq);
 /* Switch between dmabuf import and the shm fallback; reconnects if the flag changes. */

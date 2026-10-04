@@ -766,6 +766,27 @@ fn detail(app: &mut App, ui: &mut egui::Ui, t: &Theme, st: &mut State, list: &[I
     let cat = std::mem::take(&mut st.cat);
     also_section(ui, t, &cat, &it.id);
     knobs_section(app, ui, t, st, it, now);
+    let mut auto_roots = Vec::new();
+    if let Some(summary) = app.m.q("presets.catalog").and_then(|v| v.get_path("presets"))
+        .and_then(Value::as_map).and_then(|presets| presets.get(&it.id)) {
+        for (key, prefix) in [("effects", "fx."), ("overlays", "patch.")] {
+            for name in strs(summary, key) {
+                let root = format!("{prefix}{}", name.split('.').next().unwrap_or(&name));
+                if !auto_roots.contains(&root) { auto_roots.push(root); }
+            }
+        }
+        for address in strs(summary, "triggers").into_iter().chain(strs(summary, "set")) {
+            let mut parts = address.split('.');
+            if let (Some(prefix @ ("fx" | "patch")), Some(name)) = (parts.next(), parts.next()) {
+                let root = format!("{prefix}.{name}");
+                if !auto_roots.contains(&root) { auto_roots.push(root); }
+            }
+        }
+    }
+    for root in auto_roots {
+        widgets::hint(ui, t, &format!("Automatic use of {}", nice(&root)));
+        crate::views::effects::automatic_controls(app, ui, t, &root);
+    }
     runs_it_section(app, ui, t, &cat, &it.id, list);
     st.cat = cat;
     file_section(app, ui, t, st, &it.id, cat_uses(&st.cat, &it.id));

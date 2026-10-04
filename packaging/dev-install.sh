@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build release binaries and install them for the current user (development setup):
-#   ~/.local/bin/{stream-engine,streamctl,stream-engine-launch-or-focus}
+#   ~/.local/bin/{stream-engine,streamctl,stream-engine-launch-or-focus,stream-engine-drum-screen}
 #   ~/.config/systemd/user/stream-engine.service  (ExecStart → ~/.local/bin)
 #   ~/.config/stream-engine/engine.toml            (project path, if missing)
 #   ~/.local/share/applications/stream-engine{,-program}.desktop + icon
@@ -22,6 +22,7 @@ if [ -x "$old" ] && [[ "$(timeout 5 "$old" --help 2>/dev/null || true)" == *stre
   echo "removed the old CLI $old (now streamctl)"
 fi
 install -m755 omarchy/bin/stream-engine-launch-or-focus "$HOME/.local/bin/stream-engine-launch-or-focus"
+install -m755 omarchy/bin/stream-engine-drum-screen "$HOME/.local/bin/stream-engine-drum-screen"
 install -m644 packaging/stream-engine.desktop packaging/stream-engine-program.desktop "$HOME/.local/share/applications/"
 install -m644 packaging/stream-engine.svg "$HOME/.local/share/icons/hicolor/scalable/apps/stream-engine.svg"
 sed -e "s|ExecStart=/usr/bin/stream-engine|ExecStart=$HOME/.local/bin/stream-engine|" \

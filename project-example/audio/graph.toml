@@ -5,49 +5,25 @@
 # Use 64 for the low-latency drum monitor path (M12); needs realtime scheduling.
 quantum = 256
 
-# The Studio 24c stereo input carries the StudioLive 16R main mix → `band` bus.
-# `target` = PipeWire node.name, or a case-insensitive substring of node.name/description.
-[inputs.band]
-target = "Studio 24c"
-channels = [1, 2]
-delay = "0ms"          # A/V delay (live: audio.input.band.delay_ms)
-
-# 16R USB multichannel stems (M12) — uncomment when the 16R is the interface. Channel
-# numbers are the 16R's USB channels (pro-audio profile port order).
-# [inputs.band]
-# target = "StudioLive 16R"
-# channels = [17, 18]      # main mix return
-# [inputs.kick]
-# target = "StudioLive 16R"
-# channels = [1]
-# bus = "drums"
-# [inputs.snare]
-# target = "StudioLive 16R"
-# channels = [2]
-# bus = "drums"
-# [inputs.vox]
-# target = "StudioLive 16R"
-# channels = [9]
-# bus = "mic"
+# No hardware capture is configured by the starter. Add the actual device and channels
+# in Sound → Mix → Add input; device discovery alone does not enable capture.
 
 # hub.audio slots → buses (defaults: youtube, web.* → music; tts → tts; sfx.* → sfx;
 # game* → game; patch.* → sfx). Per-slot A/V delay:
 [slots]
 "youtube" = { bus = "music", delay = "0ms" }
 
-# Software audio leaves the motherboard's rear analog output into the 16R. The 16R
-# combines it with drums and sends its one final mix through the Studio 24c to OBS.
-# Do not put band or program here: returning the 24c input would create feedback.
+# Optional software-audio playback to the configured external mixer.
+# Keep any capture feed returning from that mixer out of this output to avoid feedback.
 # If the cable uses the front-panel jack, select "Motherboard Audio Front Headphones".
 [playback]
 target = "Motherboard Audio Speakers"
 channels = [1, 2]
 buses = ["music", "sfx", "tts", "game"]
 
-# Live analysis → band.*, music.*, beat.*, mic.* signals.
+# Analysis of app playback; select other analysis buses explicitly when needed.
 [analysis]
-buses = ["band", "music"]
-beat_source = "auto"   # band when it has a confident beat, else music
+buses = ["music"]
+beat_source = "auto"
 min_bpm = 70
 max_bpm = 180
-# mic = "vox"          # vocal stem input → mic.level, mic.hype, mic.talking

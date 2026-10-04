@@ -1,0 +1,13 @@
+# Clip flash: a camera-shutter moment, then a Windows 3.1 "Clipped!" sticker in a corner.
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "overlay"
+label       = "Clip Flash"
+description = "Camera-shutter moment: iris blades snap shut and open with a soft white flash, then a Windows 3.1 Clipboard window with a camera in the clipper's colour slides into a corner"
+params.flash  = { type = "float", default = 0.5, range = [0.0, 0.6], description = "Peak flash opacity (capped at 60 % white for flash safety)" }
+params.iris   = { type = "bool", default = true, description = "Draw the shutter iris blades closing and opening" }
+params.corner = { type = "enum", options = ["bottom_left", "bottom_right", "top_left", "top_right"], default = "bottom_left", description = "Corner the Clipped! window slides into" }
+params.margin = { type = "float", default = 0.03, range = [0.0, 0.2], description = "Distance of the window from the frame edges (fraction of the frame height)" }
+params.scale  = { type = "float", default = 1.0, range = [0.5, 3.0], description = "Window size; pixels snap to whole multiples" }
+trigger = { attack = "30ms", hold = "2.5s", release = "400ms", retrigger = "replace" }
+budget = { gpu_ms = 0.15 }

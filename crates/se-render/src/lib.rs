@@ -22,6 +22,7 @@ pub mod resources;
 pub mod scene;
 pub mod service;
 pub mod sources;
+mod upload;
 
 pub use service::{RenderHandle, spawn, start, stop};
 

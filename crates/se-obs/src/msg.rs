@@ -10,14 +10,12 @@ pub enum PluginMsg {
     Hello(Hello),
     Status(Box<Status>),
     Event(PluginEvent),
-    RecordPath(RecordPath),
-    RecordEnd(RecordEnd),
     Reply(Reply),
 }
 
 impl PluginMsg {
     /// Message types this engine understands; others are ignored (newer plugin).
-    pub const KNOWN: [&'static str; 6] = ["hello", "status", "event", "record_path", "record_end", "reply"];
+    pub const KNOWN: [&'static str; 4] = ["hello", "status", "event", "reply"];
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -36,15 +34,11 @@ pub struct Hello {
 #[serde(default)]
 pub struct Status {
     pub streaming: bool,
-    pub recording: bool,
-    pub rec_paused: bool,
     /// Main stream output bitrate over the last interval.
     pub kbps: f64,
     pub dropped: i64,
     pub total: i64,
     pub congestion: f64,
-    /// Main recording bitrate over the last interval.
-    pub rec_kbps: f64,
     /// Video the encoder could not keep up with during the last interval (skipped frames ×
     /// frame interval).
     pub lag_ms: f64,
@@ -57,11 +51,8 @@ pub struct Status {
     /// `os_gettime_ns()` and CLOCK_MONOTONIC sampled together.
     pub obs_ns: u64,
     pub mono_ns: u64,
-    /// OBS-clock time of the first frame of the main stream / current main recording file (0 = inactive).
+    /// OBS-clock time of the first frame of the main stream (0 = inactive).
     pub stream_start_ns: u64,
-    pub record_start_ns: u64,
-    pub record_path: String,
-    pub record_dir: String,
     pub scene: String,
     pub stale: BTreeMap<String, bool>,
     pub sources: BTreeMap<String, u32>,
@@ -84,17 +75,15 @@ pub struct OutputStatus {
     pub congestion: f64,
     /// Engine canvas the output encodes (`wide`, `tall`) or the OBS canvas name.
     pub canvas: String,
-    pub path: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct PluginEvent {
-    /// `stream_started|stream_stopped|record_started|record_stopped|record_paused|record_unpaused|scene_fallback|scene_restored`
+    /// `stream_started|stream_stopped|scene_fallback|scene_restored`
     pub name: String,
     pub obs_ns: u64,
     pub mono_ns: u64,
-    pub path: Option<String>,
     /// OBS canvas name (fallback events).
     pub canvas: Option<String>,
     pub scene: Option<String>,
@@ -103,29 +92,6 @@ pub struct PluginEvent {
     /// Engine canvases shown by the affected scene.
     pub canvases: Vec<String>,
     pub reason: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct RecordPath {
-    pub path: String,
-    pub canvas: String,
-    pub output: String,
-    pub start_obs_ns: u64,
-    pub obs_ns: u64,
-    pub mono_ns: u64,
-    pub tracks: serde_json::Value,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct RecordEnd {
-    pub path: String,
-    pub canvas: String,
-    pub output: String,
-    pub end_obs_ns: u64,
-    pub obs_ns: u64,
-    pub mono_ns: u64,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -150,8 +116,6 @@ pub enum EngineMsg {
     Cmd {
         id: u64,
         op: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        dir: Option<String>,
     },
     Error {
         error: String,
@@ -190,7 +154,7 @@ mod tests {
     fn parses_status_with_missing_fields_and_ignores_unknown_types() {
         let s = parse(br#"{"t":"status","streaming":true,"kbps":6000.5,"stale":{"wide":false,"tall":true},"extra":1}"#).unwrap().unwrap();
         let PluginMsg::Status(s) = s else { panic!("not a status") };
-        assert!(s.streaming && !s.recording);
+        assert!(s.streaming);
         assert_eq!(s.kbps, 6000.5);
         assert_eq!(s.stale.get("tall"), Some(&true));
         assert_eq!(parse(br#"{"t":"future_thing","x":1}"#).unwrap(), None);
@@ -201,8 +165,8 @@ mod tests {
 
     #[test]
     fn engine_messages_are_single_lines() {
-        let l = EngineMsg::Cmd { id: 7, op: "record.start".into(), dir: Some("/tmp/show".into()) }.line();
-        assert_eq!(l, "{\"t\":\"cmd\",\"id\":7,\"op\":\"record.start\",\"dir\":\"/tmp/show\"}\n");
+        let l = EngineMsg::Cmd { id: 7, op: "stream.start".into() }.line();
+        assert_eq!(l, "{\"t\":\"cmd\",\"id\":7,\"op\":\"stream.start\"}\n");
         let c = EngineMsg::Config { stale_ms: 500, fallback_mode: "live".into(), fallback_scene: "A\nB".into(), fallback_text: "x".into() }.line();
         assert_eq!(c.matches('\n').count(), 1);
     }

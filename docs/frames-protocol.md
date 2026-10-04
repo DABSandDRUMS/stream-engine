@@ -4,8 +4,8 @@ Two local Unix sockets in `$XDG_RUNTIME_DIR/stream-engine/` (directory mode 0700
 
 | Socket | Type | Purpose | Server | Clients |
 |---|---|---|---|---|
-| `frames.sock` | `SOCK_SEQPACKET` | Zero-copy canvas frames (dmabuf fds + sync fences) | engine (`se-render`) | OBS plugin, UI |
-| `obs.sock` | `SOCK_STREAM`, JSON lines | OBS health, timestamps, recording paths, start/stop | engine (`se-obs`) | OBS plugin |
+| `frames.sock` | `SOCK_SEQPACKET` | Canvas frames (dmabuf fds + sync fences; shared-memory fallback) | engine (`se-render`) | OBS plugin, UI, app recorder |
+| `obs.sock` | `SOCK_STREAM`, JSON lines | OBS streaming health, timestamps, stream start/stop | engine (`se-obs`) | OBS plugin |
 
 All integers are little-endian. File descriptors travel as `SCM_RIGHTS` ancillary data on the
 message they belong to. Every message starts with the same 8-byte header.
@@ -86,8 +86,8 @@ struct se_goodbye {
 ### Rules
 
 - The engine renders into a buffer that is neither the most recently sent one nor held by any
-  client (held = sent and not yet released). With 4 buffers and two clients this never stalls;
-  if every buffer is held, the engine skips the export for that frame (render never waits).
+  client (held = sent and not yet released). If every buffer is held, the engine skips the
+  export for that frame (render never waits).
 - Frames are paced by the engine's 60 fps clock; clients sample the newest.
 - A client that stops reading for > 2 s is disconnected.
 - Staleness: the OBS plugin treats a canvas as stale when no `se_frame` arrived for
@@ -101,8 +101,8 @@ struct se_goodbye {
   and expects memfds (the shm fallback happens automatically).
 - The OBS plugin releases a dmabuf buffer only after the GPU finished the draws that sampled it (GL
   fence, usually within one frame of switching to a newer frame); frames superseded before they
-  were shown are released immediately, shm buffers right after the upload. In practice a plugin
-  client holds 1–2 buffers, so 4 buffers per canvas never stall.
+  were shown are released immediately, shm buffers right after the upload. A plugin client
+  typically holds 1–2 buffers; additional consumers must release their own buffers promptly.
 - Clients drop the connection on protocol errors (bad magic/version, truncated `SCM_RIGHTS`,
   buffer index out of range, fence count mismatch) and reconnect with backoff (100 ms → 2 s).
 - Clients look for the sockets in `$SE_RUNTIME_DIR` when set (dev instances).
@@ -118,36 +118,33 @@ One plugin connection at a time: while a connection is alive (a line within 5 s)
 
 ```json
 {"t":"hello","obs":"32.2.2","plugin":"0.1.0","canvases":["wide","tall"],"pid":1234,"config":{…last engine config…}}
-{"t":"status","streaming":true,"recording":false,"rec_paused":false,"kbps":6000.0,"dropped":0,"total":123456,"congestion":0.0,
- "rec_kbps":0.0,"lag_ms":0.0,"fps":60.0,"render_ms":0.4,"lagged":0,"rendered":1000,"skipped":0,"encoded":1000,
- "obs_ns":123,"mono_ns":456,"stream_start_ns":100,"record_start_ns":0,"record_path":"","record_dir":"/home/u/Videos",
+{"t":"status","streaming":true,"kbps":6000.0,"dropped":0,"total":123456,"congestion":0.0,
+ "lag_ms":0.0,"fps":60.0,"render_ms":0.4,"lagged":0,"rendered":1000,"skipped":0,"encoded":1000,
+ "obs_ns":123,"mono_ns":456,"stream_start_ns":100,
  "scene":"Scene","stale":{"wide":false,"tall":false},"sources":{"wide":1,"tall":1,"preview":0,"atlas":0},
  "feeds":{"wide":{"connected":true,"frames":600,"superseded":0,"fence_timeouts":0,"width":1920,"height":1080,"dmabuf":true,"goodbye":false,"age_ms":8}},
  "fallback":false,
  "outputs":[{"name":"simple_stream","id":"rtmp_output","kind":"stream","active":true,"kbps":6000.0,"dropped":0,"total":3600,"congestion":0.0,"canvas":"wide"}]}
-{"t":"event","name":"stream_started","obs_ns":123,"mono_ns":456}   // stream_started|stream_stopped|record_started|record_stopped (+ "path")|record_paused|record_unpaused
+{"t":"event","name":"stream_started","obs_ns":123,"mono_ns":456}   // stream_started|stream_stopped
 {"t":"event","name":"scene_fallback","canvas":"Main","scene":"Technical Difficulties","from":"Scene","canvases":["wide"],"reason":"stale","obs_ns":…,"mono_ns":…}
 {"t":"event","name":"scene_restored","canvas":"Main","scene":"Technical Difficulties","to":"Scene","canvases":["wide"],"reason":"fresh","obs_ns":…,"mono_ns":…}   // reason fresh|manual|operator
-{"t":"record_path","path":"/home/u/Videos/2026-09-25 20-00-00.mkv","canvas":"wide","output":"simple_file_output","start_obs_ns":120,"obs_ns":123,"mono_ns":456,
- "tracks":[{"index":0,"mixer":1,"name":"Track 1","sources":["se-program"],"devices":["se-program"]}]}
-{"t":"record_end","path":"…","canvas":"wide","output":"simple_file_output","end_obs_ns":130,"obs_ns":131,"mono_ns":464}
 {"t":"reply","id":7,"ok":true,"error":null,"result":"starting"}
 ```
 
 `status` is sent once per second and immediately when a feed's staleness or the number of sources
 changes. `lag_ms` = skipped (encoder-lag) frames in the last interval × frame interval.
-`stream_start_ns`/`record_start_ns`/`start_obs_ns` are the OBS-clock time of the first frame of the
-stream / file (0 = inactive). A `record_path` is sent for every file (including splits, and again
-after a reconnect for files still being written); `canvas` is `wide`/`tall` from the
-`stream-engine` source found in the recorded OBS canvas (else the OBS canvas name).
+`stream_start_ns` is the OBS-clock time of the first frame of the stream (0 = inactive).
+Generic `outputs` telemetry can report independently active OBS outputs, but carries no
+recording ownership or file paths. App recording is independent: it uses selected sources,
+its own capture lifecycle and app master-clock metadata, not `obs.sock`.
 
 ### Engine → plugin
 
 ```json
 {"t":"config","stale_ms":500,"fallback_mode":"live","fallback_scene":"Technical Difficulties","fallback_text":"…"}   // after hello and on change
-{"t":"cmd","id":7,"op":"stream.start"}   // stream.start|stream.stop|record.start|record.stop|fallback.on|fallback.off|fallback.setup|setup
+{"t":"cmd","id":7,"op":"stream.start"}   // stream.start|stream.stop|fallback.on|fallback.off|fallback.setup|setup
 {"t":"error","error":"another OBS instance is already connected to this engine"}
 ```
 
 The plugin executes `cmd` on OBS's UI thread through the frontend API and answers with `reply`.
-`fallback_mode`: `off` (manual only), `live` (only while an output is active), `always`.
+`fallback_mode`: `off` (manual only), `live` (only while streaming), `always`.

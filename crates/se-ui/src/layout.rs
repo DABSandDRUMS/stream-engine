@@ -28,7 +28,7 @@ pub const CONFIDENCE_APP_ID: &str = "stream-engine.program";
 /// Page ids a layout can open on (see `app::Page`).
 pub const PAGES: [&str; 9] = ["live", "scenes", "sources", "automation", "sound", "lights", "community", "recordings", "settings"];
 /// Live-page right-rail tabs.
-pub const RAIL_TABS: [&str; 4] = ["events", "chat", "queue", "mod"];
+pub const RAIL_TABS: [&str; 3] = ["queue", "events", "mod"];
 
 /// Which program canvases the confidence window shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,7 +128,7 @@ pub struct ShowCfg {
 
 impl Default for ShowCfg {
     fn default() -> Self {
-        ShowCfg { rail_tab: "chat".into(), rail_width: 380.0, multiview: true }
+        ShowCfg { rail_tab: "queue".into(), rail_width: 380.0, multiview: true }
     }
 }
 
@@ -490,7 +490,7 @@ const FILE_COMMENTS: &[(&str, &str, &str)] = &[
     ("confidence", "fallback", "# used while none of `monitors` is present"),
     ("confidence", "canvases", "# wide | tall | both"),
     ("show", "", "# Overview page"),
-    ("show", "rail_tab", "# events | chat | queue | mod"),
+    ("show", "rail_tab", "# queue | events | mod (chat stays visible)"),
 ];
 
 fn fresh_file(mut doc: DocumentMut) -> String {
@@ -647,7 +647,7 @@ monitors = ["desc:Philips FTV"]   # the TV
         let (set, errors) = LayoutSet::from_files([("layouts/show-3disp.toml", "zoom = 1.2\n[show]\nrail_width = 400\n")]);
         assert!(errors.is_empty(), "{errors:?}");
         let l = set.get("show-3disp").unwrap();
-        assert_eq!((l.zoom, l.show.rail_width, l.show.rail_tab.as_str()), (1.2, 400.0, "chat"));
+        assert_eq!((l.zoom, l.show.rail_width), (1.2, 400.0));
         assert_eq!(l.auto_fallback.as_deref(), Some("show-2disp"));
         assert_eq!(l.windows, Layout::builtin("show-3disp").unwrap().windows);
 

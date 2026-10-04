@@ -5,7 +5,6 @@
 
 use crate::config::VideoConfig;
 use std::io::Read;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -22,15 +21,23 @@ fn secs(t: f64) -> String {
     format!("{:.3}", t.max(0.0))
 }
 
-fn nice_cmd(program: &str, nice: i32) -> Command {
-    let mut c = Command::new(program);
-    // SAFETY: setpriority is async-signal-safe; runs in the child between fork and exec.
-    unsafe {
-        c.pre_exec(move || {
-            libc::setpriority(libc::PRIO_PROCESS, 0, nice);
-            Ok(())
-        });
+/// A child at CPU niceness `nice`, idle IO class, that dies with the engine.
+/// Exec-only wrappers preserve its PID for the live guard's signals without a `pre_exec`
+/// hook, which would fork and write-protect the engine's entire address space.
+pub(crate) fn background_cmd(program: &str, nice: i32, cpus: &[usize]) -> Command {
+    // SAFETY: getpriority only reads this thread's niceness. `nice` adjusts the inherited
+    // value, so compensate for workers already niced by `transcribe::niced`.
+    let inherited = unsafe { libc::getpriority(libc::PRIO_PROCESS, 0) };
+    let adjustment = nice.clamp(-20, 19) - inherited;
+    let mut c = Command::new("setpriv");
+    c.args(["--pdeathsig", "KILL", "--", "nice", "--adjustment"])
+        .arg(adjustment.to_string())
+        .args(["--", "ionice", "--class", "3", "--"]);
+    if !cpus.is_empty() {
+        let list = cpus.iter().map(usize::to_string).collect::<Vec<_>>().join(",");
+        c.args(["taskset", "--cpu-list"]).arg(list);
     }
+    c.arg(program);
     c
 }
 
@@ -103,45 +110,57 @@ pub fn pcm_args(input: &Path, stream: usize, from: f64, dur: f64) -> Vec<String>
     ]
 }
 
-/// Run ffmpeg and return stdout.
+/// Run ffmpeg and return stdout. Under [`live::with_halt`](crate::live::with_halt) the child
+/// stops when the show goes live.
 pub fn run_capture(args: &[String], nice: i32) -> Result<Vec<u8>, String> {
-    let mut child = nice_cmd("ffmpeg", nice)
+    let mut child = background_cmd("ffmpeg", nice, &[])
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("ffmpeg: {e} (is ffmpeg installed?)"))?;
-    let mut stderr = child.stderr.take().expect("piped");
-    let err_thread = std::thread::spawn(move || {
-        let mut s = String::new();
-        let _ = stderr.read_to_string(&mut s);
-        s
+        .map_err(|e| format!("background ffmpeg launch: {e} (requires setpriv, nice, ionice and ffmpeg)"))?;
+    let err_thread = drain(child.stderr.take().expect("piped"));
+    let mut stdout = child.stdout.take().expect("piped");
+    let out_thread = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        stdout.read_to_end(&mut out).map(|_| out)
     });
-    let mut out = Vec::new();
-    child.stdout.take().expect("piped").read_to_end(&mut out).map_err(|e| e.to_string())?;
-    let status = child.wait().map_err(|e| e.to_string())?;
-    let err = err_thread.join().unwrap_or_default();
-    if !status.success() {
+    let status = crate::live::wait_child(&mut child, crate::live::current().as_ref());
+    let out = out_thread.join().map_err(|_| "ffmpeg reader panicked".to_string())?.map_err(|e| e.to_string());
+    let err = String::from_utf8_lossy(&err_thread.join().unwrap_or_default()).into_owned();
+    if !status?.success() {
         return Err(format!("ffmpeg failed: {}", tail(&err)));
     }
-    Ok(out)
+    out
 }
 
-/// Run ffmpeg with `cwd`, returning stderr's tail on failure.
+/// Run ffmpeg with `cwd`, returning stderr's tail on failure. Live-guarded like [`run_capture`].
 pub fn run(args: &[String], cwd: &Path, nice: i32) -> Result<(), String> {
-    let out = nice_cmd("ffmpeg", nice)
+    let mut child = background_cmd("ffmpeg", nice, &[])
         .args(args)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| format!("ffmpeg: {e} (is ffmpeg installed?)"))?;
-    if out.status.success() { Ok(()) } else { Err(tail(&String::from_utf8_lossy(&out.stderr))) }
+        .spawn()
+        .map_err(|e| format!("background ffmpeg launch: {e} (requires setpriv, nice, ionice and ffmpeg)"))?;
+    let err_thread = drain(child.stderr.take().expect("piped"));
+    let status = crate::live::wait_child(&mut child, crate::live::current().as_ref());
+    let err = err_thread.join().unwrap_or_default();
+    if status?.success() { Ok(()) } else { Err(tail(&String::from_utf8_lossy(&err))) }
 }
 
-fn tail(s: &str) -> String {
+/// Read a pipe to the end on its own thread (keeps the child from blocking on a full pipe).
+pub fn drain(mut r: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = r.read_to_end(&mut buf);
+        buf
+    })
+}
+
+pub fn tail(s: &str) -> String {
     let lines: Vec<&str> = s.lines().filter(|l| !l.trim().is_empty()).collect();
     lines[lines.len().saturating_sub(6)..].join(" | ")
 }
@@ -364,6 +383,82 @@ pub fn has_encoder(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_child_probe() {
+        if let Some(path) = std::env::var_os("SE_CLIPS_ORPHAN_PROBE") {
+            let mut child = background_cmd("sleep", 19, &[]).arg("30").spawn().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            std::fs::write(path, child.id().to_string()).unwrap();
+            let _ = child.wait();
+            return;
+        }
+        let Some(path) = std::env::var_os("SE_CLIPS_BACKGROUND_PROBE") else { return };
+        let mut affinity: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+        // SAFETY: these calls only inspect this process and fill valid out-parameters.
+        let (nice, io) = unsafe {
+            assert_eq!(libc::sched_getaffinity(0, std::mem::size_of_val(&affinity), &mut affinity), 0);
+            (libc::getpriority(libc::PRIO_PROCESS, 0), libc::syscall(libc::SYS_ioprio_get, 1, 0))
+        };
+        let cpus: Vec<usize> = (0..libc::CPU_SETSIZE as usize).filter(|&cpu| unsafe { libc::CPU_ISSET(cpu, &affinity) }).collect();
+        let observed = (std::process::id(), nice, io, cpus);
+        std::fs::write(path, serde_json::to_vec(&observed).unwrap()).unwrap();
+        std::process::exit(37);
+    }
+
+    #[test]
+    fn background_child_keeps_pid_exit_status_priorities_and_affinity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("observed.json");
+        let mut allowed: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+        // SAFETY: sched_getaffinity fills our properly sized CPU set.
+        assert_eq!(unsafe { libc::sched_getaffinity(0, std::mem::size_of_val(&allowed), &mut allowed) }, 0);
+        let cpu = (0..libc::CPU_SETSIZE as usize).find(|&cpu| unsafe { libc::CPU_ISSET(cpu, &allowed) }).unwrap();
+        // Run from an already-niced worker: applying nice=19 must be absolute, not +19.
+        let (pid, status) = crate::transcribe::niced(10, move || {
+            let mut child = background_cmd(std::env::current_exe().unwrap().to_str().unwrap(), 19, &[cpu])
+                .args(["--exact", "ffmpeg::tests::background_child_probe", "--test-threads=1"])
+                .env("SE_CLIPS_BACKGROUND_PROBE", &path)
+                .stdin(Stdio::null()).stdout(Stdio::null()).spawn().unwrap();
+            (child.id(), child.wait().unwrap())
+        }).unwrap();
+        assert_eq!(status.code(), Some(37), "wrapper must return the actual child's exit");
+        let (observed_pid, nice, io, cpus): (u32, i32, i64, Vec<usize>) =
+            serde_json::from_slice(&std::fs::read(tmp.path().join("observed.json")).unwrap()).unwrap();
+        assert_eq!(observed_pid, pid, "signals must target the encoder, not a wrapper parent");
+        assert_eq!(nice, 19);
+        assert_eq!(io >> 13, 3, "background IO stays idle");
+        assert_eq!(cpus, [cpu]);
+    }
+
+    #[test]
+    fn background_child_dies_when_its_parent_process_exits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("child.pid");
+        let mut parent = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "ffmpeg::tests::background_child_probe", "--test-threads=1"])
+            .env("SE_CLIPS_ORPHAN_PROBE", &path)
+            .stdin(Stdio::null()).stdout(Stdio::null()).spawn().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !path.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        parent.kill().unwrap();
+        parent.wait().unwrap();
+        let pid: u32 = std::fs::read_to_string(&path).expect("child started").parse().unwrap();
+        let exited = || std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .map_or(true, |s| s.split_once(") ").is_some_and(|(_, fields)| fields.starts_with('Z')));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !exited() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let died = exited();
+        if !died {
+            // Clean up only this test's child if the parent-death protection regresses.
+            unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        }
+        assert!(died, "background encoder survived its parent");
+    }
 
     fn cut() -> Cut {
         Cut {

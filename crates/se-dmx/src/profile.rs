@@ -151,6 +151,10 @@ pub struct Channel {
     pub role: Role,
     /// Attribute name for `raw` channels; role name otherwise.
     pub name: String,
+    /// Human-facing physical channel function, including fixed/managed functions.
+    pub label: Option<String>,
+    /// Model-specific control restrictions and unresolved calibration/source caveats.
+    pub restriction: Option<String>,
     /// Value sent when the attribute is unset (raw/fixed) or the channel's resting value.
     pub default: u8,
     pub invert: bool,
@@ -160,6 +164,8 @@ pub struct Channel {
     pub hz: Option<(f32, f32)>,
     /// Strobe/shutter value meaning "open, not strobing".
     pub open: u8,
+    /// Optional shutter byte for zero intensity / blackout. Never inferred from `open`.
+    pub closed: Option<u8>,
     pub slots: Vec<Slot>,
     /// Pan/tilt: full travel in degrees; zoom: beam angle at 0 and 1.
     pub deg: Option<(f32, f32)>,
@@ -348,12 +354,14 @@ struct RawChannelTable {
     range: Option<[u8; 2]>,
     hz: Option<[f32; 2]>,
     open: Option<u8>,
+    closed: Option<u8>,
     value: Option<u8>,
     #[serde(default)]
     slots: Vec<RawSlot>,
     deg: Option<toml::Value>,
     #[serde(default)]
     label: Option<String>,
+    restriction: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -376,9 +384,11 @@ impl RawChannel {
                 hz: None,
                 open: None,
                 value: None,
+                closed: None,
                 slots: Vec::new(),
                 deg: None,
                 label: None,
+                restriction: None,
             },
             RawChannel::Full(t) => RawChannelTable {
                 role: t.role.clone(),
@@ -389,9 +399,11 @@ impl RawChannel {
                 hz: t.hz,
                 open: t.open,
                 value: t.value,
+                closed: t.closed,
                 slots: t.slots.iter().map(|s| RawSlot { value: s.value, name: s.name.clone(), color: s.color.clone() }).collect(),
                 deg: t.deg.clone(),
                 label: t.label.clone(),
+                restriction: t.restriction.clone(),
             },
         };
         let role = Role::parse(&t.role).ok_or_else(|| format!("unknown role `{}`", t.role))?;
@@ -453,12 +465,15 @@ impl RawChannel {
         Ok(Channel {
             role,
             name,
+            label: t.label,
+            restriction: t.restriction,
             default,
             invert: t.invert,
             range: t.range.map(|[a, b]| (a, b)),
             hz: t.hz.map(|[a, b]| (a, b)),
             open: t.open.unwrap_or(default),
             slots,
+            closed: t.closed,
             deg,
         })
     }
@@ -512,7 +527,7 @@ pub fn library(project: &BTreeMap<String, toml::Table>, errors: &mut Vec<String>
     out
 }
 
-/// The generic fixture library shipped with the engine (same files as the starter project).
+/// Fixture library shipped with the engine (same files as the starter project).
 pub const BUILTIN: &[(&str, &str)] = &[
     ("generic_dimmer", include_str!("../../../project-example/lights/fixtures/generic_dimmer.toml")),
     ("generic_rgb", include_str!("../../../project-example/lights/fixtures/generic_rgb.toml")),
@@ -522,6 +537,11 @@ pub const BUILTIN: &[(&str, &str)] = &[
     ("generic_led_bar", include_str!("../../../project-example/lights/fixtures/generic_led_bar.toml")),
     ("generic_strobe", include_str!("../../../project-example/lights/fixtures/generic_strobe.toml")),
     ("generic_cmy_wash", include_str!("../../../project-example/lights/fixtures/generic_cmy_wash.toml")),
+    ("chauvet_colorstrip", include_str!("../../../project-example/lights/fixtures/chauvet_colorstrip.toml")),
+    ("chauvet_freedom_par_tri6", include_str!("../../../project-example/lights/fixtures/chauvet_freedom_par_tri6.toml")),
+    ("chauvet_freedom_stick", include_str!("../../../project-example/lights/fixtures/chauvet_freedom_stick.toml")),
+    ("adj_inno_pocket_scan", include_str!("../../../project-example/lights/fixtures/adj_inno_pocket_scan.toml")),
+    ("chauvet_circus_20_irc", include_str!("../../../project-example/lights/fixtures/chauvet_circus_20_irc.toml")),
 ];
 
 #[cfg(test)]

@@ -44,6 +44,7 @@ pub fn friendly(path: &str) -> String {
         ["controllers", _] => named("buttons & pedals", stem),
         ["bindings", _] => named("signal link", stem),
         ["timelines", _] => named("timeline", stem),
+        ["autoseq", _] => named("auto sequence", stem),
         ["sources", _] => named("camera", stem),
         ["audio", ..] => "Sound settings".into(),
         ["layouts", _] => named("window layout", stem),

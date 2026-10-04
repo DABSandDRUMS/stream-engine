@@ -1,0 +1,12 @@
+# Song intro card: a Windows 3.1 "NOW PLAYING" window loads the song, then zooms shut on a downbeat.
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "overlay"
+label       = "Song Intro Card"
+description = "A Windows 3.1 NOW PLAYING window with a spinning CD, live BPM readout and a filling progress bar zooms open, then snaps shut exactly on the next downbeat"
+params.position  = { type = "vec2", default = [0.495, 0.24], range = [0.0, 1.0], description = "Window center (0-1 of the frame); high by default to keep faces and the kit clear" }
+params.scale     = { type = "float", default = 1.0, range = [0.5, 3.0], description = "Window size; pixels snap to whole multiples" }
+params.fill_time = { type = "float", default = 0.6, range = [0.2, 4.0], unit = "s", description = "How long the progress bar takes to fill" }
+params.close_on  = { type = "enum", options = ["bar", "beat"], default = "bar", description = "Close on the first bar downbeat or the first beat after the bar fills" }
+trigger = { attack = "100ms", hold = "5s", release = "300ms", retrigger = "replace" }
+budget = { gpu_ms = 0.15 }

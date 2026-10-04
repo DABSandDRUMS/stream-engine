@@ -459,7 +459,7 @@ pub fn address_parts(addr: &str, scene: &dyn Fn(&str) -> Option<String>) -> Vec<
         ["scene", sc, rest @ ..] => vec![scene_name(sc), param(rest)],
         ["fx", fx, rest @ ..] => vec!["Whole screen".into(), effect(fx), param(rest)],
         ["patch", id, rest @ ..] => vec![effect(&format!("patch.{id}")), param(rest)],
-        ["audio", "bus", b, rest @ ..] => vec!["Sound".into(), nice(b), param(rest)],
+        ["audio", "bus", b, rest @ ..] => vec!["Sound".into(), crate::views::mix::bus_label(b), param(rest)],
         ["audio", rest @ ..] => vec!["Sound".into(), param(rest)],
         ["lights", rest @ ..] => vec!["Lights".into(), param(rest)],
         _ => vec![param(&seg)],
@@ -518,7 +518,7 @@ const CHANNEL: [(&str, &str); 2] = [("twitch.viewers", "Viewers"), ("twitch.chat
 /// First segments that are never an analysed bus.
 const NOT_BUSES: [&str; 11] = ["lfo", "beat", "twitch", "time", "audio", "midi", "osc", "drums", "signal", "mixer", "controllers"];
 
-/// A signal as words: `band.kick` → "Band kick", `lfo.slow` → "Slow wave".
+/// A signal as words: `band.kick` → "16R output kick" (the bus's input name), `lfo.slow` → "Slow wave".
 pub fn signal_label(name: &str) -> String {
     if let Some((_, l)) = BEAT.iter().chain(&SLOW).chain(&CHANNEL).find(|(n, _)| *n == name) {
         return l.to_string();
@@ -529,7 +529,7 @@ pub fn signal_label(name: &str) -> String {
         ["midi", dev, rest @ ..] => format!("{} {}", nice(dev), control_words(&rest.join("."))),
         [bus, part] if BAND.iter().any(|(p, _)| p == part) => {
             let w = BAND.iter().find(|(p, _)| p == part).map(|(_, w)| w.to_lowercase()).unwrap_or_default();
-            format!("{} {w}", nice(bus))
+            format!("{} {w}", crate::views::mix::bus_label(bus))
         }
         _ => nice(&seg.join(" ")),
     }
@@ -565,7 +565,7 @@ fn signal_groups(app: &App) -> Vec<Group> {
     let row = |items: &[(&str, &str)]| vec![(String::new(), items.iter().map(|(n, l)| (n.to_string(), l.to_string())).collect())];
     let mut out = Vec::new();
     if !buses.is_empty() {
-        let rows = buses.iter().map(|b| (nice(b), BAND.iter().map(|(p, l)| (format!("{b}.{p}"), l.to_string())).collect())).collect();
+        let rows = buses.iter().map(|b| (crate::views::mix::bus_label(b), BAND.iter().map(|(p, l)| (format!("{b}.{p}"), l.to_string())).collect())).collect();
         out.push(Group { short: "Music", title: "Music & drums", rows });
     }
     out.push(Group { short: "Beat", title: "Beat", rows: row(&BEAT[..]) });
@@ -1480,11 +1480,12 @@ mod tests {
         assert_eq!(w("fx.vhs.amount"), "Whole screen › VHS tape › Amount");
         assert_eq!(w("audio.bus.music.gain"), "Sound › Music › Volume");
         assert_eq!(w("lights.master"), "Lights › Master");
-        assert_eq!(signal_label("band.kick"), "Band kick");
+        crate::views::mix::remember_bus_label("band", "16R output");
+        assert_eq!(signal_label("band.kick"), "16R output kick");
         assert_eq!(signal_label("music.hat"), "Music hi-hat");
         assert_eq!(signal_label("lfo.slow"), "Slow wave");
         assert_eq!(signal_label("midi.xtouch.fs_a"), "X-TOUCH Footswitch A");
-        assert_eq!(signal_words("band.kick"), "band kick");
+        assert_eq!(signal_words("band.kick"), "16R output kick");
         assert_eq!(signal_words("midi.xtouch.fader_1"), "X-TOUCH Fader 1", "a brand keeps its capitals mid-sentence");
         assert_eq!(area("scene.duo.node.cam.offset_x"), 0);
         assert_eq!(area("scene.duo.node.cam.fx.blur.amount"), 1);

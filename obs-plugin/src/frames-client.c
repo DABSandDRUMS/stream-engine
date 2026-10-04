@@ -55,6 +55,7 @@ struct se_frames_client {
 	bool stop;
 	bool want_dmabuf;
 	struct se_frames_import *pending_import;
+	uint64_t active_epoch; /* zero once disconnected, until a fresh canvas arrives */
 	bool ready_valid;
 	struct se_frames_ready ready;
 	struct release_item releases[RELEASE_QUEUE_CAP];
@@ -228,6 +229,7 @@ static void set_connected(struct se_frames_client *c, bool connected)
 		c->stats.dmabuf = c->hello_dmabuf;
 	} else {
 		/* the engine forgets our holds when we disconnect; a ready frame may be overwritten */
+		c->active_epoch = 0;
 		c->ready_valid = false;
 		c->n_releases = 0;
 	}
@@ -373,6 +375,7 @@ static bool on_canvas(struct se_frames_client *c, const struct se_canvas *m, int
 	pthread_mutex_lock(&c->mu);
 	old = c->pending_import;
 	c->pending_import = imp;
+	c->active_epoch = imp->epoch;
 	c->ready_valid = false;
 	c->n_releases = 0;
 	c->stats.goodbye = false;
@@ -713,6 +716,14 @@ void se_frames_client_poll(struct se_frames_client *c, struct se_frames_update *
 	out->frame = c->ready;
 	c->ready_valid = false;
 	pthread_mutex_unlock(&c->mu);
+}
+
+bool se_frames_client_import_current(struct se_frames_client *c, uint64_t epoch)
+{
+	pthread_mutex_lock(&c->mu);
+	bool current = epoch != 0 && c->stats.connected && c->active_epoch == epoch;
+	pthread_mutex_unlock(&c->mu);
+	return current;
 }
 
 void se_frames_client_release(struct se_frames_client *c, uint64_t epoch, uint32_t buffer, uint64_t seq)

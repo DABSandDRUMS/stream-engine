@@ -223,16 +223,15 @@ impl Default for WhisperConfig {
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct AudioConfig {
-    /// Roles whose tracks are left out of clip audio (music is dropped by default).
+    /// Explicit roles to omit from talk clips. Empty by default: retain selected sources.
     pub drop: Vec<String>,
     /// Roles to transcribe, in order of preference (the first role with a track wins).
     pub transcribe: Vec<String>,
     /// Fallback role names by audio-stream index when the recording has no track info.
     pub tracks: Vec<String>,
-    /// Role → glob patterns matched against a track's name, OBS sources, and PipeWire nodes.
+    /// Role → glob patterns matched against a track's configured name and source.
     pub roles: BTreeMap<String, Vec<String>>,
-    /// What to do when every track carries music (single mixed track): `keep` (flag the
-    /// clip) or `mute`.
+    /// If every track is explicitly excluded: `keep` the complete mix or `mute`.
     pub mixed: MixedPolicy,
 }
 
@@ -242,14 +241,14 @@ impl Default for AudioConfig {
             ("music", &["se-music", "*music*", "*youtube*", "*song*"][..]),
             ("program", &["se-program", "*program*"][..]),
             ("mic", &["se-mic", "*mic*", "*voice*", "*vocal*"][..]),
-            ("band", &["se-band", "*band*", "*studio 24c*", "*24c*"][..]),
+            ("band", &["se-band", "*band*"][..]),
             ("drums", &["se-drums", "*drum*"][..]),
             ("tts", &["se-tts", "*tts*"][..]),
             ("sfx", &["se-sfx", "*sfx*", "*alert*"][..]),
             ("game", &["se-game", "*game*"][..]),
         ];
         AudioConfig {
-            drop: vec!["music".into(), "program".into()],
+            drop: Vec::new(),
             transcribe: vec!["mic".into(), "band".into()],
             tracks: Vec::new(),
             roles: roles.iter().map(|(k, v)| (k.to_string(), v.iter().map(|s| s.to_string()).collect())).collect(),

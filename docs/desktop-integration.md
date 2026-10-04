@@ -27,6 +27,7 @@ The package installs:
 |---|---|
 | `/usr/bin/stream-engine`, `/usr/bin/streamctl` | engine/UI binary and CLI |
 | `/usr/bin/stream-engine-launch-or-focus` | focus the UI window by exact app-id, or launch it (`--program` for the confidence window) |
+| `/usr/bin/stream-engine-drum-screen` | local Hyprland desk ⇄ Philips TV handoff (`status`, `toggle`, `tv`, `desk`; Python 3) |
 | `/usr/share/stream-engine/{web,project-example,templates,scripts}` | engine data (`share_dir()` = `<exe>/../share/stream-engine`) |
 | `/usr/share/stream-engine/omarchy/` | the Omarchy extras below, with their installer |
 | `/usr/lib/stream-engine/` | CEF web host `stream-engine-web` + CEF runtime (found via `<share>/../../lib/stream-engine`) |
@@ -85,8 +86,8 @@ Starting sets the show mode first and then starts OBS, so going live from rehear
 ## Notifications
 
 Background problems show up as desktop notifications (freedesktop, via `notify-send`; the
-Omarchy shell is the notification daemon) — only while no Stream Engine window has focus, and
-never for routine events:
+Omarchy shell is the notification daemon) — only while no Stream Engine window has focus
+(except health failures, below), and never for routine events:
 
 | Problem | When |
 |---|---|
@@ -95,11 +96,34 @@ never for routine events:
 | Twitch (or the chat bot) needs you to sign in again | the sign-in expired or failed, or renewing keeps failing, for a minute |
 | The disk is almost full | under 10 GB free on the project disk |
 | Backups / recordings disk / recordings budget | asked for by the backup and retention tasks ([extras.md](extras.md#backups-and-retention)) |
+| Stream Engine: *check* failed | any `health.*` check has been `fail` for 10 s (see below) |
 
 Each problem is notified once per occurrence; the same problem isn't repeated within 30 minutes,
 and notifications are at least 30 s apart (problems that come up in between arrive together as
-"N things need your attention"). A problem that starts while a Stream Engine window is in front
-counts as seen. Clicking a notification opens (or focuses) the UI on the page that fixes it.
+"N things need your attention"; a different problem is delayed to the next slot, never dropped).
+A problem that starts while a Stream Engine window is in front counts as seen. Clicking a
+notification opens (or focuses) the UI on the page that fixes it.
+
+### Health failures
+
+Any health check (`health.<check>`, the list in the header health pill and `streamctl
+preflight`) that turns `fail` and stays failing for 10 s sends one critical notification,
+"Stream Engine: *check* failed", whose text is the check's detail. These notify **even while a
+Stream Engine window has focus**. Clicking opens the UI's health view (`ui.open {view:
+"health"}`).
+
+- A check counts once it has been seen working (`pass` or `warn`) since the engine started.
+  A check that has been failing since start counts only while the show matters (streaming or a
+  show mode other than off air / rehearsal); before that, preflight and Go live show it.
+- `obs` fails whenever OBS is closed, so it counts only while the show matters.
+- A failure that one of the specific notifications above already reports is merged into it
+  rather than notified twice: Twitch sign-in (`twitch`, `bot`), an unplugged device
+  (`devices`), a stale OBS feed (`obs`), the recordings disk (`recordings`), and failed backups
+  (`backup`).
+- When a notified (or merged) failure passes again, a low-urgency "Stream Engine: *check*
+  recovered" notification follows (skipped while a window has focus: the UI shows it). After a
+  recovery, a new failure of the same check notifies again; a check that went from `fail` to
+  `warn` and back to `fail` without passing is not repeated within 30 minutes.
 
 The UI reports its focus with the action `ui.focus {focused, pid}` whenever it changes and after
 every reconnect; a UI that has exited, or no UI at all, counts as not focused (`ui.focused`
@@ -151,7 +175,48 @@ files, so nothing needs restarting.
   is not running.
 - **Keybinds and window rules** (`--hypr`: `~/.config/hypr/stream-engine.lua`, required from
   `bindings.lua`): SUPER+CTRL+ALT + S (open UI), RETURN (Take), ESCAPE (Panic), C (Clean),
-  B (BRB; replaces Omarchy's "Show battery remaining"), N / P (next / previous scene to Up next). Windows: `stream-engine` on DP-1,
+  B (BRB; replaces Omarchy's "Show battery remaining"), N / P (next / previous scene to Up next),
+  V (Drum screen; replaces a standalone TV toggle if installed). Windows: `stream-engine` on DP-1,
   `stream-engine.<panel>` on DP-2, `stream-engine.program` fullscreen on the TV (DP-2 while the
   TV is absent) with `idle_inhibit = "always"`; all fully opaque. Edit the monitor names at the
   top of the file for other setups.
+
+## Drum screen: desk ⇄ Philips TV
+
+The **Drum screen off/on** pill is in the global Stream Engine header, beside the effects
+and lights switches. `Super+Ctrl+Alt+V` uses the same `stream-engine-drum-screen toggle`
+helper. This is a local desktop control, not an engine action; it works with the engine
+offline and does not restart the engine or change its playback/audio settings.
+
+- **On:** enables the Philips TV, verifies a usable output, moves complete workspaces
+  (retaining tiled layouts and groups), and disables the desk monitors. Workspaces remain
+  separate: use the usual `Super+1`, `Super+2`, etc. to select them on the TV.
+- **Off:** restores the desk monitors' saved modes, refresh rates, positions, scales and
+  transforms; restores workspace ownership, active workspaces, surviving floating windows
+  and focus; then disables the TV and parks its HDMI port to prevent standby hotplug freezes.
+- **Saved mode:** Lua monitor overrides survive reload/login. The existing privileged
+  `tv-port` helper saves the HDMI detection choice for boot. A disconnected TV leaves the
+  desk monitors enabled when the TV profile is loaded. Closed windows and layout trees
+  cannot be recreated after a compositor restart/reboot.
+
+Requires Lua-configured Hyprland, Python 3, and the configured executable `~/.local/bin/tv`
+helper (with its existing `tv-port` authorization). The development/package installers
+install `stream-engine-drum-screen`; the Omarchy `--hypr` installer adds its keybind.
+The UI prefers `~/.local/bin/stream-engine-drum-screen`, then searches PATH.
+
+State is saved atomically in `$XDG_STATE_HOME/stream-engine/drum-screen.json`
+(`~/.local/state` by default). The monitor override is
+`$XDG_STATE_HOME/omarchy/toggles/hypr/stream-engine-drum-screen.lua`, loaded after normal
+monitor settings. These saved profiles preserve the original desk through a failed switch;
+temporary replacement empty workspaces are not treated as desktop content.
+
+Failures produce a desktop notification and, for the UI button, a toast and hover detail.
+A failed transition attempts to restore the previous usable screens. Turn on the target,
+select the correct HDMI input and check cables, then use `stream-engine-drum-screen desk`
+to recover the saved desk or `stream-engine-drum-screen tv` to retry TV mode.
+`stream-engine-drum-screen status` is read-only and reports `desk`/`tv`, or an actionable
+error when saved TV mode cannot be used. Concurrent changes are serialized.
+
+Regression coverage: `python3 -B -m unittest discover -s omarchy/tests -v` exercises
+workspace migration with the compositor's replacement empty workspaces in both directions.
+

@@ -7,13 +7,18 @@
 //! * [`queue`]: ordering of pending/queued entries.
 //! * [`player`]: desired state for the two-slot player page (`web/player.html`) and its reports.
 //! * [`relay`]: outbound WebSocket to the relay (queue snapshots out, Ko-fi payments in).
+//! * [`queue_page`]: `health.queue_page`, the public queue page probed through its public URL.
+//! * [`title`] + [`metadata`]: artist/genres/year from MusicBrainz (no key) for queued songs,
+//!   cached by video id (`song.current.*`, entry fields `artist`/`genres`/`year`).
 //! * [`service`]: the actor tying it all to the hub (actions `queue.*`, `youtube.*`, `relay.*`).
 
 pub mod lookup;
 pub mod messages;
+pub mod metadata;
 pub mod player;
 pub mod policy;
 pub mod queue;
+pub mod queue_page;
 pub mod quota;
 pub mod relay;
 pub mod secrets;
@@ -21,6 +26,7 @@ pub mod service;
 pub mod settings;
 pub mod store;
 pub mod text;
+pub mod title;
 pub mod youtube;
 
 use std::sync::Arc;

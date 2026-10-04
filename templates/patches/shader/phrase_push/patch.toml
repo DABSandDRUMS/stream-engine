@@ -1,0 +1,18 @@
+# Phrase Push — a slow, tempo-locked camera push-in that builds across a phrase of N bars and
+# resets on the next phrase downbeat (a quick ease back or a hard snap), drifting slightly
+# toward a focus point. Subtle by default (6 %); the zoom always covers the frame, so edges never
+# show. The bar count comes from se.time × bpm (a stable tempo is assumed); the phrase starts
+# on bar 0 of that count.
+# Attach: fx = [{ name = "patch.phrase_push" }] on a camera source, scene node, or canvas.
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "effect"
+label       = "Phrase Push"
+description = "Slow tempo-locked push-in over a phrase that resets on the phrase downbeat"
+params.amount = { type = "float", default = 1.0, range = [0.0, 2.0], description = "Overall strength (scales the zoom)" }
+params.bars   = { type = "int", default = 4, range = [1, 16], description = "Phrase length in bars (4, 8 or 16 are typical)" }
+params.zoom   = { type = "float", default = 0.06, range = [0.0, 0.25], description = "Push-in reached at the end of the phrase (fraction of the frame)" }
+params.reset  = { type = "enum", options = ["smooth", "snap"], default = "smooth", description = "Back to wide on the downbeat with a quick ease or a hard cut" }
+params.focus  = { type = "vec2", default = [0.55, 0.8], range = [0.0, 1.0], description = "Point the push drifts toward (uv, 0,0 top-left); default is the snare" }
+params.drift  = { type = "float", default = 0.5, range = [0.0, 1.0], description = "How far the push drifts toward the focus (1 = as far as the zoom allows)" }
+budget = { gpu_ms = 0.05 }

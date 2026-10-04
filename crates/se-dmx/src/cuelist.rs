@@ -26,6 +26,7 @@ pub struct Cue {
     pub delay_ms: u64,
     pub follow_ms: Option<u64>,
     pub wait_ms: Option<u64>,
+    pub wait_beats: Option<f64>,
     pub ease: Ease,
     pub block: bool,
     pub release: Vec<String>,
@@ -93,6 +94,8 @@ pub struct CueList {
     pub cues: Vec<Cue>,
     /// Premade knobs (`[[knob]]`, targets `cue.<id>.…`; see [`crate::knobs`]).
     pub knobs: Vec<crate::knobs::Bound>,
+    /// Free lowercase tags (`tags = [...]`) for `lights.layer.pick` / `lights.tags`.
+    pub tags: Vec<String>,
 }
 
 impl CueList {
@@ -112,6 +115,7 @@ impl CueList {
             delay_ms: 0,
             follow_ms: None,
             wait_ms: None,
+            wait_beats: None,
             ease: Ease::Linear,
             block: false,
             release: Vec::new(),
@@ -132,6 +136,7 @@ impl CueList {
             back_fade_ms: None,
             cues: vec![cue],
             knobs: Vec::new(),
+            tags: p.tags.clone(),
         }
     }
 }
@@ -168,6 +173,8 @@ struct RawList {
     notes: Option<String>,
     #[serde(default)]
     knob: Vec<se_core::knob::Knob>,
+    #[serde(default)]
+    tags: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -180,6 +187,7 @@ struct RawCue {
     delay: Option<toml::Value>,
     follow: Option<toml::Value>,
     wait: Option<toml::Value>,
+    wait_beats: Option<f64>,
     ease: Option<String>,
     #[serde(default)]
     block: bool,
@@ -229,6 +237,10 @@ impl CueList {
                 Some(_) => return Err(format!("cue {}: `id` must be a string or number", i + 1)),
             };
             let w = |k: &str| format!("cue `{id}` {k}");
+            if let Some(beats) = c.wait_beats {
+                if !beats.is_finite() || beats <= 0.0 { return Err(format!("{} must be a finite positive number", w("wait_beats"))); }
+                if c.wait.is_some() || c.follow.is_some() { return Err(format!("{} cannot be combined with wait or follow", w("wait_beats"))); }
+            }
             let ease = match c.ease.as_deref() {
                 None => Ease::Linear,
                 Some(e) => Ease::parse(e).ok_or_else(|| format!("{}: unknown ease `{e}`", w("ease")))?,
@@ -276,6 +288,7 @@ impl CueList {
                 delay_ms: opt_dur(&c.delay, &w("delay"))?.unwrap_or(0),
                 follow_ms: opt_dur(&c.follow, &w("follow"))?,
                 wait_ms: opt_dur(&c.wait, &w("wait"))?,
+                wait_beats: c.wait_beats,
                 ease,
                 block: c.block,
                 release: c.release,
@@ -303,6 +316,7 @@ impl CueList {
             back_fade_ms: opt_dur(&r.back_fade, "back_fade")?,
             cues,
             knobs: Vec::new(),
+            tags: crate::tags::parse(r.tags)?,
         };
         se_core::knob::check_all(&r.knob)?;
         for k in r.knob {
@@ -544,5 +558,8 @@ b = { intensity = 0.3 }
         assert!(e.contains("unknown effect `nope`"), "{e}");
         assert!(CueList::parse("x", &toml::from_str("[[cue]]\nid = 1\n[[cue]]\nid = 1").unwrap()).unwrap_err().contains("duplicate"));
         assert!(CueList::parse("x", &toml::from_str("[[cue]]\nfade = \"soon\"").unwrap()).unwrap_err().contains("bad duration"));
+        for timing in ["wait_beats=0", "wait_beats=-1", "wait_beats=nan", "wait_beats=16\nwait='8s'", "wait_beats=16\nfollow='1s'"] {
+            assert!(CueList::parse("x", &toml::from_str(&format!("[[cue]]\n{timing}")).unwrap()).unwrap_err().contains("wait_beats"));
+        }
     }
 }

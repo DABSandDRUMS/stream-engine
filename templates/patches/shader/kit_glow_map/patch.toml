@@ -1,0 +1,29 @@
+# Kit Glow Map — stage lights on the kit. Five soft elliptical light zones (kick, snare, toms,
+# hats, crash) light up the existing picture in their own colours on their own hits, like small
+# lamps rigged on each drum: fast attack, a natural ~0.3 s fade, and the light multiplies the
+# surface (bright chrome and coated heads catch it, black stays mostly black) plus a little haze.
+# There are only kick/snare/hat signals, so toms and crash are split out by timing: snare-band
+# hits off the quarter-note grid (fills) light the toms, hat-band hits on the bar downbeat light
+# the crash (see main.wgsl). A trigger (alert) chases the user's colour through the zones.
+# Always-on effect, so no manifest trigger: the chase is timed from se.trigger_age.
+# Zones default to the kit.mp4 framing (uv centre x, y, radius x, y); move them per camera.
+# Attach: fx = [{ name = "patch.kit_glow_map" }] on the kit camera source, node, or canvas.
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "effect"
+label       = "Kit Glow Map"
+description = "Soft coloured stage lights on each drum and cymbal that flash with their own hits"
+params.amount      = { type = "float", default = 1.0, range = [0.0, 2.0], description = "Overall light strength" }
+params.decay       = { type = "float", default = 1.0, range = [0.4, 2.5], unit = "x", description = "Light tail length (1 = about 0.3 s to dark, cymbals longer)" }
+params.haze        = { type = "float", default = 0.35, range = [0.0, 1.0], description = "Share of light that glows in the air instead of only on surfaces" }
+params.kick_zone   = { type = "vec4", default = [0.52, 1.06, 0.40, 0.25], range = [-0.5, 1.5], description = "Kick light: centre x, y and radius x, y (uv)" }
+params.snare_zone  = { type = "vec4", default = [0.66, 0.85, 0.12, 0.11], range = [-0.5, 1.5], description = "Snare light: centre x, y and radius x, y (uv)" }
+params.toms_zone   = { type = "vec4", default = [0.38, 0.88, 0.17, 0.11], range = [-0.5, 1.5], description = "Toms light: centre x, y and radius x, y (uv); fills sweep across it" }
+params.hats_zone   = { type = "vec4", default = [0.08, 0.54, 0.11, 0.11], range = [-0.5, 1.5], description = "Hi-hat light: centre x, y and radius x, y (uv)" }
+params.crash_zone  = { type = "vec4", default = [0.17, 0.77, 0.20, 0.13], range = [-0.5, 1.5], description = "Crash light: centre x, y and radius x, y (uv)" }
+params.kick_color  = { type = "color", default = "#ff1a0d", description = "Kick light colour" }
+params.snare_color = { type = "color", default = "#c8dcff", description = "Snare light colour" }
+params.toms_color  = { type = "color", default = "#a64dff", description = "Toms light colour" }
+params.hats_color  = { type = "color", default = "#ffbf3a", description = "Hi-hat light colour" }
+params.crash_color = { type = "color", default = "#33e6ff", description = "Crash light colour" }
+budget = { gpu_ms = 0.15 }

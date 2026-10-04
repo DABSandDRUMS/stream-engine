@@ -15,5 +15,5 @@ pub mod trace;
 pub mod transitions;
 pub mod triggers;
 
-pub use crate::core::{Core, Input, Output, RuntimeState, addr, timeline};
+pub use crate::core::{Core, Input, Output, RuntimeState, addr, autoseq, context, timeline};
 pub use config::{Config, SourceFile};

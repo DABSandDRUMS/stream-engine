@@ -1,0 +1,23 @@
+# Time slice: during snare fills the picture splits into horizontal strips, each one showing a
+# slightly older moment than the one above it (a slit-scan stagger from the last 8 frames), with
+# Win 3.1 bevel seams between the strips and a small sideways shear that grows with the age. As
+# the fill ends the strips catch up with the present and the seams fade. Invisible otherwise.
+# Uses the input history ring (`history = 8`): up to 8 frames back (~0.27 s at 30 fps, ~0.13 s at
+# 60 fps), plus state feedback whose alpha carries the smoothed fill level. Fills are detected
+# from the snare envelope (hits off the 2/4 backbeat, see main.wgsl).
+# Always-on: attach it (`fx = [{ name = "patch.time_slice" }]`) to the kit camera source, its
+# node or the canvas. No manifest trigger: the optional trigger burst uses se.trigger_age.
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "effect"
+label       = "Time Slice"
+description = "On fills the picture splits into horizontal strips that each lag a little further behind, then catch up with the present"
+history     = 8
+feedback    = "state"
+params.bands    = { type = "int", default = 8, range = [2, 24], description = "Number of strips" }
+params.order    = { type = "enum", options = ["down", "up", "center_out"], default = "down", description = "Which strips lag most: the bottom, the top, or the outer ones" }
+params.shear    = { type = "float", default = 0.012, range = [0.0, 0.05], description = "Sideways shift of the oldest strip (fraction of the width), alternating left/right" }
+params.seams    = { type = "float", default = 0.8, range = [0.0, 1.0], description = "Bevel seam strength between strips" }
+params.tint     = { type = "color", default = "#a8c8ff", description = "Colour the oldest strip drifts towards" }
+params.triggers = { type = "bool", default = true, description = "Also slice for a moment after a trigger (alert)" }
+budget = { gpu_ms = 0.15 }

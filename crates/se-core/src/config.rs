@@ -148,15 +148,81 @@ impl Default for ProjectDef {
 #[serde(default)]
 pub struct FxRef {
     pub name: String,
+    pub id: String,
+    pub triggered: bool,
     /// Conditional attachment (`mode == 'chill'`).
     pub when: Option<String>,
     /// Exclusive group (only one active per group).
     pub group: Option<String>,
     pub hold: Option<Dur>,
-    /// Always on (true) or only while triggered (false).
+    /// Bypass gate; trigger-envelope selection is independent.
     pub enabled: Option<bool>,
     #[serde(flatten)]
     pub params: BTreeMap<String, Value>,
+}
+
+impl FxRef {
+    pub fn slot_id(&self) -> &str { if self.id.is_empty() { &self.name } else { &self.id } }
+}
+
+pub fn valid_fx_id(id: &str) -> bool {
+    !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.') && !id.starts_with('.') && !id.ends_with('.') && !id.contains("..")
+}
+
+pub fn normalize_fx(fx: &mut [FxRef]) -> Result<(), String> {
+    let mut used = std::collections::BTreeSet::new();
+    for f in fx.iter().filter(|f| !f.id.is_empty()) {
+        if !valid_fx_id(&f.id) || !used.insert(f.id.clone()) { return Err(format!("invalid or duplicate FX slot `{}`", f.id)); }
+    }
+    for f in fx {
+        if f.name.is_empty() { return Err("FX slot needs a name".into()); }
+        if f.id.is_empty() {
+            let base = f.name.clone();
+            if !valid_fx_id(&base) { return Err(format!("invalid FX name `{}`", f.name)); }
+            let mut id = base.clone();
+            let mut n = 2;
+            while used.contains(&id) { id = format!("{base}_{n}"); n += 1; }
+            used.insert(id.clone());
+            f.id = id;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct FxChainDef {
+    pub name: String,
+    pub label: Option<String>,
+    pub fx: Vec<FxRef>,
+}
+
+/// How a source fills its node window.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeFit {
+    #[default]
+    Stretch,
+    Native,
+}
+
+impl NodeFit {
+    /// Place a source UV rectangle in a pixel window. Native pixels follow the canvas's
+    /// resolution scale, not the window size: excess is clipped at the top/right, and
+    /// unused space stays transparent. Returns the visible content rect and its UVs.
+    pub fn placement(self, rect: [f32; 4], uv: [f32; 4], source_size: [f32; 2], canvas_scale: f32) -> ([f32; 4], [f32; 4]) {
+        if self == Self::Stretch {
+            return (rect, uv);
+        }
+        let pixel = [source_size[0] * canvas_scale, source_size[1] * canvas_scale];
+        let available = [(uv[2] - uv[0]).max(0.0) * pixel[0], (uv[3] - uv[1]).max(0.0) * pixel[1]];
+        if pixel[0] <= 0.0 || pixel[1] <= 0.0 || available[0] <= 0.0 || available[1] <= 0.0 {
+            return ([rect[0], rect[1] + rect[3], 0.0, 0.0], uv);
+        }
+        let w = rect[2].max(0.0).min(available[0]);
+        let h = rect[3].max(0.0).min(available[1]);
+        ([rect[0], rect[1] + rect[3] - h, w, h], [uv[0], uv[3] - h / pixel[1], uv[0] + w / pixel[0], uv[3]])
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -167,6 +233,7 @@ pub struct NodeDef {
     pub src: String,
     /// Normalized x, y, w, h.
     pub rect: [f32; 4],
+    pub fit: NodeFit,
     /// Normalized crop: left, top, right, bottom insets.
     pub crop: [f32; 4],
     pub radius: f32,
@@ -175,8 +242,9 @@ pub struct NodeDef {
     pub blend: String,
     pub mask: Option<String>,
     pub fx: Vec<FxRef>,
+    pub fx_enabled: bool,
     pub when: Option<String>,
-    /// Enter/exit style for morph transitions: `fade | scale | slide_left | slide_right | slide_up | slide_down | none`.
+    /// Enter/exit style for morph/glide transitions: `fade | scale | slide | slide_left | slide_right | slide_up | slide_down | none`.
     pub enter: Option<String>,
     pub exit: Option<String>,
     pub offset_x: f32,
@@ -192,6 +260,7 @@ impl Default for NodeDef {
             id: String::new(),
             src: String::new(),
             rect: [0.0, 0.0, 1.0, 1.0],
+            fit: NodeFit::default(),
             crop: [0.0; 4],
             radius: 0.0,
             opacity: 1.0,
@@ -199,6 +268,7 @@ impl Default for NodeDef {
             blend: "normal".into(),
             mask: None,
             fx: Vec::new(),
+            fx_enabled: true,
             when: None,
             enter: None,
             exit: None,
@@ -211,12 +281,50 @@ impl Default for NodeDef {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SceneCanvas {
     pub nodes: Vec<NodeDef>,
     pub fx: Vec<FxRef>,
+    pub fx_enabled: bool,
+    pub groups: Vec<GroupDef>,
     pub background: Option<Value>,
+}
+
+impl Default for SceneCanvas {
+    fn default() -> Self { Self { nodes: Vec::new(), fx: Vec::new(), fx_enabled: true, groups: Vec::new(), background: None } }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GroupDef {
+    pub id: String,
+    pub nodes: Vec<String>,
+    pub fx: Vec<FxRef>,
+    pub fx_enabled: bool,
+    pub z: i32,
+    pub blend: String,
+    pub opacity: f32,
+    pub visible: bool,
+    pub when: Option<String>,
+}
+
+impl Default for GroupDef {
+    fn default() -> Self { Self { id: String::new(), nodes: Vec::new(), fx: Vec::new(), fx_enabled: true, z: 0, blend: "normal".into(), opacity: 1.0, visible: true, when: None } }
+}
+
+pub fn validate_groups(canvas: &SceneCanvas) -> Result<(), String> {
+    let mut ids = std::collections::BTreeSet::new();
+    let mut members = std::collections::BTreeSet::new();
+    for g in &canvas.groups {
+        if !valid_fx_id(&g.id) || !ids.insert(&g.id) { return Err(format!("invalid or duplicate group `{}`", g.id)); }
+        for n in &g.nodes {
+            if !canvas.nodes.iter().any(|node| &node.id == n) || !members.insert(n) {
+                return Err(format!("group `{}` has unknown or repeated member `{n}`", g.id));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -290,18 +398,127 @@ impl Default for TransitionVoteDef {
     }
 }
 
+/// `[context.musical_fx]`: restrained musical video moments, independent of the novelty budget.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MusicalFxDef {
+    /// Let the song establish itself before the first opportunity.
+    pub start_delay: Dur,
+    /// Silence between the end of a release tail and the next opportunity (at least 45s).
+    pub quiet_gap: Dur,
+    /// Trusted-grid phrase length in beats.
+    pub phrase_beats: u32,
+    /// Separate rolling-hour ceiling; fixed storage supports at most 48 moments.
+    pub max_per_hour: u32,
+}
+
+impl Default for MusicalFxDef {
+    fn default() -> Self {
+        Self { start_delay: Dur(12_000), quiet_gap: Dur(45_000), phrase_beats: 32, max_per_hour: 24 }
+    }
+}
+
+impl MusicalFxDef {
+    fn validate(&self) -> Result<(), String> {
+        if !(12_000..=120_000).contains(&self.start_delay.ms()) {
+            return Err("[context.musical_fx] start_delay must be 12s..=120s".into());
+        }
+        if !(45_000..=600_000).contains(&self.quiet_gap.ms()) {
+            return Err("[context.musical_fx] quiet_gap must be 45s..=600s".into());
+        }
+        if !(16..=128).contains(&self.phrase_beats) || self.phrase_beats % 4 != 0 {
+            return Err("[context.musical_fx] phrase_beats must be a multiple of four in 16..=128".into());
+        }
+        if !(1..=48).contains(&self.max_per_hour) {
+            return Err("[context.musical_fx] max_per_hour must be 1..=48".into());
+        }
+        Ok(())
+    }
+}
+
+/// `[context]` in project.toml: tuning of the context layer (`context.*`, docs/context.md).
+/// Every key is optional; the defaults suit a drum-cover stream.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ContextDef {
+    /// Automatic moments per rolling hour (`context.budget`, spent by `context.spend`).
+    pub auto_per_hour: u32,
+    /// `context.peak`: `context.energy` ≥ `peak_on` for `peak_hold`, at most once per
+    /// `peak_cooldown`; `context.settle` once it stays below `peak_off` for `settle_hold`.
+    pub peak_on: f32,
+    pub peak_off: f32,
+    pub peak_hold: Dur,
+    pub settle_hold: Dur,
+    pub peak_cooldown: Dur,
+    /// `context.song_peak`: after a `music.drop` (or a `music.section` with novelty ≥
+    /// `section_novelty`), `context.song` ≥ `song_peak_on` for `song_peak_hold`, starting within
+    /// `song_peak_window`; at most once per `song_peak_cooldown`, never while the host talks.
+    pub song_peak_on: f32,
+    pub song_peak_hold: Dur,
+    pub song_peak_window: Dur,
+    pub song_peak_cooldown: Dur,
+    pub section_novelty: f32,
+    /// `context.fill_landed`: ≥ `fill_hits` snare/tom hits within `fill_window`, then a kick of
+    /// velocity ≥ `fill_land_velocity` (or a crash) within `fill_land` of the last hit, within
+    /// `fill_downbeat` beats of a bar start (0 = anywhere); at most once per `fill_cooldown`.
+    pub fill_hits: u32,
+    pub fill_window: Dur,
+    pub fill_land: Dur,
+    pub fill_land_velocity: f32,
+    pub fill_downbeat: f32,
+    pub fill_cooldown: Dur,
+    /// `context.mood` is re-evaluated at most this often while a song plays.
+    pub mood_every: Dur,
+    pub musical_fx: MusicalFxDef,
+}
+
+impl Default for ContextDef {
+    fn default() -> Self {
+        ContextDef {
+            auto_per_hour: 6,
+            peak_on: 0.72,
+            peak_off: 0.5,
+            peak_hold: Dur(6_000),
+            settle_hold: Dur(3_000),
+            peak_cooldown: Dur(120_000),
+            song_peak_on: 0.7,
+            song_peak_hold: Dur(4_000),
+            song_peak_window: Dur(10_000),
+            song_peak_cooldown: Dur(45_000),
+            section_novelty: 0.35,
+            fill_hits: 5,
+            fill_window: Dur(1_200),
+            fill_land: Dur(600),
+            fill_land_velocity: 0.4,
+            fill_downbeat: 0.5,
+            fill_cooldown: Dur(20_000),
+            mood_every: Dur(20_000),
+            musical_fx: MusicalFxDef::default(),
+        }
+    }
+}
+
+/// `[fx]` in project.toml: the operator's effects switch (`fx.enabled`). Patch ids (or full
+/// trigger addresses such as `fx.grade`) in `exempt` keep firing while effects are off.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FxControlDef {
+    pub exempt: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct LightsRef {
     /// A cue list to run (`cue` alone) or, with `cuelist`, one of its cues.
     pub cue: Option<String>,
     pub cuelist: Option<String>,
-    /// A light look (`lights/palettes/<look>.toml`) held on the lights it covers.
+    /// A palette (`lights/palettes/<look>.toml`) selected in the musical base layer.
     pub look: Option<String>,
+    /// Playback duration, bounded by chat TTL for chat-triggered presets.
     pub hold: Option<Dur>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SceneDef {
     pub name: String,
@@ -312,10 +529,15 @@ pub struct SceneDef {
     pub transitions: TransitionPool,
     pub lights: Option<LightsRef>,
     pub fx: Vec<FxRef>,
+    pub fx_enabled: bool,
     pub on_enter: Vec<String>,
     pub on_exit: Vec<String>,
     /// Scene-layer values applied to any address while this scene is on program.
     pub set: BTreeMap<String, Value>,
+}
+
+impl Default for SceneDef {
+    fn default() -> Self { Self { name: String::new(), label: None, key: None, canvas: BTreeMap::new(), transitions: TransitionPool::default(), lights: None, fx: Vec::new(), fx_enabled: true, on_enter: Vec::new(), on_exit: Vec::new(), set: BTreeMap::new() } }
 }
 
 impl SceneDef {
@@ -343,15 +565,19 @@ pub struct TransitionDef {
     pub name: String,
     /// Display name (the file name when absent).
     pub label: Option<String>,
-    /// `morph | shader | combined | cut`
+    /// `morph | glide | shader | combined | cut`
     pub kind: String,
     /// For shader/combined: a built-in shader name (`crate::transitions::SHADERS`), a WGSL file
     /// relative to the project (`*.wgsl`), or `patch.<id>`.
     pub shader: Option<String>,
     pub ms: Option<Dur>,
-    pub ease: se_proto::Ease,
+    /// Omitted: `standard` for glide, `in_out_cubic` for other kinds.
+    pub ease: Option<se_proto::Ease>,
     pub enter: String,
     pub exit: String,
+    pub enter_window: Option<[f32; 2]>,
+    pub exit_window: Option<[f32; 2]>,
+    pub fade_window: Option<[f32; 2]>,
     #[serde(flatten)]
     pub params: BTreeMap<String, Value>,
 }
@@ -364,9 +590,12 @@ impl Default for TransitionDef {
             kind: "morph".into(),
             shader: None,
             ms: None,
-            ease: se_proto::Ease::InOutCubic,
+            ease: None,
             enter: "fade".into(),
             exit: "fade".into(),
+            enter_window: None,
+            exit_window: None,
+            fade_window: None,
             params: BTreeMap::new(),
         }
     }
@@ -380,6 +609,14 @@ pub enum Conflict {
     Replace,
     Queue,
     Reject,
+}
+
+/// When a preset starts: on the next beat or bar of the beat clock (`quantize`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Quantize {
+    Beat,
+    Bar,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
@@ -401,6 +638,20 @@ pub struct MixRef {
     pub fade: Option<Dur>,
 }
 
+/// Explicit opt-in to the musical video library. Empty moods admit every context mood.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AutoFxDef {
+    pub moods: Vec<String>,
+    /// Inclusive range of the song's relative energy (typical passage = 0.5).
+    pub energy: [f32; 2],
+    pub weight: f64,
+}
+
+impl Default for AutoFxDef {
+    fn default() -> Self { Self { moods: Vec::new(), energy: [0.0, 1.0], weight: 1.0 } }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct PresetDef {
@@ -412,6 +663,10 @@ pub struct PresetDef {
     pub hold: Option<Dur>,
     pub conflict: Conflict,
     pub priority: Option<u16>,
+    /// One preset of a lane runs at a time; firings while it is busy wait their turn (FIFO).
+    pub lane: Option<String>,
+    /// Start on the next beat/bar boundary instead of at once.
+    pub quantize: Option<Quantize>,
     /// Pressing again while active releases it.
     pub toggle: bool,
     /// Stays on until released (`preset.release`, a button let go), even with nothing in `set`.
@@ -434,6 +689,12 @@ pub struct PresetDef {
     /// quick effect already changes; its value lives where firing picks it up ([`KnobSlot`]).
     #[serde(rename = "knob")]
     pub knobs: Vec<Knob>,
+    /// A roulette: firing it picks one of these presets by weight (`w`, default 1) and fires that
+    /// one instead, as `preset.fire <picked>` would. A roulette has no effects of its own.
+    pub pick: Vec<PoolEntry>,
+    /// A roulette skips its last N picks while others are left.
+    pub avoid_repeat: usize,
+    pub auto_fx: Option<AutoFxDef>,
 }
 
 /// Where a quick effect keeps a knob's value.
@@ -459,6 +720,33 @@ impl PresetFx {
 }
 
 impl PresetDef {
+    /// A musical candidate can only affect video, never lights, sound, scenes or persistent state.
+    pub fn check_auto_fx(&self) -> Result<(), String> {
+        let Some(a) = &self.auto_fx else { return Ok(()) };
+        if a.moods.iter().any(|m| !crate::core::context::Mood::ALL.contains(&m.as_str())) {
+            return Err("auto_fx moods must be none/chill/groove/bright/heavy/hype".into());
+        }
+        if a.energy.iter().any(|v| !v.is_finite() || !(0.0..=1.0).contains(v)) || a.energy[0] > a.energy[1] {
+            return Err("auto_fx energy must be an ordered finite range within 0..=1".into());
+        }
+        if !a.weight.is_finite() || !(0.0..=1_000.0).contains(&a.weight) || a.weight == 0.0 {
+            return Err("auto_fx weight must be finite and in 0..=1000 (exclusive of zero)".into());
+        }
+        if self.hold.is_none_or(|h| h.ms() == 0 || h.ms() > 30_000) {
+            return Err("auto_fx requires a positive finite hold of at most 30s (20–28s recommended)".into());
+        }
+        if self.fx.is_empty() || self.fx.iter().any(|fx| {
+            let video = !fx.name.contains('.') || fx.name.starts_with("patch.") || fx.name.starts_with("fx.");
+            !video || fx.hold.is_some_and(|h| h.ms() == 0 || h.ms() > self.hold.unwrap().ms()) || fx.params.contains_key("hold")
+        }) || self.lights.is_some() || self.sound.is_some() || self.mix.is_some() || !self.set.is_empty()
+            || !self.commands.is_empty() || !self.on_release.is_empty() || self.scene.is_some() || self.mode.is_some()
+            || !self.pick.is_empty() || self.toggle || self.until_released
+        {
+            return Err("auto_fx must be finite video-only effects without side effects or latching".into());
+        }
+        Ok(())
+    }
+
     /// Where the value of a knob driving `target` lives, if this quick effect changes it.
     pub fn knob_slot(&self, target: &str) -> Option<KnobSlot> {
         if self.set.contains_key(target) {
@@ -515,6 +803,35 @@ impl PresetDef {
                 };
                 return Err(format!("knob “{}”: the value this quick effect has for `{}` must be {want}", k.label, k.target));
             }
+        }
+        Ok(())
+    }
+
+    /// A roulette's own shape: usable weights and nothing of its own to run. Its targets are
+    /// checked across files ([`Config::validate`]).
+    fn check_pick(&self) -> Result<(), String> {
+        if let Some(e) = self.pick.iter().find(|e| !(e.w.is_finite() && e.w >= 0.0)) {
+            return Err(format!("pick `{}`: `w` must be a number ≥ 0", e.name));
+        }
+        if !self.pick.iter().any(|e| e.w > 0.0) {
+            return Err("`pick` needs at least one entry with `w` > 0".into());
+        }
+        if self.pick.iter().any(|e| e.name == self.name) {
+            return Err("`pick` can't name this preset itself".into());
+        }
+        let own = [
+            ("fx", !self.fx.is_empty()),
+            ("lights", self.lights.is_some()),
+            ("sound", self.sound.is_some()),
+            ("mix", self.mix.is_some()),
+            ("set", !self.set.is_empty()),
+            ("do", !self.commands.is_empty()),
+            ("on_release", !self.on_release.is_empty()),
+            ("scene", self.scene.is_some()),
+            ("mode", self.mode.is_some()),
+        ];
+        if let Some((key, _)) = own.iter().find(|(_, has)| *has) {
+            return Err(format!("a preset with `pick` fires the one it picks; it can't have `{key}` too"));
         }
         Ok(())
     }
@@ -663,6 +980,7 @@ pub struct Config {
     pub scenes: BTreeMap<String, SceneDef>,
     pub transitions: BTreeMap<String, TransitionDef>,
     pub presets: BTreeMap<String, PresetDef>,
+    pub fx_chains: BTreeMap<String, FxChainDef>,
     pub rules: Vec<RuleDef>,
     pub bindings: Vec<BindingDef>,
     /// Kinds owned by other subsystems (timelines, commands, alerts, mixes, controllers,
@@ -676,6 +994,18 @@ pub struct Config {
 
 fn parse<T: for<'de> Deserialize<'de>>(t: &toml::Table) -> Result<T, String> {
     toml::Value::Table(t.clone()).try_into().map_err(|e: toml::de::Error| e.message().to_string())
+}
+
+fn normalize_fx_value(value: &mut toml::Value) -> Result<(), String> {
+    let mut fx: Vec<FxRef> = value.clone().try_into().map_err(|e: toml::de::Error| e.to_string())?;
+    normalize_fx(&mut fx)?;
+    *value = toml::Value::try_from(fx).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn normalize_table_fx(table: &mut toml::Table, key: &str) -> Result<(), String> {
+    if let Some(value) = table.get_mut(key) { normalize_fx_value(value)?; }
+    Ok(())
 }
 
 /// Tables in a file that holds either one item or `[[key]]` arrays.
@@ -701,9 +1031,16 @@ impl Config {
     fn add_file(&mut self, f: &SourceFile) -> Result<(), String> {
         match f.kind.as_str() {
             "project" => {
-                let p: ProjectDef = parse(&f.table)?;
+                let mut p: ProjectDef = parse(&f.table)?;
                 if p.schema > SCHEMA_VERSION {
                     return Err(format!("schema {} is newer than this engine ({SCHEMA_VERSION})", p.schema));
+                }
+                if let Some(toml::Value::Table(render)) = p.extra.get_mut("render") {
+                    for key in ["canvas_fx", "output_fx"] {
+                        if let Some(toml::Value::Table(hosts)) = render.get_mut(key) {
+                            for (_, value) in hosts.iter_mut() { normalize_fx_value(value)?; }
+                        }
+                    }
                 }
                 self.project = p;
             }
@@ -711,6 +1048,7 @@ impl Config {
                 let mut s: SceneDef = parse(&f.table)?;
                 s.name = f.name.clone();
                 for canvas in s.canvas.values_mut() {
+                    normalize_fx(&mut canvas.fx)?;
                     for n in &mut canvas.nodes {
                         if n.src.is_empty() {
                             return Err("node without `src`".into());
@@ -718,9 +1056,19 @@ impl Config {
                         if n.id.is_empty() {
                             n.id = n.src.clone();
                         }
+                        normalize_fx(&mut n.fx)?;
                     }
+                    for g in &mut canvas.groups { normalize_fx(&mut g.fx)?; }
+                    validate_groups(canvas)?;
                 }
+                normalize_fx(&mut s.fx)?;
                 self.scenes.insert(s.name.clone(), s);
+            }
+            "fx_chains" => {
+                let mut chain: FxChainDef = parse(&f.table)?;
+                chain.name = f.name.clone();
+                normalize_fx(&mut chain.fx)?;
+                self.fx_chains.insert(chain.name.clone(), chain);
             }
             "transitions" => {
                 let mut t: TransitionDef = parse(&f.table)?;
@@ -734,6 +1082,13 @@ impl Config {
                     se_proto::Op::parse(c).map_err(|e| format!("command `{c}`: {e}"))?;
                 }
                 p.check_knobs()?;
+                p.check_auto_fx()?;
+                if p.lane.as_deref().is_some_and(|l| l.trim().is_empty()) {
+                    return Err("`lane` must name a lane".into());
+                }
+                if !p.pick.is_empty() {
+                    p.check_pick()?;
+                }
                 self.presets.insert(p.name.clone(), p);
             }
             "rules" => {
@@ -769,6 +1124,10 @@ impl Config {
                 }
             }
             other => {
+                let mut table = f.table.clone();
+                if other == "sources" {
+                    normalize_table_fx(&mut table, "fx")?;
+                }
                 // Controller mappings (§7 `controllers/faders.toml`) carry `[[binding]]` entries
                 // that are ordinary bindings (takeover, curves, scope) owned by the core.
                 if other == "controllers"
@@ -786,7 +1145,7 @@ impl Config {
                         self.bindings.push(b);
                     }
                 }
-                self.other.entry(other.to_string()).or_default().insert(f.name.clone(), f.table.clone());
+                self.other.entry(other.to_string()).or_default().insert(f.name.clone(), table);
             }
         }
         self.files.insert(format!("{}/{}", f.kind, f.name), f.path.clone());
@@ -831,7 +1190,22 @@ impl Config {
                 }
             }
             Ok(None) => {}
-            Err(e) => errs.push(ConfigError { file: project_file, msg: e }),
+            Err(e) => errs.push(ConfigError { file: project_file.clone(), msg: e }),
+        }
+        for e in [self.context().err(), self.fx_control().err()].into_iter().flatten() {
+            errs.push(ConfigError { file: project_file.clone(), msg: e });
+        }
+        // roulettes pick existing presets that aren't roulettes themselves
+        for p in self.presets.values().filter(|p| !p.pick.is_empty()) {
+            let file = self.files.get(&format!("presets/{}", p.name)).cloned().unwrap_or_default();
+            for e in &p.pick {
+                let msg = match self.presets.get(&e.name) {
+                    None => format!("preset `{}` pick: unknown preset `{}`", p.name, e.name),
+                    Some(t) if !t.pick.is_empty() => format!("preset `{}` pick: `{}` is itself a roulette (`pick`)", p.name, e.name),
+                    Some(_) => continue,
+                };
+                errs.push(ConfigError { file: file.clone(), msg });
+            }
         }
         self.errors.extend(errs);
     }
@@ -841,6 +1215,24 @@ impl Config {
         match self.project.extra.get("transition_vote") {
             None => Ok(None),
             Some(v) => v.clone().try_into().map(Some).map_err(|e: toml::de::Error| format!("[transition_vote]: {}", e.message())),
+        }
+    }
+
+    /// `[context]` of project.toml (defaults when the section is absent).
+    pub fn context(&self) -> Result<ContextDef, String> {
+        let def: ContextDef = match self.project.extra.get("context") {
+            None => ContextDef::default(),
+            Some(v) => v.clone().try_into().map_err(|e: toml::de::Error| format!("[context]: {}", e.message()))?,
+        };
+        def.musical_fx.validate()?;
+        Ok(def)
+    }
+
+    /// `[fx]` of project.toml (nothing exempt when the section is absent).
+    pub fn fx_control(&self) -> Result<FxControlDef, String> {
+        match self.project.extra.get("fx") {
+            None => Ok(FxControlDef::default()),
+            Some(v) => v.clone().try_into().map_err(|e: toml::de::Error| format!("[fx]: {}", e.message())),
         }
     }
 
@@ -863,6 +1255,9 @@ impl Config {
                     if let Some(s) = prev.scenes.get(name) {
                         self.scenes.insert(name.into(), s.clone());
                     }
+                }
+                "fx_chains" => {
+                    if let Some(chain) = prev.fx_chains.get(name) { self.fx_chains.insert(name.into(), chain.clone()); }
                 }
                 "transitions" => {
                     if let Some(s) = prev.transitions.get(name) {
@@ -961,6 +1356,21 @@ lights = { cue = "warm_duo" }
     }
 
     #[test]
+    fn native_fit_clips_top_right_and_preserves_cropped_pixels() {
+        let fit = NodeFit::Native;
+        let uv = [0.125, 0.25, 0.875, 0.75];
+        assert_eq!(fit.placement([10.0, 20.0, 32.0, 16.0], uv, [128.0, 128.0], 1.0),
+            ([10.0, 20.0, 32.0, 16.0], [0.125, 0.625, 0.375, 0.75]));
+        assert_eq!(fit.placement([5.0, 10.0, 16.0, 8.0], uv, [128.0, 128.0], 0.5),
+            ([5.0, 10.0, 16.0, 8.0], [0.125, 0.625, 0.375, 0.75]));
+        assert_eq!(fit.placement([10.0, 20.0, 128.0, 96.0], uv, [128.0, 128.0], 1.0),
+            ([10.0, 52.0, 96.0, 64.0], uv));
+        let (rect, crop) = fit.placement([10.0, 20.0, 32.0, 16.0], uv, [0.0, 128.0], 1.0);
+        assert_eq!(rect, [10.0, 36.0, 0.0, 0.0]);
+        assert!(crop.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
     fn controller_files_contribute_bindings() {
         let c = Config::build(&[file(
             "controllers",
@@ -982,5 +1392,30 @@ lights = { cue = "warm_duo" }
         assert_eq!(next.errors.len(), 1);
         let merged = next.merge_last_good(&good, &["presets/hype.toml".to_string()]);
         assert_eq!(merged.presets["hype"].sound.as_deref(), Some("airhorn"));
+    }
+    #[test]
+    fn duplicate_slots_fail_and_last_good_chains_survive() {
+        let good = Config::build(&[file("fx_chains","stage","fx=[{name='vhs'},{name='vhs',enabled=false,triggered=true}]")]);
+        assert_eq!(good.fx_chains["stage"].fx[1].id,"vhs_2");
+        assert_eq!(good.fx_chains["stage"].fx[1].enabled,Some(false));
+        assert!(good.fx_chains["stage"].fx[1].triggered);
+        let next = Config::build(&[file("fx_chains","stage","fx=[{id='same',name='vhs'},{id='same',name='grade'}]")]);
+        assert!(!next.fx_chains.contains_key("stage"));
+        let merged = next.merge_last_good(&good,&["fx_chains/stage.toml".into()]);
+        assert_eq!(merged.fx_chains["stage"].fx,good.fx_chains["stage"].fx);
+    }
+
+    #[test]
+    fn invalid_composite_membership_rejects_scene() {
+        for groups in [
+            "[{id='g',nodes=['missing']}]",
+            "[{id='g',nodes=['cam']},{id='g',nodes=[]}]",
+            "[{id='a',nodes=['cam']},{id='b',nodes=['cam']}]",
+        ] {
+            let text = format!("[canvas.wide]\nnodes=[{{src='cam'}}]\ngroups={groups}\n");
+            let c = Config::build(&[file("scenes","show",&text)]);
+            assert!(!c.scenes.contains_key("show"));
+            assert_eq!(c.errors[0].file,"scenes/show.toml");
+        }
     }
 }

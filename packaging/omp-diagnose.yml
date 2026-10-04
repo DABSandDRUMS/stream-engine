@@ -1,0 +1,48 @@
+# omp settings overlay for the UI's "Fix with AI" sessions (`omp --config <this file>`).
+# Reads are free; anything that writes or executes asks the operator first, except the exact
+# read-only diagnostics below. `allow` rules must match the whole command and never approve
+# compound lines, so `streamctl get x; anything` still prompts. Denies come first.
+tools:
+  approvalMode: always-ask
+  approval:
+    eval: prompt
+    task: prompt
+    browser: prompt
+bash:
+  # A plain `a && b` chain runs without asking only when every part matches an allow rule below.
+  allowCompoundCommands: true
+  patterns:
+    - match: "*--vacuum*"
+      approval: deny
+    - match: "*--rotate*"
+      approval: deny
+    - match: "*--flush*"
+      approval: deny
+    - match: "streamctl get *"
+      approval: allow
+    - match: "streamctl --json get *"
+      approval: allow
+    - match: "streamctl query *"
+      approval: allow
+    - match: "streamctl --json query *"
+      approval: allow
+    - match: "streamctl preflight"
+      approval: allow
+    - match: "streamctl --json preflight"
+      approval: allow
+    - match: "streamctl explain *"
+      approval: allow
+    - match: "streamctl trace *"
+      approval: allow
+    - match: "streamctl status"
+      approval: allow
+    - match: "journalctl --user *"
+      approval: allow
+    - match: "systemctl --user status *"
+      approval: allow
+    - match: "systemctl --user show *"
+      approval: allow
+    - match: "systemctl --user is-active *"
+      approval: allow
+    - match: "systemctl --user list-units *"
+      approval: allow

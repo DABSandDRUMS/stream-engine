@@ -19,7 +19,10 @@ The top bar is on every page:
 | **Off air** / **ON AIR 01:02:03** | Whether you're streaming, and for how long. **Engine offline** means the engine isn't reachable. |
 | Show button (for example **Starting soon**) | What the show is doing right now. Click it to change it. It appears once the show is doing something. |
 | Health pill | **All good**, **Finish setting up**, **2 things to check** (yellow) or **1 problem** (red). Click it for the list; each line has a **Fix** button that opens the right page. |
-| **Recording** | OBS is recording. |
+| **Recording** | The app is recording your selected sources. OBS only streams. |
+| **Effects on** / **Effects off** | Click to turn every video effect off at once, or back on. While it says **Effects off** (amber), chat, rewards and automatic moments can't fire effects, effect rewards are paused on Twitch, and anything already running stops. Your own buttons still work. |
+| **Lights: auto** / **Lights: normal** | **Lights: auto** lets the lights follow the music by themselves. Click it for **Lights: normal** (amber): automatic light changes stop and the lights go back to your normal look. |
+| **Drum screen off** / **Drum screen on** | Moves all desktop workspaces to the Philips TV and disables both desk screens. Click again to restore the desk layout and park the TV. The same toggle is `Super+Ctrl+Alt+V`; it works even when the engine is offline. |
 | **Clear chat effects** | Removes every effect viewers started from chat. |
 | **Emergency stop** | Press and hold. Stops all effects and puts the lights and sound somewhere safe. |
 | Big button | **Open OBS**, then **Go live**, then **End stream**. |
@@ -33,11 +36,11 @@ streams and clips. The sidebar only appears under **Edit**.
 |---|---|---|
 | **Scenes** | Arrange sources in scenes and choose their look. | **Scenes**, **Effects**, **Transitions** |
 | **Sources** | Create cameras, media, web and generated visuals; import material. | **Sources**, **Files** |
-| **Automation** | Decide what happens when an event or control fires (including viewer alerts), and what follows live signals. | **Events**, **Alerts**, **Buttons & pedals**, **Chat commands**, **Actions**, **Modulation**, **Timelines** |
+| **Automation** | Decide what happens when an event or control fires (including viewer alerts), what follows live signals, and which scenes switch by themselves. | **Events**, **Alerts**, **Buttons & pedals**, **Chat commands**, **Actions**, **Modulation**, **Timelines**, **Auto sequence** |
 | **Sound** | Levels for everything your viewers hear, and the read-out voice. | **Mix**, **Mixing desk**, **Read-out voice** |
 | **Lights** | Set up fixtures and looks, run cue lists, set brightness and blackout. | One console |
 | **Community** | Chat bot, song requests, Twitch, goals and giveaways. | **Chat bot**, **Song requests**, **Twitch**, **Goals**, **Giveaways** |
-| **Settings** | Devices, accounts, backups, history and troubleshooting. | **Get started**, **Devices**, **Accounts & app**, **Backups**, **History**, **Performance**, **Troubleshooting** |
+| **Settings** | Devices, accounts, backups, history, health and troubleshooting. | **Get started**, **Devices**, **Accounts & app**, **Backups**, **History**, **Performance**, **Health**, **Troubleshooting** |
 
 A number next to **Edit** means setup still needs attention. A number next to **Clipping**
 means clips are waiting for review. Under **Edit**, **Community** also shows items waiting there.
@@ -81,14 +84,48 @@ layer. Click a scene again to edit its own settings. A scene can be empty until 
   crop, mask, blend, show or hide it, and choose its enter/exit animation. **Edit source**
   opens that source's reusable settings, not a second copy.
 - **Effects** in the layer inspector change only that layer; **Scene effects** change the
-  whole scene. Add an effect there, then adjust its strength and settings. **Scenes → Effects**
-  is the library for built-in and custom effects and their shared defaults.
+  whole scene. Add repeated effects, reorder slots, and adjust their settings. **Enabled**
+  bypasses a slot; **Chain enabled** bypasses the whole rack without losing settings.
+  **Only on trigger** is a separate choice, not what disabling an effect means.
 - The **On every scene** group lists sources pinned above all scenes, such as notification
   pages. Select one to choose whether it appears on Main, Vertical or both. Other sources only
   appear where you add their layers.
 - Click the scene itself to rename it, change its background or transition, add scene effects,
   specify actions when it starts or ends, or duplicate/delete it. A scene cannot be deleted
   while it is on air.
+
+For reusable looks, open **Scenes → Effects → Target racks / saved chains**. Select a source,
+layer, scene, layout, group, master canvas, or final output. Check several targets and use
+**Apply to checked targets** to copy a saved chain independently; editing one copy does not
+change another. **Replace existing slots** replaces rather than appends. **Save this chain**
+captures the selected target's authored settings. Warm stage, Monochrome, VHS tape, and
+Digital breakup are available starter chains; none is applied automatically.
+
+Select a layout to create a **Composited group** using its layer IDs and group z. Members are
+combined before the group's effects run, unlike putting an effect separately on each layer.
+The group acts as one layer in the stack; bypassing its FX keeps it grouped, while
+**Delete group** restores individual stacking. Select the group target to edit its rack.
+Master canvas/output racks remain across scene changes; final output also includes overlays.
+**Effect library / defaults** retains built-in and custom effects and their shared defaults.
+
+
+For the drum project's **Win 3.1 video window**, open **Scenes → Effects → Effect library / defaults**
+and select **Win 3.1 video window** under **Custom effects**. Under **Defaults**, edit the side,
+foot, and YouTube title fields (`SIDE CAM`, `FOOT CAM`, and `YOUTUBE` initially).
+Changes save and update the picture live. Camera borders, title bars, and captions scale with
+the box width: a 480-pixel-wide window has a 20-pixel title bar and 16-pixel text. This keeps
+the 16:9 client picture snug against its frame, including reduced-resolution previews.
+Camera layers using this frame and the YouTube player preserve their
+box proportions when resized, without holding Shift. Changing either Size field also adjusts
+the other dimension. The complete video remains fitted inside the frame, never stretched.
+The **Window titles (automatic)** layers follow the cameras and should stay full-canvas.
+Under **Defaults**, **Title bar color**, **Frame color**, and **Title text color** are shared
+by the camera windows, captions, YouTube player, and chatting/alert windows.
+
+The drum project's **Just chatting** webcam window shows a pressed Play button, a smoothly
+moving playback cursor and elapsed window time. These are camera-window decorations, not
+controls for the song queue; they keep moving while songs are paused. The separate floating
+chat layer renders only real chat, including offline, and stays empty until messages arrive.
 
 ### Switching scenes
 
@@ -112,6 +149,16 @@ placement and queue behavior. **Sound → Read-out voice** sets up speech. Alert
 and queued, so one at a time shows; they are not scene layers or saved actions. Add a source
 that draws alerts to the scene (or pin it above every scene) before expecting them on the
 video.
+
+**Automation → Auto sequence** makes the show switch between scenes by itself. Click **New auto
+sequence** (the `+`), name it, then under **How it plays** choose **In order** or **Random**, the
+**Default time** (for example 45 s), and optionally a **Transition** and its **Switch
+length** (**Automatic** uses each scene's own transition settings). Under **Scenes**, use **Add a
+scene** (or **Add all scenes**). Each scene has a labeled **Time on scene** field and its own
+transition; the arrows change the order. Edited scene times stay independent even if they
+equal the default. **Use default** makes that scene follow the default again.
+Click **Create** (or **Save** after editing). **Play** starts it right away; you turn it on
+and off during the show on the Overview.
 
 ### Undo a change, or go back to an earlier version
 
@@ -147,10 +194,57 @@ Look at the health pill in the top bar.
   **Fix** next to the line. Fix it before you go on air.
 
 The list uses plain sentences, for example "Camera 3 has no picture. Is the camera on?" or
-"Your microphone is silent. Is it muted or unplugged?".
+"Your microphone is silent. Is it muted or unplugged?". **See every check** at the bottom opens
+**Settings → Health**.
 
 For the full checklist in a terminal, use the Omarchy menu: **Stream → Preflight**. Each line
 starts with `✓` (fine), `!` (check it) or `✗` (broken).
+
+### When something breaks: the alert banner and Health
+
+Whenever a check fails, a red banner appears right under the top bar, on every page. Each line
+names what broke (for example **Tips & queue link** or **Public song list page**), what the
+engine says about it, and how long it has been like that ("for 3 min"; "for at least 3 min"
+when it was already broken when the window connected). While you're on air, problems viewers
+would notice (OBS, cameras, overlays, web sources, Twitch, the song player, the queue link and
+page) show in yellow even when they're only warnings. Optional extras you never set up (tips,
+the YouTube key) never raise the banner, but once they're set up their failures always do. If
+the engine itself can't be reached, the banner says so first.
+
+Each banner line has up to three buttons:
+
+- **Recover**: only shown when a fix exists that viewers won't notice. It runs right away.
+- **Details**: opens **Settings → Health**.
+- **Fix with AI**: opens a diagnosis session (see below).
+
+**Settings → Health** lists every check, worst first, with its detail and how long it has been
+in its current state, plus the engine connection. Under each problem are the fixes for it, in
+three kinds:
+
+- **Viewers won't notice** (run on click): look for devices again, reconnect the mixing desk,
+  reconnect the tips & queue link, sign in to Twitch again (the Twitch code page opens by
+  itself), restart the queue service or the tunnel behind the public song list page, start
+  Stream Engine when it isn't running.
+- **Viewers would notice** (the button ends in "…" and asks first, saying exactly what changes on
+  stream): reload the song player (the song playing now stops), reload one overlay, reconnect
+  one camera.
+- **Stops more than the broken part** (for example rebuilding the whole sound system): only
+  offered while you're off air, and it asks first. Signing the web browser in, restarting the
+  engine and anything that stops the stream are never offered here.
+
+After you click, the line shows **Recovering…** and the button stays disabled. It says **Working
+again** only when the check is seen passing, not when the engine merely accepted the request. If
+the check is still failing after 45 seconds (5 minutes for a Twitch sign-in), it says so: try
+**Fix with AI**.
+
+**Fix with AI** (on each problem, and one at the top of Health for everything) writes a
+diagnostic report to your private runtime folder (`$XDG_RUNTIME_DIR/stream-engine/diagnostics/`,
+readable only by you) and opens a terminal with an AI diagnosis session in the Stream Engine
+folder. The report has the on-air state, every check, the related queue and Twitch state, and
+the last 150 warnings and errors. Tokens, keys, cookies, passwords and other secrets are blanked
+out first. Opening the session changes nothing. The session reads first, explains the cause,
+and asks you before every change; it never restarts the engine, OBS or sound while you're live.
+The button is greyed out when the Stream Engine folder isn't known (start the engine first).
 
 ### Cameras
 
@@ -177,9 +271,10 @@ belong under **Sound → Mix → Advanced**.
 1. Play each sound you intend to include (for example backing music, drums and a microphone).
    Confirm the appropriate meters move in Stream Engine for inputs routed through its mixer.
 2. Check OBS's selected audio feed and meter for the stream; disable duplicate captures.
-   In **Settings → Accounts & app → Recording**, choose the feeds the app should record.
-   Make a short recording from **Clipping** and listen back to every selected feed.
-   A complete mixed source stays mixed: it does not provide separate drum or backing tracks.
+   In **Settings → Accounts & app → Recording**, check the **Sound tracks** list (by default
+   **Mix** = your band and **Music** = song requests). Make a short recording from **Clipping**
+   and listen back to every track. A complete mixed source stays mixed: it does not provide
+   separate drum or backing tracks.
 3. For the mixing desk, open **Sound → Mixing desk**. Make sure you have a saved mix named
    "Safe" under **Saved mixes** (see [Emergencies](#4-emergencies)).
 
@@ -271,6 +366,16 @@ Under **Up next**:
 To choose which transitions get used where, open **Scenes → Transitions** (see
 [Transitions](#transitions) under "Building your stream").
 
+### Auto sequence
+
+The **Auto sequence** bar under **Scenes** switches scenes for you, on a timer. Pick one in its
+list and flip the switch on. If the scene on air is part of it, that scene stays and its timer
+starts; otherwise the first scene (or a random one) goes on air right away. While it runs, the
+bar shows what's on and what comes next, for example "Drum cams → Crowd in 32s". **Skip** goes
+to the next scene now. Switching scenes yourself doesn't stop it: the timer starts again from
+the scene you picked. Flip the switch off to stop; what's on air stays. **Edit** opens
+**Automation → Auto sequence**. Without any, the bar offers **Make one**.
+
 ### Buttons on Overview and the Stream Deck
 
 **Buttons** on **Overview** mirror the Stream Deck page you configured. New projects have no
@@ -278,6 +383,51 @@ assigned keys or saved actions. Use **Automation → Buttons & pedals** to assig
 saved actions or show controls. Once assigned, click a button or press its deck key to run
 it; right-click a running button to stop it. **Running now** lists active actions, light cue
 lists and timelines.
+
+The drum project's **Cameras** page has three independent masters:
+
+- **AUTO SCENES** starts/stops the existing Drum camera cycle: nine playing layouts,
+  45 seconds each, excluding the three most recently shown scenes while alternatives exist.
+- **AUTO LIGHTS** starts/stops the existing song-aware lighting director.
+- **AUTO FX** starts/stops the musical video director. It chooses intermittent atmosphere,
+  bloom, highlight sheen and edge leaks on camera sources, matched to song mood/energy
+  and the lighting scheme. It waits through quiet gaps rather than constantly changing FX.
+  Chat/drums can influence it, but a song must be playing. Speech and silence fade it out.
+
+These states survive restarts. Turning **AUTO FX** off cancels pending musical starts and
+fades out its owned look over three seconds. Notifications, viewer and manual effects remain
+independent. **Effects off** remains the separate all-effects kill switch. Read
+`context.fx.*` and `health.context.fx` for activity/selection problems; tuning and library
+opt-in are documented in [context.md](context.md).
+
+For individual video effects, open **Scenes → Effects → Effect library / defaults**, select
+a built-in or custom picture effect, and expand **Automatic triggers**:
+
+- **Auto-only enabled** is an on/off slider for that effect's automatic starts only. It does
+  not disable the effect everywhere, stop a currently running effect, or block manual buttons,
+  Twitch/channel-point rewards, notifications, or operator-authored rituals.
+- **Minimum automatic interval** sets the minimum time between successful automatic starts,
+  with **Seconds** and **Minutes** units. **0** adds no extra wait, preserving the director's
+  existing musical timing. A rejected or queued request does not consume the interval.
+- These operator-only preferences survive engine restarts and hot reloads. A running session's
+  last successful automatic-start time survives library edits and unsuccessful selections.
+  The interval is not a periodic timer: there is no guaranteed trigger every N seconds.
+  The musical director still needs **AUTO FX**, a playing song, an eligible musical preset,
+  suitable mood/energy, and its normal quiet gaps and hourly limits.
+
+Saved action details in **Automation → Actions** reuse these same controls for their built-in
+and custom constituent effects; changing one updates its automatic policy everywhere. A
+musical candidate containing any disabled or cooling-down effect is excluded *before* the
+weighted selection. Autonomous legacy peak/settle/song-peak/fill/mood rules use the same
+effect policy for direct triggers, presets, and roulette choices. Notifications such as song
+ended, arbitrary context rituals, and viewer events are not musical opportunities; the
+existing **AUTO FX** master continues to govern the musical director alone.
+
+For CLI/API edits use `set_base fx.<name>.auto.enabled false` or
+`set_base patch.<id>.auto.interval 300` (intervals are always seconds, 0–86,400).
+These are saved runtime preferences, not per-scene settings or changes to a patch's global
+enabled state. Automatic start timestamps are session-local; after a restart the saved
+preference remains, while the director's ordinary startup and quiet-gap safeguards apply.
 
 ### Lights
 
@@ -294,10 +444,66 @@ is installed for a rig automatically. Once configured:
   one, **Stop** to end it. Each shows which step is on and what's next, with its knobs (for
   example a chase's **Speed**) underneath. On air, starting a cue list asks first.
 - **Master**: **Brightness** sets how bright all your lights are; **Blackout** turns them all off.
-- The **Overview** has a small **Lights** bar with the same brightness, blackout, looks, and the
+- **Default lights**, at the top of **Master**, restores the project's configured idle room
+  lighting and pauses **AUTO LIGHTS** until you explicitly turn it on again. In the drum-stream
+  project, the idle room is **Main ON + pink COLORstrips** (`#ff69b4`, intensity `0.30`);
+  other projects use their own configured idle look. The Stream Deck default-lights button
+  uses the same no-argument `lights.default` action.
+  This stops authored lighting playback, pending/outgoing layers, effects and flashes, clears
+  programmer/direct manual overrides, releases latched panic, restores brightness to 100% and
+  turns blackout off. Output arming, transports, safety caps and rehearsal mode stay unchanged.
+  Main follows the existing verified-output idle handoff, not a direct plug toggle; preview
+  alone does not prove physical lighting changed. Offline, the connected engine applies it
+  immediately; on air, confirm **Your viewers will see this** → **Default lights**.
+  The button is unavailable when disconnected, and the **AUTO LIGHTS paused** badge appears
+  only after the engine reports that automatic lighting is off.
+- The **Overview** has a small **Lights** bar with the same **Default lights** button (including
+  on-air confirmation and engine-reported AUTO status), brightness, blackout, looks, and the
   running cue list's **Go** and **Stop**.
 
 Add another look or cue list under **Lights** after your fixtures are configured.
+
+**Configured AUTO SHOW:** the drum-stream project has an **AUTO SHOW** key on the deck's
+camera page, using the same `lights.auto` switch as Overview's **Lights: auto / Lights: normal**.
+Turning it on starts the current song/drum context; turning it off fades only the show's own
+layers, leaving manual and viewer looks alone. It does not start or change songs.
+
+The show combines 28 six-color palettes, 40 independent motions and eight finite accents.
+Palette changes follow the song's mood; motion follows energy, sections and the measured beat.
+Some motions listen to the backing track, others to your drums. Drops and landed fills get
+short accents; raids and hype trains get bounded celebrations. When you talk between songs
+it calms down. With no song or drums, it returns to pink overheads and Main on.
+
+Builds wait for a sixteen-beat phrase; other regular changes wait for four beats, and drop
+accents for the next beat. Regular palette/motion handoffs fade over two seconds, including
+effect depth. **Sound → Mix** reports whether the beat is **locked** or **freewheel**:
+freewheel means the clock is continuing without a trusted audio measurement, not that it
+has detected a new tempo. Beat lock does not establish which beat is the musical bar's first.
+
+The authored looks retain a pale overhead wash while cans and pixels trade movement.
+The scanner normally holds an open white spotlight rather than a colored orbit.
+Deeper dimming stays off that supporting wash; shallow breathing and brief transition
+dips remain. This is recipe-level support, not a hard output floor:
+brightness controls, blackout and panic still work normally. Accents hand their support
+back to the running motion when they finish.
+The calm **Kit body bloom** and **Track air** looks also retain pale can support:
+authored cans at 0.9, bars at 0.85, and shallow 0.25 source/color depths. The ordinary
+brightness/energy controls still scale them; quiet passages do not turn every can dark.
+
+Casual can movement includes staggered chases, alternating pairs, gentle roundtables and
+cross-meter exchanges. These combine deliberate beat-based movement with selected drum-hit
+responses. Regular motion selection prefers reactive looks alongside mood, backing-track
+preference and meaningful can choreography, while keeping its repeat history. Detected
+kick/snare/hat hits use gated envelopes with 25–50 ms attack and 250–420 ms release;
+continuous bass/level looks breathe rather than map raw audio directly to brightness.
+Hype increases depth and motion without making every fixture flash on every hit.
+
+Scanner position and wheel changes happen dark, settle for 750 ms, then fade the white
+spot in over 750 ms. Only explicitly finite gestures add a small sweep. The neutral
+logical aim is not a surveyed safe physical target; commissioning is still required.
+
+**Auto sequence** is separate from AUTO SHOW: start **Drum cycle** to rotate camera scenes;
+turning automatic lights on alone does not start scene cycling.
 
 Flash safety is always on: never more than 3 flashes a second. A yellow **Softening flashes
 now** badge means some fast flashes are being softened to keep them safe for viewers. That's
@@ -322,7 +528,9 @@ From the deck, the **MIX** page has **LX GO** (next step of the main cue list), 
 Viewers ask for songs by typing `!sr` and a song name in chat. The requested video plays in the
 YouTube player on the duo scene, with a now-playing card beside it.
 
-In Overview's right-hand column, open **Songs**:
+Overview's right-hand column keeps chat above the lower pane. The **Songs**, **Activity**, and
+**Mod** tabs select only that lower pane; **Songs** is selected by default. Both panes scroll
+independently, and switching tabs does not resize or hide chat:
 
 - The switch at the top turns requests on (**Taking requests**) or off (**Requests closed**).
 - **Now playing** shows the song and who asked for it, with pause and skip buttons.
@@ -357,7 +565,21 @@ any line in **Activity** to see what it set off.
 
 ### Chat moderation
 
-Open **Chat** in Overview's right-hand column.
+Chat stays at the top of Overview's right-hand column. There is no separate Chat tab:
+**Songs**, **Activity**, and **Mod** change only the lower pane. Switching these tabs keeps
+your unsent message and chat search.
+
+The **Twitch** row above the messages shows **N watching**: Twitch's current stream viewer
+count, not the number of people in chat. It updates automatically using the existing Twitch
+polling interval (30 seconds by default). **Offline** means Twitch reports no live stream;
+**Viewers unavailable** means no count is available yet, the engine is disconnected, or
+Twitch needs authorization. An unknown count is never shown
+as zero.
+
+The window retains the latest 500 chat messages separately from engine activity. Beats,
+scene changes, and other engine events do not push chat out. Twitch message deletion,
+timeouts/bans that purge a user's messages, and full chat clears still remove the affected
+messages. This is window-local history, not an archive restored after closing the app.
 
 - Hover a message for two quick buttons: time the viewer out for 10 minutes, or delete the
   message.
@@ -432,6 +654,7 @@ Press and hold **Emergency stop** in the top bar, or hold `Ctrl+Esc` for one sec
 the deck's **PANIC** key for one second. It:
 
 - stops every effect and timeline, and anything waiting to happen,
+- stops the auto sequence,
 - puts the lights on the safe look,
 - puts the sound back to its normal mix and stops sounds,
 - brings back your "Safe" mix on the mixing desk,
@@ -483,7 +706,9 @@ The pill says, for example, "Camera 3 has no picture. Is the camera on?".
 
 A crashed web source reloads itself and keeps its last picture while it does. If the health
 pill reports a source problem, click **Fix**; select the source at **Sources → Sources** and
-choose **Reload** under **Files** if it needs a manual restart.
+choose **Reload** under **Files** if it needs a manual restart. **Settings → Health** offers
+**Reload the song player…** and **Reload <overlay>…** too; they ask first because viewers see
+(or hear) that one source restart.
 
 ### OBS drops
 
@@ -515,6 +740,7 @@ These keys work even when the Stream Engine window isn't in front:
 | `Super+Ctrl+Alt+C` | Clear chat effects |
 | `Super+Ctrl+Alt+B` | Be right back / back to Live |
 | `Super+Ctrl+Alt+N` / `P` | Next / previous scene to **Up next** |
+| `Super+Ctrl+Alt+V` | Drum screen: desk ⇄ Philips TV (replaces the standalone TV on/off shortcut) |
 
 The Omarchy menu (**Stream**) has **Go Live**, **BRB**, **Preflight** and **Panic** too.
 
@@ -528,6 +754,7 @@ If the app won't open at all, open a terminal and type one of these:
 | `streamctl take` | Switch (**Up next** goes on air) |
 | `streamctl scene duo --cut` | Put the duo scene on air right away |
 | `streamctl next` / `streamctl prev` | Next / previous scene to **Up next** |
+| `streamctl do autoseq.stop` | Stop the auto sequence (what's on air stays) |
 | `streamctl mode live` | Set the show to **Live** (also `offline`, `preshow`, `brb`, `outro`, …) |
 | `streamctl marker` | Add a marker |
 | `streamctl undo` | Undo the last change |
@@ -572,14 +799,63 @@ Pick a time window, click twice for a start/end, adjust the times, then press **
 (the selected range must fit in one recording and meet the shown length limits).
 **Make clips** finds moments automatically instead.
 
-The compact recording controls stay above the library. Configure sources, destination and
-automatic capture in **Settings → Accounts & app → Recording**. With automation enabled,
-capture starts in Starting soon or Live and stops when you go off air. OBS only streams.
+The header above the library shows the recorder (**Recording** / **Recorder ready**, what is
+being recorded, its size so far and the free space) and the archive (**Archiving 42%**,
+**2 shows to archive**, **Archive paused** or **Archive up to date**; hover it for details).
+**Start recording** / **Stop recording** work by hand; **Settings** opens the recording settings.
 
-The **Recording** badge in the top bar confirms the app is recording; **Clipping** also
-lets you start/stop manually. If the badge is off unexpectedly,
-check recording health and your selected sources in Settings before continuing. Source choices
-are not an exhaustive list: use the manual input format/source fields for other supported feeds.
+### Recording and the archive
+
+Every show is recorded automatically. Recording starts when the show goes to **Starting soon**
+or **Live** and keeps going until you're off air; OBS only streams. The **Recording** badge in
+the top bar confirms it. Set it up in **Settings → Accounts & app**:
+
+- **Recording now** shows what is recording (for example "Recording main + 2 cameras"), how
+  big it is so far, the free space, and any camera that had to pause (for example "paused:
+  computer busy"). Below it is the archive queue: each show waiting or being archived, its
+  step (**Waiting**, **Camera cleanup**, **Shrinking video**, **Checking**, **Keeping full
+  quality**, **Packing data**, **Moving**), progress and the reason it waits or failed.
+  **Archive now** starts without waiting after the show; **Pause** stops archive work until you
+  click **Resume archiving** (it continues where it stopped, also after a restart); **Retry**
+  next to a failed show, or **Retry failed**, tries again. These buttons only work while you're
+  off air; while live, recording, or streaming they are greyed out and the card says why.
+  Archive work also stops by itself within seconds when you go live and carries on afterwards.
+- **Record every stream automatically** is on by default. Turning it off shows **Streams won't
+  be recorded**: nothing is recorded unless you start it on **Clipping**.
+- **Main recording** is the whole show picture with every sound track; clips are made from it.
+  **Picture quality** is **High** by default (full quality for clips). **Also record the tall
+  picture** keeps the phone-shaped canvas as an extra picture-only file.
+- **Cameras** lists your camera sources. Each can be **Off**, **720p** or **1080p**; it is kept
+  as its own picture-only file for clips from another angle. One main camera at 1080p and the
+  others at 720p is recommended. A camera that is no longer a source is shown in red and must be
+  turned off (or added back in Sources) before saving.
+- **Sound tracks**: use one **Mix** track when your interface already carries the whole show.
+  If Apple Music goes through the mixing desk, it is already included; do not add it again.
+  Separate tracks only help when you actually have separate feeds. **Add sound track** / the
+  bin button add and remove tracks; a fully mixed input cannot have its music separated later.
+- **Recording folder** and **Archive folder**: type a path or click **Browse…**. Each shows the
+  free space, warns when the folder doesn't exist yet or is on the system drive (a separate
+  drive is safer), and the card warns when there isn't room for a 3-hour show. A blank archive
+  folder means **Archive** inside the recording folder.
+- **Shrink finished shows into the archive** (on by default): some time after the show (20
+  minutes off air by default, never while you're live) the full-quality main recording is made
+  smaller and moved, with the show's data and exported clips, to the archive folder. The
+  originals are deleted only after the archived copy is checked. **Archive size per 3-hour show**
+  sets how big each show gets (3–12 GB, recommended 5.4 GB); the line under it estimates the
+  picture quality and how many more shows fit.
+- **Delete camera files after their clips are reviewed, or after N days** (14 by default):
+  only the separate camera files are deleted, never while you're on air and never for shows
+  marked to keep. The main recording is always kept.
+- **More options**: which show modes start recording, frames per second (60 by default),
+  video encoding, the main recording's exact quality, the space to keep free (camera files stop
+  first, then the main recording), a backup recording folder used if the recording folder is
+  missing when a show starts, when archiving starts, archive sound quality, exact capture inputs,
+  and the show index choices.
+
+Click **Save recording settings**; changes apply to the next recording. **Discard changes**
+goes back to what's saved. The health list shows **Recording** and **Archive** problems; their
+**Fix** button opens these settings. Details: [recording](clips.md#recording-and-show-data),
+[archive](clips.md#after-the-show-archive).
 
 ### Backups and disk space
 

@@ -11,20 +11,25 @@ pub fn matches(pattern: &str, addr: &str) -> bool {
     if !pattern.contains('*') {
         return false;
     }
-    let p: Vec<&str> = pattern.split('.').collect();
-    let a: Vec<&str> = addr.split('.').collect();
-    match_segs(&p, &a)
+    match_segs(pattern.split('.'), addr.split('.'))
 }
 
-fn match_segs(p: &[&str], a: &[&str]) -> bool {
-    match (p.first(), a.first()) {
-        (None, None) => true,
-        (Some(&"**"), _) => {
-            // zero or more segments
-            (0..=a.len()).any(|k| match_segs(&p[1..], &a[k..]))
+fn match_segs(mut p: std::str::Split<'_, char>, mut a: std::str::Split<'_, char>) -> bool {
+    match p.next() {
+        None => a.next().is_none(),
+        Some("**") if p.clone().next().is_none() => true,
+        Some("**") => {
+            // Try zero or more segments without materializing either path.
+            loop {
+                if match_segs(p.clone(), a.clone()) {
+                    return true;
+                }
+                if a.next().is_none() {
+                    return false;
+                }
+            }
         }
-        (Some(ps), Some(as_)) => glob_seg(ps, as_) && match_segs(&p[1..], &a[1..]),
-        _ => false,
+        Some(ps) => a.next().is_some_and(|segment| glob_seg(ps, segment) && match_segs(p, a)),
     }
 }
 
@@ -36,15 +41,15 @@ pub fn glob_seg(p: &str, s: &str) -> bool {
     if !p.contains('*') {
         return p == s;
     }
-    let parts: Vec<&str> = p.split('*').collect();
+    let mut parts = p.split('*').enumerate().peekable();
     let mut rest = s;
-    for (i, part) in parts.iter().enumerate() {
+    while let Some((i, part)) = parts.next() {
         if i == 0 {
             match rest.strip_prefix(part) {
                 Some(r) => rest = r,
                 None => return false,
             }
-        } else if i == parts.len() - 1 {
+        } else if parts.peek().is_none() {
             return rest.ends_with(part);
         } else if let Some(pos) = rest.find(part) {
             rest = &rest[pos + part.len()..];
@@ -90,6 +95,60 @@ mod tests {
         assert!(matches("a.**.z", "a.z"));
         assert!(matches("a.**.z", "a.b.c.z"));
         assert!(!matches("twitch.sub", "twitch.subgift"));
+    }
+
+    #[test]
+    fn iterator_matching_preserves_segment_and_glob_boundaries() {
+        // Independent materialized-path oracle, including empty segments and Unicode.
+        fn glob(p: &str, s: &str) -> bool {
+            if p == "*" { return true; }
+            if !p.contains('*') { return p == s; }
+            let parts: Vec<_> = p.split('*').collect();
+            let mut rest = s;
+            for (i, part) in parts.iter().enumerate() {
+                if i == 0 {
+                    let Some(r) = rest.strip_prefix(part) else { return false; };
+                    rest = r;
+                } else if i == parts.len() - 1 {
+                    return rest.ends_with(part);
+                } else if let Some(pos) = rest.find(part) {
+                    rest = &rest[pos + part.len()..];
+                } else {
+                    return false;
+                }
+            }
+            true
+        }
+        fn segments(p: &[&str], a: &[&str]) -> bool {
+            match (p.first(), a.first()) {
+                (None, None) => true,
+                (Some(&"**"), _) => (0..=a.len()).any(|k| segments(&p[1..], &a[k..])),
+                (Some(ps), Some(segment)) => glob(ps, segment) && segments(&p[1..], &a[1..]),
+                _ => false,
+            }
+        }
+        let mut patterns = vec!["**.a.**.b".to_string(), "a**b*c".to_string(), "*é*".to_string()];
+        let mut addresses = vec!["a.b.a.b".to_string(), "aabbbc".to_string(), "préféré".to_string()];
+        for p in ["", "a", "b", "*", "**", "a*", "*b", "a*b", "***"] {
+            patterns.push(p.to_string());
+            for q in ["", "a", "*", "**", "b*"] {
+                patterns.push(format!("{p}.{q}"));
+                patterns.push(format!("{p}.{q}.**"));
+            }
+        }
+        for a in ["", "a", "b", "ab", "é", "*"] {
+            addresses.push(a.to_string());
+            for b in ["", "a", "b", "ab", "é"] {
+                addresses.push(format!("{a}.{b}"));
+                addresses.push(format!("{a}.{b}.a"));
+            }
+        }
+        for p in &patterns {
+            for a in &addresses {
+                let want = p == a || p == "**" || (p.contains('*') && segments(&p.split('.').collect::<Vec<_>>(), &a.split('.').collect::<Vec<_>>()));
+                assert_eq!(matches(p, a), want, "pattern={p:?}, address={a:?}");
+            }
+        }
     }
 
     #[test]

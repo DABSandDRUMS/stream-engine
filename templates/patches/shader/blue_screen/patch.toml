@@ -1,0 +1,14 @@
+# Blue screen: a fake Windows crash. The picture glitches out, the whole frame turns into a
+# classic blue text-mode crash screen ("A fatal groove has occurred at 0028:C0FFEE ...", cursor
+# blinking on the beat), then on release the CRT switches off, DOS types `win`, the Windows 3.1
+# logo sweeps in and the live picture dithers back.
+# Burst-only: it runs canvas-wide while `patch.<id>.env` > 0 (fire `patch.blue_screen`). The
+# crash screen stays up for the hold; the reboot plays during the release.
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "effect"
+label       = "Blue screen"
+description = "The picture glitches into a fake blue Windows crash screen, then reboots through the Windows 3.1 logo"
+params.amount = { type = "float", default = 1.0, range = [0.0, 1.0], description = "Opacity of the glitch, crash screen and reboot over the picture" }
+trigger = { attack = "50ms", hold = "8s", release = "1600ms" }
+budget = { gpu_ms = 0.2 }

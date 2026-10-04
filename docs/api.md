@@ -134,6 +134,9 @@ texture_ref, trigger, list, map`; `merge` is `ltp` or `htp`.
 **`explain` layers**, in resolution order: `base` (source `project`), `scene`, `binding`
 (source = binding), `override` / `animation` (source = override key, with its `priority`), and
 `clamp` (source `meta` or `safety`). `active` marks the layers that shaped the final value.
+The resolver builds explanation layers only for `explain`, not on normal ticks. Exact `get`
+uses the address index; wildcard matching iterates segments without allocating temporary
+paths. Animation, expiry, HTP/LTP precedence and wildcard ordering are unchanged.
 
 **`trace` record kinds:** `event`, `rule`, `command`, `change`, `preset`, `error`, `policy`.
 
@@ -159,7 +162,7 @@ texture_ref, trigger, list, map`; `merge` is `ltp` or `htp`.
 | `actor` | `{platform, id, name, roles}` | none | viewer the command acts for; `roles` ⊂ `everyone follower sub vip mod owner` |
 | `causal` | u64 | none | id of the event/command that caused it (trace chain) |
 | `priority` | u16 | from `origin` | override priority |
-| `key` | string | from origin/actor | override layer key (e.g. `cuelist:<name>`, `timeline:<name>`); overrides with the same key replace each other and are released together; ignored at chat priority |
+| `key` | string | from origin/actor | override layer key (e.g. `cuelist:<name>`, `timeline:<name>`); overrides with the same key replace each other and are released together; at chat priority, an explicit key is scoped as `chat:<actor>:<key>` and cannot escape chat caps or TTL |
 
 Only full-scope clients may choose `origin` and `priority`; every other scope is forced to
 origin `api` with its default priority. Full-scope WebSocket clients that omit `origin`
@@ -185,6 +188,23 @@ origin `api` with its default priority. Full-scope WebSocket clients that omit `
 | `undo` / `redo` | – | undo/redo `set_base` edits |
 | `wait` | `ms` | delay inside command lists (rules, presets, timelines); a no-op on its own |
 | `action` | `name`, `args`? | subsystem action routed by name prefix (`lights.cue`, `queue.skip`, `bot.say`, `obs.stream.start`, …) |
+
+Authored preset, scene, and transition `lights` references use `lights.layer.select` on the
+musical **base** layer, not the manual cue-console API. `look` names a palette. `cue` alone
+names a cuelist; with `cuelist`, it names a cue within that list. `lights.hold` supplies the
+layer's duration; temporary presets also retire their lighting when released or expired.
+Each preset runtime instance carries its own owner token, so an older expiration cannot
+release a newer preset, scene, or UI selection. Scene selections share the ordered `scene`
+owner: entering a scene with no lighting releases only that owner, and a failed replacement
+leaves the previous successful scene lighting available for the next scene change to retire.
+Selection preserves the originating actor and trace cause; chat-triggered lighting remains
+chat-priority and bounded by chat TTL. Layers own their playback duration timers.
+`lights.layer.pick {layer, tags, any?, kind?, avoid_repeat?, …select fields}` lets rules ask
+for tagged content (palette/cue list `tags`) instead of a name, then selects it with the same
+ownership rules; no matching content is a logged no-op, not an error.
+`lights.cue`, Go/Back/Locate, and programmer actions remain advanced manual-console APIs;
+explicit authored command lists can still invoke them deliberately. See [lights.md](lights.md)
+for layer controls, ownership, clock, and output safety.
 
 ```json
 {"t":"cmd","req":7,"cmd":{"origin":"api","op":{"kind":"animate","address":"lights.par_left.dimmer","to":0.5,"ms":800,"ease":"out_cubic"}}}
@@ -235,6 +255,8 @@ scene.take [transition] [dur]   preset.fire <name> [k=v …]    preset.release <
 mode.set <mode>                 emit <type> [k=v …]  (alias: fire)                wait <dur>
 toggle <addr>  (= action toggle address=<addr>: switch flips; number 0 ⇄ its max, or 1; like `set` from the same origin; wildcards flip each match)
 panic | clean | undo | redo     <any.action> [positional …] [k=v …]
+autoseq.play [name]   autoseq.toggle [name]   autoseq.select <name>   autoseq.stop   autoseq.next   (auto-sequence.md)
+fx.on | fx.off | fx.toggle   fx.auto.on | fx.auto.off | fx.auto.toggle   lights.auto.on | lights.auto.off | lights.auto.toggle   context.spend   (context.md)
 ```
 
 - Tokens split on whitespace; `'…'` and `"…"` quote (quotes are removed), and `[…]` / `{…}`
@@ -294,6 +316,10 @@ An event is `{id, ts, type, origin, actor?, payload, causal?}` (`actor` =
 | `mode.changed`, `mode.exit.<from>`, `mode.enter.<to>` | `mode.set` (payload `{from, to}`; state `show.mode`) |
 | `scene.take` (`{from, to, transition, ms}`), `scene.changed` (`{scene, from, transition}`) | transitions (state `show.scene.{preview,program}`, `show.transition.*`) |
 | `panic`, `clean` | those commands (state `show.panic`) |
+| `autoseq.started {preset}`, `autoseq.stopped {preset, reason}`, `autoseq.step {preset, scene, step, transition}` | auto sequence ([auto-sequence.md](auto-sequence.md); state `show.autoseq.*`) |
+| `fx.changed {enabled}`, `fx.auto.changed {enabled}`, `lights.auto.changed {enabled}` | operator switches `fx.on/off/toggle`, `fx.auto.on/off/toggle`, `lights.auto.on/off/toggle` (persistent read-only state `fx.enabled`, `fx.auto` default `false`, `lights.auto`; operator `set fx.auto` / `set lights.auto` route through switch actions; [context.md](context.md)) |
+| `context.peak {energy, mood}`, `context.settle {mood}`, `context.song_peak {strength, mood}`, `context.fill_landed {strength}`, `context.mood {mood, previous}` | context layer (signals `context.*`, state `context.mood`; [context.md](context.md)) |
+| `context.musical_fx {preset, mood, energy, level, attack, release}` | intermittent musical video director; `fx.auto` gates only this musical provenance. Read-only `context.fx.preset/reason/next_at` and `health.context.fx`; notifications/manual/viewer effects remain independent ([context.md](context.md)) |
 | `policy.accepted`, `policy.rejected`, `policy.pending`, `policy.approved` | chat policy decisions ([twitch.md](twitch.md)) |
 | `twitch.*`, `tip`, … | platform adapters, relay, simulator ([twitch.md](twitch.md), [relay.md](relay.md), [tiktok.md](tiktok.md)) |
 | `osc.<path>` | OSC input ([below](#osc)) |
@@ -346,15 +372,20 @@ else by the core. Unknown names reply with ``error: "unknown query `<name>`"``.
 | `errors` | – | project load errors `[{file, msg}]` |
 | `trace.recent` | `{n}` (default 200) | `[{id, parent, kind, label, ts}]` |
 | `timelines`, `timeline` | –, `{name}` | timeline definitions and state ([timelines.md](timelines.md)) |
+| `autoseq` | – | auto sequence presets `[{name, label, order, dwell_ms, transition, ms, steps}]` ([auto-sequence.md](auto-sequence.md)) |
 | `sim.presets` | – | `[{name, args}]` |
 | `undo` | – | `{undo, redo}` stack depths |
 | `config.scenes`, `config.presets`, `config.transitions`, `config.rules`, `config.bindings`, `config.project` | – | parsed project config (`config.transitions`: every `transitions/*.toml` by name, with `label`, `kind`, `shader`, `ms`, `ease`, `enter`, `exit` and its settings) |
+| `config.sources` | – | normalized source-name → source table map |
+| `config.render` | – | direct `[render]` settings table from `project.toml` |
+| `config.fx_chains` | – | chain-name → saved chain definition map |
+| `fx.chains` | – | `[{name, label, fx}]`, including stable slot IDs and authored parameters |
 
 **Engine**
 
 | Name | Args | Returns |
 |---|---|---|
-| `engine.info` | – | `{version, session, project, pid, started}` |
+| `engine.info` | – | `{version, session, project, share, pid, started}` (`share`: absolute share/repo root serving `web/`, `""` if missing) |
 | `preflight` | – | `[{name, status: pass\|warn\|fail, detail}]` (every `health.*` plus disk, idle inhibitor, night light, GPU) |
 | `sessions` | `{n}` (default 50) | recent sessions |
 | `audit` | `{n}` (default 200) | recent audit rows (commands with origin, actor, result) |
@@ -374,20 +405,30 @@ else by the core. Unknown names reply with ``error: "unknown query `<name>`"``.
 | `bot.commands`, `bot.timers`, `bot.files`, `bot.counters`, `bot.quotes` | [bot-and-alerts.md](bot-and-alerts.md) |
 | `queue`, `queue.policy`, `queue.library {q, limit}`, `queue.history {n}`, `youtube.status`, `relay.status`, `song.player` | [song-requests.md](song-requests.md) |
 | `twitch.follow_age {user_id}`, `twitch.scopes`, `emotes` | [twitch.md](twitch.md) |
-| `lights.rig`, `lights.cuelists`, `lights.palettes`, `lights.effects`, `lights.programmer`, `lights.output`, `lights.rdm` | [lights.md](lights.md) |
+| `lights.rig`, `lights.cuelists`, `lights.palettes`, `lights.effects`, `lights.tags`, `lights.programmer`, `lights.output`, `lights.rdm` | [lights.md](lights.md) |
 | `mixer` / `mixer.status`, `mixer.coverage`, `mixer.snapshots`, `mixer.discover {seconds}` | [mixer.md](mixer.md) |
-| `audio.mix`, `audio.devices`, `analysis.grid {path, force} \| {media}` | [audio.md](audio.md) |
+| `audio.mix`, `audio.devices`, `project.audio.inputs`, `analysis.grid {path, force} \| {media}` | [audio.md](audio.md) |
 | `controllers.page {deck, page}`, `controllers.pages`, `controllers.deck`, `controllers.deck.preview {deck, since}`, `controllers.midi`, `controllers.midi.ports`, `controllers.midi.monitor {n, device}`, `controllers.voice`, `controllers.learn` | [controllers.md](controllers.md) |
 | `patches {id}`, `patch.templates` | [patches.md](patches.md) |
-| `clips {session, status, limit}`, `clips.session {session}`, `clips.jobs`, `clips.feedback {session}`, `recording.status`, `recording.timeline {session, from?, to?, limit?}` | [clips.md](clips.md) |
+| `clips {session, status, limit}`, `clips.session {session}`, `clips.jobs`, `clips.feedback {session}`, `recording.status`, `recording.sources`, `recording.timeline {session, from?, to?, limit?}` | [clips.md](clips.md) |
+| `recording.finalize` | Stops app capture and waits for finalized files plus persisted metadata; full-access clients only. Internal session rotation/shutdown barrier. |
+| `session.persist {session, values}` | Internal durable metadata barrier; rejects a closed session ID. Full-access clients only. |
 | `timeline.grid {name}`, `timeline.ports` | [timelines.md](timelines.md) |
-| `devices`, `sources` | [devices-and-sources.md](devices-and-sources.md) |
+| `devices`, `sources`, `project.sources` | [devices-and-sources.md](devices-and-sources.md) |
 | `render` | [render.md](render.md) |
 | `web` | [web.md](web.md) |
 | `obs` | [obs.md](obs.md) |
 | `tts` | [tts.md](tts.md) |
 | `tiktok` | [tiktok.md](tiktok.md) |
 | `giveaway`, `retention`, `remote_mod.request` (used by the relay link) | [extras.md](extras.md) |
+
+The app recorder is independent of OBS: actions `recording.start` / `recording.stop` control
+capture of the video/audio sources selected in app Settings and persisted under `[recording]`.
+State `recording.active`, `recording.starting`, `recording.stopping`, `recording.path` and
+`health.recording` describe app capture, not OBS outputs. `recording.sources` offers source
+choices without claiming complete external-device discovery; manual FFmpeg format/source
+pairs are supported. Per-file `recordings` entries in session metadata retain
+`{canvas, path, start_ns, end_ns, tracks}` on the app master-clock timebase for clipping.
 
 ### Project media
 
@@ -498,6 +539,52 @@ doesn't change, or a value of the wrong kind at the target) is a config error fo
 The Quick effects tab sends `save: false` while a slider is held and `save: true` when it's let
 go or has rested for 0.6 s.
 
+### Video FX authoring
+
+These actions persist comment-preserving project edits and hot-reload them. They require
+full-access, actor-less authoring commands; chat, viewer-derived commands, and patches cannot
+author chains/groups. Runtime `set`/`animate`/bindings on slot addresses remain separate.
+As with other subsystem actions, an ack confirms routing; an authoring failure is an error log.
+
+`Target` is one of:
+
+```text
+{kind:"source", name:"camera"}
+{kind:"node", scene:"main", node:"kit"}       # all matching canvas placements
+{kind:"scene", scene:"main"}
+{kind:"layout", scene:"main", canvas:"wide"}
+{kind:"group", scene:"main", canvas:"wide", group:"cameras"}
+{kind:"canvas", canvas:"wide"}               # master, before ordinary overlays
+{kind:"output", canvas:"wide"}               # master, after overlays
+```
+
+| Action | Args | Behavior |
+|---|---|---|
+| `fx.slot.add` | `{target, name}` | append an independent slot; repeated effect kinds get unique IDs |
+| `fx.slot.remove` | `{target, id}` | remove that slot |
+| `fx.slot.move` | `{target, id, forward}` | move one position; `forward: true` means later in the chain |
+| `fx.slot.set` | `{target, id, key, value}` | author a slot setting, `enabled`, or `triggered`; null removes an explicit setting; identity cannot be changed |
+| `fx.chain.set` | `{target, enabled}` | bypass/enable the entire chain without removing slots |
+| `fx.chain.apply` | `{name, targets:[Target,…], replace?}` | append independent copies of a saved chain, or replace existing slots; conflicting IDs are regenerated |
+| `fx.chain.save` | `{name, label?, target}` | capture the authored chain into `fx_chains/<name>.toml`; rejects node chains that differ across canvases |
+| `fx.group.set` | `{scene, canvas, id, nodes:[id,…], z?, enabled?, delete?}` | create/update group membership and stacking; `enabled` controls group FX, not membership; `delete` dissolves the group |
+
+Apply validates every target and resulting document before writing; multi-file write failures
+attempt rollback. A source/scene must exist. Master targets must name a configured canvas.
+Saving captures authored settings, not temporary live overrides.
+
+CLI arguments use TOML inline tables/arrays (not JSON object syntax):
+
+```sh
+streamctl query fx.chains
+streamctl do 'fx.chain.apply name=warm_stage targets=[{kind="node",scene="main",node="kit"},{kind="node",scene="main",node="room"}]'
+streamctl do 'fx.chain.set target={kind="output",canvas="wide"} enabled=false'
+streamctl do 'fx.slot.set target={kind="node",scene="main",node="kit"} id=warmth key=saturation value=0.0'
+```
+
+Every attachment host and its live address prefix are listed in [render.md](render.md#slots-targets-and-saved-chains).
+
+
 ## Auth
 
 | Credential | Where | Scope |
@@ -521,7 +608,8 @@ Tokens are compared in constant time.
 `emit`, the action name for `action`, and the command word for `scene.go`, `scene.cut`,
 `scene.take`, `preset.fire`, `preset.release`, `mode.set`. A grant (an address pattern) covers
 every target it matches and everything beneath it. Never allowed for patches, whatever the
-grants: `api.*`, `secrets.*`, `project.*`, `patch.new`, `patch.open`, `patch.remove`, secret-carrying actions
+grants: `api.*`, `secrets.*`, `project.*`, actions `fx.chain.*`, `fx.slot.*`, `fx.group.*`,
+`patch.new`, `patch.open`, `patch.remove`, secret-carrying actions
 (`*.key.set`, `*.secret.set`, `*.token.set`, `secrets.set`, `api.device.add`), `set_base`,
 `panic`, `clean`, `undo`, `redo`. Grant changes apply to the page's existing token immediately
 ([patches.md](patches.md)).
@@ -659,12 +747,13 @@ as `cmd` with origin `cli` and printed as `ok: <command>` or an error (exit stat
 |---|---|
 | Twitch events, actions, policy, rewards | [twitch.md](twitch.md) |
 | Chatbot, alerts, goals, overlays | [bot-and-alerts.md](bot-and-alerts.md) |
-| Song queue, YouTube player | [song-requests.md](song-requests.md) |
+| Song queue, YouTube player, song metadata (`song.current.{title,artist,genres,year}`, entry `artist`/`genres`/`year`) | [song-requests.md](song-requests.md) |
 | Lights | [lights.md](lights.md) |
 | Audio graph, effects, mixer | [audio.md](audio.md), [audio-effects.md](audio-effects.md), [mixer.md](mixer.md) |
 | Stream Deck, MIDI, voice | [controllers.md](controllers.md) |
 | Cameras and media sources | [devices-and-sources.md](devices-and-sources.md) |
 | Patches, web sources | [patches.md](patches.md), [web.md](web.md) |
 | Rendering, frames, OBS | [render.md](render.md), [frames-protocol.md](frames-protocol.md), [obs.md](obs.md) |
-| Timelines, clips, TTS, TikTok, extras, relay | [timelines.md](timelines.md), [clips.md](clips.md), [tts.md](tts.md), [tiktok.md](tiktok.md), [extras.md](extras.md), [relay.md](relay.md) |
+| Timelines, auto sequence, clips, TTS, TikTok, extras, relay | [timelines.md](timelines.md), [auto-sequence.md](auto-sequence.md), [clips.md](clips.md), [tts.md](tts.md), [tiktok.md](tiktok.md), [extras.md](extras.md), [relay.md](relay.md) |
+| Effects/lights operator switches, context signals and moments | [context.md](context.md) |
 | What each UI page reads and sends | [ui-data-contract.md](ui-data-contract.md) |

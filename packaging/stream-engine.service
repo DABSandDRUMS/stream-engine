@@ -3,6 +3,8 @@ Description=stream-engine live production engine
 Documentation=https://github.com/DABSandDRUMS/stream-engine
 After=pipewire.service graphical-session.target
 Wants=pipewire.service
+# Never give up restarting (systemd's default stops after 5 starts in 10 s).
+StartLimitIntervalSec=0
 
 [Service]
 Type=notify
@@ -10,6 +12,8 @@ NotifyAccess=main
 ExecStart=/usr/bin/stream-engine daemon
 Restart=always
 RestartSec=1
+RestartSteps=5
+RestartMaxDelaySec=30
 # The core and render threads heartbeat; a stall of either restarts the engine.
 WatchdogSec=10
 TimeoutStopSec=10

@@ -12,14 +12,15 @@ use std::collections::HashMap;
 
 const NS: &str = "twitch.rewards";
 
-/// Helix body for a reward (create or update).
-pub fn body(r: &RewardDef) -> J {
+/// Helix body for a reward (create or update). `fx_enabled` is the operator's `fx.enabled`:
+/// while effects are off, rewards with `fx = true` are paused on Twitch.
+pub fn body(r: &RewardDef, fx_enabled: bool) -> J {
     let mut b = json!({
         "title": r.title,
         "cost": r.cost,
         "prompt": r.prompt,
         "is_enabled": r.enabled,
-        "is_paused": r.paused,
+        "is_paused": r.paused || (r.fx && !fx_enabled),
         "is_user_input_required": r.input_required,
         "is_max_per_stream_enabled": r.max_per_stream.is_some(),
         "max_per_stream": r.max_per_stream.unwrap_or(0),
@@ -103,7 +104,8 @@ pub fn load_map(db: &Db) -> HashMap<String, String> {
 }
 
 /// Create/update every reward from the project; disable ones whose file was removed.
-pub async fn sync(helix: &Helix, db: &Db, broadcaster: &str, defs: &[RewardDef]) -> Result<(Vec<Synced>, RewardMap), String> {
+/// `fx_enabled == false` pauses the rewards marked `fx = true` (unpaused again when true).
+pub async fn sync(helix: &Helix, db: &Db, broadcaster: &str, defs: &[RewardDef], fx_enabled: bool) -> Result<(Vec<Synced>, RewardMap), String> {
     let q = [("broadcaster_id", broadcaster.to_string()), ("only_manageable_rewards", "true".to_string())];
     let remote = helix.get(Account::Broadcaster, "/channel_points/custom_rewards", &q).await.map_err(|e| e.to_string())?;
     let remote: Vec<J> = remote.get("data").and_then(J::as_array).cloned().unwrap_or_default();
@@ -112,7 +114,7 @@ pub async fn sync(helix: &Helix, db: &Db, broadcaster: &str, defs: &[RewardDef])
     let mut out = Vec::new();
     let mut map = RewardMap { manageable: by_remote_id.keys().cloned().collect(), ..Default::default() };
     for def in defs {
-        let want = body(def);
+        let want = body(def, fx_enabled);
         let existing = mapping
             .get(&def.key)
             .and_then(|id| by_remote_id.get(id).copied())
@@ -199,7 +201,7 @@ mod tests {
     #[test]
     fn body_and_remote_comparison() {
         let d = def("title = \"HYPE\"\ncost = 2000\ncooldown = \"5m\"\nmax_per_user_per_stream = 3\nfires = \"preset.hype\"\ncolor = \"#e82424\"");
-        let b = body(&d);
+        let b = body(&d, true);
         assert_eq!(b["global_cooldown_seconds"], 300);
         assert_eq!(b["is_max_per_user_per_stream_enabled"], true);
         assert_eq!(b["should_redemptions_skip_request_queue"], false);
@@ -218,5 +220,24 @@ mod tests {
         let mut skip = remote;
         skip["should_redemptions_skip_request_queue"] = json!(true);
         assert!(!matches(&skip, &b), "a reward that skips the queue can't be refunded: must be fixed");
+    }
+
+    #[test]
+    fn fx_rewards_pause_while_effects_are_off() {
+        let fx = def("title = \"Glitch\"\ncost = 100\nfires = \"preset.glitch\"\nfx = true");
+        let plain = def("title = \"Hydrate\"\ncost = 100");
+        let held = def("title = \"Later\"\ncost = 100\npaused = true\nfx = true");
+        assert_eq!(body(&fx, false)["is_paused"], true, "effects off: the fx reward is paused");
+        assert_eq!(body(&fx, true)["is_paused"], false, "effects back on: resumed");
+        assert_eq!(body(&plain, false)["is_paused"], false, "rewards without fx are unaffected");
+        assert_eq!(body(&held, true)["is_paused"], true, "an explicitly paused reward stays paused");
+        // the reward as Twitch has it after a sync with effects on must be updated once they're off
+        let remote = json!({
+            "id": "r2", "title": "Glitch", "cost": 100, "prompt": "", "is_enabled": true, "is_paused": false, "is_user_input_required": false,
+            "max_per_stream_setting": {"is_enabled": false}, "max_per_user_per_stream_setting": {"is_enabled": false},
+            "global_cooldown_setting": {"is_enabled": false}, "should_redemptions_skip_request_queue": false
+        });
+        assert!(matches(&remote, &body(&fx, true)));
+        assert!(!matches(&remote, &body(&fx, false)));
     }
 }

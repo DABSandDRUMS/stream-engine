@@ -26,7 +26,7 @@ fn run(cmd: &mut Command) {
     assert!(out.status.success(), "{cmd:?}: {}", String::from_utf8_lossy(&out.stderr));
 }
 
-/// Write the synthetic OBS recording; returns its path.
+/// Write a synthetic multitrack recording; returns its path.
 fn make_recording(dir: &Path) -> PathBuf {
     let mut ff = Command::new("ffmpeg");
     ff.args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=60:duration=180"]);
@@ -120,7 +120,9 @@ fn synthetic_session_produces_ranked_wide_and_tall_clips() {
 
     let db = Db::open(&root.path().join("runtime.db")).unwrap();
     store::migrate(&db).unwrap();
-    let env = JobEnv { db: db.clone(), project_root: project.clone(), data_dir: se_store::data_dir(), cfg: ClipsConfig::default() };
+    let mut cfg = ClipsConfig { auto_rank: false, ..ClipsConfig::default() };
+    cfg.audio.drop = vec!["music".into(), "program".into()]; // explicit opt-in for this separate-track fixture
+    let env = JobEnv { db: db.clone(), project_root: project.clone(), data_dir: se_store::data_dir(), cfg };
     let report = job::process(&env, "20260925-200000", &|p| eprintln!("  [{}] {}/{} {}", p.stage, p.done, p.total, p.detail)).unwrap();
     eprintln!("report: {report:?}");
     assert_eq!((report.clips, report.failed), (3, 0), "{report:?}");

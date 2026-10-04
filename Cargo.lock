@@ -5761,6 +5761,7 @@ dependencies = [
  "rusqlite",
  "se-clock",
  "se-core",
+ "se-frames",
  "se-hub",
  "se-proto",
  "se-store",
@@ -5939,6 +5940,7 @@ dependencies = [
  "arc-swap",
  "base64 0.23.1",
  "crossbeam-channel",
+ "image",
  "jpeg-encoder",
  "libc",
  "notify",
@@ -6329,9 +6331,11 @@ name = "se-web-host"
 version = "0.1.0"
 dependencies = [
  "cef",
+ "flate2",
  "libc",
  "parking_lot",
  "se-web",
+ "serde_json",
 ]
 
 [[package]]

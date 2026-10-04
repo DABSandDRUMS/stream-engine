@@ -1,0 +1,15 @@
+# Light leaks — drifting film light leaks screened over the layer. Attach as an effect:
+# `fx = [{ name = "patch.light_leaks", amount = 0.6 }]` on a camera source, node, or canvas.
+# Always on (no manifest trigger); a patch trigger floods a big flare in from a corner and sweeps
+# a hot band across the frame, timed from se.trigger_age (bigger payload = bigger, longer flare).
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "effect"
+label       = "Light Leaks"
+description = "Warm and magenta film light leaks drifting in from the frame edges, flaring on snare and crash"
+params.amount = { type = "float", default = 0.6,  range = [0.0, 2.0], description = "Overall leak strength" }
+params.speed  = { type = "float", default = 1.0,  range = [0.0, 4.0], description = "Drift speed of the leaks" }
+params.reach  = { type = "float", default = 1.0,  range = [0.3, 2.0], description = "How far the leaks reach into the frame" }
+params.warmth = { type = "float", default = 0.6,  range = [0.0, 1.0], description = "Balance from magenta (0) to amber (1)" }
+params.react  = { type = "float", default = 1.0,  range = [0.0, 2.0], description = "How much snare and crash hits flare the leaks" }
+budget = { gpu_ms = 0.3 }

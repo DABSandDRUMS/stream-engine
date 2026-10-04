@@ -1,0 +1,11 @@
+# Window boing: wraps the layer in an elastic Windows 3.1 window that squashes on kicks.
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "effect"
+label       = "Window Boing"
+description = "Win 3.1 window around the layer that squashes on kicks and boings on the trigger"
+params.amount      = { type = "float", default = 1.0, range = [0.0, 2.0], description = "Overall wobble strength (0 = still window)" }
+params.chrome      = { type = "bool", default = true, description = "Draw the gray frame and title bar" }
+params.squash      = { type = "float", default = 0.03, range = [0.0, 0.12], description = "Squash per kick (share of the size); the trigger boing is about 2-3x" }
+params.title_color = { type = "color", default = "#000080", description = "Title bar colour" }
+budget  = { gpu_ms = 0.3 }

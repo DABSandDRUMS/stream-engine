@@ -302,7 +302,7 @@ pub fn confidence_contents(app: &mut App, ui: &mut egui::Ui) {
         }
     });
     let since = app.m.get("show.live_since").and_then(Value::as_i64).unwrap_or(0);
-    let rec = app.m.b("obs.record.active");
+    let rec = app.m.b("recording.active");
     let status = if since > 0 {
         format!("● LIVE {}{}  ·  {program}", crate::views::status::hms((crate::views::status::now_ms() - since) / 1000), if rec { "  ·  REC" } else { "" })
     } else {

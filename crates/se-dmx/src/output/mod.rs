@@ -90,6 +90,10 @@ pub struct Shared {
     pub stop: AtomicBool,
     pub scheduling: Mutex<String>,
     pub frames: AtomicU64,
+    /// At least one configured transport successfully wrote DMX since this instance started.
+    pub output_sent: AtomicBool,
+    /// Armed, healthy transports are sending committed lighting intention (including held looks).
+    pub output_in_use: AtomicBool,
     /// Show mode is `rehearsal`: outputs without `rehearsal = true` hold their look (§17.2).
     pub rehearsal: AtomicBool,
     /// Heap allocations seen on the output thread inside a frame (counting allocator builds only;
@@ -163,15 +167,39 @@ struct Sink {
     status: usize,
     /// `rehearsal = true`: keeps sending the live show while rehearsing.
     rehearsal: bool,
+    committed: Vec<CommittedUniverse>,
     kind: SinkKind,
+}
+
+struct CommittedUniverse {
+    universe: usize,
+    slots: [u8; 512],
+    intended: bool,
+}
+
+impl CommittedUniverse {
+    fn new(universe: usize) -> Self {
+        Self { universe, slots: [0; 512], intended: false }
+    }
+
+    fn commit(&mut self, live: &[[u8; 512]], intended: &[bool], holding: bool) {
+        if !holding {
+            self.slots.copy_from_slice(&live[self.universe]);
+            self.intended = intended[self.universe];
+        }
+    }
+}
+
+#[derive(Default)]
+struct SendActivity {
+    sent: bool,
+    in_use: bool,
 }
 
 struct Outputs {
     sinks: Vec<Sink>,
     status: Vec<OutputStatus>,
     dirty: bool,
-    /// The last frame sent before rehearsal started (indexed like `Rig::universes`).
-    held: Vec<[u8; 512]>,
     holding: bool,
 }
 
@@ -197,13 +225,13 @@ impl Outputs {
                 id: o.id.clone(),
                 kind: o.kind_name().into(),
                 enabled: o.enabled,
-                state: if o.enabled { "fail".into() } else { "off".into() },
-                detail: if o.enabled { "not opened yet".into() } else { "disabled".into() },
+                state: if o.enabled && rig.output_armed { "fail".into() } else { "off".into() },
+                detail: if !rig.output_armed { "output interlock disarmed".into() } else if o.enabled { "not opened yet".into() } else { "disabled".into() },
                 frames: 0,
                 errors: 0,
                 held: false,
             });
-            if !o.enabled {
+            if !o.enabled || !rig.output_armed {
                 continue;
             }
             let uidx = |u: u16| rig.universe_index(u).unwrap_or(0);
@@ -269,9 +297,14 @@ impl Outputs {
                     }
                 }
             };
-            sinks.push(Sink { status: si, rehearsal: o.rehearsal, kind });
+            let committed = match &kind {
+                SinkKind::Enttec { universe, .. } => vec![CommittedUniverse::new(*universe)],
+                SinkKind::Sacn { packets, .. } => packets.iter().map(|(u, ..)| CommittedUniverse::new(*u)).collect(),
+                SinkKind::ArtNet { packets, .. } => packets.iter().map(|(u, ..)| CommittedUniverse::new(*u)).collect(),
+            };
+            sinks.push(Sink { status: si, rehearsal: o.rehearsal, committed, kind });
         }
-        Outputs { sinks, status, dirty: true, held: vec![[0u8; 512]; rig.universes.len()], holding: false }
+        Outputs { sinks, status, dirty: true, holding: false }
     }
 
     /// Enter or leave rehearsal: outputs not marked `rehearsal` switch to/from the held look.
@@ -283,10 +316,18 @@ impl Outputs {
         self.dirty = true;
     }
 
-    /// Remember the frame just sent as the look to hold if rehearsal starts. No allocation.
-    fn keep(&mut self, universes: &[[u8; 512]]) {
-        if !self.holding && self.held.len() == universes.len() {
-            self.held.copy_from_slice(universes);
+    /// Plan changes may remap universe indices; preserve each sink's actual held look by ID
+    /// and universe number, never by a preview frame or an unrelated sink's last write.
+    fn inherit_held(&mut self, old: &Outputs, old_universes: &[u16], universes: &[u16]) {
+        for sink in &mut self.sinks {
+            let id = &self.status[sink.status].id;
+            let Some(previous) = old.sinks.iter().find(|s| old.status[s.status].id == *id) else { continue };
+            for held in &mut sink.committed {
+                if let Some(prior) = previous.committed.iter().find(|c| old_universes[c.universe] == universes[held.universe]) {
+                    held.slots = prior.slots;
+                    held.intended = prior.intended;
+                }
+            }
         }
     }
 
@@ -345,16 +386,25 @@ impl Outputs {
     }
 
     /// Send one frame everywhere (held outputs send the held look). No allocation.
-    fn send(&mut self, live: &[[u8; 512]], now: u64) {
+    fn send(&mut self, live: &[[u8; 512]], intended: &[bool], now: u64) -> SendActivity {
+        let mut activity = SendActivity::default();
         for s in self.sinks.iter_mut() {
             let st = &mut self.status[s.status];
-            let universes: &[[u8; 512]] = if self.holding && !s.rehearsal && self.held.len() == live.len() { &self.held } else { live };
+            let holding = self.holding && !s.rehearsal;
+            let mut sink_active = false;
+            let mut datagrams_ok = None;
             match &mut s.kind {
                 SinkKind::Enttec { dev, frame, universe, next_retry, .. } => {
                     let Some(d) = dev else { continue };
-                    frame.set(&universes[*universe]);
+                    let committed = &mut s.committed[0];
+                    frame.set(if holding { &committed.slots } else { &live[*universe] });
                     match d.send_dmx(frame) {
-                        Ok(()) => st.frames += 1,
+                        Ok(()) => {
+                            st.frames += 1;
+                            committed.commit(live, intended, holding);
+                            activity.sent = true;
+                            sink_active = committed.intended;
+                        }
                         Err(e) => {
                             st.errors += 1;
                             st.state = "fail".into();
@@ -367,37 +417,57 @@ impl Outputs {
                 }
                 SinkKind::Sacn { socket: Some(sock), packets } => {
                     let mut ok = true;
-                    for (u, p, dest, seq) in packets.iter_mut() {
+                    for ((u, p, dest, seq), committed) in packets.iter_mut().zip(&mut s.committed) {
                         *seq = seq.wrapping_add(1);
-                        p.set(*seq, &universes[*u]);
-                        if sock.send_to(p.bytes(), *dest).is_err() {
+                        p.set(*seq, if holding { &committed.slots } else { &live[*u] });
+                        if sock.send_to(p.bytes(), *dest).is_ok_and(|n| n == p.bytes().len()) {
+                            committed.commit(live, intended, holding);
+                            activity.sent = true;
+                            sink_active |= committed.intended;
+                        } else {
                             ok = false;
                         }
                     }
-                    if ok {
-                        st.frames += 1;
-                    } else {
-                        st.errors += 1;
-                    }
+                    datagrams_ok = Some(ok);
                 }
                 SinkKind::ArtNet { socket: Some(sock), packets } => {
                     let mut ok = true;
-                    for (u, p, dest, seq) in packets.iter_mut() {
+                    for ((u, p, dest, seq), committed) in packets.iter_mut().zip(&mut s.committed) {
                         *seq = if *seq == 255 { 1 } else { *seq + 1 };
-                        p.set(*seq, 0, &universes[*u]);
-                        if sock.send_to(p.bytes(), *dest).is_err() {
+                        p.set(*seq, 0, if holding { &committed.slots } else { &live[*u] });
+                        if sock.send_to(p.bytes(), *dest).is_ok_and(|n| n == p.bytes().len()) {
+                            committed.commit(live, intended, holding);
+                            activity.sent = true;
+                            sink_active |= committed.intended;
+                        } else {
                             ok = false;
                         }
                     }
-                    if ok {
-                        st.frames += 1;
-                    } else {
-                        st.errors += 1;
-                    }
+                    datagrams_ok = Some(ok);
                 }
                 _ => {}
             }
+            if let Some(ok) = datagrams_ok {
+                if ok {
+                    st.frames += 1;
+                    if st.state != "ok" {
+                        st.state = "ok".into();
+                        st.detail = "datagrams sent".into();
+                        self.dirty = true;
+                    }
+                } else {
+                    st.errors += 1;
+                    sink_active = false;
+                    if st.state != "fail" {
+                        st.state = "fail".into();
+                        st.detail = "datagram write failed".into();
+                        self.dirty = true;
+                    }
+                }
+            }
+            activity.in_use |= sink_active;
         }
+        activity
     }
 
     /// sACN: announce stream termination (E1.31 §6.2.6: three packets).
@@ -579,6 +649,7 @@ pub fn spawn(
         struct Alive(Arc<Shared>);
         impl Drop for Alive {
             fn drop(&mut self) {
+                self.0.output_in_use.store(false, Ordering::Release);
                 self.0.alive.store(false, Ordering::Release);
             }
         }
@@ -602,6 +673,7 @@ pub fn spawn(
             sleep_until(deadline);
             let woke = mono_ns();
             if shared.stop.load(Ordering::Acquire) {
+                shared.output_in_use.store(false, Ordering::Release);
                 outs.terminate(&engine.frame.universes);
                 break;
             }
@@ -611,31 +683,31 @@ pub fn spawn(
             if !Arc::ptr_eq(&cur, engine.plan()) {
                 let p = cur.clone();
                 drop(cur);
-                let outputs_changed = p.rig.outputs != engine.plan().rig.outputs || p.rig.universes != engine.plan().rig.universes;
-                engine.set_plan(p.clone());
+                let outputs_changed = p.rig.outputs != engine.plan().rig.outputs
+                    || p.rig.universes != engine.plan().rig.universes
+                    || p.rig.output_armed != engine.plan().rig.output_armed;
                 if outputs_changed {
+                    shared.output_in_use.store(false, Ordering::Release);
                     outs.terminate(&engine.frame.universes);
-                    let kept = std::mem::take(&mut outs.held);
-                    outs = Outputs::build(&p.rig, shared.cid);
-                    // a rehearsal edit to the rig keeps holding the pre-rehearsal look
-                    if kept.len() == outs.held.len() {
-                        outs.held = kept;
-                    }
+                    let mut next = Outputs::build(&p.rig, shared.cid);
+                    next.inherit_held(&outs, &engine.plan().rig.universes, &p.rig.universes);
+                    outs = next;
                 }
+                engine.set_plan(p.clone());
                 period = (1e9 / p.rig.rate_hz as f64) as u64;
                 exclude = true;
             } else {
                 drop(cur);
             }
             exclude |= outs.connect(woke);
-            let rehearsal = shared.rehearsal.load(Ordering::Relaxed);
-            if rehearsal != outs.holding {
-                outs.set_holding(rehearsal);
-                exclude = true;
-            }
             let scope = se_alloc::Scope::begin();
             let snap = hub.snapshot.load_full();
             engine.render(&snap, woke);
+            let holding = shared.rehearsal.load(Ordering::Relaxed) && engine.rehearsal_hold_allowed();
+            if holding != outs.holding {
+                outs.set_holding(holding);
+                exclude = true;
+            }
             // hand the previous snapshot to the control task instead of possibly freeing it here
             if !held.as_ref().is_some_and(|h| Arc::ptr_eq(h, &snap)) {
                 if let Some(old) = held.replace(snap)
@@ -647,9 +719,12 @@ pub fn spawn(
                 drop(snap);
             }
             let t0 = mono_ns();
-            outs.send(&engine.frame.universes, t0);
+            let activity = outs.send(&engine.frame.universes, engine.intended(), t0);
+            if activity.sent {
+                shared.output_sent.store(true, Ordering::Release);
+            }
+            shared.output_in_use.store(activity.in_use, Ordering::Release);
             let t1 = mono_ns();
-            outs.keep(&engine.frame.universes);
             frames += 1;
             shared.frames.store(frames, Ordering::Relaxed);
             if !exclude && last_send != 0 {
@@ -731,6 +806,91 @@ mod tests {
     use super::*;
 
     #[test]
+    fn disarmed_transport_never_sends_even_when_enabled() {
+        let listener = UdpSocket::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut errors = Vec::new();
+        let profiles = crate::profile::library(&Default::default(), &mut errors);
+        let src = format!(
+            "[outputs.net]\nkind = \"artnet\"\nenabled = true\ndestination = \"127.0.0.1\"\nport = {}\n",
+            listener.local_addr().unwrap().port(),
+        );
+        let mut rig = Rig::compile(&toml::from_str(&src).unwrap(), profiles, errors).unwrap();
+        let frame = vec![[73; 512]];
+        let mut outputs = Outputs::build(&rig, [0; 16]);
+        let activity = outputs.send(&frame, &[true], 0);
+        assert!(!activity.sent && !activity.in_use);
+        let mut packet = [0u8; 600];
+        assert_eq!(listener.recv(&mut packet).unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+        assert_eq!(outputs.status[0].state, "off");
+        rig.output_armed = true;
+        let mut outputs = Outputs::build(&rig, [0; 16]);
+        listener.set_nonblocking(false).unwrap();
+        listener.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+        let activity = outputs.send(&frame, &[true], 0);
+        assert!(activity.sent && activity.in_use);
+        let n = listener.recv(&mut packet).unwrap();
+        assert_eq!(n, artnet::PACKET_LEN);
+        assert_eq!(packet[18], 73);
+        rig.output_armed = false;
+        let mut outputs = Outputs::build(&rig, [0; 16]);
+        listener.set_nonblocking(true).unwrap();
+        let activity = outputs.send(&frame, &[true], 0);
+        assert!(!activity.sent && !activity.in_use);
+        assert_eq!(listener.recv(&mut packet).unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+    }
+
+    #[test]
+    fn sacn_activity_commits_only_sent_universes_and_holds_successful_intention() {
+        let listener = UdpSocket::bind("127.0.0.1:0").unwrap();
+        listener.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
+        let destination = listener.local_addr().unwrap();
+        let src = format!(
+            "[output]\narmed = true\n\
+             [fixtures.room]\nprofile = \"generic_rgb\"\nmode = \"3ch\"\naddress = 1\nuniverse = 1\n\
+             [fixtures.preview]\nprofile = \"generic_rgb\"\nmode = \"3ch\"\naddress = 1\nuniverse = 2\n\
+             [outputs.room]\nkind = \"sacn\"\nuniverses = [1]\ndestination = \"127.0.0.1\"\nport = {}\n",
+            destination.port(),
+        );
+        let rig = crate::engine::tests::rig(&src);
+        let mut outputs = Outputs::build(&rig, [0; 16]);
+        let receive = || {
+            let mut packet = [0; sacn::PACKET_LEN];
+            assert_eq!(listener.recv(&mut packet).unwrap(), sacn::PACKET_LEN);
+            packet[126]
+        };
+        let dark = [[0; 512]; 2];
+        let activity = outputs.send(&dark, &[false, true], 0);
+        assert!(activity.sent && !activity.in_use, "lighting an unsent universe cannot take over the room");
+        assert_eq!(receive(), 0);
+        let activity = outputs.send(&dark, &[true, false], 1);
+        assert!(activity.sent && activity.in_use, "an intentional dimmer trough remains in use");
+        assert_eq!(receive(), 0);
+
+        // A real failed localhost send must neither claim activity nor replace the held look.
+        let SinkKind::Sacn { packets, .. } = &mut outputs.sinks[0].kind else { unreachable!() };
+        packets[0].2.set_port(0);
+        let activity = outputs.send(&[[137; 512]; 2], &[false, true], 2);
+        assert!(!activity.sent && !activity.in_use);
+        assert_eq!(outputs.status[0].state, "fail");
+        outputs.set_holding(true);
+        let SinkKind::Sacn { packets, .. } = &mut outputs.sinks[0].kind else { unreachable!() };
+        packets[0].2 = destination;
+        let activity = outputs.send(&[[201; 512]; 2], &[false, true], 3);
+        assert!(activity.sent && activity.in_use, "held intention comes from the successful show, not rehearsal preview");
+        assert_eq!(receive(), 0, "the failed frame never overwrites the committed dark tick");
+        assert_eq!(outputs.status[0].state, "ok");
+        outputs.set_holding(false);
+        let activity = outputs.send(&dark, &[false, false], 4);
+        assert!(activity.sent && !activity.in_use, "leaving rehearsal commits the current inactive look");
+        assert_eq!(receive(), 0);
+        outputs.set_holding(true);
+        let activity = outputs.send(&[[201; 512]; 2], &[true, true], 5);
+        assert!(activity.sent && !activity.in_use, "a lit rehearsal preview cannot claim a held blackout");
+        assert_eq!(receive(), 0);
+    }
+
+    #[test]
     fn bcd_encoding_for_rdm_uid() {
         assert_eq!(bcd(405589), 0x0040_5589);
         assert_eq!(bcd(0), 0);
@@ -764,7 +924,7 @@ mod tests {
         };
         let (room, test) = (listen(), listen());
         let src = format!(
-            "[fixtures.par1]\nprofile = \"generic_rgb\"\nmode = \"3ch\"\naddress = 1\n\
+            "[output]\narmed = true\n[fixtures.par1]\nprofile = \"generic_rgb\"\nmode = \"3ch\"\naddress = 1\n\
              [outputs.room]\nkind = \"artnet\"\ndestination = \"127.0.0.1\"\nport = {}\n\
              [outputs.test]\nkind = \"artnet\"\ndestination = \"127.0.0.1\"\nport = {}\nrehearsal = true\n",
             room.local_addr().unwrap().port(),
@@ -782,8 +942,7 @@ mod tests {
         };
         let frame = |outs: &mut Outputs, v: u8| {
             let u = vec![[v; 512]];
-            outs.send(&u, 0);
-            outs.keep(&u);
+            outs.send(&u, &[v > 0], 0);
             (first_slot(&room), first_slot(&test))
         };
         assert_eq!(frame(&mut outs, 10), (10, 10));

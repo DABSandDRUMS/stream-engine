@@ -1,0 +1,16 @@
+# Paintbrush mischief: an MS Paint brush scribbles a doodle over the picture, it lingers, then the
+# eraser wipes it. An always-on effect (no manifest trigger) so auto mode can doodle between
+# triggers; each trigger of the patch starts a new doodle (se.trigger_age / se.trigger_count).
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "effect"
+label       = "Paintbrush Mischief"
+description = "A pixel MS Paint brush draws stars, an arrow, a circle or an underline around the drummer, then an eraser wipes them away"
+params.amount = { type = "float", default = 1.0, range = [0.0, 1.0], description = "Ink opacity" }
+params.target = { type = "vec2", default = [0.5, 0.42], range = [0.0, 1.0], description = "Point the arrow, circle and underline aim at (0-1 of the frame)" }
+params.speed  = { type = "float", default = 1.0, range = [0.3, 3.0], unit = "x", description = "Drawing and erasing speed" }
+params.linger = { type = "float", default = 1.4, range = [0.0, 6.0], unit = "s", description = "How long a finished doodle stays before the eraser comes" }
+params.brush  = { type = "float", default = 1.0, range = [0.5, 2.5], unit = "x", description = "Brush thickness" }
+params.pixel  = { type = "float", default = 1.0, range = [0.5, 3.0], unit = "x", description = "Pixel size; snaps to whole screen pixels" }
+params.auto   = { type = "bool", default = false, description = "Also doodle on its own every few seconds while a tempo is detected" }
+budget = { gpu_ms = 0.4 }

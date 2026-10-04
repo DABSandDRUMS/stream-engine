@@ -418,7 +418,7 @@ fn apply_config(sh: &Arc<Shared>, ctx: &EngineCtx, cfg: &Arc<se_core::Config>, l
     sh.core.store(cfg.clone());
     sh.meta.lock().clear();
     let files = cfg.other.get("controllers").cloned().unwrap_or_default();
-    let (ctl, errors) = config::parse_all(&files, &cfg.files, last_good);
+    let (ctl, errors) = config::parse_all(&files, &cfg.files, &sh.project_root, last_good);
     for (file, e) in &errors {
         sh.hub.log("error", "controllers", format!("{file}: {e} (keeping the last good version)"));
     }
@@ -558,7 +558,7 @@ async fn handle_action(sh: &Arc<Shared>, c: &Command, name: &str, args: &Value) 
             let key = arg(args, "key", 0).and_then(Value::as_i64).and_then(|k| u8::try_from(k).ok()).ok_or("deck.assign needs key")?;
             let page = arg_str(args, "page", usize::MAX).unwrap_or_else(|| status.lock().page.clone());
             let clear = arg(args, "clear", usize::MAX).is_some_and(Value::truthy);
-            let entries = if clear { None } else { Some(assign_entries(args)?) };
+            let entries = if clear { None } else { Some(assign_entries(args, &sh.project_root)?) };
             sh.write_deck_key(&cfg.file, &page, key, entries).await?;
             sh.hub.log("info", "deck", format!("{}: page {page} key {key} {}", cfg.file, if clear { "cleared" } else { "assigned" }));
             Ok(())
@@ -671,16 +671,26 @@ fn voice_cmd(sh: &Shared, c: voice::VoiceCmd) -> Result<(), String> {
 }
 
 /// `deck.assign` arguments → key table entries (validated like the file parser).
-fn assign_entries(args: &Value) -> Result<Vec<(String, toml_edit::Value)>, String> {
+fn assign_entries(args: &Value, root: &Path) -> Result<Vec<(String, toml_edit::Value)>, String> {
+    if args.get_path("image").is_some_and(|v| !matches!(v, Value::Str(_))) {
+        return Err("deck.assign `image` must be a project-relative PNG path".into());
+    }
+    for key in ["clock", "disabled"] {
+        if args.get_path(key).is_some_and(|v| !matches!(v, Value::Bool(_))) {
+            return Err(format!("deck.assign `{key}` must be a boolean"));
+        }
+    }
     let mut out: Vec<(String, toml_edit::Value)> = Vec::new();
     let mut table = toml::Table::new();
-    for k in ["preset", "scene", "toggle", "momentary", "page", "label", "icon", "color", "state", "hold", "cooldown"] {
+    // `page` selects the page being edited, not the key's navigation action.
+    for k in ["preset", "scene", "toggle", "momentary", "target_page", "label", "icon", "color", "state", "hold", "cooldown", "image"] {
         if let Some(Value::Str(s)) = args.get_path(k) {
+            let k = if k == "target_page" { "page" } else { k };
             out.push((k.into(), toml_edit::Value::from(s.as_str())));
             table.insert(k.into(), toml::Value::String(s.clone()));
         }
     }
-    for k in ["cut", "ptt", "confirm"] {
+    for k in ["cut", "ptt", "confirm", "clock", "disabled"] {
         if let Some(Value::Bool(b)) = args.get_path(k) {
             out.push((k.into(), toml_edit::Value::from(*b)));
             table.insert(k.into(), toml::Value::Boolean(*b));
@@ -700,9 +710,9 @@ fn assign_entries(args: &Value) -> Result<Vec<(String, toml_edit::Value)>, Strin
         out.push((k.into(), toml_edit::Value::Array(a)));
         table.insert(k.into(), toml::Value::Array(cmds.into_iter().map(toml::Value::String).collect()));
     }
-    config::Action::from_table(&table)?;
+    config::KeyDef::from_table(&table, root)?;
     if out.is_empty() {
-        return Err("deck.assign needs preset=, scene=, toggle=, momentary=, do=, page=, or ptt=true (or clear=true)".into());
+        return Err("deck.assign needs an action or presentation (image=, clock=true, disabled=true, label=), or clear=true".into());
     }
     Ok(out)
 }
@@ -742,11 +752,15 @@ fn page_value(sh: &Shared, cfg: &DeckCfg, page: &str) -> Result<Value, String> {
                         .unwrap_or_else(|| if matches!(kd.action, config::Action::Preset(_)) { hex_rgb(color) } else { String::new() }),
                 )
                 .with("action", kd.action.describe())
+                .with("image", kd.image.as_ref().map(|image| image.path.clone()).unwrap_or_default())
+                .with("clock", kd.clock)
+                .with("disabled", kd.disabled)
+                .with("available", kd.available())
                 .with("active", st.on)
                 .with("program", st.program)
                 .with("preview", st.preview)
-                .with("hold_ms", kd.b.hold_ms as i64)
-                .with("confirm", exec::needs_confirm(&kd.action, &kd.b, &core));
+                .with("hold_ms", if kd.available() { kd.b.hold_ms as i64 } else { 0 })
+                .with("confirm", kd.available() && exec::needs_confirm(&kd.action, &kd.b, &core));
             if let Some((rem, total)) = cooldowns.get(&(page.to_string(), *k)) {
                 v = v.with("cooldown_ms", *rem as i64).with("cooldown_total_ms", *total as i64);
             }
@@ -969,12 +983,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn assign_keeps_edit_page_separate_from_key_action() {
+        let root = Path::new(".");
+        let saved_action = Value::map().with("page", "apple_music").with("preset", "apple_music_pause");
+        let navigation = Value::map().with("page", "apple_music").with("target_page", "main");
+        for (args, expected) in [
+            (saved_action, config::Action::Preset("apple_music_pause".into())),
+            (navigation, config::Action::Page("main".into())),
+        ] {
+            let entries = assign_entries(&args, root).unwrap();
+            let mut doc = toml_edit::DocumentMut::new();
+            learn::assign_key(&mut doc, "apple_music", 4, Some(&entries)).unwrap();
+            let stored: toml::Table = doc.to_string().parse().unwrap();
+            let key = stored["page"]["apple_music"]["key"]["4"].as_table().unwrap();
+            assert_eq!(config::Action::from_table(key).unwrap(), expected);
+        }
+        assert!(assign_entries(&Value::map().with("page", "apple_music"), root).is_err());
+    }
+
+    #[test]
     fn assign_writes_press_and_release_lists() {
         let list = |c: &str| Value::List(vec![Value::from(c)]);
         let args = Value::map().with("do", list("preset.fire hype")).with("release", list("preset.release hype")).with("label", "Hype");
-        let entries = assign_entries(&args).unwrap();
-        let keys: Vec<&str> = entries.iter().map(|(k, _)| k.as_str()).collect();
-        assert_eq!(keys, ["label", "do", "release"]);
+        let entries = assign_entries(&args, Path::new(".")).unwrap();
         let text = entries.iter().map(|(k, v)| format!("{k} = {v}")).collect::<Vec<_>>().join("\n");
         let table: toml::Table = text.parse().unwrap();
         assert_eq!(
@@ -982,7 +1013,7 @@ mod tests {
             config::Action::Commands { press: vec!["preset.fire hype".into()], release: vec!["preset.release hype".into()] }
         );
         // a release list alone is a valid key too (nothing on press)
-        assert!(assign_entries(&Value::map().with("release", list("scene.take"))).is_ok());
-        assert!(assign_entries(&Value::map().with("release", list("set"))).is_err(), "release lines are checked like press lines");
+        assert!(assign_entries(&Value::map().with("release", list("scene.take")), Path::new(".")).is_ok());
+        assert!(assign_entries(&Value::map().with("release", list("set")), Path::new(".")).is_err(), "release lines are checked like press lines");
     }
 }

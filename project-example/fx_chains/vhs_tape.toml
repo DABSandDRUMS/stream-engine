@@ -1,0 +1,6 @@
+label = "VHS tape"
+fx = [
+  { id = "faded", name = "grade", amount = 1.0, level = 1.0, warmth = 0.08, tint = 0.0, contrast = 0.95, saturation = 0.85, lift = 0.035, exposure = 0.0 },
+  { id = "tape", name = "vhs", amount = 0.45, level = 1.0, noise = 0.20, jitter = 0.12, scanlines = 0.25, bleed = 0.25 },
+  { id = "fringe", name = "rgb_split", amount = 0.25, level = 1.0, spread = 0.004, angle = 0.0 },
+]

@@ -3,7 +3,7 @@
 
 use crate::{osr, task};
 use se_web::protocol::{self, FromHost, ToHost};
-use std::io;
+use std::io::{self, Write};
 use std::os::fd::{AsFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -41,7 +41,7 @@ pub fn send(msg: &FromHost, fd: Option<BorrowedFd<'_>>) -> bool {
     match protocol::send(s, msg, fd, false) {
         Ok(()) => true,
         Err(e) => {
-            eprintln!("stream-engine-web: send failed: {e}");
+            let _ = writeln!(io::stderr(), "stream-engine-web: send failed: {e}");
             false
         }
     }
@@ -55,7 +55,7 @@ pub fn notify(msg: &FromHost) -> bool {
 /// Log to the engine (or stderr in sign-in mode).
 pub fn log(level: &str, msg: String) {
     if sock().is_none() || !send(&FromHost::Log { level: level.into(), msg: msg.clone() }, None) {
-        eprintln!("stream-engine-web [{level}] {msg}");
+        let _ = writeln!(io::stderr(), "stream-engine-web [{level}] {msg}");
     }
 }
 
@@ -70,7 +70,7 @@ pub fn spawn_reader() -> io::Result<()> {
                 Ok(None) => break,
                 Err(e) if e.kind() == io::ErrorKind::InvalidData => log("error", format!("bad command from engine: {e}")),
                 Err(e) => {
-                    eprintln!("stream-engine-web: control socket: {e}");
+                    let _ = writeln!(io::stderr(), "stream-engine-web: control socket: {e}");
                     break;
                 }
             }
@@ -88,7 +88,7 @@ fn dispatch(msg: ToHost) {
         ToHost::Shutdown => begin_shutdown(),
         other => {
             if !task::on_ui(move || osr::command(other)) {
-                eprintln!("stream-engine-web: UI thread gone; dropping command");
+                let _ = writeln!(io::stderr(), "stream-engine-web: UI thread gone; dropping command");
             }
         }
     }
@@ -99,7 +99,7 @@ fn begin_shutdown() {
     // CEF normally exits within a second; never outlive the engine by more than a few.
     std::thread::spawn(|| {
         std::thread::sleep(Duration::from_secs(8));
-        eprintln!("stream-engine-web: shutdown timed out; exiting");
+        let _ = writeln!(io::stderr(), "stream-engine-web: shutdown timed out; exiting");
         // SAFETY: immediate process exit without running destructors (CEF may be wedged).
         unsafe { libc::_exit(0) };
     });

@@ -1,5 +1,6 @@
-//! Runtime DB tables: `clips` (the review queue) and `clip_jobs` (post-stream job state, so a
-//! job interrupted by an engine restart is resumed).
+//! Runtime DB tables: `clips` (the review queue), `clip_jobs` (post-stream job state, so a
+//! job interrupted by an engine restart is resumed), and `archive_jobs` (the per-show archive
+//! stage machine, see `crate::archive`).
 
 use crate::show;
 use anyhow::Result;
@@ -78,9 +79,36 @@ CREATE TABLE clip_feedback (
 CREATE INDEX clip_feedback_session ON clip_feedback(session, id);
 "#;
 
+const ARCHIVE_SCHEMA: &str = r#"
+CREATE TABLE archive_jobs (
+  session TEXT PRIMARY KEY,
+  show TEXT NOT NULL,
+  show_dir TEXT NOT NULL,
+  dest TEXT NOT NULL DEFAULT '',
+  stage TEXT NOT NULL,
+  state TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_try INTEGER NOT NULL DEFAULT 0,
+  progress REAL NOT NULL DEFAULT 0,
+  masters TEXT NOT NULL DEFAULT '[]',
+  isos TEXT NOT NULL DEFAULT '[]',
+  isos_left INTEGER NOT NULL DEFAULT 0,
+  bytes_in INTEGER NOT NULL DEFAULT 0,
+  bytes_out INTEGER NOT NULL DEFAULT 0,
+  video_kbps INTEGER NOT NULL DEFAULT 0,
+  ended_at INTEGER NOT NULL DEFAULT 0,
+  queued_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  finished_at INTEGER
+);
+CREATE INDEX archive_jobs_open ON archive_jobs (state, queued_at);
+"#;
+
 pub fn migrate(db: &Db) -> Result<()> {
     db.migrate("clips/1", SCHEMA)?;
-    db.migrate("clips/2", CONTEXT_SCHEMA)
+    db.migrate("clips/2", CONTEXT_SCHEMA)?;
+    db.migrate("clips/3", ARCHIVE_SCHEMA)
 }
 
 fn now() -> i64 {
@@ -526,6 +554,205 @@ pub fn jobs(db: &Db, limit: usize) -> Result<Vec<Value>> {
         }
     }
     Ok(out)
+}
+
+// ---- archive ------------------------------------------------------------------------------
+
+/// One master file of a show and its name in the archive folder.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ArchiveMaster {
+    pub src: String,
+    pub name: String,
+}
+
+/// A show's row in the archive stage machine (`crate::archive`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ArchiveRow {
+    pub session: String,
+    /// Show folder name (also the archive folder name).
+    pub show: String,
+    pub show_dir: String,
+    /// `<archive dir>/<show>`, fixed when encoding starts.
+    pub dest: String,
+    pub stage: String,
+    /// `queued | running | waiting | failed | done`.
+    pub state: String,
+    pub detail: String,
+    /// Consecutive failures (backoff and health).
+    pub attempts: i64,
+    /// Unix s before which the row is not retried.
+    pub next_try: i64,
+    pub progress: f64,
+    pub masters: Vec<ArchiveMaster>,
+    /// Hot ISO files still to delete (independently of archiving).
+    pub isos: Vec<String>,
+    pub isos_left: bool,
+    pub bytes_in: i64,
+    pub bytes_out: i64,
+    pub video_kbps: i64,
+    /// Unix s the show (session) ended.
+    pub ended_at: i64,
+    pub queued_at: i64,
+    pub updated_at: i64,
+    pub finished_at: Option<i64>,
+}
+
+const ARCHIVE_COLS: &str = "session, show, show_dir, dest, stage, state, detail, attempts, next_try, progress, masters, isos, isos_left, \
+    bytes_in, bytes_out, video_kbps, ended_at, queued_at, updated_at, finished_at";
+
+fn archive_row(r: &rusqlite::Row) -> rusqlite::Result<ArchiveRow> {
+    Ok(ArchiveRow {
+        session: r.get(0)?,
+        show: r.get(1)?,
+        show_dir: r.get(2)?,
+        dest: r.get(3)?,
+        stage: r.get(4)?,
+        state: r.get(5)?,
+        detail: r.get(6)?,
+        attempts: r.get(7)?,
+        next_try: r.get(8)?,
+        progress: r.get(9)?,
+        masters: serde_json::from_str(&r.get::<_, String>(10)?).unwrap_or_default(),
+        isos: json_list(r.get(11)?),
+        isos_left: r.get::<_, i64>(12)? != 0,
+        bytes_in: r.get(13)?,
+        bytes_out: r.get(14)?,
+        video_kbps: r.get(15)?,
+        ended_at: r.get(16)?,
+        queued_at: r.get(17)?,
+        updated_at: r.get(18)?,
+        finished_at: r.get(19)?,
+    })
+}
+
+impl ArchiveRow {
+    pub fn to_value(&self) -> Value {
+        Value::map()
+            .with("session", self.session.clone())
+            .with("show", self.show.clone())
+            .with("show_dir", self.show_dir.clone())
+            .with("dest", self.dest.clone())
+            .with("stage", self.stage.clone())
+            .with("state", self.state.clone())
+            .with("detail", self.detail.clone())
+            .with("attempts", self.attempts)
+            .with("next_try", self.next_try)
+            .with("progress", (self.progress * 1000.0).round() / 1000.0)
+            .with("masters", self.masters.iter().map(|m| m.src.clone()).collect::<Vec<_>>())
+            .with("isos", self.isos.clone())
+            .with("isos_left", self.isos_left)
+            .with("bytes_in", self.bytes_in)
+            .with("bytes_out", self.bytes_out)
+            .with("video_kbps", self.video_kbps)
+            .with("ended_at", self.ended_at)
+            .with("queued_at", self.queued_at)
+            .with("finished_at", self.finished_at.map(Value::Int).unwrap_or_default())
+    }
+}
+
+/// Queue a show; an existing row is left alone. Returns whether it was added.
+pub fn archive_insert(db: &Db, row: &ArchiveRow) -> Result<bool> {
+    let t = now();
+    let n = db.with(|c| {
+        c.execute(
+            "INSERT OR IGNORE INTO archive_jobs (session, show, show_dir, stage, state, masters, isos, isos_left, ended_at, queued_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
+            params![
+                row.session,
+                row.show,
+                row.show_dir,
+                row.stage,
+                row.state,
+                serde_json::to_string(&row.masters).unwrap_or_default(),
+                serde_json::to_string(&row.isos).unwrap_or_default(),
+                row.isos_left as i64,
+                row.ended_at,
+                t
+            ],
+        )
+    })?;
+    Ok(n > 0)
+}
+
+pub fn archive_get(db: &Db, session: &str) -> Result<Option<ArchiveRow>> {
+    db.with(|c| c.query_row(&format!("SELECT {ARCHIVE_COLS} FROM archive_jobs WHERE session = ?1"), [session], archive_row).optional())
+}
+
+/// All rows, oldest show first.
+pub fn archive_list(db: &Db) -> Result<Vec<ArchiveRow>> {
+    db.with(|c| {
+        let mut st = c.prepare(&format!("SELECT {ARCHIVE_COLS} FROM archive_jobs ORDER BY ended_at, queued_at"))?;
+        st.query_map([], archive_row)?.collect()
+    })
+}
+
+/// Store the worker's view of a row (everything but its identity and queue time).
+pub fn archive_save(db: &Db, row: &ArchiveRow) -> Result<()> {
+    db.with(|c| {
+        c.execute(
+            "UPDATE archive_jobs SET dest = ?2, stage = ?3, state = ?4, detail = ?5, attempts = ?6, next_try = ?7, progress = ?8,
+               masters = ?9, isos = ?10, isos_left = ?11, bytes_in = ?12, bytes_out = ?13, video_kbps = ?14, updated_at = ?15,
+               finished_at = ?16
+             WHERE session = ?1",
+            params![
+                row.session,
+                row.dest,
+                row.stage,
+                row.state,
+                row.detail,
+                row.attempts,
+                row.next_try,
+                row.progress,
+                serde_json::to_string(&row.masters).unwrap_or_default(),
+                serde_json::to_string(&row.isos).unwrap_or_default(),
+                row.isos_left as i64,
+                row.bytes_in,
+                row.bytes_out,
+                row.video_kbps,
+                now(),
+                row.finished_at
+            ],
+        )
+    })?;
+    Ok(())
+}
+
+/// Commit an archived show in one transaction: clip rows follow their recording
+/// (`recordings` old → new) and media (`clips_dir` old prefix → new prefix), and the row moves to
+/// its next stage — so a crash leaves either the old paths and stage, or both new.
+pub fn archive_commit(db: &Db, row: &ArchiveRow, recordings: &[(String, String)], clips_dir: Option<(&str, &str)>) -> Result<()> {
+    db.with(|c| {
+        let tx = c.unchecked_transaction()?;
+        for (old, new) in recordings {
+            tx.execute("UPDATE clips SET recording = ?3 WHERE session = ?1 AND recording = ?2", params![row.session, old, new])?;
+        }
+        if let Some((old, new)) = clips_dir {
+            let old = format!("{}/", old.trim_end_matches('/'));
+            let new = format!("{}/", new.trim_end_matches('/'));
+            for col in ["wide_path", "tall_path", "wide_thumb", "tall_thumb"] {
+                tx.execute(
+                    &format!("UPDATE clips SET {col} = ?3 || substr({col}, length(?2) + 1) WHERE session = ?1 AND substr({col}, 1, length(?2)) = ?2"),
+                    params![row.session, old, new],
+                )?;
+            }
+        }
+        tx.execute(
+            "UPDATE archive_jobs SET stage = ?2, state = ?3, detail = ?4, attempts = 0, next_try = 0, progress = ?5, bytes_out = ?6, updated_at = ?7 WHERE session = ?1",
+            params![row.session, row.stage, row.state, row.detail, row.progress, row.bytes_out, now()],
+        )?;
+        tx.commit()
+    })?;
+    Ok(())
+}
+
+/// Clips of a show are settled once its clip job finished (or none was ever queued) and no clip
+/// still waits for review — the full-quality hot files are no longer needed for clipping.
+pub fn clips_settled(db: &Db, session: &str) -> Result<bool> {
+    db.with(|c| {
+        let ready: i64 = c.query_row("SELECT COUNT(*) FROM clips WHERE session = ?1 AND status = 'ready'", [session], |r| r.get(0))?;
+        let job: Option<String> = c.query_row("SELECT state FROM clip_jobs WHERE session = ?1", [session], |r| r.get(0)).optional()?;
+        Ok(ready == 0 && job.is_none_or(|s| s == "done"))
+    })
 }
 
 #[cfg(test)]

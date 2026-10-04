@@ -1,0 +1,14 @@
+# Count-in: giant chunky pixel numbers 1-2-3-4 pop on the beats after the trigger, then GO!
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "overlay"
+label       = "Count-In"
+description = "Huge chunky pixel numbers 1, 2, 3, 4 pop in on the next four beats with squash and overshoot, then a big GO! on the beat after"
+params.position = { type = "vec2", default = [0.5, 0.45], range = [0.0, 1.0], description = "Center of the numbers (0-1 of the frame)" }
+params.size     = { type = "float", default = 0.45, range = [0.1, 0.8], description = "Number height as a fraction of the frame height" }
+params.go       = { type = "bool", default = true, description = "Show GO! on the beat after 4" }
+params.align    = { type = "enum", options = ["beat", "bar"], default = "beat", description = "Start on the next beat, or wait for the next bar downbeat so GO! lands on beat 1" }
+params.rainbow  = { type = "bool", default = true, description = "Each count gets its own VGA colour (off: all use color)" }
+params.color    = { type = "color", default = "#ffff55", description = "Number colour when rainbow is off" }
+trigger = { attack = "50ms", hold = "3.5s", release = "200ms", retrigger = "replace" }
+budget = { gpu_ms = 0.15 }

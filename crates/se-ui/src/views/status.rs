@@ -1,6 +1,7 @@
 //! Application header: brand and master navigation above a quiet operational toolbar.
 //! Status is text-first, with color reserved for the on-air tally and actionable warnings.
-//! Stream controls, health details, Clear chat effects, and Emergency stop remain directly accessible.
+//! Stream controls, health details, the Effects and Lights switches, Clear chat effects, and
+//! Emergency stop remain directly accessible.
 
 use crate::app::{App, ViewId};
 use crate::panels::Panel;
@@ -50,17 +51,15 @@ pub fn mode_label(mode: &str) -> String {
     }
 }
 
-/// Health checks that are optional features: "not set up" there is not a problem.
-const OPTIONAL: [&str; 4] = ["relay", "youtube", "tiktok", "twitch"];
-
 /// Plain-language title for a health check, and where to fix it.
-fn check_info(check: &str) -> (&'static str, Option<Panel>) {
+pub(crate) fn check_info(check: &str) -> (&'static str, Option<Panel>) {
     let base = check.split('.').next().unwrap_or(check);
     match base {
         "obs" => ("OBS", Some(Panel::View(ViewId::Setup))),
         "twitch" => ("Twitch", Some(Panel::View(ViewId::Setup))),
         "youtube" => ("Song requests", Some(Panel::View(ViewId::Setup))),
         "relay" => ("Tips & public queue", Some(Panel::View(ViewId::Setup))),
+        "queue_page" => ("Public song list", Some(Panel::View(ViewId::Songs))),
         "sources" | "devices" => ("Devices", Some(Panel::View(ViewId::Devices))),
         "audio" => ("Sound", Some(Panel::View(ViewId::Audio))),
         "mixer" => ("Mixing desk", Some(Panel::View(ViewId::Mixer))),
@@ -71,6 +70,7 @@ fn check_info(check: &str) -> (&'static str, Option<Panel>) {
         "tts" => ("Read-out voice", Some(Panel::View(ViewId::Tts))),
         "timecode" => ("Timelines", Some(Panel::View(ViewId::Timeline))),
         "clips" | "recordings" => ("Recordings", Some(Panel::View(ViewId::Sessions))),
+        "recording" | "archive" => ("Recording", Some(Panel::View(ViewId::Settings))),
         "backup" => ("Backups", Some(Panel::View(ViewId::Maintenance))),
         "versions" => ("Project history", Some(Panel::View(ViewId::History))),
         "alerts" => ("Alerts", Some(Panel::View(ViewId::Alerts))),
@@ -98,12 +98,19 @@ fn friendly(app: &App, check: &str, status: &str, detail: &str) -> Option<String
             }
         }
         "audio" if check == "audio.mic" => "Your microphone is silent. Is it muted or unplugged?".into(),
-        "audio" if check == "audio.obs" => "OBS can't hear Stream Engine's sound yet. Sound → \"Add our sound to OBS\" fixes it.".into(),
+        "audio" if check == "audio.obs" => {
+            "Check your selected streaming audio inputs in OBS. Recording inputs are configured independently in Settings.".into()
+        }
         "audio" => "Something's off with the sound. See Sound → Mix → Advanced.".into(),
         "twitch" if detail.contains("not authorized") || detail.contains("no Client ID") => "Twitch isn't set up yet.".into(),
         "twitch" if ["token", "scopes", "revoked"].iter().any(|w| detail.contains(w)) => "Twitch needs you to sign in again: Community → Twitch.".into(),
         "twitch" if fail => "Twitch isn't connected right now. It reconnects by itself; if it stays, see Community → Twitch.".into(),
         "twitch" => "Twitch needs a look: see Community → Twitch.".into(),
+        "relay" if fail => "Tips and the public song list aren't reaching Stream Engine. It keeps retrying by itself.".into(),
+        "queue_page" if fail => "The public song list page can't be reached (tunnel or DNS). Chat requests still work.".into(),
+        "queue_page" => "The public song list page didn't answer just now.".into(),
+        "player" => "The song player's YouTube account isn't verified, so song requests are paused.".into(),
+        "youtube" if fail => "Song lookups on YouTube aren't working: check the API key.".into(),
         "night_light" => "Night light is on, so your screens look warmer than your stream. Turn it off while you adjust colours.".into(),
         "idle_inhibitor" => "Your screen may lock during the show. It normally stays awake by itself once you start.".into(),
         "versions" => "New versions of your project can't be saved. See Settings → History.".into(),
@@ -147,6 +154,10 @@ fn friendly(app: &App, check: &str, status: &str, detail: &str) -> Option<String
         "recordings" => "Recordings are using more space than you allowed.".into(),
         "timecode" => "A timeline can't hear its clock.".into(),
         "clips" => "Clip making needs a look.".into(),
+        "recording" if fail => "The show isn't being recorded.".into(),
+        "recording" => "Recording needs a look.".into(),
+        "archive" if fail => "Finished shows can't be archived.".into(),
+        "archive" => "The archive needs a look.".into(),
         _ => return None,
     })
 }
@@ -156,7 +167,7 @@ fn friendly(app: &App, check: &str, status: &str, detail: &str) -> Option<String
 pub struct EngineDown {
     since: Option<std::time::Instant>,
     starting: Option<std::time::Instant>,
-    result: std::sync::Arc<std::sync::Mutex<Option<Result<(), String>>>>,
+    result: crate::views::health::Slot,
 }
 
 /// True when the engine has been unreachable long enough to say so (not a reconnect blip).
@@ -167,6 +178,37 @@ pub fn engine_down(app: &mut App) -> bool {
     }
     let since = *app.down.since.get_or_insert_with(std::time::Instant::now);
     since.elapsed().as_secs_f32() > 3.0
+}
+
+/// How long the engine has been unreachable (zero while connected or not yet noticed).
+pub fn down_for(app: &App) -> std::time::Duration {
+    match app.down.since {
+        Some(s) if !app.m.connected => s.elapsed(),
+        _ => std::time::Duration::ZERO,
+    }
+}
+
+/// Start the engine (and keep it starting at login) through its systemd user service, in the
+/// background. The returned slot gets the result.
+pub fn start_engine(app: &mut App) -> crate::views::health::Slot {
+    app.down.starting = Some(std::time::Instant::now());
+    let slot = app.down.result.clone();
+    if let Ok(mut r) = slot.lock() {
+        *r = None;
+    }
+    let out = slot.clone();
+    std::thread::spawn(move || {
+        let res = std::process::Command::new("systemctl").args(["--user", "enable", "--now", "stream-engine"]).output();
+        let r = match res {
+            Ok(o) if o.status.success() => Ok(()),
+            Ok(o) => Err(String::from_utf8_lossy(&o.stderr).trim().to_string()),
+            Err(e) => Err(format!("Couldn't run systemctl: {e}")),
+        };
+        if let Ok(mut s) = out.lock() {
+            *s = Some(r);
+        }
+    });
+    slot
 }
 
 /// The page shown while the engine isn't running: one button starts it (and keeps it starting
@@ -190,22 +232,7 @@ pub fn engine_down_ui(app: &mut App, ui: &mut egui::Ui) {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
         }
         if clicked {
-            app.down.starting = Some(std::time::Instant::now());
-            let slot = app.down.result.clone();
-            if let Ok(mut r) = slot.lock() {
-                *r = None;
-            }
-            std::thread::spawn(move || {
-                let out = std::process::Command::new("systemctl").args(["--user", "enable", "--now", "stream-engine"]).output();
-                let r = match out {
-                    Ok(o) if o.status.success() => Ok(()),
-                    Ok(o) => Err(String::from_utf8_lossy(&o.stderr).trim().to_string()),
-                    Err(e) => Err(format!("Couldn't run systemctl: {e}")),
-                };
-                if let Ok(mut s) = slot.lock() {
-                    *s = Some(r);
-                }
-            });
+            start_engine(app);
         }
     });
 }
@@ -221,16 +248,20 @@ pub fn warnings(app: &App) -> Vec<Warning> {
     for (a, v) in app.m.under("health") {
         let check = a.trim_start_matches("health.");
         let st = v.get_path("status").and_then(Value::as_str).unwrap_or("");
-        let optional = OPTIONAL.iter().any(|o| check.starts_with(o));
-        if st == "fail" || (st == "warn" && !optional) {
-            let detail = v.get_path("detail").and_then(Value::as_str).unwrap_or("");
+        let detail = v.get_path("detail").and_then(Value::as_str).unwrap_or("");
+        // An optional extra that was never set up is not a problem; TikTok's connection states
+        // aren't either. Failures always count, optional or not.
+        let unset = crate::health::not_set_up(check, detail);
+        let quiet = st == "warn" && (unset || crate::health::base(check) == "tiktok");
+        if (st == "fail" || st == "warn") && !quiet {
             let (title, open) = check_info(check);
-            let setup = check.starts_with("twitch") || (check.starts_with("obs") && !on_air);
+            // Setup only while off air: on air every Twitch/OBS problem is a real one.
+            let setup = !on_air && (unset || check.starts_with("obs"));
             let text = match friendly(app, check, st, detail) {
                 Some(f) => f,
                 None => format!("{title}: {detail}"),
             };
-            w.push(Warning { text, fail: st == "fail" && !optional, open, setup });
+            w.push(Warning { text, fail: st == "fail", open, setup });
         }
     }
     let errs = app.m.f("project.errors") as i64;
@@ -303,7 +334,7 @@ pub fn warnings(app: &App) -> Vec<Warning> {
 // ---- Go live checklist (§15.8: preflight all green, or acknowledged) ------------------------------
 
 /// Optional extras: not set up doesn't hold up going live.
-const OPTIONAL_EXTRAS: [&str; 3] = ["relay", "youtube", "tiktok"];
+const OPTIONAL_EXTRAS: [&str; 4] = ["relay", "youtube", "tiktok", "queue_page"];
 
 /// How a preflight check reads in the checklist, most urgent first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -349,6 +380,8 @@ fn ready_text(check: &str, detail: &str) -> String {
         "backup" => "Backups are up to date.",
         "versions" => "Every change to your project is saved.",
         "recordings" => "Recordings fit in the space you allowed.",
+        "recording" => "Recording is ready.",
+        "archive" => "Finished shows are archived.",
         _ => return format!("{}: ready.", check_info(check).0),
     }
     .into()
@@ -566,6 +599,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
             if clean.on_hover_text(format!("Remove every effect viewers triggered from chat ({})", app.keys_label("clean"))).clicked() {
                 app.m.command(Op::Clean);
             }
+            operator_switches(app, ui);
         });
     });
     let divider = ui.cursor().top();
@@ -646,8 +680,17 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                     }
                 });
             }
+            ui.add_space(6.0);
+            ui.separator();
+            if widgets::button_ex(ui, &t, Some(icon::RIGHT), "See every check", Kind::Ghost, Size::Small, 0.0, true)
+                .on_hover_text("Settings → Health: every check, how long it has been like that, Recover and Fix with AI")
+                .clicked()
+            {
+                app.open_view(ViewId::Health);
+                ui.close();
+            }
         });
-        if app.m.b("obs.record.active") {
+        if app.m.b("recording.active") {
             widgets::badge(ui, &t, "Recording", t.tally_program());
         }
         if app.m.connected && mode == "rehearsal" {
@@ -707,6 +750,76 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     if app.golive.open {
         golive_window(app, &ui.ctx().clone());
     }
+}
+
+/// Routine utilities beside Clear chat effects: engine effects/lights and the local drum
+/// screen. Missing engine switch state reads as on; drum-screen control stays independent
+/// of the engine connection.
+fn operator_switches(app: &mut App, ui: &mut egui::Ui) {
+    let t = app.t.clone();
+    let on = |a: &str| app.m.get(a).is_none_or(|v| v.is_null() || v.truthy());
+    let (fx, auto) = (on("fx.enabled"), on("lights.auto"));
+    let connected = app.m.connected;
+    // Right to left: Effects, Lights, then the local Drum screen switch.
+    let tip = if fx {
+        "Effects are on: chat, rewards and automatic moments can fire video effects. Click to turn every effect off right away."
+    } else {
+        "Effects are off: nothing from chat, rewards or automation fires video effects, and effect rewards are paused on Twitch. Your own buttons still work. Click to turn effects back on."
+    };
+    if switch_pill(ui, &t, if fx { "Effects on" } else { "Effects off" }, fx, connected).on_hover_text(tip).clicked() {
+        app.m.command(Op::Action { name: if fx { "fx.off" } else { "fx.on" }.into(), args: Value::Null });
+    }
+    let tip = if auto {
+        "Lights follow the music automatically. Click to go back to your normal lights."
+    } else {
+        "Lights stay on your normal look; automatic light changes are off. Click to let them follow the music again."
+    };
+    if switch_pill(ui, &t, if auto { "Lights: auto" } else { "Lights: normal" }, auto, connected).on_hover_text(tip).clicked() {
+        app.m.command(Op::Action { name: if auto { "lights.auto.off" } else { "lights.auto.on" }.into(), args: Value::Null });
+    }
+    let drum = switch_pill(ui, &t, app.drum_screen.label(), app.drum_screen.on(), app.drum_screen.enabled())
+        .on_hover_text(app.drum_screen.detail());
+    if drum.clicked() {
+        app.drum_screen.toggle(ui.ctx());
+    }
+}
+
+/// A framed label with a small switch: green and to the right when on; amber edge and text when
+/// off, so a switched-off automation is visible at a glance.
+fn switch_pill(ui: &mut egui::Ui, t: &se_ui_kit::Theme, label: &str, on: bool, enabled: bool) -> egui::Response {
+    use egui::{CornerRadius, Stroke, StrokeKind, Vec2, pos2};
+    use se_ui_kit::motion;
+    use se_ui_kit::theme::{font_medium, mix, radius};
+    let enabled = enabled && ui.is_enabled();
+    let galley = ui.painter().layout_no_wrap(label.to_string(), font_medium(type_scale::BODY), t.fg);
+    let (track, pad, gap) = (Vec2::new(28.0, 16.0), 12.0, 8.0);
+    let size = Vec2::new(pad + track.x + gap + galley.size().x + pad, 36.0);
+    let (rect, resp) = ui.allocate_exact_size(size, if enabled { egui::Sense::click() } else { egui::Sense::hover() });
+    if ui.is_rect_visible(rect) {
+        let ctx = ui.ctx();
+        let h = motion::t(ctx, resp.id.with("hover"), enabled && resp.hovered(), motion::FAST);
+        let k = motion::t(ctx, resp.id.with("on"), on, motion::SLOW);
+        let (accent, text) = if !enabled {
+            (t.text_faint, t.text_faint)
+        } else if on {
+            (t.green, t.fg)
+        } else {
+            (t.yellow, mix(t.yellow, t.fg, 0.35))
+        };
+        let p = ui.painter();
+        let edge = if on || !enabled { mix(t.border, t.fg, 0.12 * h) } else { mix(t.border, t.yellow, 0.55 + 0.2 * h) };
+        p.rect(rect, CornerRadius::same(radius::CONTROL), mix(t.surface, t.fg, 0.035 * h), Stroke::new(1.0, edge), StrokeKind::Inside);
+        let tr = egui::Rect::from_min_size(pos2(rect.left() + pad, rect.center().y - track.y / 2.0), track);
+        p.rect_filled(tr, CornerRadius::same(radius::PILL), mix(t.border, accent, 0.25 + 0.6 * k));
+        let x = egui::lerp(tr.left() + 8.0..=tr.right() - 8.0, k);
+        p.circle_filled(pos2(x, tr.center().y), 6.0, if on && enabled { t.bg } else { mix(t.fg, accent, 0.4) });
+        p.galley_with_override_text_color(pos2(tr.right() + gap, rect.center().y - galley.size().y / 2.0), galley, text);
+        if resp.has_focus() {
+            p.rect_stroke(rect.expand(2.0), CornerRadius::same(radius::CONTROL + 2), Stroke::new(1.5, t.accent), StrokeKind::Middle);
+        }
+    }
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, on, label));
+    if enabled { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp }
 }
 
 #[cfg(test)]

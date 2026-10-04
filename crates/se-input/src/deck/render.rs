@@ -5,6 +5,59 @@
 use ab_glyph::{Font, FontVec, PxScale, ScaleFont, point};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
+use std::sync::Arc;
+
+/// Decoded once per configuration load; both supported device sizes are cached.
+#[derive(Clone, Debug)]
+pub struct Artwork {
+    pub path: String,
+    content_id: [u8; 20],
+    rgb: Arc<[u8]>,
+    xl_rgb: Arc<[u8]>,
+}
+
+impl Artwork {
+    pub fn load(root: &std::path::Path, path: &str) -> Result<Self, String> {
+        let rel = std::path::Path::new(path);
+        if path.is_empty() || rel.components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
+            return Err("`image` must be a nonempty path relative to the project root (no `..`)".into());
+        }
+        let file = root.join(rel);
+        let bytes = std::fs::read(&file).map_err(|e| format!("image `{}`: {e}", file.display()))?;
+        let decoded = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
+            .map_err(|e| format!("image `{}`: cannot decode PNG: {e}", file.display()))?;
+        if decoded.width() != 72 || decoded.height() != 72 || decoded.color() != image::ColorType::Rgb8 {
+            return Err(format!("image `{}` must be a 72×72, 8-bit RGB PNG (got {}×{} {:?})", file.display(), decoded.width(), decoded.height(), decoded.color()));
+        }
+        let rgb = decoded.into_rgb8();
+        let content_id = sha1_smol::Sha1::from(rgb.as_raw().as_slice()).digest().bytes();
+        let xl_rgb = image::imageops::resize(&rgb, 96, 96, image::imageops::FilterType::Lanczos3).into_raw().into();
+        Ok(Self { path: path.into(), content_id, rgb: rgb.into_raw().into(), xl_rgb })
+    }
+
+    fn pixels(&self, size: u32) -> &[u8] {
+        match size {
+            72 => &self.rgb,
+            96 => &self.xl_rgb,
+            _ => unreachable!("unsupported deck key size"),
+        }
+    }
+}
+
+impl PartialEq for Artwork {
+    fn eq(&self, other: &Self) -> bool {
+        self.path == other.path && self.content_id == other.content_id
+    }
+}
+
+impl Eq for Artwork {}
+
+impl Hash for Artwork {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.path.hash(state);
+        self.content_id.hash(state);
+    }
+}
 
 pub type Rgb = [u8; 3];
 
@@ -19,6 +72,11 @@ pub struct KeyVisual {
     pub edge: Option<(Rgb, u8)>,
     pub icon: String,
     pub label: String,
+    /// Full-key artwork already includes its label and icon.
+    pub artwork: Option<Arc<Artwork>>,
+    /// Live local HH:MM:SS, separate from the static label.
+    pub clock: Option<Arc<str>>,
+    pub disabled: bool,
     /// Bottom progress bar: filled fraction in 1/64 steps and its color.
     pub progress: Option<(u8, Rgb)>,
     /// Small LED dot in the top-right corner.
@@ -287,6 +345,45 @@ impl Canvas {
         }
     }
 
+    /// Eight-character seven-segment clock, legible even before fonts finish loading.
+    fn clock(&mut self, text: &str, color: Rgb) {
+        let sf = self.s as f32;
+        let unit = sf / 72.0;
+        let mut x = 4.0 * unit;
+        let y = 25.0 * unit;
+        let w = 8.0 * unit;
+        let h = 20.0 * unit;
+        let thick = 1.3 * unit;
+        let digit = [
+            0b0111111, 0b0000110, 0b1011011, 0b1001111, 0b1100110,
+            0b1101101, 0b1111101, 0b0000111, 0b1111111, 0b1101111,
+        ];
+        for ch in text.chars() {
+            if ch == ':' {
+                self.circle(x + 2.0 * unit, y + h * 0.32, unit, color);
+                self.circle(x + 2.0 * unit, y + h * 0.72, unit, color);
+                x += 4.0 * unit;
+                continue;
+            }
+            let Some(n) = ch.to_digit(10) else { continue };
+            let segments = [
+                (x + thick, y, x + w - thick, y + thick),
+                (x + w - thick, y + thick, x + w, y + h / 2.0),
+                (x + w - thick, y + h / 2.0, x + w, y + h - thick),
+                (x + thick, y + h - thick, x + w - thick, y + h),
+                (x, y + h / 2.0, x + thick, y + h - thick),
+                (x, y + thick, x + thick, y + h / 2.0),
+                (x + thick, y + h / 2.0 - thick / 2.0, x + w - thick, y + h / 2.0 + thick / 2.0),
+            ];
+            for (bit, (x0, y0, x1, y1)) in segments.into_iter().enumerate() {
+                if digit[n as usize] & (1 << bit) != 0 {
+                    self.round_rect(x0, y0, x1, y1, thick * 0.35, color, None);
+                }
+            }
+            x += 9.5 * unit;
+        }
+    }
+
     fn text(&mut self, fonts: &Fonts, text: &str, px: f32, center_x: f32, baseline: f32, c: Rgb, bold: bool) {
         let w = fonts.width(text, px, bold);
         let mut x = center_x - w / 2.0;
@@ -366,18 +463,25 @@ fn layout_label(fonts: &Fonts, label: &str, start_px: f32, min_px: f32, max_w: f
 pub fn render_rgb(fonts: Option<&Fonts>, v: &KeyVisual, size: u32, rotate180: bool) -> Vec<u8> {
     let s = size as usize;
     let sf = size as f32;
-    let mut c = Canvas::new(s);
+    let mut c = if let Some(artwork) = &v.artwork {
+        let scale = if v.pressed { 0.65 } else { 1.0 };
+        Canvas { s, px: artwork.pixels(size).chunks_exact(3).map(|p| [p[0] as f32 * scale, p[1] as f32 * scale, p[2] as f32 * scale]).collect() }
+    } else {
+        Canvas::new(s)
+    };
     if v.blank {
         return c.rgb(rotate180, false);
     }
     let bg = if v.pressed { mix(v.bg, [0, 0, 0], 0.35) } else { v.bg };
     let inset = sf * 0.03;
     let radius = sf * 0.14;
-    c.round_rect(inset, inset, sf - inset, sf - inset, radius, bg, None);
+    if v.artwork.is_none() {
+        c.round_rect(inset, inset, sf - inset, sf - inset, radius, bg, None);
+    }
     if let Some((ec, w)) = v.edge {
         c.round_rect(inset, inset, sf - inset, sf - inset, radius, ec, Some(w as f32 * sf / 72.0));
     }
-    if let Some(fonts) = fonts {
+    if let Some(fonts) = fonts.filter(|_| v.artwork.is_none() && v.clock.is_none()) {
         let has_icon = !v.icon.is_empty();
         let max_w = sf - sf * 0.16;
         if has_icon {
@@ -400,6 +504,10 @@ pub fn render_rgb(fonts: Option<&Fonts>, v: &KeyVisual, size: u32, rotate180: bo
             }
         }
     }
+    if let Some(clock) = &v.clock {
+        c.round_rect(sf * 0.035, sf * 0.30, sf * 0.965, sf * 0.67, sf * 0.04, [0, 0, 0], None);
+        c.clock(clock, v.fg);
+    }
     if let Some((frac, pc)) = v.progress {
         let w = (sf - sf * 0.22) * (frac.min(64) as f32 / 64.0);
         if w > 0.5 {
@@ -409,6 +517,12 @@ pub fn render_rgb(fonts: Option<&Fonts>, v: &KeyVisual, size: u32, rotate180: bo
     }
     if let Some(bc) = v.badge {
         c.circle(sf * 0.84, sf * 0.16, sf * 0.055, bc);
+    }
+    if v.disabled {
+        let x = sf * 0.84;
+        let y = sf * 0.16;
+        c.circle(x, y, sf * 0.09, [230, 70, 70]);
+        c.round_rect(x - sf * 0.055, y - sf * 0.015, x + sf * 0.055, y + sf * 0.015, sf * 0.005, [15, 15, 15], None);
     }
     c.rgb(rotate180, v.dim)
 }

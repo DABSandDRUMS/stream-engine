@@ -9,6 +9,7 @@
 //! cache_days = 7           # re-check cached metadata older than this (when quota allows)
 //! search_results = 5       # candidates per text search (first playable one wins)
 //! crossfade = "400ms"      # visual crossfade between the two player slots
+//! metadata = true          # artist/genres/year from MusicBrainz (free, no key)
 //!
 //! [songs.messages]
 //! added = "@{user} queued {title} (#{pos})"   # "" silences a message
@@ -25,12 +26,19 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
     pub region: String,
+    /// Exact authenticated YouTube channel ID; empty means playback is locked.
+    pub youtube_channel: String,
+    /// Delegated Brand-channel session pinned by the native embedded browser.
+    pub youtube_delegate: String,
     pub daily_quota: u32,
     pub link_reserve: u32,
     pub cache_days: u32,
     pub search_results: u32,
     pub crossfade_ms: u32,
     pub api_base: String,
+    /// Look songs up on MusicBrainz (`[songs] metadata`, default true).
+    pub metadata: bool,
+    pub metadata_base: String,
     pub messages: Messages,
     pub relay_url: Option<String>,
     pub queue_url: Option<String>,
@@ -40,12 +48,16 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             region: "US".into(),
+            youtube_channel: String::new(),
+            youtube_delegate: String::new(),
             daily_quota: 10_000,
             link_reserve: 200,
             cache_days: 7,
             search_results: 5,
             crossfade_ms: 400,
             api_base: youtube::DEFAULT_BASE.into(),
+            metadata: true,
+            metadata_base: crate::metadata::DEFAULT_BASE.into(),
             messages: Messages::default(),
             relay_url: None,
             queue_url: None,
@@ -61,6 +73,23 @@ fn int(t: &toml::Table, k: &str, d: u32, max: u32) -> Result<u32, String> {
     }
 }
 
+pub(crate) fn valid_channel_id(channel: &str) -> bool {
+    channel.len() == 24 && channel.starts_with("UC") && channel.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+pub(crate) fn valid_delegate(delegate: &str) -> bool {
+    !delegate.is_empty() && delegate.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// An https API base (plain http only for a localhost test server), without a trailing `/`.
+fn base_url(v: &toml::Value, key: &str) -> Result<String, String> {
+    let b = v.as_str().ok_or_else(|| format!("[songs] {key} must be a string"))?;
+    if !(b.starts_with("https://") || b.starts_with("http://127.0.0.1") || b.starts_with("http://localhost")) {
+        return Err(format!("[songs] {key} must be https (or a localhost test server)"));
+    }
+    Ok(b.trim_end_matches('/').to_string())
+}
+
 impl Settings {
     pub fn parse(songs: Option<&toml::Value>, relay: Option<&toml::Value>) -> Result<Settings, String> {
         let mut s = Settings::default();
@@ -72,6 +101,23 @@ impl Settings {
                     return Err(format!("[songs] region must be a two-letter country code, got `{r}`"));
                 }
                 s.region = r;
+            }
+            if let Some(channel) = t.get("youtube_channel") {
+                let channel = channel.as_str().ok_or("[songs] youtube_channel must be an exact UC channel ID string")?;
+                if !channel.is_empty() && !valid_channel_id(channel) {
+                    return Err("[songs] youtube_channel must be an exact 24-character UC channel ID (not a name, handle, or URL)".into());
+                }
+                s.youtube_channel = channel.to_string();
+            }
+            if let Some(delegate) = t.get("youtube_delegate") {
+                let delegate = delegate.as_str().ok_or("[songs] youtube_delegate must be a decimal identifier string")?;
+                if !delegate.is_empty() && !valid_delegate(delegate) {
+                    return Err("[songs] youtube_delegate must be a decimal delegated Brand-channel identifier".into());
+                }
+                s.youtube_delegate = delegate.to_string();
+            }
+            if !s.youtube_channel.is_empty() && s.youtube_delegate.is_empty() {
+                return Err("[songs] youtube_delegate is required when youtube_channel is configured".into());
             }
             s.daily_quota = int(t, "daily_quota", s.daily_quota, 100_000_000)?;
             s.link_reserve = int(t, "link_reserve", s.link_reserve, 100_000)?;
@@ -87,11 +133,13 @@ impl Settings {
                 };
             }
             if let Some(b) = t.get("api_base") {
-                let b = b.as_str().ok_or("[songs] api_base must be a string")?;
-                if !(b.starts_with("https://") || b.starts_with("http://127.0.0.1") || b.starts_with("http://localhost")) {
-                    return Err("[songs] api_base must be https (or a localhost test server)".into());
-                }
-                s.api_base = b.trim_end_matches('/').to_string();
+                s.api_base = base_url(b, "api_base")?;
+            }
+            if let Some(m) = t.get("metadata") {
+                s.metadata = m.as_bool().ok_or("[songs] metadata must be true or false")?;
+            }
+            if let Some(b) = t.get("metadata_base") {
+                s.metadata_base = base_url(b, "metadata_base")?;
             }
             if let Some(m) = t.get("messages") {
                 let m = m.as_table().ok_or("[songs.messages] must be a table")?;
@@ -169,5 +217,24 @@ mod tests {
         assert!(Settings::parse(None, Some(&t("url = \"ws://relay.example.com/link\""))).is_err(), "plain ws only for localhost");
         assert!(Settings::parse(None, Some(&t("url = \"ws://127.0.0.1:8787/link\""))).is_ok());
         assert!(Settings::parse(Some(&t("api_base = \"http://evil.example\"")), None).is_err());
+        assert!(Settings::parse(Some(&t("metadata_base = \"http://evil.example\"")), None).is_err());
+        assert!(Settings::parse(Some(&t("metadata = \"yes\"")), None).is_err());
+        assert!(!Settings::parse(Some(&t("metadata = false")), None).unwrap().metadata);
+        assert!(Settings::parse(None, None).unwrap().metadata, "on by default");
+    }
+
+    #[test]
+    fn channel_configuration_requires_exact_identity() {
+        let id = "UCz7OyuTD7kJJ6nJHko6r7ZQ";
+        assert_eq!(Settings::parse(Some(&t(&format!("youtube_channel = \"{id}\"\nyoutube_delegate = \"123456\""))), None).unwrap().youtube_channel, id);
+        assert!(Settings::parse(None, None).unwrap().youtube_channel.is_empty());
+        assert!(Settings::parse(Some(&t("youtube_channel = \"\"")), None).unwrap().youtube_channel.is_empty());
+        for invalid in ["@covers", "Dabs & Drum Covers", "UCshort", " UCz7OyuTD7kJJ6nJHko6r7ZQ", "UCz7OyuTD7kJJ6nJHko6r7Z!"] {
+            assert!(Settings::parse(Some(&t(&format!("youtube_channel = \"{invalid}\""))), None).is_err(), "{invalid}");
+        }
+        assert!(Settings::parse(Some(&t(&format!("youtube_channel = \"{id}\""))), None).is_err());
+        for invalid in ["-123", "12 34", "012x"] {
+            assert!(Settings::parse(Some(&t(&format!("youtube_delegate = \"{invalid}\""))), None).is_err());
+        }
     }
 }

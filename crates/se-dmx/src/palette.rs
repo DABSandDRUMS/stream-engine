@@ -3,12 +3,9 @@
 //! and `@<address>` (any live state value).
 
 use crate::rig::{AttrKind, Rig};
-use se_proto::Value;
+use se_proto::{Value, palette::SLOTS};
 use serde::Deserialize;
 use std::collections::BTreeMap;
-
-/// Stream palette slots published by the renderer as `palette.<slot>`.
-pub const STREAM_SLOTS: &[&str] = &["accent", "background", "foreground", "red", "yellow", "green", "cyan", "magenta"];
 
 /// Attribute groups a palette reference can expand to.
 pub fn attr_group(name: &str) -> Option<&'static [&'static str]> {
@@ -34,8 +31,8 @@ impl Spec {
                 if let Some(p) = s.strip_prefix("palette:") {
                     Spec::Palette(p.to_string())
                 } else if let Some(slot) = s.strip_prefix("stream:") {
-                    if !STREAM_SLOTS.contains(&slot) {
-                        return Err(format!("unknown stream palette slot `{slot}` ({})", STREAM_SLOTS.join(", ")));
+                    if !SLOTS.contains(&slot) {
+                        return Err(format!("unknown stream palette slot `{slot}` ({})", SLOTS.join(", ")));
                     }
                     Spec::Address(format!("palette.{slot}"))
                 } else if let Some(a) = s.strip_prefix('@') {
@@ -100,6 +97,8 @@ pub struct Palette {
     pub set: Vec<(String, Vec<(String, Spec)>)>,
     /// Premade knobs (`[[knob]]`, targets `set.<target>.<attr>`; see [`crate::knobs`]).
     pub knobs: Vec<crate::knobs::Bound>,
+    /// Free lowercase tags (`tags = [...]`) for `lights.layer.pick` / `lights.tags`.
+    pub tags: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -113,6 +112,8 @@ struct Raw {
     notes: Option<String>,
     #[serde(default)]
     knob: Vec<se_core::knob::Knob>,
+    #[serde(default)]
+    tags: Vec<String>,
 }
 
 impl Palette {
@@ -139,7 +140,8 @@ impl Palette {
             }
             set.push((target, out));
         }
-        let mut p = Palette { name: name.into(), label: r.label.unwrap_or_else(|| name.to_string()), kind, set, knobs: Vec::new() };
+        let tags = crate::tags::parse(r.tags)?;
+        let mut p = Palette { name: name.into(), label: r.label.unwrap_or_else(|| name.to_string()), kind, set, knobs: Vec::new(), tags };
         se_core::knob::check_all(&r.knob)?;
         for k in r.knob {
             let at = crate::knobs::look_at(&p, &k)?;

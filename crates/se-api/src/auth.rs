@@ -10,6 +10,7 @@ use std::collections::HashMap;
 /// launching an editor. Secret-carrying actions ([`Op::is_secret`]) and `set_base` are never grantable either.
 const ADMIN_NAMESPACES: &[&str] = &["api", "secrets", "project"];
 const ADMIN_ACTIONS: &[&str] = &["patch.new", "patch.open", "patch.remove"];
+const ADMIN_ACTION_PREFIXES: &[&str] = &["fx.chain.", "fx.slot.", "fx.group."];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Scope {
@@ -54,9 +55,9 @@ impl Scope {
     }
 
     pub fn may_query(&self, name: &str) -> bool {
-        // `remote_mod.request` acts on a moderator's behalf; the relay link calls it inside the
-        // engine, so from the API only full-access clients may
-        if name == "remote_mod" || name.starts_with("remote_mod.") {
+        // These queries mutate state or durable metadata. Internal hub callers bypass API
+        // authorization; external read/patch/mod clients must not reach those barriers.
+        if name == "remote_mod" || name.starts_with("remote_mod.") || matches!(name, "recording.finalize" | "session.persist") {
             return *self == Scope::Full;
         }
         match self {
@@ -84,7 +85,10 @@ fn patch_target(op: &Op) -> Option<&str> {
 
 fn admin_only(op: &Op, target: &str) -> bool {
     let root = target.split('.').next().unwrap_or(target);
-    op.is_secret() || ADMIN_NAMESPACES.contains(&root) || ADMIN_ACTIONS.contains(&target)
+    op.is_secret()
+        || ADMIN_NAMESPACES.contains(&root)
+        || ADMIN_ACTIONS.contains(&target)
+        || matches!(op, Op::Action { .. }) && ADMIN_ACTION_PREFIXES.iter().any(|prefix| target.starts_with(prefix))
 }
 
 /// `grant` matches `target` or one of its ancestors (`lights.*` covers `lights.cue` and
@@ -213,6 +217,14 @@ mod tests {
             "patch.remove",
             "youtube.key.set",
             "twitch.token.set",
+            "fx.chain.apply",
+            "fx.chain.save",
+            "fx.chain.set",
+            "fx.slot.add",
+            "fx.slot.remove",
+            "fx.slot.move",
+            "fx.slot.set",
+            "fx.group.set",
         ] {
             assert!(!p.allows(&act(name)), "{name}");
         }
@@ -236,6 +248,18 @@ mod tests {
         }
         assert!(Scope::Full.may_query("remote_mod") && Scope::Full.may_query("remote_mod.request"));
         assert!(Scope::ReadOnly.may_query("remote_modest"), "only the remote_mod namespace");
+    }
+
+    #[test]
+    fn recorder_barriers_require_full_access() {
+        for name in ["recording.finalize", "session.persist"] {
+            for scope in [Scope::ReadOnly, Scope::Mod, Scope::Patch("x".into(), vec!["**".into()])] {
+                assert!(!scope.may_query(name), "{scope:?} must not mutate recorder/session state");
+            }
+            assert!(Scope::Full.may_query(name));
+        }
+        assert!(Scope::ReadOnly.may_query("recording.status"));
+        assert!(Scope::ReadOnly.may_query("recording.sources"));
     }
 
     #[test]

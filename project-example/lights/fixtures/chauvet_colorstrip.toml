@@ -1,0 +1,8 @@
+# COLORstrip/COLORstrip Mini UM Rev. 1 p. 10; QRG Rev. 3 p. 7.
+# Original COLORstrip is 4CH, not the photographed software's 7CH profile.
+name = "Chauvet COLORstrip"
+manufacturer = "Chauvet"
+kind = "bar"
+notes = "Direct whole-bar RGB only. Fixed selector 210 avoids internal strobe/program gates. Confirm physical model before arming."
+[modes.4ch]
+channels = [{ role = "fixed", value = 210, label = "Direct RGB mode selector", restriction = "Held at 210; internal static/chase/strobe/fade/sound modes excluded. Shared-address bars cannot be controlled separately." }, "red", "green", "blue"]

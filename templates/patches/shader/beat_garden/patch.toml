@@ -1,0 +1,23 @@
+# Beat garden: a strip of pixel-art flowers along the bottom edge. Plants sprout one by one and
+# grow a pixel per beat (time snapped to the beat grid), sway in half-time with the groove (kick
+# pushes them a little further), and pop their blooms open on snare hits / fills. Firing
+# `patch.beat_garden.trigger` opens the whole garden and releases rising pollen (bigger tier =
+# longer bloom). Always-on effect: attach it (`fx = [{ name = "patch.beat_garden" }]`) to the
+# camera source/node or the canvas; no manifest trigger, so it never hides between triggers.
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "effect"
+label       = "Beat garden"
+description = "Pixel-art flowers grow along the bottom edge with the groove, sway on the beat, and bloom on fills"
+params.amount     = { type = "float", default = 1.0, range = [0.0, 1.0], description = "Garden opacity" }
+params.height     = { type = "float", default = 0.12, range = [0.05, 0.35], description = "Garden height (fraction of the frame)" }
+params.pixel      = { type = "float", default = 4.0, range = [2.0, 10.0], description = "Art pixel size (screen pixels at 720p)" }
+params.head_start = { type = "float", default = 0.25, range = [0.0, 1.0], description = "Share of plants already grown at start" }
+params.fill_time  = { type = "float", default = 45.0, range = [5.0, 600.0], description = "Seconds until every plant has sprouted" }
+params.grow_time  = { type = "float", default = 7.0, range = [1.0, 60.0], description = "Seconds from sprout to full flower" }
+params.sway       = { type = "float", default = 1.6, range = [0.0, 4.0], description = "Sway (art pixels at the flower head)" }
+params.bloom_gain = { type = "float", default = 1.0, range = [0.0, 2.0], description = "How easily snare hits / fills open the blooms" }
+params.density    = { type = "float", default = 0.85, range = [0.1, 1.0], description = "Share of spots that get a plant" }
+params.center_gap = { type = "float", default = 0.0, range = [0.0, 0.8], description = "Keep this width clear in the middle (fraction of width)" }
+params.ground     = { type = "bool", default = true, description = "Draw the soil and grass strip" }
+budget = { gpu_ms = 0.4 }

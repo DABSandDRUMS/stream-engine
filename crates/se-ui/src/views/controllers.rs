@@ -734,6 +734,7 @@ fn assign_args(st: &State, base: Value) -> Value {
         }
         "ptt" => base.with("ptt", true),
         "scene" if st.edit_cut => base.with("scene", target).with("cut", true),
+        "page" => base.with("target_page", target),
         kind => base.with(kind, target),
     };
     for (key, v) in [("label", &st.edit_label), ("icon", &st.edit_icon), ("color", &st.edit_color), ("hold", &st.edit_hold)] {

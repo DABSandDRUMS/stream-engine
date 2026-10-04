@@ -1,0 +1,18 @@
+# Drum explosion: the trigger blows the picture apart from the kit. Square shards fly straight
+# out from `center`, spinning, shrinking, pixelating and dithering away over a dark backdrop with
+# a flash and a shockwave ring (tinted by the viewer's colour); kicks shove the debris further.
+# On release everything flies back in reverse and snaps into place.
+# Burst-only: it runs canvas-wide while `patch.<id>.env` > 0 (fire `patch.drum_explosion`).
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "effect"
+label       = "Drum explosion"
+description = "The picture shatters outward from the kit into spinning pixel shards, then rebuilds in reverse"
+params.amount   = { type = "float", default = 1.0, range = [0.0, 2.0], description = "How far the shards fly (a bigger trigger amount adds more)" }
+params.center   = { type = "vec2", default = [0.55, 0.8], range = [0.0, 1.0], description = "Blast center (uv, 0,0 = top left); default is the kit" }
+params.shard    = { type = "float", default = 52.0, range = [16.0, 120.0], unit = "px", description = "Shard size in pixels at 720p" }
+params.spin     = { type = "float", default = 0.5, range = [0.0, 1.0], description = "How fast the shards tumble" }
+params.pixelate = { type = "float", default = 1.0, range = [0.0, 1.0], description = "How chunky the shard pictures get as they fly" }
+params.backdrop = { type = "float", default = 1.0, range = [0.0, 2.0], description = "Brightness of the dim ghost picture behind the debris" }
+trigger = { attack = "50ms", hold = "6s", release = "900ms" }
+budget = { gpu_ms = 0.3 }

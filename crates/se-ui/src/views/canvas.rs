@@ -102,6 +102,21 @@ pub fn editor_nodes(app: &App, scene: &str, canvas: &str) -> Vec<CanvasNode> {
     out
 }
 
+pub(crate) fn framed_window(app: &App, scene: &str, canvas: &str, id: &str) -> bool {
+    let nodes = app.build.scene_config(scene)
+        .and_then(|s| s.get_path("canvas"))
+        .and_then(|c| c.get_path(canvas))
+        .and_then(|c| c.get_path("nodes"))
+        .and_then(Value::as_list)
+        .unwrap_or(&[]);
+    nodes.iter().any(|n| {
+        let src = n.get_path("src").and_then(Value::as_str).unwrap_or("");
+        let node_id = n.get_path("id").and_then(Value::as_str).filter(|s| !s.is_empty()).unwrap_or(src);
+        node_id == id && (src == "youtube" || n.get_path("fx").and_then(Value::as_list).unwrap_or(&[]).iter()
+            .any(|fx| fx.get_path("name").and_then(Value::as_str) == Some("patch.win31_video")))
+    })
+}
+
 fn vec4(v: [f32; 4]) -> Value {
     Value::from(v.map(|x| (x * 10000.0).round() / 10000.0))
 }
@@ -248,6 +263,7 @@ fn editor(app: &mut App, ui: &mut egui::Ui, scene: &str, canvas: &str, size: Vec
         canvas_px: monitor::canvas_size(canvas),
         grid: app.build.canvas.grid,
         snap: app.build.canvas.snap,
+        keep_aspect: app.build.canvas.selected.as_deref().is_some_and(|id| framed_window(app, scene, canvas, id)),
         snap_px: 6.0,
         safe_area: app.build.canvas.safe,
         tiktok_guides: app.build.canvas.tiktok && canvas == "tall",

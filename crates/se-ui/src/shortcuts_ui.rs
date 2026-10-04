@@ -84,7 +84,7 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
     }
     if fired(app, "search") {
         if app.page == Page::Live {
-            app.show.rail = crate::views::show::RailTab::Chat;
+            app.show.rail = crate::views::show::RailTab::Queue;
         } else {
             app.build.library_focus = true;
         }

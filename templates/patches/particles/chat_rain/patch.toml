@@ -1,0 +1,23 @@
+# Chat rain: every chat message (one patch trigger each) drops a chunky pixel raindrop in the
+# chatter's colour. Its column comes from user_hash, so a regular always rains from roughly the same
+# spot, and the shape (drop, gem, diamond, heart) is theirs too. It falls with a short speed trail and
+# lands in a crown splash with a few droplets on the floor line. Underneath, `twitch.chat_rate`
+# drives a thin ambient drizzle (capped), so a busy chat looks like weather. No manifest trigger:
+# the layer is always drawn and new messages are counted via se.trigger_count (up to 3 per frame,
+# each with the latest payload's colour).
+# Rule idea: do = ["patch.chat_rain.trigger"] on `twitch.chat` (the user/colour come from the event).
+kind        = "particles"
+layer       = "overlay"
+label       = "Chat rain"
+description = "Each chat message falls as a chunky pixel raindrop in the chatter's colour and splashes on the floor, over a drizzle that thickens with chat rate"
+particles   = { count = 640, sim = "sim.wgsl", draw = "draw.wgsl" }
+signals     = ["twitch.chat_rate"]
+params.pixel      = { type = "float", default = 0.0085, range = [0.003, 0.014], description = "Size of one sprite pixel of a message drop (fraction of layer height)" }
+params.speed      = { type = "float", default = 1.0, range = [0.4, 2.5], description = "Fall speed of message drops" }
+params.droplets   = { type = "int",   default = 5, range = [0, 6], description = "Splash droplets per message drop" }
+params.density    = { type = "float", default = 30.0, range = [0.0, 80.0], description = "Ambient drizzle drops per second at 100 chat messages per minute" }
+params.max_drops  = { type = "float", default = 40.0, range = [0.0, 100.0], description = "Ceiling on ambient drops per second however busy chat gets" }
+params.rain_color = { type = "color", default = "#a8c8ff", description = "Colour of the ambient drizzle" }
+params.wind       = { type = "float", default = 0.15, range = [-1.0, 1.0], description = "Sideways slant of the drizzle (negative = leftwards)" }
+params.floor      = { type = "float", default = 0.995, range = [0.5, 1.0], description = "Height of the splash line (0-1 of the layer, y down)" }
+budget      = { gpu_ms = 0.15 }

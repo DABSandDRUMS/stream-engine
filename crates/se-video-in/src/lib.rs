@@ -6,7 +6,8 @@
 //!   controls as `source.<n>.ctrl.<control>` with the device's real ranges.
 //! * Media files: FFmpeg (NVDEC `*_cuvid` when available) into NV12 or RGBA (alpha) slots.
 //! * Only sources in use are captured: `render.sources.used` when the renderer publishes it,
-//!   else every source referenced by a scene node.
+//!   else every source referenced by a scene node, plus every source a recorder taps
+//!   ([`se_hub::Hub::tap_video`], `video_in.<n>.taps`).
 //! * Temporary previews ([`preview`]): Settings → Devices shows a live thumbnail of any camera,
 //!   opened at a light mode while leased, or taken from the source already capturing it.
 //!
@@ -52,6 +53,8 @@ struct Src {
     writer: Option<VideoWriter>,
     worker: Option<Worker>,
     unused_since: Option<Instant>,
+    /// Last published `video_in.<n>.taps`.
+    taps: usize,
 }
 
 #[derive(Default)]
@@ -59,7 +62,7 @@ struct State {
     sources: BTreeMap<String, Src>,
     errors: HashMap<String, String>,
     health: Option<(String, String)>,
-    /// Source names currently wanted by the renderer/scenes.
+    /// Source names currently wanted by the renderer/scenes or recording taps.
     wanted: HashSet<String>,
     previews: preview::Previews,
 }
@@ -121,6 +124,7 @@ async fn run(
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => update_usage(&ctx, &shared).await,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             },
+            () = ctx.hub.video.taps_changed() => update_usage(&ctx, &shared).await,
             Some(cmd) = actions.recv() => {
                 if let se_proto::Op::Action { name, args } = &cmd.op {
                     match action(&ctx, &shared, name, args).await {
@@ -164,6 +168,7 @@ fn reload(ctx: &EngineCtx, shared: &Shared) {
                         let kind_changed = s.def.kind_str() != def.kind_str();
                         s.def = def.clone();
                         declare(ctx, &def);
+                        s.taps = 0;
                         if let Some(w) = &s.worker {
                             if kind_changed {
                                 // restarted with the right worker type by update_usage
@@ -179,8 +184,10 @@ fn reload(ctx: &EngineCtx, shared: &Shared) {
                     None => {
                         declare(ctx, &def);
                         let writer = ctx.hub.video.register(name);
-                        st.sources
-                            .insert(name.clone(), Src { def, status: Arc::new(Status::default()), writer: Some(writer), worker: None, unused_since: None });
+                        st.sources.insert(
+                            name.clone(),
+                            Src { def, status: Arc::new(Status::default()), writer: Some(writer), worker: None, unused_since: None, taps: 0 },
+                        );
                     }
                 }
                 if !st.sources[name].def.color.lut.is_empty() {
@@ -209,6 +216,7 @@ fn reload(ctx: &EngineCtx, shared: &Shared) {
         }
         st.errors.remove(&n);
         ctx.hub.submit(se_core::Input::Remove { prefix: format!("source.{n}") });
+        ctx.hub.submit(se_core::Input::Remove { prefix: format!("video_in.{n}") });
     }
 }
 
@@ -224,6 +232,10 @@ fn declare(ctx: &EngineCtx, def: &SourceDef) {
         config::Kind::File(f) => f.rel.clone(),
     };
     hub.publish(&format!("source.{n}.device"), Value::Str(device));
+    hub.declare(
+        &format!("video_in.{n}.taps"),
+        Meta::int(0, [0.0, 1.0e6]).readonly().owner(OWNER).describe("recording taps on this source; it is captured while any exist"),
+    );
     for (f, _, range, desc) in COLOR_FIELDS {
         hub.declare(&format!("source.{n}.color.{f}"), Meta::float(def.color.get(f), range).owner(OWNER).describe(desc));
     }
@@ -258,12 +270,15 @@ fn scene_sources(cfg: &se_core::Config) -> HashSet<String> {
     out
 }
 
+/// Sources to capture: the renderer's (or the scenes') plus every source a recorder taps.
 fn wanted(ctx: &EngineCtx) -> HashSet<String> {
     let snap = ctx.hub.snapshot.load();
-    if let Some(Value::List(l)) = snap.get("render.sources.used") {
-        return l.iter().filter_map(|v| v.as_str().map(str::to_string)).collect();
-    }
-    scene_sources(&ctx.config.borrow())
+    let mut want = match snap.get("render.sources.used") {
+        Some(Value::List(l)) => l.iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
+        _ => scene_sources(&ctx.config.borrow()),
+    };
+    want.extend(ctx.hub.video.tapped());
+    want
 }
 
 /// A source's `device` (identity, glob, or `/dev/…` path) among present cameras.
@@ -379,6 +394,11 @@ async fn update_usage(ctx: &EngineCtx, shared: &Shared) {
         let names: Vec<String> = st.sources.keys().cloned().collect();
         for name in names {
             let s = st.sources.get_mut(&name).expect("present");
+            let taps = ctx.hub.video.tap_count(&name);
+            if taps != s.taps {
+                s.taps = taps;
+                ctx.hub.publish(&format!("video_in.{name}.taps"), Value::Int(taps as i64));
+            }
             if want.contains(&name) {
                 s.unused_since = None;
                 if s.worker.is_none()
@@ -783,5 +803,101 @@ mod tests {
     #[test]
     fn allocator_is_counting() {
         assert!(se_alloc::installed());
+    }
+
+    #[test]
+    fn camera_frame_writes_do_not_allocate_with_or_without_taps() {
+        use se_hub::media::{PixelFormat, VideoSlots};
+        let slots = VideoSlots::default();
+        let mut w = slots.register("cam");
+        let frame = vec![7u8; 1280 * 2 * 720];
+        let write = |w: &mut se_hub::media::VideoWriter, ts| w.write(1280, 720, 2560, PixelFormat::Yuyv, ts, &frame);
+        // the triple buffer sizes its three buffers on first use
+        for ts in 0..3 {
+            write(&mut w, ts);
+        }
+        let s = se_alloc::Scope::begin();
+        for ts in 0..100 {
+            write(&mut w, ts);
+        }
+        assert_eq!(s.allocs(), 0, "untapped path");
+        drop(s);
+        let tap = slots.tap("cam", 2);
+        for ts in 0..3 {
+            write(&mut w, ts);
+            drop(tap.recv_timeout(Duration::ZERO));
+        }
+        let s = se_alloc::Scope::begin();
+        for ts in 0..100 {
+            write(&mut w, ts);
+            drop(tap.recv_timeout(Duration::ZERO).unwrap());
+        }
+        assert_eq!(s.allocs(), 0, "tapped steady state reuses its copies");
+    }
+
+    /// A file source stands in for a camera (same demand path; no devices are opened).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tap_adds_capture_demand_until_the_grace_after_its_last_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let made = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-f", "lavfi", "-i", "testsrc=size=64x48:rate=30", "-t", "2", "-pix_fmt", "yuv420p"])
+            .arg(dir.path().join("loop.mp4"))
+            .status();
+        if !made.is_ok_and(|s| s.success()) {
+            eprintln!("ffmpeg CLI not available: skipped");
+            return;
+        }
+        let (hub, core_rx) = se_hub::Hub::new(Arc::new(se_clock::Clock::new()));
+        let (_tx, cfg_rx) = tokio::sync::watch::channel(Arc::new(se_core::Config::default()));
+        let ctx = EngineCtx {
+            hub: hub.clone(),
+            db: se_store::Db::memory().unwrap(),
+            project_root: dir.path().to_path_buf(),
+            data_dir: dir.path().to_path_buf(),
+            share_dir: dir.path().to_path_buf(),
+            config: cfg_rx,
+            http: "127.0.0.1:0".parse().unwrap(),
+            dev: true,
+        };
+        let def = Arc::new(config::parse("loop", &toml::from_str("file = \"loop.mp4\"\nhwaccel = \"none\"").unwrap(), dir.path()).unwrap());
+        let shared: Shared = Arc::default();
+        let src = Src { def, status: Arc::new(Status::default()), writer: Some(hub.video.register("loop")), worker: None, unused_since: None, taps: 0 };
+        shared.lock().sources.insert("loop".into(), src);
+        let capturing = |sh: &Shared| sh.lock().sources["loop"].worker.is_some();
+        let taps_published = || {
+            let mut last = None;
+            while let Ok(m) = core_rx.try_recv() {
+                if let se_hub::CoreMsg::Input(se_core::Input::Publish { address, value }) = m
+                    && address == "video_in.loop.taps"
+                {
+                    last = value.as_i64();
+                }
+            }
+            last
+        };
+
+        update_usage(&ctx, &shared).await;
+        assert!(!capturing(&shared), "unused and untapped");
+
+        let tap = hub.tap_video("loop", 4);
+        assert!(wanted(&ctx).contains("loop"));
+        update_usage(&ctx, &shared).await;
+        assert!(capturing(&shared), "a tap alone makes it captured");
+        assert_eq!(taps_published(), Some(1));
+        let f = tokio::task::spawn_blocking(move || (tap.recv_timeout(Duration::from_secs(5)), tap)).await.unwrap();
+        let (frame, tap) = (f.0.expect("tapped frame"), f.1);
+        assert_eq!((frame.width, frame.height, frame.format), (64, 48, se_hub::media::PixelFormat::Nv12));
+        assert_eq!(frame.data.len(), (frame.stride * 48 * 3 / 2) as usize);
+        assert!(frame.seq > 0 && frame.ts > 0);
+
+        drop(tap);
+        assert!(!wanted(&ctx).contains("loop"));
+        update_usage(&ctx, &shared).await;
+        assert!(capturing(&shared), "kept through the unused grace");
+        assert_eq!(taps_published(), Some(0));
+        shared.lock().sources.get_mut("loop").unwrap().unused_since = Some(Instant::now() - UNUSED_GRACE);
+        update_usage(&ctx, &shared).await;
+        assert!(!capturing(&shared), "released after the grace");
+        assert!(shared.lock().sources["loop"].writer.is_some(), "slot writer handed back");
     }
 }

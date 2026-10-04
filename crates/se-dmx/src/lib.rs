@@ -11,8 +11,10 @@ pub mod control;
 pub mod cuelist;
 pub mod effects;
 pub mod engine;
+pub mod foundation;
 pub mod knobs;
 pub mod limiter;
+pub mod main_light;
 pub mod output;
 pub mod palette;
 pub mod playback;
@@ -21,6 +23,8 @@ pub mod programmer;
 pub mod query;
 pub mod rig;
 pub mod show;
+pub mod tags;
+mod tplink;
 
 pub use control::{Lights, run, start, stop};
 

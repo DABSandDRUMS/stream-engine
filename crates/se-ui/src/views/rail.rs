@@ -1,6 +1,6 @@
-//! Right rail on the Live page (§15.4): Chat (looks like chat; hover or right-click a message to
-//! moderate), Activity (friendly event cards, with "Show this alert?" cards on top while an alert
-//! waits in its veto window), Songs (compact queue), Mod (things waiting for your OK).
+//! Right rail on the Live page (§15.4): pinned Chat (hover or right-click a message to
+//! moderate) above Songs (compact queue), Activity (friendly event cards and veto windows),
+//! or Mod (things waiting for your OK). Tabs select only the lower pane.
 //! Data contract: docs/ui-data-contract.md.
 
 use crate::app::App;
@@ -42,7 +42,6 @@ pub fn badge_count(app: &App, tab: RailTab) -> usize {
         RailTab::Events => pending(app, "veto").len() + list(app, "alerts.veto").len(),
         RailTab::Queue => app.m.get("queue.pending").and_then(Value::as_i64).unwrap_or(0).max(0) as usize,
         RailTab::Mod => pending(app, "approval").len() + app.m.get("twitch.automod.held").and_then(Value::as_i64).unwrap_or(0).max(0) as usize,
-        RailTab::Chat => 0,
     }
 }
 
@@ -360,39 +359,44 @@ fn role_marks(t: &Theme, roles: &[Role]) -> Vec<(&'static str, Color32, &'static
 
 pub fn chat(app: &mut App, ui: &mut egui::Ui) {
     let t = app.t.clone();
-    // Chat after removals: deleted messages, purged users (ban/timeout/clear), and full clears.
-    let mut msgs: Vec<&Event> = Vec::new();
-    for e in app.m.events.iter() {
-        match e.ty.as_str() {
-            "twitch.chat" => msgs.push(e),
-            "twitch.chat.delete" => {
-                let id = e.payload.get_path("message_id").and_then(Value::as_str);
-                msgs.retain(|m| m.payload.get_path("message_id").and_then(Value::as_str) != id);
-            }
-            "twitch.user.purge" => {
-                let uid = e.payload.get_path("user_id").and_then(Value::as_str);
-                msgs.retain(|m| m.payload.get_path("user_id").and_then(Value::as_str) != uid && m.actor.as_ref().map(|a| a.id.as_str()) != uid);
-            }
-            "twitch.chat.clear" => msgs.clear(),
-            _ => {}
-        }
-    }
-    let msgs: Vec<Event> = msgs.into_iter().cloned().collect();
     let tw = crate::views::twitch::twitch_state(app);
     let connected = tw.connected();
+    let (audience, color) = if !app.m.connected || !connected {
+        ("Viewers unavailable".to_string(), t.text_dim)
+    } else {
+        match app.m.get("twitch.stream.live") {
+            Some(Value::Bool(false)) => ("Offline".to_string(), t.text_dim),
+            Some(Value::Bool(true)) => match app.m.get("twitch.stream.viewers").and_then(Value::as_i64).filter(|n| *n >= 0) {
+                Some(n) => (format!("{} watching", grouped(n)), t.green),
+                None => ("Viewers unavailable".to_string(), t.text_dim),
+            },
+            _ => ("Viewers unavailable".to_string(), t.text_dim),
+        }
+    };
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Twitch").size(type_scale::SMALL).color(t.text_dim));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.label(RichText::new(audience).font(font_medium(type_scale::BODY)).color(color))
+                .on_hover_text("Current Twitch viewers, not chat participants. Refreshes automatically with Twitch's viewer updates.");
+            ui.label(RichText::new(icon::USERS).size(type_scale::BODY).color(color));
+        });
+    });
+    ui.add_space(spacing::XS);
+    let msgs = &app.m.chat_messages;
     if !msgs.is_empty() {
         ui.add(se_ui_kit::widgets::field(&mut app.show.chat_filter).hint_text(format!("{}  Search chat", icon::SEARCH)).desired_width(f32::INFINITY));
         ui.add_space(spacing::XS);
     }
     let f = app.show.chat_filter.to_lowercase();
-    let bottom = if connected { 48.0 } else { 0.0 };
+    let bottom = if connected { 36.0 + spacing::S + 2.0 * ui.spacing().item_spacing.y } else { 0.0 };
     let mut act: Option<(&'static str, Value)> = None;
     let mut open_twitch = false;
     egui::ScrollArea::vertical()
         .id_salt("rail-chat")
         .stick_to_bottom(true)
         .auto_shrink([false, false])
-        .max_height((ui.available_height() - bottom).max(60.0))
+        .min_scrolled_height(0.0)
+        .max_height((ui.available_height() - bottom).max(0.0))
         .show(ui, |ui| {
             let mut any = false;
             for (n, e) in msgs.iter().enumerate() {
@@ -825,6 +829,48 @@ pub fn moderation(app: &mut App, ui: &mut egui::Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_audience_tracks_updates_without_presenting_unknown_or_cached_counts_as_live() {
+        use egui_kittest::{Harness, kittest::Queryable};
+
+        struct ChatApp(App);
+        impl eframe::App for ChatApp {
+            fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
+                egui::CentralPanel::default().show(ui, |ui| chat(&mut self.0, ui));
+            }
+        }
+        let mut h = Harness::builder().with_size([320.0, 400.0]).build_eframe(|cc| {
+            let mut app = App::new(
+                cc,
+                crate::UiOpts { socket: Some("/nonexistent/se-ui-audience-test.sock".into()), layout: Some("single".into()), program_only: false },
+            );
+            app.m.connected = true;
+            app.m.state.insert("twitch.auth.status".into(), Value::from("authorized"));
+            app.m.state.insert("twitch.stream.live".into(), Value::Bool(true));
+            ChatApp(app)
+        });
+        h.run_steps(3);
+        assert!(h.query_by_label_contains("watching").is_none(), "an unknown count is not zero viewers");
+        for n in [0, 1, 1234] {
+            h.state_mut().0.m.apply(se_proto::wire::ServerMsg::State { changes: vec![("twitch.stream.viewers".into(), Value::Int(n))] });
+            h.run_steps(3);
+            let label = format!("{} watching", grouped(n));
+            h.get_by_label(&label);
+            assert_eq!(h.query_all_by_label_contains("watching").count(), 1, "only the latest count is displayed");
+        }
+        h.state_mut().0.m.apply(se_proto::wire::ServerMsg::State { changes: vec![("twitch.stream.live".into(), Value::Bool(false))] });
+        h.run_steps(3);
+        assert!(h.query_by_label_contains("watching").is_none(), "offline must hide the last live count");
+        h.state_mut().0.m.state.insert("twitch.stream.live".into(), Value::Bool(true));
+        h.state_mut().0.m.connected = false;
+        h.run_steps(3);
+        assert!(h.query_by_label_contains("watching").is_none(), "a disconnected engine's cached count is not current");
+        h.state_mut().0.m.connected = true;
+        h.state_mut().0.m.state.insert("twitch.auth.status".into(), Value::from("pending"));
+        h.run_steps(3);
+        assert!(h.query_by_label_contains("watching").is_none(), "reauthorizing Twitch must hide the previous account's count");
+    }
 
     #[test]
     fn policy_window_uses_master_clock_deadlines() {

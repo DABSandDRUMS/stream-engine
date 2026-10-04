@@ -1,0 +1,18 @@
+# Desktop wormhole: on the trigger the picture shrinks into a Windows 3.1 window and recedes
+# down a spinning tunnel of nested copies of itself on a teal desktop, more windows pouring in
+# toward the center; on release it snaps back to full screen with a small overshoot.
+# Burst-only: it runs canvas-wide while `patch.<id>.env` > 0 (fire `patch.desktop_wormhole`).
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "effect"
+label       = "Desktop wormhole"
+description = "The picture recedes into a spinning tunnel of nested Windows 3.1 windows, then snaps back"
+params.amount  = { type = "float", default = 1.0, range = [0.0, 1.5], description = "How deep the picture is pulled in (1 = full tunnel)" }
+params.copies  = { type = "int", default = 8, range = [2, 10], description = "Nested windows in the tunnel" }
+params.spin    = { type = "float", default = 0.1, range = [0.0, 0.5], unit = "rad", description = "Twist added per nested window" }
+params.flow    = { type = "float", default = 0.6, range = [0.0, 2.0], description = "Windows sliding toward the center per second" }
+params.center  = { type = "vec2", default = [0.5, 0.5], range = [0.0, 1.0], description = "Where the tunnel leads (uv, 0,0 = top left)" }
+params.title_color = { type = "color", default = "#000080", description = "Title bar color" }
+params.desktop = { type = "color", default = "#008080", description = "Desktop color behind the tunnel" }
+trigger = { attack = "100ms", hold = "9s", release = "800ms" }
+budget = { gpu_ms = 0.3 }

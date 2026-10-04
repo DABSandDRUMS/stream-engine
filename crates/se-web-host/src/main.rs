@@ -5,7 +5,7 @@
 //! (`browser_subprocess_path` = itself), so `execute_process` runs first.
 //!
 //! Modes (the engine passes these; not meant to be run by hand except `--se-version`):
-//! * `--se-ipc-fd=3 --se-profile=<dir> [--se-log-file=<path>] [--se-devtools-port=<n>] [--se-no-gpu]`
+//! * `--se-ipc-fd=0 --se-profile=<dir> [--se-log-file=<path>] [--se-devtools-port=<n>] [--se-no-gpu]`
 //!   — off-screen host driven by the engine.
 //! * `--se-login=<url> --se-profile=<dir>` — windowed sign-in browser on the same profile.
 //! * `--se-version` — print the CEF version (install check).
@@ -15,8 +15,10 @@ mod ipc;
 mod login;
 mod osr;
 mod task;
+mod youtube;
 
 use cef::*;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -61,7 +63,7 @@ impl Opts {
 
 fn fail(msg: String) -> ! {
     ipc::log("error", msg.clone());
-    eprintln!("stream-engine-web: {msg}");
+    let _ = writeln!(std::io::stderr(), "stream-engine-web: {msg}");
     std::process::exit(1);
 }
 
@@ -76,7 +78,7 @@ fn main() {
     let opts = match Opts::parse(std::env::args().skip(1)) {
         Ok(o) => Arc::new(o),
         Err(e) => {
-            eprintln!("stream-engine-web: {e}");
+            let _ = writeln!(std::io::stderr(), "stream-engine-web: {e}");
             std::process::exit(2);
         }
     };
@@ -96,13 +98,14 @@ fn main() {
     }
 
     let Some(mode) = &opts.mode else {
-        eprintln!("stream-engine-web is started by the stream-engine daemon (see docs/web.md); `--se-version` prints the CEF version");
+        let _ =
+            writeln!(std::io::stderr(), "stream-engine-web is started by the stream-engine daemon (see docs/web.md); `--se-version` prints the CEF version");
         std::process::exit(2);
     };
     if let Mode::Osr { ipc_fd } = mode
         && let Err(e) = ipc::adopt(*ipc_fd)
     {
-        eprintln!("stream-engine-web: {e}");
+        let _ = writeln!(std::io::stderr(), "stream-engine-web: {e}");
         std::process::exit(2);
     }
     let Some(profile) = opts.profile.clone() else { fail("--se-profile=<dir> is required".into()) };

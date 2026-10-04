@@ -8,6 +8,7 @@
 //! engine state.
 
 use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
 use se_ui::app::{App, Page};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -23,14 +24,6 @@ fn pump(h: &mut Harness<'_, App>, ms: u64) {
         h.step();
         std::thread::sleep(Duration::from_millis(16));
     }
-}
-
-fn click(h: &mut Harness<'_, App>, pos: egui::Pos2) {
-    h.input_mut().events.extend([
-        egui::Event::PointerMoved(pos),
-        egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::default() },
-        egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::default() },
-    ]);
 }
 
 fn main() {
@@ -79,7 +72,7 @@ fn main() {
             }
             pump(&mut h, 1200);
             if page == Page::Live {
-                // one shot per right-rail tab: live-rail-chat, live-rail-activity, …
+                // one shot per lower-rail tab, with chat pinned above it
                 for (tab, label, _) in se_ui::views::show::RailTab::ALL {
                     let name = format!("live-rail-{}", label.to_lowercase());
                     if only.as_deref().is_some_and(|o| !name.starts_with(o) && !"live".starts_with(o)) {
@@ -89,30 +82,42 @@ fn main() {
                     pump(&mut h, 800);
                     shots += save(&mut h, &out, &name);
                 }
-                h.state_mut().show.rail = se_ui::views::show::RailTab::Chat;
+                h.state_mut().show.rail = se_ui::views::show::RailTab::Queue;
                 pump(&mut h, 300);
             }
             shots += save(&mut h, &out, &name);
+            if page == Page::Scenes && i == 1 {
+                h.get_by_label("Target racks / saved chains").click();
+                pump(&mut h, 300);
+                shots += save(&mut h, &out, &format!("{name}-racks"));
+                h.get_by_label("Targets — select a rack or check several for a preset").click();
+                pump(&mut h, 300);
+                shots += save(&mut h, &out, &format!("{name}-racks-controls"));
+                h.get_by_label("Targets — select a rack or check several for a preset").click();
+                pump(&mut h, 300);
+                h.get_by_label("Effect library / defaults").click();
+                pump(&mut h, 300);
+            }
             if page == Page::Recordings {
-                // The custom-drawn segmented control has no accesskit button nodes.
-                // Its position is fixed relative to the top-left, independent of viewport width.
-                for (x, suffix) in [(172.0, "streams"), (251.0, "clips")] {
-                    click(&mut h, egui::pos2(x, 190.0));
-                    pump(&mut h, 1200);
-                    shots += save(&mut h, &out, &format!("{name}-{suffix}"));
-                    if suffix == "streams" {
-                        let pick = h.state().m.q_list("sessions").iter().enumerate().find_map(|(index, session)| {
-                            let id = session.get_path("id").and_then(se_proto::Value::as_str)?;
-                            let summary = h.state().m.q(&format!("clips.session:{id}"))?;
-                            summary.get_path("recordings").and_then(se_proto::Value::as_list).filter(|r| !r.is_empty()).map(|_| index)
-                        });
-                        if let Some(index) = pick {
-                            // The list starts just below the tabs; each card and gap occupy ~100 px.
-                            click(&mut h, egui::pos2(200.0, 265.0 + index as f32 * 100.0));
-                            pump(&mut h, 1800);
-                            shots += save(&mut h, &out, &format!("{name}-streams-show"));
-                        }
-                    }
+                let pick = h.state().m.q_list("sessions").iter().find_map(|session| {
+                    let id = session.get_path("id").and_then(se_proto::Value::as_str)?;
+                    let summary = h.state().m.q(&format!("clips.session:{id}"))?;
+                    let clips = summary.get_path("clips").and_then(se_proto::Value::as_list)?;
+                    let clip = clips.first()?.get_path("id")?.as_i64()?;
+                    Some((id.to_owned(), clip))
+                });
+                if let Some((session, clip)) = pick {
+                    h.get_by_label(&format!("Open recording {session}")).click();
+                    pump(&mut h, 2000);
+                    shots += save(&mut h, &out, &format!("{name}-clips"));
+                    h.get_by_label(&format!("Open clip {clip}")).hover();
+                    pump(&mut h, 1800);
+                    shots += save(&mut h, &out, &format!("{name}-hover-a"));
+                    pump(&mut h, 700);
+                    shots += save(&mut h, &out, &format!("{name}-hover-b"));
+                    h.get_by_label(&format!("Open clip {clip}")).click();
+                    pump(&mut h, 1600);
+                    shots += save(&mut h, &out, &format!("{name}-detail"));
                 }
             }
             if page == Page::Scenes && i == 0 {

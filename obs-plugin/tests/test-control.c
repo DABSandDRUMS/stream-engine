@@ -182,7 +182,7 @@ int main(void)
 	json_decref(m);
 
 	/* line split across writes, two lines in one write, junk and objects without "t" */
-	const char *parts[] = {"{\"t\":\"cmd\",\"id\":7,", "\"op\":\"record.start\"}\n{\"t\":\"config\",\"stale_ms\":250}\n",
+	const char *parts[] = {"{\"t\":\"cmd\",\"id\":7,", "\"op\":\"stream.start\"}\n{\"t\":\"config\",\"stale_ms\":250}\n",
 			       "not json\n", "{\"id\":1}\n", "[1,2]\n", "\n", "{\"t\":\"cmd\",\"id\":8,\"op\":\"x\"}\n"};
 	for (size_t i = 0; i < sizeof(parts) / sizeof(parts[0]); i++) {
 		CHECK(write(fd, parts[i], strlen(parts[i])) == (ssize_t)strlen(parts[i]), "write part");
@@ -191,7 +191,7 @@ int main(void)
 	CHECK(wait_msgs(3, 1000), "three valid messages");
 	pthread_mutex_lock(&S.mu);
 	CHECK(S.n_msgs == 3, "exactly three (got %d)", S.n_msgs);
-	CHECK(strcmp(S.msgs[0], "{\"id\":7,\"op\":\"record.start\",\"t\":\"cmd\"}") == 0, "msg0 %s", S.msgs[0]);
+	CHECK(strcmp(S.msgs[0], "{\"id\":7,\"op\":\"stream.start\",\"t\":\"cmd\"}") == 0, "msg0 %s", S.msgs[0]);
 	CHECK(strcmp(S.msgs[1], "{\"stale_ms\":250,\"t\":\"config\"}") == 0, "msg1 %s", S.msgs[1]);
 	CHECK(strcmp(S.msgs[2], "{\"id\":8,\"op\":\"x\",\"t\":\"cmd\"}") == 0, "msg2 %s", S.msgs[2]);
 	S.n_msgs = 0;

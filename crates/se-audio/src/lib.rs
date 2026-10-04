@@ -1,10 +1,10 @@
 //! Audio subsystem (§8, §5 audio into OBS, §21): a PipeWire graph with our own nodes.
 //!
-//! * Capture: the Studio 24c stereo input (the 16R main mix) → `band` bus; more inputs (16R
-//!   USB multichannel stems) are configurable. `hub.audio` slots (YouTube player, web
-//!   patches, TTS, sound effects) feed `music`/`tts`/`sfx`/`game`.
-//! * Buses `band`, `music`, `sfx`, `tts`, `game` (+ `drums`, `mic` stems) → `program`, each
-//!   published as a PipeWire source node `se-<bus>` for OBS.
+//! * Capture: explicitly configured hardware or virtual sources feed named buses; an
+//!   empty input configuration captures nothing. `hub.audio` slots (YouTube player, web
+//!   patches, TTS, sound effects) feed their configured routing destinations.
+//! * Named mix buses → `program`, each published as a PipeWire source node `se-<bus>`
+//!   for independently configured recording and streaming consumers.
 //! * Effect chains (`se-dsp`), ducking, per-bus gain/mute/limiter, A/V delay, sampler,
 //!   `dsp` wasm patches, drum triggers, a low-latency monitor path.
 //! * Live analysis (`se-analysis`) → `band.*`, `music.*`, `beat.*`, `mic.*` signals/events.

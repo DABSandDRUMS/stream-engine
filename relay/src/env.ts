@@ -10,6 +10,8 @@ export interface Env {
   KOFI_BUFFER_MAX?: string;
   /** Heading of the public queue page. */
   QUEUE_TITLE?: string;
+  /** Twitch login linked from the public queue page (`twitch.tv/<login>`). */
+  QUEUE_CHANNEL?: string;
 }
 
 /** The single relay Durable Object. */

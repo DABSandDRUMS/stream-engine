@@ -1,14 +1,18 @@
 //! `se-ui`: the stream-engine window, a pure client of the engine API (§3.1, §15).
 
 pub mod app;
+pub mod diagnose;
+pub mod display;
 pub mod editor;
 pub mod frames;
+pub mod health;
 pub mod layout;
 pub mod model;
 pub mod monitors;
 pub mod palette;
 pub mod panels;
 pub mod preferences;
+pub mod recovery;
 pub mod shortcuts;
 pub mod shortcuts_ui;
 pub mod views;

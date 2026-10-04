@@ -11,6 +11,7 @@ struct Node {
     premultiplied: f32,    // 1: texture is premultiplied; 0: straight alpha
     use_mask: f32,
     solid: f32,
+    content: vec4<f32>,    // visible native content rect; zero uses dst (stretch)
 };
 
 @group(0) @binding(0) var<uniform> node: Node;
@@ -45,8 +46,14 @@ fn vs(@builtin(vertex_index) vi: u32) -> VsOut {
     o.local = local;
     let t = local / max(size, vec2<f32>(1e-3)) + 0.5;
     o.muv = t;
+    // Content placement is unrotated; the window remains the rotation/mask/corner frame.
+    var t_source = t;
+    if node.content.z > 0.0 && node.content.w > 0.0 {
+        let p_source = node.dst.xy + half + local;
+        t_source = (p_source - node.content.xy) / node.content.zw;
+    }
     // extrapolated past the rect edge (the quad is 1 px larger); clamped per fragment
-    o.uv = mix(node.uv.xy, node.uv.zw, t);
+    o.uv = mix(node.uv.xy, node.uv.zw, t_source);
     return o;
 }
 
@@ -60,7 +67,12 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let half = node.dst.zw * 0.5;
     let r = clamp(node.radius, 0.0, min(half.x, half.y));
     let d = sd_round_box(in.local, half, r);
-    let coverage = clamp(0.5 - d, 0.0, 1.0);
+    var coverage = clamp(0.5 - d, 0.0, 1.0);
+    if node.content.z > 0.0 && node.content.w > 0.0 {
+        let content_center = node.content.xy + node.content.zw * 0.5;
+        let p_source = node.dst.xy + half + in.local - content_center;
+        coverage *= clamp(0.5 - sd_round_box(p_source, node.content.zw * 0.5, 0.0), 0.0, 1.0);
+    }
     var c: vec4<f32>;
     if node.solid > 0.5 {
         c = vec4<f32>(node.color.rgb * node.color.a, node.color.a);

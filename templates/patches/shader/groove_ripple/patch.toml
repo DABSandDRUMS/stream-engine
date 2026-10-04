@@ -1,0 +1,19 @@
+# Groove Ripple — every kick drops a stone in the picture: a small wave packet of rings spreads
+# out from the kit, bending the image slightly with a faint glint on each crest. The ripple is
+# strongest in the background and toward the edges and fades out in a calm zone around the
+# drummer's face. A trigger (alert) drops one big stone: a ring burst with two echoes rolling out
+# to the edges, sized by the payload and glinting in the user's colour. Always-on effect, so no
+# manifest trigger: the burst is timed from se.trigger_age.
+# Attach: fx = [{ name = "patch.groove_ripple" }] on a camera source, scene node, or canvas.
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "effect"
+label       = "Groove Ripple"
+description = "Kick-driven ripple rings spreading from the kit, kept off the drummer's face"
+params.amount     = { type = "float", default = 1.0, range = [0.0, 2.0], description = "Overall strength" }
+params.center     = { type = "vec2", default = [0.5, 0.8], range = [0.0, 1.0], description = "Where rings start (uv, 0,0 = top left); default is the kit" }
+params.refraction = { type = "float", default = 0.8, range = [0.0, 3.0], description = "How much the rings bend the image" }
+params.highlight  = { type = "float", default = 0.35, range = [0.0, 1.0], description = "Faint glint on the wave crests" }
+params.speed      = { type = "float", default = 1.0, range = [0.3, 2.0], unit = "x", description = "How fast rings travel outward" }
+params.calm       = { type = "float", default = 0.28, range = [0.0, 0.6], description = "Radius of the ripple-free zone around the face (upper middle)" }
+budget = { gpu_ms = 0.3 }

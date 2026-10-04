@@ -12,6 +12,7 @@
 --   SUPER CTRL ALT + ESCAPE   Panic (effects off, safe lights, safe mix)
 --   SUPER CTRL ALT + C        Clean (clear chat overrides)
 --   SUPER CTRL ALT + B        BRB (toggle live ⇄ brb)
+--   SUPER CTRL ALT + V        Drum screen (desk ⇄ TV)
 
 -- Outputs (`hyprctl monitors all`). The TV is matched by EDID description so it keeps working
 -- whichever connector it is plugged into; `~/.local/bin/tv` parks it with the same selector.
@@ -35,6 +36,9 @@ o.bind("SUPER + CTRL + ALT + B", "Stream: BRB", streamctl("brb", "BRB"))
 o.bind("SUPER + CTRL + ALT + N", "Stream: Next scene to Up next", streamctl("next", "Next scene"))
 o.bind("SUPER + CTRL + ALT + P", "Stream: Previous scene to Up next", streamctl("prev", "Previous scene"))
 
+-- Replaces the standalone TV toggle when it was installed on this key.
+hl.unbind("SUPER + CTRL + ALT + V")
+o.bind("SUPER + CTRL + ALT + V", "Stream: Drum screen (desk / TV)", "stream-engine-drum-screen toggle")
 -- Every stream-engine window shows video: keep it fully opaque (like Omarchy's media windows).
 o.window("^stream-engine(\\..+)?$", { tag = "-default-opacity" })
 o.window("^stream-engine(\\..+)?$", { opacity = "1 1" })

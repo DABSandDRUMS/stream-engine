@@ -1,0 +1,15 @@
+# Pixel confetti: a burst of chunky 16-color confetti (chips, stars, notes, smileys, hearts,
+# bolts) fired from two poppers in the top corners; pieces flutter down in pixel steps, bounce
+# once off the bottom edge, and dither out. Bigger payloads (`amount`/`bits`/`count`) fire more.
+kind        = "particles"
+layer       = "overlay"
+label       = "Pixel confetti"
+description = "Old-computer confetti burst in the 16-color VGA palette that flutters down, bounces off the bottom, and dithers away"
+particles   = { count = 2048, sim = "sim.wgsl", draw = "draw.wgsl" }
+params.pieces  = { type = "float", default = 120.0, range = [10.0, 500.0], description = "Pieces per burst before the payload boost" }
+params.power   = { type = "float", default = 1.0, range = [0.3, 2.0], description = "Popper launch speed" }
+params.pixel   = { type = "float", default = 0.0042, range = [0.0015, 0.012], description = "Size of one sprite pixel (fraction of layer height)" }
+params.flutter = { type = "float", default = 1.0, range = [0.0, 2.0], description = "Sideways sway and flip speed while falling" }
+params.trickle = { type = "bool",  default = false, description = "Strong kicks drop a few extra pieces from the top while the burst is up" }
+trigger = { attack = "50ms", hold = "3s", release = "1500ms", retrigger = "stack" }
+budget  = { gpu_ms = 0.3 }

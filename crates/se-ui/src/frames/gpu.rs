@@ -32,6 +32,8 @@ pub fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'sta
         label: Some("se-ui device"),
         required_features: adapter.features() & IMPORT_FEATURES,
         required_limits: wgpu::Limits { max_texture_dimension_2d: 8192, ..base_limits },
+        // Do not reserve a 64 MiB staging block from the renderer/OBS BAR1 window.
+        memory_hints: wgpu::MemoryHints::MemoryUsage,
         ..Default::default()
     }
 }

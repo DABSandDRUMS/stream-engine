@@ -1,6 +1,8 @@
 //! SQLite tables of the song subsystem (runtime DB, §3.3): the video library/cache, the
-//! text-query cache, queue rows (current queue + history), and relay dedupe.
+//! text-query cache, queue rows (current queue + history), relay dedupe, and the song
+//! metadata cache (MusicBrainz results by video id).
 
+use crate::metadata::{self, SongInfo};
 use crate::queue::{Entry, Paid, Status};
 use crate::text;
 use crate::youtube::Video;
@@ -55,6 +57,36 @@ CREATE TABLE IF NOT EXISTS relay_seen (
   received_at INTEGER NOT NULL
 );
 "#;
+
+/// Song metadata by YouTube video id. `info` is the JSON [`SongInfo`] of a confident match,
+/// NULL for "no confident match"; either way nothing is looked up again before `retry_at`.
+const META_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS song_meta (
+  video_id TEXT PRIMARY KEY,
+  info TEXT,
+  fetched_at INTEGER NOT NULL,
+  retry_at INTEGER NOT NULL,
+  version INTEGER NOT NULL
+);
+"#;
+
+/// A `song_meta` row.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MetaRow {
+    /// `None`: no confident match.
+    pub info: Option<SongInfo>,
+    /// Unix seconds.
+    pub fetched_at: i64,
+    pub retry_at: i64,
+    pub version: i64,
+}
+
+impl MetaRow {
+    /// Should this video be looked up (again)?
+    pub fn due(&self, now_s: i64) -> bool {
+        self.version != metadata::VERSION || now_s >= self.retry_at
+    }
+}
 
 /// A library row: cached metadata plus what the player learned about it.
 #[derive(Clone, Debug, PartialEq)]
@@ -116,6 +148,7 @@ fn row_cached(r: &Row) -> rusqlite::Result<Option<Cached>> {
 impl Store {
     pub fn open(db: Db) -> Result<Store> {
         db.migrate("songs.v1", SCHEMA)?;
+        db.migrate("songs.meta.v1", META_SCHEMA)?;
         Ok(Store { db })
     }
 
@@ -367,6 +400,33 @@ impl Store {
     /// Forget dedupe records older than `days`.
     pub fn prune_seen(&self, days: i64) -> Result<()> {
         self.db.with(|c| c.execute("DELETE FROM relay_seen WHERE received_at < ?1", params![now_s() - days * 86_400]))?;
+        Ok(())
+    }
+
+    // ---- song metadata ------------------------------------------------------------------
+
+    pub fn song_meta(&self, video: &str) -> Option<MetaRow> {
+        self.db
+            .with(|c| {
+                c.query_row("SELECT info, fetched_at, retry_at, version FROM song_meta WHERE video_id = ?1", params![video], |r| {
+                    let info: Option<String> = r.get(0)?;
+                    Ok(MetaRow { info: info.and_then(|s| serde_json::from_str(&s).ok()), fetched_at: r.get(1)?, retry_at: r.get(2)?, version: r.get(3)? })
+                })
+                .optional()
+            })
+            .ok()
+            .flatten()
+    }
+
+    pub fn put_song_meta(&self, video: &str, info: Option<&SongInfo>, fetched_at: i64, retry_at: i64) -> Result<()> {
+        let js = info.map(serde_json::to_string).transpose()?;
+        self.db.with(|c| {
+            c.execute(
+                "INSERT INTO song_meta (video_id, info, fetched_at, retry_at, version) VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(video_id) DO UPDATE SET info = ?2, fetched_at = ?3, retry_at = ?4, version = ?5",
+                params![video, js, fetched_at, retry_at, metadata::VERSION],
+            )
+        })?;
         Ok(())
     }
 

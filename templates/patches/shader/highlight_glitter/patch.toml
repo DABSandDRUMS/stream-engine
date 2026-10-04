@@ -1,0 +1,16 @@
+# Highlight glitter — four-point star glints on small bright highlights (cymbals, lights,
+# reflections). Attach as an effect: `fx = [{ name = "patch.highlight_glitter", amount = 1.0 }]`.
+# Always on (no manifest trigger); hats and high-band energy raise sparkle activity, and a patch
+# trigger gives a short glitter shower timed from se.trigger_age.
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "effect"
+label       = "Highlight Glitter"
+description = "Tiny four-point star glints that twinkle on small bright highlights, livelier with hats and cymbals"
+params.amount    = { type = "float", default = 1.0,  range = [0.0, 2.0],  description = "Glint brightness" }
+params.threshold = { type = "float", default = 0.58, range = [0.3, 1.0],  description = "How bright a highlight must be to sparkle" }
+params.density   = { type = "float", default = 0.5,  range = [0.0, 0.7],  description = "Share of grid cells allowed to sparkle at full activity (hard cap)" }
+params.size      = { type = "float", default = 1.0,  range = [0.2, 1.0],  description = "Star ray length (1 = half a grid cell)" }
+params.angle     = { type = "float", default = 0.3,  range = [0.0, 1.5708], unit = "rad", description = "Star filter rotation" }
+params.react     = { type = "float", default = 1.0,  range = [0.0, 2.0],  description = "How much hats and high-band energy raise activity" }
+budget = { gpu_ms = 0.4 }

@@ -23,7 +23,7 @@ Handoff document for building a custom, all-in-one live-stream production engine
    Stream Deck, MIDI, voice, and chat are *inputs* to it, not separate UIs.
 3. **We write every application in the chain.** No third-party apps (no TouchDesigner, QLC+, Companion, StreamElements, Streamer.bot, Node-RED, UC Surface, etc.).
    Libraries are fine where they wrap a standard, the OS, or hard math: GPU API, codecs, browser engine, TLS, speech model inference, async runtime, serialization.
-4. **OBS is only the output.** It receives our finished frames and audio, encodes with **NVENC**, streams to Twitch/TikTok, and records. No compositing, no scenes (except one fallback scene), no overlays in OBS. Stream keys and destination setup are the streamer's business, not ours.
+4. **OBS only streams.** It receives our finished frames and selected streaming audio, encodes with **NVENC**, and streams to Twitch/TikTok. The app separately records video/audio sources selected in its Settings (§18). No compositing, no scenes (except one fallback scene), no overlays in OBS. Stream keys and destination setup are the streamer's business, not ours.
 5. **Performance from day one.**
    - Frames never leave the GPU on the output path.
    - No per-frame allocation.
@@ -178,6 +178,9 @@ Timelines are how anything (lights, video, audio, mixer, patches) gets **sequenc
 
 ### 2.8 Presets and modes
 - A preset is a named list of commands with timing (`hold`, `release`), a conflict policy for when it's already active (`stack | replace | queue | reject`), and a priority.
+- **Lanes** (`lane = "moment"`): at most one preset of a lane runs at a time. Firing one while its lane is busy (another of its presets running, or a quantized start pending) waits in that lane's FIFO queue — up to 8 waiting; a ninth firing fails (so a reward refunds), while a queued one succeeds (no refund). When the running preset ends (hold expiry, release, toggle-off, removal), the oldest waiting firing starts with its original origin, priority, actor and payload (chat TTL counts from the real start); one that waited more than 30 s is dropped and logged instead. The preset holding the lane re-fires by its own `conflict` first (`replace` restarts it in place and keeps the lane; `stack` stacks; `queue`/`reject` as usual). `preset.release` of a preset that hasn't started yet cancels its waiting firings. `panic` and `clean` empty lane queues (and drop pending lane starts).
+- **Quantize** (`quantize = "beat" | "bar"`): the preset starts on the next beat (`beat.phase`) or bar (`lfo.bar`, 4 beats) at `beat.bpm` — e.g. 120 bpm with `lfo.bar` at 0.75 starts 0.5 s later. No tempo (`beat.bpm` ≤ 0 or missing) or a boundary under 30 ms away starts it at once. A pending quantized start holds its lane. Any other `quantize` value is a config error for that file.
+- **Roulette** (`pick = [{ name = "confetti", w = 2 }, { name = "strobe" }]`, `avoid_repeat = 2`): firing the preset picks one entry by weight (`w`, default 1; 0 = never) with the core's seeded RNG, skipping that roulette's last `avoid_repeat` picks (default 0) while other candidates remain, and fires the pick exactly as `preset.fire <pick>` would — same payload, origin, priority, actor and event — so the pick's own `lane`, `quantize`, `conflict` and chat rules apply (the roulette's own `chat = false`/`confirm` also gate chat). The trace shows `roulette <name> picked <pick>` under the firing. Pick history is per roulette and lives in memory (not across restarts). Releasing a roulette is a no-op. Config errors: a roulette with `fx`, `lights`, `sound`, `mix`, `set`, `do`, `on_release`, `scene` or `mode`, a negative `w`, no `w` > 0, or naming itself (file rejected); an unknown pick target or one that is itself a roulette (reported).
 - Modes gate rules and chat effects. Mode changes are events, so they can fire presets (e.g. entering `brb` pulls the mic sends).
 - **Panic:** stops all effects and chat-triggered activity, sets lights to a safe look, and recalls the safe mix.
 - **Clean:** clears chat-originated overrides only.
@@ -214,9 +217,9 @@ Timelines are how anything (lights, video, audio, mixer, patches) gets **sequenc
 - One monotonic master clock (CLOCK_MONOTONIC, ns). **Everything** is timestamped with it: events, signals, commands, frames, audio blocks.
 - Maintained mappings to:
   - wall clock
-  - OBS stream and recording time (reported by our OBS plugin, §5)
+  - OBS stream time (reported by our OBS plugin, §5); app recording files use the master clock directly (§18)
   - Twitch stream delay (measured), so chat timestamps can be shifted back to the moment on screen
-  - the audio device clock (the 16R is the graph driver, §8.1)
+  - the selected audio device clock (§8.1)
 
 ### 3.3 Persistence
 - **Project directory** (plain text, lives in git):
@@ -230,6 +233,7 @@ Timelines are how anything (lights, video, audio, mixer, patches) gets **sequenc
     rules/*.toml
     bindings/*.toml
     timelines/*.toml
+    autoseq/*.toml      # auto sequence presets: program scene cycles on a timer (docs/auto-sequence.md)
     commands/*.toml     # chatbot commands, timers (§14.3)
     alerts/*.toml       # alert routing, variations, queue policy (§14.2)
     mixes/*.toml        # hardware mixer snapshots (§8.7)
@@ -264,7 +268,7 @@ Timelines are how anything (lights, video, audio, mixer, patches) gets **sequenc
   - `events.jsonl.zst`
   - `signals.bin` (downsampled)
   - `markers.json`
-  - `meta.toml` (OBS recording file paths, clock mappings)
+  - `meta.toml` (app recording file paths, selected tracks and master-clock mappings)
 - **Secrets:** OAuth refresh tokens and API keys go in the system keyring (Secret Service), never in project files.
 
 ### 3.4 Hot reload and isolation
@@ -363,15 +367,16 @@ A small native OBS module; our only code inside OBS.
 
 - **Video sources:** `stream-engine: wide` and `stream-engine: tall`. They import our dmabufs (`gs_texture_create_from_dmabuf`) and wait on sync fences. Zero copy, so NVENC encodes straight from GPU memory.
 - **Control channel** (Unix socket to the engine):
-  - reports stream/record start and stop, and output health (bitrate, dropped frames, encoder lag)
-  - reports OBS timestamps for clock mapping, and recording file paths
-  - accepts `stream.start` / `stream.stop` / `record.start` / `record.stop` through the OBS frontend API, so "Go live" in our UI starts OBS (optional; stream keys stay in OBS)
+  - reports stream start and stop, and output health (bitrate, dropped frames, encoder lag)
+  - reports OBS streaming timestamps for clock mapping
+  - accepts `stream.start` / `stream.stop` through the OBS frontend API, so "Go live" in our UI starts OBS (optional; stream keys stay in OBS)
 - **Fallback:** a "technical difficulties" scene the plugin (or OBS) switches to if our feed goes stale.
-- **Audio into OBS:**
-  - **Day one:** our engine publishes separate PipeWire nodes (`se-band`, `se-music`, `se-sfx`, `se-tts`, `se-game`, `se-program`; later `se-drums`/`se-mic` stems); OBS captures them, the program mix feeds the stream, and the separate tracks go to the recording.
-  - **Later option:** the plugin exposes audio sources fed from our rings with shared timestamps, for tighter A/V sync.
-- **Recording** (configured in OBS): wide and tall canvases plus multitrack audio.
-  - **Verified:** 10 concurrent 1080p60 `h264_nvenc` encodes ran successfully on this RTX 3070 / driver 610.57, so the 4 needed (2 streams + 2 recordings) fit.
+- **Audio into OBS:** choose the intended streaming feed, whether a hardware mix or a configured
+  PipeWire source. Avoid duplicate capture of the same mix. `obs.setup` adds video only; it does
+  not configure audio or recording.
+- **Recording belongs to the app** (§18): video/audio sources are selected in app Settings.
+  OBS audio tracks and recording settings do not determine the app's files.
+  - **Historical encoder-capacity check:** 10 concurrent 1080p60 `h264_nvenc` encodes ran on this RTX 3070 / driver 610.57. This is not acceptance proof for the app recorder or its selected sources.
   - The 3070 (Ampere) NVENC encodes H.264 and HEVC; **no AV1 encode**.
 - **OBS setup on this machine:**
   - OBS 32.2.2 with the Aitum Stream Suite plugin, which already defines a **"Vertical" canvas (1080×1920)** with a vertical stream output.
@@ -526,6 +531,8 @@ fx     = [{ name = "rgb_split", hold = "8s" }, { name = "patch.confetti" }]
 lights = { cue = "chase_fast", hold = "8s" }
 sound  = "airhorn"
 conflict = "replace"
+lane   = "moment"     # one big moment at a time; others wait their turn
+quantize = "bar"     # start on the next bar
 ```
 
 ```toml
@@ -566,18 +573,17 @@ cues = [
 
 ### 8.1 Graph (PipeWire, our own nodes)
 - **Inputs:**
-  - **Studio 24c stereo input = the StudioLive 16R's main mix** (all the 16R's channels summed: drums, mics, instruments). This is the room/band audio. 2 in / 2 out, 24-bit up to 192 kHz, plus 5-pin MIDI in/out.
-  - **16R individual channels** (later): per-channel audio through the 16R's USB multichannel, and per-channel meters over UCNET (§8.7).
+  - Explicitly configured hardware or virtual audio sources; an empty configuration captures nothing. Add/edit/remove from Sound → Mix; discovered devices are choices, not auto-created inputs. Inventory (§28.1) is not a parser default.
+  - Separate channels when available from the selected interface; a stereo mix cannot supply isolated stems.
   - e-drum MIDI (if used)
   - game/desktop
   - the YouTube player (CEF audio handler → our node)
   - media files, sound effects, TTS
-- **Buses:** `band` (the 16R mix from the 24c), `music`, `sfx`, `tts`, `game`, and later `drums`/`mic` stems → `program` mix. Each bus is published to OBS (§5). Every input and bus has an **effect chain** (§8.5).
-- **Talk detection for ducking:** the 16R mix is summed, so voice detection on it is unreliable with drums playing.
-  - Day one: ducking is triggered manually/by presets.
-  - Once `se-mixer` is connected: `mic.talking` comes from the 16R vocal channel's meter over UCNET (no extra audio cabling), or from the vocal stem if USB multichannel is used.
+- **Buses:** configured inputs and app producers feed named mix buses and the `program` mix. `music`, `sfx`, `tts` and `program` always exist for app audio; `band`, `game`, `drums` and `mic` exist only when an input, route or setting uses them, and none implies installed hardware. Inputs carry an operator-chosen name; a bus is named after the inputs routed into it, falling back to the device target or the identifier — never an invented name. Bus strips and effects belong under Advanced; the main mixer, Overview sound bar and mixer popout show input names and source-level controls, never inferred channels from bus existence. Buses may be published as PipeWire sources for selection by consumers. Every input and bus has an **effect chain** (§8.5). Publishing a bus does not automatically record it.
+- **Playback:** select output target, channels and post-fader buses. An external-mixer return must not feed back into its playback output. Monitoring has its own configurable target and routing.
+- **Talk detection for ducking:** detection on a complete mix can be unreliable during music. Use a suitable microphone input, configured meter source, or manual/preset ducking.
 - **Mixing:** per-bus gain, mute, and limiter. **Ducking:** `music` ducks under `mic.talking` (and under `tts`), with configurable depth/attack/release.
-- **Clocking:** the main audio interface (Studio 24c now; the 16R if it becomes the interface) is the PipeWire graph driver; other devices (USB camera mic, MSI capture audio) are resampled by PipeWire. Graph rate 48 kHz (PipeWire 1.6.8 here is already fixed to 48000).
+- **Clocking:** PipeWire manages the selected graph driver and resamples other devices. Graph rate 48 kHz (PipeWire 1.6.8 here is fixed to 48000); no particular interface is required.
 - **A/V alignment:** delay audio to match compositor video latency (camera and CEF paths); per-source offsets are adjustable in the UI.
 
 ### 8.2 Real-time constraints
@@ -971,13 +977,13 @@ One small service on the owner's domain; the only code we run off this machine.
 - **Overlays:** developer-made shader/particle/web/script pieces with on/off, Test and exposed settings. Place them into scenes. **Transitions:** choose defaults and per-scene/per-pair exceptions among developer-made transitions; Try it. **Media:** drag/drop or import, preview, rename with reference updates, safe delete.
 
 ### 15.6 Edit and Clipping
-- **Inputs:** cameras and devices (including live thumbnails); Buttons & pedals (Stream Deck, MIDI learn, footswitch, voice).
+- **Inputs:** add/edit/remove configured camera and media-file scene sources; discovered devices remain a separate inventory (including live thumbnails). Removal identifies scene references and refuses to strand them. Buttons & pedals covers Stream Deck, MIDI learn, footswitch and voice.
 - **Lights:** tap a developer-made look to turn it on/off, adjust exposed knobs, run cue lists, set master brightness/blackout, inspect live stage visualizer. No programmer: fixtures and looks are made for the owner.
-- **Sound:** Mix (channel strips, effects, "lowered while you talk"), Mixing desk (16R faders/saved mixes), Text to speech.
+- **Sound:** Mix (Add input / Manage inputs, actual capture sources, running app audio; Advanced for routing buses, bus effects and ducking), Mixing desk (16R faders/saved mixes), Text to speech. Input edits persist to their real configuration origin; neither the starter template nor removing the last configured capture input may create assumed hardware capture.
 - **Automation:** Reactions ("When … → do …"), Chat commands, Timelines.
 - **Community:** Alerts & goals, Song requests, Twitch, Giveaways.
-- **Clipping:** recording folder/health, past streams with time-aligned lanes/markers and manual clip selection, review queue.
-- **Settings:** Get started, Accounts & app (accounts, screens, appearance/Reduce motion, shortcuts), Backups, History (undo/versions), Performance, Troubleshooting.
+- **Clipping:** recordings library → a show's thumbnail clip grid → focused playback/review/trim; source timeline is secondary, recording status/start-stop compact.
+- **Settings:** Get started, Accounts & app (Recording: video/audio source selection, folder, automation; accounts, screens, appearance/Reduce motion, shortcuts), Backups, History (undo/versions), Performance, Troubleshooting.
 
 ### 15.7 Default shortcuts (all rebindable)
 
@@ -1097,19 +1103,25 @@ A checklist panel (and `streamctl preflight` in the CLI) with pass/warn/fail for
 
 The **Clipping** master tab owns recording status, past shows, and clips to review. The first
 deliverable is dependable capture and an understandable timeline, not a bespoke music classifier.
-OBS remains the video recorder/encoder. The engine owns the chosen destination and automation;
-it does not add new audio buses or invent tracks that the audio system does not provide.
+The app records feeds selected in **Settings → Accounts & app → Recording**; OBS only streams.
+Capture and clipping are source-agnostic: neither requires a named interface or OBS tracks.
 
 ### 18.1 Recording
 
-- `[recording] dir` is chosen in the UI and persisted in `project.toml`. Recording starts
-  automatically in the configured show modes (default `preshow`, `live`), stops on `offline`,
-  and can still be started/stopped manually. The OBS adapter must change OBS's **actual** recording
-  output directory, not just display a path. A directory change takes effect on the next file;
-  never interrupt an active recording to move it. One show folder per session under `dir`.
-- Show recording status, destination, free space, track layout, and actionable failures in the UI
-  and preflight. OBS tracks and tall-canvas recording are reported, not assumed. Preserve OBS's
-  per-file path and master-clock mapping (including split recordings) in `meta.toml`.
+- `[recording]` in `project.toml` stores `dir`, `auto`, `modes`, `snapshot_project`, `index`,
+  `video` and `audio` source lists, `fps`, `encoder` and `frames_socket`. Settings owns these
+  choices. Video defaults to `canvas:wide` / `canvas:tall`; audio entries select actual feeds.
+  External inputs accept explicit FFmpeg `format` / `source` pairs, passed as arguments, not
+  shell commands. Available-source discovery is not exhaustive. Empty audio means video-only.
+- The app uses FFmpeg to capture the selected feeds into one show folder per session under
+  `dir`. With automation enabled it starts in configured modes (default `preshow`, `live`) and
+  stops on `offline`; `recording.start` / `recording.stop` also work manually without OBS.
+  Settings changes apply to the next capture, never interrupt an active file to move it.
+- Show status, destination, free space, selected track layout and actionable failures in
+  Clipping and preflight. `recording.status` / `recording.sources` provide status and choices;
+  `recording.active/starting/stopping/path` and `health.recording` describe app capture.
+  Preserve per-file `{canvas, path, start_ns, end_ns, tracks}` in `meta.toml`'s `recordings`
+  array, using the app master clock, not OBS recording events or clocks.
 - The existing session journal (`events.jsonl.zst`, `signals.bin`, `markers.json`, `meta.toml`)
   remains the authoritative raw record. Snapshot project text configuration when recording starts,
   then copy the closed journal into the show's `data/`. Exclude credential-named settings, assets
@@ -1137,26 +1149,30 @@ state with clear gaps rather than claiming every lighting frame was captured.
 ### 18.3 Basic AI-assisted clipping
 
 Keep the existing hype/manual marker detector and post-show job. Add song intervals as candidate
-sources so performances appear even without chat hype. Talk clips may use sentence boundaries and
-omit the music track. A clip overlapping a requested song keeps the song and performance audio,
-uses musical boundaries when reliable beat/downbeat data is present (else a safe time window),
-and does not burn unreliable lyric captions. Never remove the backing track from a performance
-clip. The `Risk of DMCA` flag on such a clip is informational: it must not block production,
+sources so performances appear even without chat hype. Talk clips may use sentence boundaries,
+but cannot remove backing music from a complete mixed source. A clip overlapping a
+requested song keeps that same complete audio stream, uses musical boundaries when reliable
+beat/downbeat data is present (else a safe time window), and does not burn unreliable lyric
+captions. The `Risk of DMCA` flag is informational: it must not block production,
 approval, upload, or ranking.
+By default retain every selected recorded audio feed (`[clips.audio] drop = []`). Talk-track
+exclusions are opt-in; separate-track rules act on recorded streams, never imagined stems.
+Song clips retain all selected feeds. Selecting duplicate inputs is the operator's choice;
+the app does not infer source contents or deduplicate mixes.
 
 The existing `rank_command` argv/JSON hook is the model boundary. A non-interactive read-only
 `omp` wrapper may be selected there; it receives timestamped context (song, scene, lights, chat,
 transcript, markers and candidate bounds) and returns keys, scores, titles and in/out. A model
-failure retains deterministic candidates. Human Keep / Skip / Trim decisions and manual ranges
+failure retains deterministic candidates. Human approval/rejection/trim decisions and manual ranges
 are recorded with context as future feedback; no model training now.
 
 ### 18.4 Clipping UX
 
-- **Recording:** choose destination, see capture health and tracks, start/stop manually.
-- **Past streams:** open a show, scrub the recording against the song/talk/scene/light/chat/hype/
-  marker/clip lanes, select a range and make a clip. Keep the existing process/retry controls.
-- **Clips:** review wide and tall cuts, reasons, song/requester, informational DMCA badge,
-  Keep / Skip / Trim / Upload. Empty, indexing and failure states must say what to do.
+- **Recordings library:** familiar drive-like browsing, real thumbnails, dates, durations and clip counts. Compact capture status/start-stop; source configuration stays in Settings.
+- **Show results:** opening a recording shows its generated clips as large thumbnail cards, with duration and review status. Muted hover previews; click into a focused clip detail, not inline forms on every card.
+- **Clip detail:** playback, wide/tall selection, reasons, song/requester, informational DMCA badge, Approve / Reject / Apply trim / Upload. Back returns to the same show.
+- **Source timeline:** a secondary tool for the song/talk/scene/light/chat/hype/marker/clip lanes and manual clip ranges; keep automatic process/retry controls.
+- Empty, indexing, missing media and failure states must say what to do. Preview decoding is bounded and off the UI thread; leaving a card/page stops preview work.
 
 The other developer owns the main UI shell (`Overview / Edit / Clipping`) and the scene/light
 editors; this work owns the Clipping content and its recording/clip APIs. Shared shell changes
@@ -1227,7 +1243,7 @@ Suggested libraries (verify versions at start): `tokio`, `wgpu` (+ `ash` for dma
 ## 21. Performance requirements
 
 - **Frame rate:** 60 fps steady on both canvases with all 6 cameras (4 AVMatrix HDMI, MSI capture, USB camera), the YouTube source, 3 effects, and 2 overlay patches active. Frame time budget ≤ 8 ms GPU (leaving headroom for NVENC, CEF, and the UI).
-- **VRAM:** the RTX 3070 has 8 GB, shared with OBS (2 canvases + 4 NVENC sessions), CEF, and the desktop. Engine budget ≤ 3 GB, shown live in the perf panel.
+- **VRAM:** the RTX 3070 has 8 GB, shared with OBS streaming, app recording, CEF, and the desktop. Engine budget ≤ 3 GB, shown live in the perf panel.
 - **Capture bandwidth:** 4 × 1080p60 YUYV (≈1 GB/s) + MSI 720p60 + USB 1080p30 MJPEG, host→GPU; uploads use staging buffers reused per frame (no per-frame allocation).
 - **Output path zero-copy:** no CPU readback of canvas frames; UI previews are shared textures.
 - No shader/pipeline compilation outside load or hot reload.
@@ -1309,13 +1325,13 @@ Each milestone ends with a **live smoke run**: the actual app, real devices, out
 | **M1** | Core foundation | State tree + metadata + provenance, command API, events (causal ids), signals (LFOs), rules + expr, bindings, presets, modes, runtime-state persistence/restore, event log + sessions, simulator, WebSocket/OSC API with auth, `streamctl` CLI | `streamctl fire twitch.cheer bits=1000` → rule fires preset → param changes, observable over the API with a trace; `kill -9` the engine → state restored; session replay reproduces it |
 | **M2** | Video path + UI v0 | Device registry, V4L2 + MJPEG sources + camera controls, render graph, scenes/nodes, 2 canvases + preview, Take, morph + one shader transition, one effect at each attachment point incl. conditional, dmabuf export + UI import spike, **OBS plugin** (sources, health, fallback, start/stop), idle inhibitor, `se-ui-kit` with Omarchy theme/font, Show mode (status bar, preview/program, scenes, multiview), perf panel, confidence window | 2+ cameras in OBS at steady 60 fps on both canvases; Take with random transitions works; zero CPU readback on output and previews; UI follows `omarchy theme set` live; fallback scene on stale feed |
 | **M3** | Patches + Build mode | Loader, the four visual kinds (`shader`, `particles`, `script`, `web`; `dsp` comes in M12), input contract, Lua sandbox + budgets, WGSL header gen, CEF web source, templates + "New patch", preview/test routing, last-good-version reload, GPU device-loss recovery; Build mode (library, canvas editor, inspector with provenance, rules editor, trace, simulator, console) | Drop or create a patch → it appears and triggers; broken shader/script keeps the old version live; over-budget script suspended; web patch crash doesn't affect output; a scene built in the canvas editor round-trips to TOML with comments intact |
-| **M4** | Audio | PipeWire graph (Studio 24c as driver; realtime scheduling set up), `band` bus from the 24c (16R mix), buses → OBS nodes, ducking (manual/preset first), effect chains + built-in DSP library, live analysis → signals/events, binding shaping incl. auto-normalize, signal scopes, Mix strip | Bass from the band mix drives an effect param with the same feel across quiet/loud songs; kick events fire rules; a preset ducks music; a preset fires a tempo-synced stutter on the music bus with no clicks; PipeWire data loop confirmed `SCHED_FIFO`; no xruns in a 4 h soak |
+| **M4** | Audio | Configurable PipeWire inputs, buses, playback and monitoring; realtime scheduling; published virtual sources; ducking, effect chains + built-in DSP library, live analysis → signals/events, binding shaping incl. auto-normalize, signal scopes, Mix strip | Bass from the selected band mix drives an effect param with the same feel across quiet/loud songs; kick events fire rules; a preset ducks music; a preset fires a tempo-synced stutter on the music bus with no clicks; PipeWire data loop confirmed `SCHED_FIFO`; no xruns in a 4 h soak |
 | **M5** | Twitch + policy + alerts + bot | OAuth device flow, EventSub, chat send, rewards from files, fulfill/refund, policy pipeline, moderation actions, AutoMod queue, veto window, deletion sync, alert queue + alert/goal/label/chat-box templates with emotes, chatbot (commands, timers, counters, quotes), ad-break mode, preflight panel, right-rail tabs | A real cheer/sub/redeem fires presets with correct gating; a rejected redeem is refunded; a 50-gift bomb produces one combined alert; deleted messages vanish from the chat box; an ad break switches mode and back |
 | **M6** | Song requests + relay | YouTube lookup + cache + quota ledger, queue + policy UI, player page + web source (CPU paint path), audio routing, gapless preload, chat commands, **Cloudflare relay** (public `/queue` page, engine link), **Ko-fi tips** → `tip` events | `!sr <link or text>` → validated, queued, plays in the scene with audio on the music bus; the public queue page updates live; a Ko-fi test payment fires a tip alert; errors auto-skip; quota exhaustion degrades gracefully |
 | **M7** | Lights | Fixture profiles + library, patch, groups, stage layout, RDM discovery attempt, programmer, palettes, cue lists with tracking/fades/follows, playbacks with HTP/LTP merge, effects engine (beat-synced), palette sharing with video, visualizer, limiter, Enttec DMX USB PRO output (sACN/Art-Net kept), Lights view | A cue list with fades and follows runs from a deck key and from an X-TOUCH fader; a beat-synced color chase follows the band mix tempo; editing a palette updates every cue using it; limiter provably caps flash rate |
 | **M8** | Control surfaces + mixer | Stream Deck Original V2 (pages, rendered keys, feedback, page editor), X-TOUCH MINI in MC mode (encoders with LED-ring feedback, buttons with LEDs, fader with pickup), FBV Express (footswitch presets, expression pedal as a signal), OSC, voice push-to-talk + grammar, **`se-mixer` UCNET adapter** once the 16R is connected (control, meters, two-way sync, snapshots), Mixer + Controllers views | Same preset fireable from deck, MIDI, footswitch, voice, keybind, and chat; X-TOUCH encoder rings follow state changes made elsewhere; the X-TOUCH fader picks up without jumps; with the 16R: moving a fader in UC Surface updates our state and the encoder ring, and a preset crossfades a mix snapshot |
 | **M9** | Timelines + timecode | Generic timelines (cue tracks, automation lanes, region tracks), timecode sources (internal, media position, MTC in, LTC in, manual), MTC/LTC out, chase/freewheel/track-on-jump, record mode, timeline editor, offline analysis for library songs (beat grid, sections) | Nightly-song chorus cue fires on time from the YouTube player position; a lighting cue list + automation lane follow incoming MTC and survive a locate jump with correct tracked state; LTC out is readable by an external decoder |
-| **M10** | Recordings + clips | Auto recording into a chosen show folder, session journal and time-aligned timeline with full-show speech transcript, song/talk/marker candidates, optional omp ranking with deterministic fallback, wide + tall clips, review and feedback | A show records automatically in the selected folder; its timeline makes song, chat, scene and light context inspectable; a requested-song clip keeps performance + backing music, shows an informational DMCA badge, and can be reviewed/retrimmed |
+| **M10** | Recordings + clips | App-owned FFmpeg recording from video/audio sources selected in Settings into a chosen show folder, session journal and time-aligned timeline with full-show speech transcript, song/talk/marker candidates, optional omp ranking with deterministic fallback, wide + tall clips, review and feedback | A show records selected sources automatically in the selected folder without OBS recording; its timeline makes song, chat, scene and light context inspectable; a requested-song clip retains the complete selected mix, shows an informational DMCA badge, and can be reviewed/retrimmed |
 | **M11** | Extras | Omarchy polish (bar widget, menu entries, keybind/rule examples, PKGBUILD), first-run wizard, TTS (Kokoro), giveaways, credits, remote mod access via the relay, TikTok events (best-effort) | Fresh machine → install package → wizard → working starter project live on stream |
 | **M12** | Live instrument FX (optional; needs the 16R's multichannel USB) | Multichannel drum inputs via the 16R, `drums` bus, per-drum onset triggers (+ e-drum MIDI via the 24c DIN port), low-latency monitor path, sampler layering, `dsp` wasm patches | Snare hits fire visuals/lights reliably with no false triggers from bleed; processed drums on stream; if monitoring, measured round trip ≤ 10 ms |
 
@@ -1329,7 +1345,7 @@ Each milestone ends with a **live smoke run**: the actual app, real devices, out
 | Script language | Lua (LuaJIT) | Tiny, fast, easy to sandbox/hot-reload |
 | Browser engine | CEF, CPU paint path on NVIDIA until PR #4238 ships | Proven YouTube playback; the shared-texture path is currently broken on NVIDIA |
 | UI toolkit | `egui` + `se-ui-kit` on the shared GPU | Fast to build; fully restylable; GPU textures in-UI |
-| Audio into OBS | Separate PipeWire nodes | No extra plugin code; per-track recording works today |
+| Audio into OBS | Operator-selected hardware or PipeWire feed | Streaming only; app recording independently selects its own video/audio sources in Settings |
 | Custom DSP | `dsp` patches as WebAssembly | Our code, sandboxed, hot-reloadable, real-time safe |
 | Config format | TOML + UI editing (round-trip safe) | Human-editable, git-friendly |
 | Tips | Ko-fi | 0% platform fee on tips, handles payments/compliance, simple verified webhook |
@@ -1347,7 +1363,7 @@ Each milestone ends with a **live smoke run**: the actual app, real devices, out
 
 **Verified on this machine (2026-09-25):**
 - **dmabuf:** Vulkan dmabuf export/import extensions are present on the RTX 3070; OBS 32.2.2 has `gs_texture_create_from_dmabuf`; `wgpu-hal` has dmabuf import. Export is implemented through `ash` (§4.5).
-- **NVENC:** 10 concurrent 1080p60 H.264 encodes succeeded (need 4). No AV1 encode on Ampere.
+- **NVENC (historical capacity check):** 10 concurrent 1080p60 H.264 encodes succeeded. No AV1 encode on Ampere. This does not verify app capture, source selection or recording A/V alignment.
 - **Kernel:** fully preemptible (`CONFIG_PREEMPT=y`, 1000 Hz).
 - **PipeWire:** realtime since the `realtime` group login: `data-loop.0` `SCHED_FIFO` prio 88 (§28.4).
 - **Idle:** the Omarchy idle monitor respects inhibitors, and `omarchy toggle idle` exists (§16.3).
@@ -1362,7 +1378,7 @@ Each milestone ends with a **live smoke run**: the actual app, real devices, out
 | # | Verified live | Waiting on |
 |---|---|---|
 | M0–M1 | User service with watchdog, reconnect, hot reload, `kill -9` restore, cheer → rule → preset with trace, session replay | — |
-| M2 | Camera previews on the Devices page from the real inputs (kit, wide, kick, room live; HDMI 3 reports "No signal"). OBS 32.2.2 (isolated config copy) imported both canvases as dmabufs: 60.0 fps for 120 s with 3 live cameras, 10 Takes, feed loss → fallback in ≈300 ms and back, 44 s 1080p60 NVENC recording | `streamctl do obs.setup` in the owner's own OBS profile (adds video + sound) |
+| M2 | Historical video-path proof: camera previews from real inputs; isolated OBS 32.2.2 imported both canvases as dmabufs at 60.0 fps for 120 s with 3 live cameras, 10 Takes, feed loss → fallback in ≈300 ms and back. Its 44 s 1080p60 OBS NVENC recording is historical, not proof of app recording. | `streamctl do obs.setup` adds video; configure the intended streaming audio separately |
 | M3 | Patch hot reload, broken shader keeps the last good version, CEF web sources, GPU device-loss recovery | — |
 | M4 | PipeWire buses, `SCHED_FIFO` engine thread, 0 xruns over 10 min and the 4 h soak (`scripts/audio-soak.sh`) | Feel test with the band playing through the 16R mix |
 | M5 | Mock EventSub end to end; a 50-gift bomb gives one combined alert; a VIP chat command fires a preset and the bot replies | Twitch Client ID (§28.2) |
@@ -1370,7 +1386,7 @@ Each milestone ends with a **live smoke run**: the actual app, real devices, out
 | M7 | ENTTEC output 44 Hz, jitter p99 0.02 ms; the Main cue list runs from `lights.go` | Fixture list (§28.3); deck LX GO key and X-TOUCH fader presses (`scripts/acceptance-surfaces.sh cuelist`) |
 | M8 | The same preset fired by voice (Whisper), keybind/CLI and VIP chat, each with its own origin; UCNET control of the 16R at 10.0.0.187 (earlier session) | Deck, X-TOUCH, FBV presses and ring check (`scripts/acceptance-surfaces.sh`); the 16R back on the LAN (plus the two `ufw` rules in docs/devices-and-sources.md for discovery) |
 | M9 | MTC in/out; LTC out read back by `ltcdump` | — |
-| M10 | Full job on a 3-minute generated session: 3 ranked wide + tall NVENC clips, captions, music track dropped for talk clips; separate manual song cut retained music/performance and saved review feedback. Isolated engine indexed a recorded show and displayed its song, mode, chat, marker and clip lanes plus recorded track status in Clipping at 1720×1080 and 3440×1440. | A real session recorded with OBS in Advanced output, tracks 1–6 (docs/obs.md step 6) |
+| M10 | Historical pre-cutover proof only: generated-session clip jobs, manual song cut, review feedback, and indexed-show lanes/track display at 1720×1080 and 3440×1440. These used the former OBS-based recording contract and do not validate app capture or current source Settings. | Current app-recorder acceptance: selected video/audio captured without OBS recording, complete mixed audio retained, source changes reflected in the next recording, timeline and clip review verified against those files. No current proof recorded here. |
 | M11 | Package builds (all libraries resolve, no file conflicts); a fresh home's first start creates the starter project and Get started opens | `sudo pacman -U` of the package (needs the owner's password) |
 | M12 | — | The 16R's multichannel USB connection |
 
@@ -1384,7 +1400,7 @@ live frame timing or xruns.
 - **TikTok events:** unofficial; expect breakage; isolated.
 - **PreSonus firmware updates** may change UCNET; pin the firmware, and keep packet-capture fixtures to detect changes.
 - **Single GPU shared by** the compositor, CEF, NVENC, the UI, and Whisper (post-stream only; voice push-to-talk is short bursts). Instrumented from M2.
-- **YouTube music on Twitch** risks DMCA/VOD muting; the separate music track mitigates this for clips and VOD edits.
+- **YouTube music on Twitch** risks DMCA/VOD muting. A complete recorded mix cannot isolate or remove backing music; flag song clips for rights review regardless of the selected capture hardware.
 
 ---
 

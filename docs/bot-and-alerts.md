@@ -178,6 +178,43 @@ Actions: `alerts.veto|approve|replay {id}`, `alerts.skip`, `alerts.pause|resume`
 `alerts.add {file, path, key: alert|variation, fields}`, `alerts.remove {file, path, key, index}`,
 `alerts.policy {fields}`. Queries: `alerts` (current, queue, history), `alerts.config`.
 
+### Compact global notifications
+
+Use a web patch with `layer = "overlay"` and `[overlays.<id>]` in `project.toml`
+to draw above every scene, rather than adding the same popup to each scene. Separate
+wide/tall pages sharing one renderer keep the window chrome undistorted. Set
+`canvases`, per-canvas `rect`, `z`, and optional `when` there for later placement or
+scene restrictions ([render.md](render.md)).
+
+Render `alerts.current` directly, including its initial subscription snapshot.
+The engine already owns duration, ordering, vetoes, recipient updates, and removal;
+a second browser queue can replay stale or moderated notifications. A compact
+popup can use `user` as its caption and a short configured `title` as its only line
+(“Raid - 12 viewers”, “Gifted 50 subs”). Leave `message` empty to omit viewer text;
+gift recipients can stay in the engine state without filling the popup.
+
+For a local browser chime, designate **one** page as the audio owner (not both
+canvases), play only on `alert.show`, and never replay it from initial state or
+`alert.update`. Silence unless `song.state == "idle"`, `queue.playing == false`,
+`queue.now.id == ""`, and `queue.now.entry == 0`; missing state also stays silent.
+An empty, manually paused queue is idle, whereas a paused/buffering/ad/held current
+song is not. Stop the chime if song or scene state becomes ineligible. Optional
+silent-scene parameters affect audio only; visual notifications can remain global.
+Route the owning page to the sound-effects bus in an `audio/*.toml` file:
+
+```toml
+[slots."patch.win31_alerts"]
+bus = "sfx"
+```
+
+Keep `sound`/sound commands unset in the alert definitions when the renderer owns
+audio, and remove scene-local popup mounts to avoid duplicate notifications.
+Viewer-origin `alert.show` rules inherit chat priority, so `audio.play` from such a
+rule is subject to `[policy] effect_modes`; raising the rule's priority does not
+bypass that cap. Renderer-owned fixed audio avoids making notification sounds
+depend on chat-effect modes.
+
+
 ## Stats — `stats.*`
 
 Every follow, sub (incl. gifted), gift bomb, cheer, tip, and raid is a row in the runtime DB

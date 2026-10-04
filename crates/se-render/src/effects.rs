@@ -6,9 +6,9 @@
 //! `strength = max(amount, level × env)` for the implicit global instance, where `amount` is the
 //! latched intensity (presets `set`, bindings, manual) and `level × env` is the triggered
 //! contribution (a trigger payload `amount`/`level` overrides `level` for that trigger).
-//! Attached instances (source/node/scene/canvas/output `fx = [...]`) are on at their own
-//! `amount` (default 1) or, with `enabled = false`, only while triggered. Strength 0 skips the
-//! pass entirely. The flash limiter scales the strength of `flashy` effects.
+//! Attached instances are on at their independent `amount` (default 1), or explicitly select
+//! `triggered = true` to follow the shared effect-kind envelope. `enabled = false` bypasses
+//! a slot regardless of its envelope; host `fx_enabled = false` bypasses the chain.
 
 /// Max float params per effect (uniform block rows × 4).
 pub const MAX_PARAMS: usize = 16;

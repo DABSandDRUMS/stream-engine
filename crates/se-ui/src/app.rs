@@ -101,7 +101,7 @@ impl Page {
             Page::Scenes => "Arrange sources into layers, give layers effects, and choose how scenes change.",
             Page::Sources => "Everything that makes picture or sound: cameras, videos, images, web pages and generated visuals.",
             Page::Automation => {
-                "What happens by itself: alerts and triggers for stream events, controls and chat commands, and settings that follow music and beats."
+                "What happens by itself: alerts and triggers for stream events, controls and chat commands, scenes that change on a timer, and settings that follow music and beats."
             }
             Page::Sound => "Levels for everything your viewers hear.",
             Page::Lights => "Turn looks on and off, run cue lists, and set the overall brightness.",
@@ -125,6 +125,7 @@ impl Page {
                 (ViewId::Actions, "Actions"),
                 (ViewId::Modulation, "Modulation"),
                 (ViewId::Timeline, "Timelines"),
+                (ViewId::AutoSequence, "Auto sequence"),
             ],
             Page::Sound => &[(ViewId::Audio, "Mix"), (ViewId::Mixer, "Mixing desk"), (ViewId::Tts, "Read-out voice")],
             Page::Lights => &[(ViewId::Lights, "Lights")],
@@ -143,6 +144,7 @@ impl Page {
                 (ViewId::Maintenance, "Backups"),
                 (ViewId::History, "History"),
                 (ViewId::Performance, "Performance"),
+                (ViewId::Health, "Health"),
                 (ViewId::Troubleshoot, "Troubleshooting"),
             ],
         }
@@ -206,6 +208,7 @@ pub enum ViewId {
     Actions,
     Modulation,
     Timeline,
+    AutoSequence,
     Audio,
     Mixer,
     Lights,
@@ -221,6 +224,7 @@ pub enum ViewId {
     Maintenance,
     History,
     Performance,
+    Health,
     Troubleshoot,
 }
 
@@ -239,6 +243,7 @@ impl ViewId {
         (ViewId::Actions, icon::PLAY, "Actions"),
         (ViewId::Modulation, icon::WAVE, "Modulation"),
         (ViewId::Timeline, icon::TIMELINE, "Timelines"),
+        (ViewId::AutoSequence, icon::SHUFFLE, "Auto sequence"),
         (ViewId::Audio, icon::MIX, "Sound mix"),
         (ViewId::Mixer, icon::SLIDERS, "Mixing desk"),
         (ViewId::Lights, icon::LIGHT, "Lights"),
@@ -254,6 +259,7 @@ impl ViewId {
         (ViewId::Maintenance, icon::SAVE, "Backups"),
         (ViewId::History, icon::CLOCK, "History"),
         (ViewId::Performance, icon::PERF, "Performance"),
+        (ViewId::Health, icon::CHECK, "Health"),
         (ViewId::Troubleshoot, icon::CONSOLE, "Troubleshooting"),
     ];
 }
@@ -290,8 +296,12 @@ pub struct App {
     last_frame_ms: f32,
     /// Engine unreachable: since when, and the "Start Stream Engine" click.
     pub down: views::status::EngineDown,
+    /// Local workstation screens, independent of engine connectivity.
+    pub drum_screen: crate::display::DrumScreen,
     /// The "Before you go live" checklist.
     pub golive: views::status::GoLive,
+    /// Health checks over time, recoveries in flight, Fix with AI.
+    pub health: views::health::HealthState,
     /// Last `ui.focus` report: (connection, focused).
     focus_sent: Option<(u64, bool)>,
 }
@@ -333,7 +343,9 @@ impl App {
             project_root: None,
             last_frame_ms: 0.0,
             down: Default::default(),
+            drum_screen: crate::display::DrumScreen::new(cc.egui_ctx.clone()),
             golive: Default::default(),
+            health: Default::default(),
             focus_sent: None,
         }
     }
@@ -353,6 +365,7 @@ impl App {
             ViewId::Actions => views::actions::ui(self, ui),
             ViewId::Modulation => views::modulate::ui(self, ui),
             ViewId::Timeline => views::timeline::ui(self, ui),
+            ViewId::AutoSequence => views::auto_sequence::ui(self, ui),
             ViewId::Audio => views::audio::ui(self, ui),
             ViewId::Mixer => views::mixer::ui(self, ui),
             ViewId::Lights => views::lights::ui(self, ui),
@@ -368,6 +381,7 @@ impl App {
             ViewId::Maintenance => views::maintenance::ui(self, ui),
             ViewId::History => views::history::ui(self, ui),
             ViewId::Performance => views::perf::ui(self, ui),
+            ViewId::Health => views::health::ui(self, ui),
             ViewId::Troubleshoot => views::troubleshoot::ui(self, ui),
         }
     }
@@ -796,6 +810,11 @@ impl App {
             .exact_size(100.0)
             .frame(egui::Frame::new().fill(self.t.chrome).inner_margin(egui::Margin { left: 24, right: 24, top: 0, bottom: 0 }))
             .show(ui, |ui| views::status::ui(self, ui));
+        // Problems are impossible to miss: a banner under the header while anything fails.
+        let alerts = views::health::banner_items(self);
+        if !alerts.is_empty() {
+            egui::Panel::top("alerts").resizable(false).frame(views::health::banner_frame(self, &alerts)).show(ui, |ui| views::health::banner(self, ui, &alerts));
+        }
         if self.page.master() == Master::Edit {
             self.sidebar(ui);
         }
@@ -809,6 +828,7 @@ impl App {
         crate::windows::popouts(self, ctx);
         crate::windows::confidence(self, ctx);
         crate::palette::ui(self, ctx);
+        views::health::modals(self, ctx);
         crate::shortcuts_ui::overlay(self, ctx);
     }
 }
@@ -819,25 +839,38 @@ impl eframe::App for App {
         let ctx = &ui.ctx().clone();
         self.theme_changes(ctx);
         self.m.pump();
+        if !self.program_only {
+            if let Some(error) = self.drum_screen.tick(ctx) {
+                self.m.toast(error, true);
+            }
+        }
+        crate::views::mix::sync_bus_labels(self);
         self.ui_events(ctx);
         self.engine_info();
         self.report_focus(ctx);
-        self.m.refresh(&[
+        views::health::tick(self, ctx);
+        let refresh = [
             "presets",
             "scenes",
             "active",
             "modes",
+            "autoseq",
             "transitions",
             "sim.presets",
             "rules",
             "bindings",
             "errors",
             "config.scenes",
+            "config.sources",
+            "config.render",
+            "fx.chains",
             "project.files",
             "patches",
             "controllers.page",
             "sources",
-        ]);
+            "web",
+        ];
+        self.m.refresh(if self.build.native_sources { &refresh } else { &refresh[..refresh.len() - 1] });
         views::build::sync(self);
         if let Some(rs) = frame.wgpu_render_state() {
             self.frames.update(rs);
@@ -847,6 +880,9 @@ impl eframe::App for App {
             crate::windows::program_root(self, ui);
         } else {
             self.main_ui(ui, ctx);
+        }
+        if self.page != Page::Recordings && !self.is_popped_out(&Panel::View(ViewId::Sessions).id()) {
+            views::sessions::leave(ctx);
         }
         self.toasts(ctx);
         let repaint = [33, 50, 80][self.gpu_pressure() as usize];

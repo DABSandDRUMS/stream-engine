@@ -317,7 +317,7 @@ pub fn params_ui(app: &mut App, ui: &mut egui::Ui, p: &Value) {
     }
 }
 
-fn rgba(v: &Value) -> Option<Color32> {
+pub(crate) fn rgba(v: &Value) -> Option<Color32> {
     match v {
         Value::Str(s) => se_ui_kit::theme::hex(s),
         Value::List(l) if l.len() >= 3 => {
@@ -329,7 +329,7 @@ fn rgba(v: &Value) -> Option<Color32> {
 }
 
 /// A color in the same form as the parameter's default (`"#rrggbb"` or `[r, g, b, a]`).
-fn color_value(c: Color32, like: &Value) -> Value {
+pub(crate) fn color_value(c: Color32, like: &Value) -> Value {
     let [r, g, b, a] = c.to_srgba_unmultiplied();
     match like {
         Value::List(l) => {

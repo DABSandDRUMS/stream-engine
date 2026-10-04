@@ -129,7 +129,9 @@ impl Gpu {
             features |= wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
         }
         let limits = adapter.limits();
-        let memory_hints = wgpu::MemoryHints::Performance;
+        // Performance reserves 64 MiB of CPU-visible VRAM even for tiny uploads.
+        // Renderer + UI share the discrete GPU's small BAR1 window with OBS/CEF.
+        let memory_hints = wgpu::MemoryHints::MemoryUsage;
 
         // Open through wgpu-hal to add the export extensions.
         let supported: Vec<std::ffi::CString> = unsafe {

@@ -19,12 +19,21 @@ use se_proto::{Command, Event, Meta, Op, Origin, Role, Value, ValueType};
 use serde_json::{Value as J, json};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 
 const OWNER: &str = "twitch";
 /// How often the moderator and VIP lists are re-read.
 const ROLES_EVERY: Duration = Duration::from_secs(600);
+/// `fx.enabled` must hold this long before rewards are re-synced (an operator flicking the
+/// toggle costs one Helix round, not one per flick).
+const FX_DEBOUNCE: Duration = Duration::from_millis(500);
+
+/// `fx.enabled` as published by the core; missing (older core) or null means effects are on.
+fn fx_on(v: Option<&Value>) -> bool {
+    v.is_none_or(|v| v.is_null() || v.truthy())
+}
 
 fn list_meta() -> Meta {
     Meta { ty: ValueType::List, default: Value::List(Vec::new()), ..Default::default() }
@@ -172,6 +181,13 @@ pub struct Service {
     sources: Mutex<Sources>,
     /// Last error reading each moderator/VIP list (warned once until it works again).
     roles_errors: Mutex<[Option<String>; 2]>,
+    /// Last seen `fx.enabled`; rewards with `fx = true` are paused on Twitch while false.
+    fx_enabled: AtomicBool,
+    fx_changed: tokio::sync::Notify,
+    /// `fx.enabled` the rewards on Twitch were last synced with (None: not synced yet).
+    rewards_fx: Mutex<Option<bool>>,
+    /// One reward sync at a time (config reload, fx toggle and `twitch.rewards.sync` overlap).
+    rewards_lock: tokio::sync::Mutex<()>,
 }
 
 impl Service {
@@ -230,6 +246,10 @@ impl Service {
             users: Mutex::new(HashMap::new()),
             sources: Mutex::new(Sources::default()),
             roles_errors: Mutex::new([None, None]),
+            fx_enabled: AtomicBool::new(true),
+            fx_changed: tokio::sync::Notify::new(),
+            rewards_fx: Mutex::new(None),
+            rewards_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -316,6 +336,7 @@ impl Service {
         self.load_cached_emotes();
         self.set("twitch.client_id", self.cfg().client_id);
         self.update_delay();
+        self.fx_enabled.store(fx_on(self.hub.snapshot.load().get("fx.enabled")), Ordering::Relaxed);
         self.update_health();
 
         // routes are registered before `start` returns so no action goes unrouted
@@ -332,6 +353,8 @@ impl Service {
         let me = self.clone();
         tokio::spawn(async move { me.config_watcher().await });
         let me = self.clone();
+        tokio::spawn(async move { me.fx_watcher().await });
+        let me = self.clone();
         tokio::spawn(async move { me.tickers().await });
         let me = self.clone();
         tokio::spawn(async move { me.bootstrap().await });
@@ -346,14 +369,26 @@ impl Service {
             if a == Account::Bot && !self.cfg().bot {
                 continue;
             }
-            match self.auth.load(a).await {
-                Ok(true) => self.authorized(a).await,
-                Ok(false) => {
-                    self.set(&format!("{}.status", auth_prefix(a)), "none");
-                    self.health.lock().auth[a as usize] = None;
-                    self.update_health();
+            // Network/DNS/Twitch outages at boot are transient: keep retrying the stored
+            // grant with backoff. Only a revoked grant needs the owner to authorize again.
+            let mut wait = Duration::from_secs(2);
+            loop {
+                match self.auth.load(a).await {
+                    Ok(true) => self.authorized(a).await,
+                    Ok(false) => {
+                        self.set(&format!("{}.status", auth_prefix(a)), "none");
+                        self.health.lock().auth[a as usize] = None;
+                        self.update_health();
+                    }
+                    Err(e @ AuthError::Other(_)) => {
+                        self.auth_failed(a, &e);
+                        tokio::time::sleep(wait).await;
+                        wait = (wait * 2).min(Duration::from_secs(60));
+                        continue;
+                    }
+                    Err(e) => self.auth_failed(a, &e),
                 }
-                Err(e) => self.auth_failed(a, &e),
+                break;
             }
         }
     }
@@ -916,9 +951,12 @@ impl Service {
             return;
         }
         let Some(bid) = self.broadcaster_id() else { return };
+        let _one = self.rewards_lock.lock().await;
         let defs = self.rewards_defs.read().clone();
-        match rewards::sync(&self.helix, &self.ctx.db, &bid, &defs).await {
+        let fx = self.fx_enabled.load(Ordering::Relaxed);
+        match rewards::sync(&self.helix, &self.ctx.db, &bid, &defs, fx).await {
             Ok((list, map)) => {
+                *self.rewards_fx.lock() = Some(fx);
                 let errors: Vec<String> = list.iter().filter(|s| s.status.starts_with("error")).map(|s| format!("{}: {}", s.key, s.status)).collect();
                 for e in &errors {
                     self.hub.log("error", OWNER, format!("reward {e}"));
@@ -934,6 +972,27 @@ impl Service {
             }
         }
         self.update_health();
+    }
+
+    /// Pause/unpause `fx = true` rewards when the operator turns effects off/on, once
+    /// `fx.enabled` has settled for [`FX_DEBOUNCE`].
+    async fn fx_watcher(self: Arc<Self>) {
+        loop {
+            self.fx_changed.notified().await;
+            while tokio::time::timeout(FX_DEBOUNCE, self.fx_changed.notified()).await.is_ok() {}
+            let on = self.fx_enabled.load(Ordering::Relaxed);
+            if *self.rewards_fx.lock() == Some(on) || !self.rewards_defs.read().iter().any(|d| d.fx) {
+                continue;
+            }
+            self.hub.log("info", OWNER, if on { "effects on: resuming effect rewards" } else { "effects off: pausing effect rewards" });
+            self.sync_rewards().await;
+        }
+    }
+
+    fn fx_seen(&self, on: bool) {
+        if self.fx_enabled.swap(on, Ordering::Relaxed) != on {
+            self.fx_changed.notify_one();
+        }
     }
 
     // ---- config ---------------------------------------------------------------------------
@@ -993,14 +1052,24 @@ impl Service {
         }
     }
 
-    // ---- bus: audit ----------------------------------------------------------------------
+    // ---- bus: audit, fx.enabled ----------------------------------------------------------
 
-    /// Audit every policy decision (§12.1 "audit everything").
+    /// Audit every policy decision (§12.1 "audit everything"); follow `fx.enabled` for rewards.
     async fn bus_listener(self: Arc<Self>) {
         let mut bus = self.hub.subscribe();
         loop {
             match bus.recv().await {
                 Ok(b) => {
+                    if let Bus::Changes(changes) = &*b
+                        && let Some((_, v)) = changes.iter().rev().find(|(a, _)| a == "fx.enabled")
+                    {
+                        self.fx_seen(fx_on(Some(v)));
+                    }
+                    if let Bus::Event(e) = &*b
+                        && e.ty == "fx.changed"
+                    {
+                        self.fx_seen(fx_on(e.payload.get_path("enabled")));
+                    }
                     if let Bus::Event(e) = &*b
                         && let Some(kind) = e.ty.strip_prefix("policy.")
                     {
@@ -1013,7 +1082,10 @@ impl Service {
                         let _ = self.ctx.db.audit("policy", actor.as_deref(), &format!("{kind} {what}"), ok, err.as_deref());
                     }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => tracing::warn!(target: "twitch", "audit listener lagged by {n} bus messages"),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!(target: "twitch", "audit listener lagged by {n} bus messages");
+                    self.fx_seen(fx_on(self.hub.snapshot.load().get("fx.enabled")));
+                }
                 Err(_) => return,
             }
         }

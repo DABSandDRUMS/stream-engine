@@ -6,6 +6,7 @@
 use crate::taps::BlockStamp;
 use parking_lot::Mutex;
 use se_analysis::{AnalysisEvent, Features, LiveAnalyzer, LiveConfig, N_BANDS, OnsetConfig};
+use se_clock::musical::{MusicalClock, Observation, Source as ClockSource};
 use se_hub::Hub;
 use se_proto::{Event, Origin, Value};
 use std::collections::BTreeMap;
@@ -15,6 +16,9 @@ use std::time::{Duration, Instant};
 
 /// RMS below which a bus is treated as silent (≈ −50 dBFS): no beat clock from it.
 const SILENCE: f32 = 0.003;
+/// A bus is live while its latest audible hop (above [`SILENCE`]) is at most this old, so the
+/// gaps between hits of a sparse groove neither drop the clock nor reset the tracker.
+const FRESH_NS: u64 = 250_000_000;
 
 /// Beat clock shared with the control thread (feeds the RT transport). Written by the
 /// analysis thread only.
@@ -29,6 +33,7 @@ pub struct BeatShared {
 
 impl BeatShared {
     fn store(&self, bpm: f32, beat: f64, ts: u64, conf: f32) {
+        self.seq.fetch_add(1, Ordering::AcqRel);
         self.bpm.store(bpm.to_bits(), Ordering::Relaxed);
         self.beat.store(beat.to_bits(), Ordering::Relaxed);
         self.ts.store(ts, Ordering::Relaxed);
@@ -38,14 +43,24 @@ impl BeatShared {
 
     /// (seq, bpm, beat, ts, confidence)
     pub fn load(&self) -> (u64, f32, f64, u64, f32) {
-        let seq = self.seq.load(Ordering::Acquire);
-        (
-            seq,
-            f32::from_bits(self.bpm.load(Ordering::Relaxed)),
-            f64::from_bits(self.beat.load(Ordering::Relaxed)),
-            self.ts.load(Ordering::Relaxed),
-            f32::from_bits(self.confidence.load(Ordering::Relaxed)),
-        )
+        loop {
+            let seq = self.seq.load(Ordering::Acquire);
+            if seq & 1 != 0 {
+                std::hint::spin_loop();
+                continue;
+            }
+            let values = (
+                seq,
+                f32::from_bits(self.bpm.load(Ordering::Relaxed)),
+                f64::from_bits(self.beat.load(Ordering::Relaxed)),
+                self.ts.load(Ordering::Relaxed),
+                f32::from_bits(self.confidence.load(Ordering::Relaxed)),
+            );
+            std::sync::atomic::fence(Ordering::Acquire);
+            if self.seq.load(Ordering::Relaxed) == seq {
+                return values;
+            }
+        }
     }
 }
 
@@ -73,6 +88,8 @@ pub enum Msg {
     Setup(Box<Setup>),
     Tap(u64),
     ClearTap,
+    Bpm(f32),
+    ResetSources,
     Quit,
 }
 
@@ -91,7 +108,10 @@ struct Run {
     hop: u64,
     talking: bool,
     talk_until: u64,
-    last_level: f32,
+    /// Master ns of the latest hop above [`SILENCE`] (0 = none yet).
+    last_audible_ts: u64,
+    last_audio_ts: u64,
+    audible: bool,
     /// Voice detector on the mic (`mic.talking` = voice and above the talk level).
     vad: Option<Box<se_analysis::vad::Vad>>,
 }
@@ -174,14 +194,16 @@ fn thread(hub: Arc<Hub>, rx: std::sync::mpsc::Receiver<Msg>, beat: Arc<BeatShare
     let mut last_audio_map = Instant::now() - Duration::from_secs(1);
     let mut beat_pref = String::from("auto");
     let mut beat_src: Option<usize> = None;
-    let mut beat_switch_since: Option<Instant> = None;
+    let mut beat_switch_since: Option<(usize, Instant)> = None;
     let mut talk_thr = se_dsp::db_to_gain(-42.0);
     let mut talk_hold_ns = 600_000_000u64;
     let mut l = vec![0.0f32; 4096];
     let mut r = vec![0.0f32; 4096];
     let mut inter = vec![0.0f32; 8192];
     let mut last_latest = Instant::now();
-    let mut pending_taps: Vec<u64> = Vec::new();
+    let mut musical = MusicalClock::new(se_clock::now());
+    let mut last_clock_publish = Instant::now() - Duration::from_secs(1);
+    let mut event_beat = 0u64;
     loop {
         loop {
             match rx.try_recv() {
@@ -211,53 +233,98 @@ fn thread(hub: Arc<Hub>, rx: std::sync::mpsc::Receiver<Msg>, beat: Arc<BeatShare
                                 hop: 0,
                                 talking: false,
                                 talk_until: 0,
-                                last_level: 0.0,
+                                last_audible_ts: 0,
+                                last_audio_ts: 0,
+                                audible: false,
                                 vad: src.is_mic.then(|| Box::new(se_analysis::vad::Vad::new(s.rate as f32))),
                             }
                         })
                         .collect();
                     beat_src = None;
+                    beat_switch_since = None;
+                    musical.invalidate_source(se_clock::now());
                     latest.lock().clear();
                 }
-                Ok(Msg::Tap(ts)) => pending_taps.push(ts),
-                Ok(Msg::ClearTap) => {
+                Ok(Msg::Tap(ts)) => musical.tap(ts),
+                Ok(Msg::Bpm(bpm)) => { musical.set_bpm(se_clock::now(), bpm); }
+                Ok(Msg::ClearTap) => musical.clear_override(se_clock::now()),
+                Ok(Msg::ResetSources) => {
+                    musical.invalidate_source(se_clock::now());
+                    beat_switch_since = None;
                     for run in &mut runs {
-                        run.an.clear_tap();
+                        if let Some(bt) = run.an.beat_mut() { bt.reset(); }
+                        run.last_audible_ts = 0;
+                        run.last_audio_ts = 0;
+                        run.audible = false;
                     }
                 }
-                Ok(Msg::Quit) | Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+                Ok(Msg::Quit) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    musical.clear_override(se_clock::now());
+                    let clock = musical.snapshot();
+                    beat.store(clock.bpm, clock.position, clock.ts, 0.0);
+                    hub.signals(vec![
+                        ("beat.confidence".into(), 0.0), ("beat.locked".into(), 0.0),
+                        ("beat.freewheel".into(), 1.0), ("beat.source".into(), 0.0),
+                    ]);
+                    latest.lock().insert("beat".into(), Value::map()
+                        .with("source", "fallback").with("status", "stopped")
+                        .with("locked", false).with("freewheel", true).with("confidence", 0.0)
+                        .with("bpm", clock.bpm as f64).with("position", clock.position));
+                    return;
+                }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
             }
         }
-        for ts in pending_taps.drain(..) {
-            for run in &mut runs {
-                run.an.tap(ts);
-            }
-        }
         // pick the beat source
-        let conf = |runs: &[Run], i: usize| runs[i].an.beat().map(|b| b.confidence()).unwrap_or(0.0) * if runs[i].last_level > 0.003 { 1.0 } else { 0.0 };
+        let now = se_clock::now();
+        // Confidence is usable only with recent audible analysis. Zero is the "never heard"
+        // sentinel, not a master-clock observation.
+        let live = |runs: &[Run], i: usize| runs[i].last_audible_ts != 0
+            && now.saturating_sub(runs[i].last_audible_ts) <= FRESH_NS;
+        let conf = |runs: &[Run], i: usize| if live(runs, i) { runs[i].an.beat().map_or(0.0, |b| b.confidence()) } else { 0.0 };
         let desired = if beat_pref == "auto" {
-            let mut best: Option<(usize, f32)> = None;
-            for (i, run) in runs.iter().enumerate() {
-                if run.is_mic {
-                    continue;
-                }
-                let c = conf(&runs, i);
-                if best.is_none_or(|(_, b)| c > b + 1e-6) {
-                    best = Some((i, c));
-                }
-            }
-            best.map(|(i, _)| i)
+            // The backing song owns timing while audible, even during acquisition. Letting
+            // the kit win on confidence would make lights follow the drummer instead of the song.
+            runs.iter().enumerate().find(|(i, run)| !run.is_mic && run.prefix == "music" && live(&runs, *i))
+                .map(|(i, _)| i)
+                .or_else(|| {
+                    let mut best: Option<(usize, f32)> = None;
+                    for (i, run) in runs.iter().enumerate() {
+                        if run.is_mic || !live(&runs, i) {
+                            continue;
+                        }
+                        let c = conf(&runs, i);
+                        if best.is_none_or(|(_, b)| c > b + 1e-6) {
+                            best = Some((i, c));
+                        }
+                    }
+                    best.map(|(i, _)| i)
+                })
         } else {
-            runs.iter().position(|r| r.prefix == beat_pref)
+            runs.iter().position(|r| r.prefix == beat_pref && !r.is_mic)
         };
+        let previous_source = beat_src;
         match (beat_src, desired) {
             (None, d) => beat_src = d,
+            (Some(_), None) => {
+                beat_src = None;
+                beat_switch_since = None;
+            }
             (Some(cur), Some(d)) if cur != d => {
-                // hysteresis: switch only after the other source is clearly better for 2 s
-                if cur >= runs.len() || conf(&runs, d) > conf(&runs, cur) + 0.15 {
-                    let since = *beat_switch_since.get_or_insert_with(Instant::now);
-                    if cur >= runs.len() || since.elapsed() > Duration::from_secs(2) {
+                // Song priority and an inactive source yield immediately. Other live buses
+                // switch only after a clearly better confidence persists for two seconds.
+                let immediate = cur >= runs.len()
+                    || (beat_pref == "auto" && runs[d].prefix == "music" && live(&runs, d))
+                    || (live(&runs, d) && !live(&runs, cur))
+                    || (conf(&runs, d) > 0.0 && conf(&runs, cur) <= 0.0);
+                if immediate {
+                    beat_src = Some(d);
+                    beat_switch_since = None;
+                } else if conf(&runs, d) > conf(&runs, cur) + 0.15 {
+                    if beat_switch_since.is_none_or(|(candidate, _)| candidate != d) {
+                        beat_switch_since = Some((d, Instant::now()));
+                    }
+                    if beat_switch_since.is_some_and(|(_, since)| since.elapsed() > Duration::from_secs(2)) {
                         beat_src = Some(d);
                         beat_switch_since = None;
                     }
@@ -267,10 +334,12 @@ fn thread(hub: Arc<Hub>, rx: std::sync::mpsc::Receiver<Msg>, beat: Arc<BeatShare
             }
             _ => beat_switch_since = None,
         }
+        if previous_source != beat_src {
+            musical.invalidate_source(now);
+        }
 
         let mut did = false;
         for (ri, run) in runs.iter_mut().enumerate() {
-            let is_beat = beat_src == Some(ri);
             loop {
                 let avail = run.samples.slots() / 2;
                 if avail == 0 {
@@ -286,8 +355,9 @@ fn thread(hub: Arc<Hub>, rx: std::sync::mpsc::Receiver<Msg>, beat: Arc<BeatShare
                     l[i] = inter[2 * i];
                     r[i] = inter[2 * i + 1];
                 }
-                // timestamp of the first sample of this chunk
-                while let Ok(s) = run.clock.peek().copied() {
+                // timestamp of the first frame of this chunk (stereo tap: stamps count
+                // interleaved samples, `read` counts frames)
+                while let Ok(s) = run.clock.peek().map(|s| BlockStamp { sample: s.sample / 2, ts: s.ts }) {
                     if s.sample <= run.read {
                         run.stamp = Some(s);
                         let _ = run.clock.pop();
@@ -307,6 +377,10 @@ fn thread(hub: Arc<Hub>, rx: std::sync::mpsc::Receiver<Msg>, beat: Arc<BeatShare
                 };
                 run.read += n as u64;
                 did = true;
+                if se_clock::now().saturating_sub(run.last_audio_ts) > FRESH_NS {
+                    if let Some(bt) = run.an.beat_mut() { bt.reset(); }
+                    run.audible = false;
+                }
                 let voice = run.vad.as_mut().map(|v| {
                     v.push(&l[..n], &r[..n]);
                     v.score()
@@ -317,10 +391,14 @@ fn thread(hub: Arc<Hub>, rx: std::sync::mpsc::Receiver<Msg>, beat: Arc<BeatShare
                 let is_mic = run.is_mic;
                 let talking = &mut run.talking;
                 let talk_until = &mut run.talk_until;
-                let last_level = &mut run.last_level;
+                let last_audible_ts = &mut run.last_audible_ts;
+                let last_audio_ts = &mut run.last_audio_ts;
                 let mut out = |f: &Features, events: &[AnalysisEvent]| {
                     *hop += 1;
-                    *last_level = f.level;
+                    if f.level > SILENCE {
+                        *last_audible_ts = f.ts;
+                    }
+                    *last_audio_ts = f.ts;
                     let mut sig: Vec<(String, f32)> = Vec::with_capacity(20 + N_BANDS);
                     for (n, v) in names.scalars.iter().zip(scalars(f)) {
                         sig.push((n.clone(), if v.is_finite() { v } else { 0.0 }));
@@ -345,13 +423,6 @@ fn thread(hub: Arc<Hub>, rx: std::sync::mpsc::Receiver<Msg>, beat: Arc<BeatShare
                         }
                         sig.push(("mic.talking".into(), if *talking { 1.0 } else { 0.0 }));
                     }
-                    // no beat clock from silence/noise floor
-                    let beat_live = is_beat && f.level > SILENCE;
-                    if beat_live {
-                        sig.push(("beat.bpm".into(), f.bpm));
-                        sig.push(("beat.phase".into(), f.phase));
-                        sig.push(("beat.confidence".into(), f.beat_confidence));
-                    }
                     hub2.signals(sig);
                     for e in events {
                         match *e {
@@ -363,19 +434,6 @@ fn thread(hub: Arc<Hub>, rx: std::sync::mpsc::Receiver<Msg>, beat: Arc<BeatShare
                                 };
                                 let mut ev = Event::new(ty.clone(), Origin::System, Value::map().with("velocity", strength as f64));
                                 ev.ts = ts;
-                                hub2.emit(ev);
-                            }
-                            AnalysisEvent::Beat(b) if beat_live => {
-                                let mut ev = Event::new(
-                                    "beat",
-                                    Origin::System,
-                                    Value::map()
-                                        .with("index", b.index as i64)
-                                        .with("bpm", b.bpm as f64)
-                                        .with("downbeat", b.downbeat)
-                                        .with("source", names.scalars[0].trim_end_matches(".level").to_string()),
-                                );
-                                ev.ts = b.ts;
                                 hub2.emit(ev);
                             }
                             AnalysisEvent::Beat(_) => {}
@@ -398,13 +456,49 @@ fn thread(hub: Arc<Hub>, rx: std::sync::mpsc::Receiver<Msg>, beat: Arc<BeatShare
                     }
                 };
                 run.an.process(&l[..n], &r[..n], ts, &mut out);
-                if is_beat
-                    && run.last_level > SILENCE
-                    && let Some(bt) = run.an.beat()
-                {
-                    let now = se_clock::now();
-                    beat.store(bt.bpm(), bt.beat_at(now), now, bt.confidence());
+                let audible = run.last_audible_ts != 0 && run.last_audio_ts.saturating_sub(run.last_audible_ts) <= FRESH_NS;
+                if run.audible && !audible {
+                    if let Some(bt) = run.an.beat_mut() { bt.reset(); }
                 }
+                run.audible = audible;
+            }
+        }
+        if last_clock_publish.elapsed() >= Duration::from_millis(10) {
+            last_clock_publish = Instant::now();
+            let now = se_clock::now();
+            if let Some(run) = beat_src.and_then(|i| runs.get(i))
+                && run.last_audible_ts != 0
+                && now.saturating_sub(run.last_audible_ts) <= FRESH_NS
+                && let Some(bt) = run.an.beat()
+            {
+                musical.observe(Observation { ts: now, bpm: bt.bpm(), phase: bt.phase_at(now), confidence: bt.confidence() });
+            } else {
+                musical.invalidate_source(now);
+            }
+            let clock = musical.advance(now);
+            beat.store(clock.bpm, clock.position, clock.ts, clock.confidence);
+            hub.signals(vec![
+                ("beat.bpm".into(), clock.bpm),
+                ("beat.phase".into(), clock.phase),
+                ("beat.position".into(), clock.position as f32),
+                ("beat.confidence".into(), clock.confidence),
+                ("beat.locked".into(), if clock.locked { 1.0 } else { 0.0 }),
+                ("beat.freewheel".into(), if clock.locked { 0.0 } else { 1.0 }),
+                ("beat.source".into(), clock.source.code()),
+            ]);
+            let index = clock.position.floor() as u64;
+            if index > event_beat {
+                event_beat = index;
+                let source = if clock.source == ClockSource::Live {
+                    beat_src.and_then(|i| runs.get(i)).map_or("live", |r| r.prefix.as_str())
+                } else {
+                    clock.source.name()
+                };
+                let mut ev = Event::new("beat", Origin::System, Value::map()
+                    .with("index", index as i64).with("bpm", clock.bpm as f64)
+                    .with("downbeat", index % 4 == 0).with("source", source));
+                ev.ts = now;
+                hub.emit(ev);
             }
         }
         if last_latest.elapsed() > Duration::from_millis(100) {
@@ -415,11 +509,18 @@ fn thread(hub: Arc<Hub>, rx: std::sync::mpsc::Receiver<Msg>, beat: Arc<BeatShare
                     lt.insert(run.prefix.clone(), features_value(f));
                 }
             }
-            if let Some(i) = beat_src
-                && let Some(run) = runs.get(i)
-            {
-                lt.insert("beat".into(), Value::map().with("source", run.prefix.clone()));
-            }
+            let clock = musical.snapshot();
+            let live_source = beat_src.and_then(|i| runs.get(i));
+            lt.insert("beat".into(), Value::map()
+                .with("source", clock.source.name())
+                .with("bus", live_source.map_or("", |r| r.prefix.as_str()))
+                .with("age_ms", live_source.filter(|r| r.last_audio_ts != 0)
+                    .map(|r| Value::Float(se_clock::now().saturating_sub(r.last_audio_ts) as f64 * 1e-6))
+                    .unwrap_or(Value::Null))
+                .with("status", if clock.locked { "locked" } else { "freewheel" })
+                .with("locked", clock.locked).with("freewheel", !clock.locked)
+                .with("bpm", clock.bpm as f64).with("position", clock.position)
+                .with("phase", clock.phase as f64).with("confidence", clock.confidence as f64));
         }
         if !did {
             std::thread::sleep(Duration::from_millis(2));

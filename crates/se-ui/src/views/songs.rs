@@ -874,6 +874,19 @@ fn setup(app: &mut App, ui: &mut egui::Ui, form: &mut Form) {
         },
         |ui| {
             ui.set_width(ui.available_width());
+            let mut retro = app.m.str("queue.theme") != "modern";
+            if widgets::toggle_row(
+                ui,
+                &t,
+                "Windows 3.1 queue theme",
+                "On: classic grey windows on a teal desktop. Off: the modern dark page. Updates viewers immediately and stays saved.",
+                &mut retro,
+            )
+            .changed()
+            {
+                act(app, "queue.theme.set", Value::map().with("theme", if retro { "win31" } else { "modern" }));
+            }
+            ui.add_space(spacing::M);
             let qurl = s(&relay, "queue_url").to_string();
             if !qurl.is_empty() {
                 ui.horizontal(|ui| {

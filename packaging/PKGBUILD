@@ -23,6 +23,8 @@ url="https://github.com/DABSandDRUMS/stream-engine"
 license=('MIT OR Apache-2.0' 'GPL-2.0-or-later' 'BSD-3-Clause')
 depends=(
   alsa-lib
+  coreutils                 # nice (exec-only background worker launch)
+  util-linux                # setpriv, ionice, taskset (no fork of the engine)
   dbus
   espeak-ng
   gcc-libs
@@ -54,6 +56,7 @@ optdepends=(
   'nvidia-utils: GPU temperature and VRAM in preflight (nvidia-smi)'
   'hyprland: window placement and keybinds from the Omarchy extras'
   'jq: stream-engine-launch-or-focus and the Omarchy extras installer'
+  'python: reversible drum-screen desktop handoff on Hyprland'
   'uwsm: launch the UI as a systemd scope from desktop entries and keybinds'
 )
 install=stream-engine.install
@@ -159,6 +162,7 @@ package() {
   install -Dm755 "$release/stream-engine" "$pkgdir/usr/bin/stream-engine"
   install -Dm755 "$release/streamctl" "$pkgdir/usr/bin/streamctl"
   install -Dm755 omarchy/bin/stream-engine-launch-or-focus "$pkgdir/usr/bin/stream-engine-launch-or-focus"
+  install -Dm755 omarchy/bin/stream-engine-drum-screen "$pkgdir/usr/bin/stream-engine-drum-screen"
 
   # Engine data: share_dir() resolves <exe>/../share/stream-engine.
   install -d "$share"

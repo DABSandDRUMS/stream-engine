@@ -6,7 +6,7 @@ use std::path::PathBuf;
 pub enum FallbackMode {
     /// Never switch automatically (manual `obs.fallback.on|off` still works).
     Off,
-    /// Switch only while an OBS output (stream or recording) is active.
+    /// Switch only while an OBS stream output is active.
     Live,
     /// Switch whenever a visible feed goes stale.
     Always,

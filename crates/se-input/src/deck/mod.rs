@@ -14,10 +14,37 @@ use render::{KeyVisual, Palette, Rgb, mix};
 use se_proto::{Event, Id, Meta, Origin, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const CONFIRM_WINDOW: Duration = Duration::from_secs(3);
 const FRAME: Duration = Duration::from_millis(33);
+
+/// Wall-clock conversion and formatting happen once per second, not once per frame.
+#[derive(Default)]
+struct LocalClock {
+    second: Option<u64>,
+    text: Arc<str>,
+}
+
+impl LocalClock {
+    fn update(&mut self, now: SystemTime) -> Result<(), String> {
+        let second = now.duration_since(UNIX_EPOCH).map_err(|e| format!("local clock: {e}"))?.as_secs();
+        if self.second == Some(second) {
+            return Ok(());
+        }
+        self.second = Some(second);
+        let timestamp: libc::time_t = second.try_into().map_err(|_| "local clock: timestamp out of range")?;
+        let mut local = std::mem::MaybeUninit::<libc::tm>::uninit();
+        // localtime_r writes the caller-owned tm and does not use shared static storage.
+        let result = unsafe { libc::localtime_r(&timestamp, local.as_mut_ptr()) };
+        if result.is_null() {
+            return Err(format!("local clock: {}", std::io::Error::last_os_error()));
+        }
+        let local = unsafe { local.assume_init() };
+        self.text = format!("{:02}:{:02}:{:02}", local.tm_hour, local.tm_min, local.tm_sec).into();
+        Ok(())
+    }
+}
 
 pub enum DeckCmd {
     Config(Arc<DeckCfg>),
@@ -123,6 +150,7 @@ struct Worker {
     last_frame: Instant,
     last_error: Option<String>,
     palette_ver: u64,
+    clock: LocalClock,
 }
 
 impl Worker {
@@ -150,6 +178,7 @@ impl Worker {
             last_frame: Instant::now() - FRAME,
             last_error: None,
             palette_ver: 0,
+            clock: LocalClock::default(),
         }
     }
 
@@ -232,6 +261,13 @@ impl Worker {
             DeckCmd::Config(cfg) => {
                 let primary_changed = cfg.primary != self.cfg.primary;
                 self.cfg = cfg;
+                // Newly unavailable keys must not retain a hold, confirmation, or release action.
+                let page = self.cfg.page(&self.page);
+                let available = |key: &u8| page.and_then(|p| p.keys.get(key)).is_some_and(KeyDef::available);
+                self.held.retain(|key, _| available(key));
+                self.fired.retain(|key, _| available(key));
+                self.confirm.retain(|(name, key), _| self.cfg.page(name).and_then(|p| p.keys.get(key)).is_some_and(KeyDef::available));
+                self.cooldown.retain(|(name, key), _| self.cfg.page(name).and_then(|p| p.keys.get(key)).is_some_and(KeyDef::available));
                 if self.cfg.page(&self.page).is_none() {
                     self.page = self.cfg.start_page.clone();
                 }
@@ -243,6 +279,10 @@ impl Worker {
             }
             DeckCmd::Page(p) => self.switch_page(&p),
             DeckCmd::Press { key, page, origin, causal } => {
+                let target = page.as_deref().unwrap_or(&self.page);
+                if self.cfg.page(target).and_then(|p| p.keys.get(&key)).is_some_and(|kd| !kd.available()) {
+                    return;
+                }
                 if let Some(p) = page.filter(|p| *p != self.page) {
                     self.switch_page(&p);
                 }
@@ -294,7 +334,7 @@ impl Worker {
     }
 
     fn press(&mut self, key: u8, origin: Origin, causal: Option<Id>) {
-        let Some(kd) = self.key_def(key).cloned() else { return };
+        let Some(kd) = self.key_def(key).filter(|kd| kd.available()).cloned() else { return };
         let ck = (self.page.clone(), key);
         if let Some((t, ms)) = self.cooldown.get(&ck)
             && t.elapsed() < Duration::from_millis(*ms)
@@ -321,6 +361,9 @@ impl Worker {
     }
 
     fn fire(&mut self, key: u8, kd: &KeyDef, origin: Origin, causal: Option<Id>) {
+        if !kd.available() {
+            return;
+        }
         if kd.b.cooldown_ms > 0 {
             self.cooldown.insert((self.page.clone(), key), (Instant::now(), kd.b.cooldown_ms));
         }
@@ -336,6 +379,10 @@ impl Worker {
 
     fn release(&mut self, key: u8, origin: Origin, causal: Option<Id>) {
         self.held.remove(&key);
+        if self.key_def(key).is_some_and(|kd| !kd.available()) {
+            self.fired.remove(&key);
+            return;
+        }
         if let Some((a, o)) = self.fired.remove(&key) {
             let _ = origin;
             self.sh.exec.release(&a, o, causal);
@@ -347,7 +394,7 @@ impl Worker {
         let due: Vec<u8> = self
             .held
             .iter()
-            .filter(|(k, (t, done))| !*done && self.key_def(**k).is_some_and(|kd| kd.b.hold_ms > 0 && t.elapsed() >= Duration::from_millis(kd.b.hold_ms)))
+            .filter(|(k, (t, done))| !*done && self.key_def(**k).is_some_and(|kd| kd.available() && kd.b.hold_ms > 0 && t.elapsed() >= Duration::from_millis(kd.b.hold_ms)))
             .map(|(k, _)| *k)
             .collect();
         for k in due {
@@ -392,6 +439,9 @@ impl Worker {
     }
 
     fn key_event(&mut self, key: u8, down: bool) {
+        if self.key_def(key).is_some_and(|kd| !kd.available()) {
+            return;
+        }
         let ev = Event::new(
             "deck.key",
             Origin::Deck,
@@ -497,6 +547,11 @@ impl Worker {
 
     /// Compute every key's look, push changed images, update the preview.
     fn frame(&mut self) {
+        if self.cfg.page(&self.page).is_some_and(|page| page.keys.values().any(|kd| kd.clock))
+            && let Err(error) = self.clock.update(SystemTime::now())
+        {
+            self.sh.hub.log("error", "deck", error);
+        }
         let snap = self.sh.hub.snapshot.load();
         let (palette, pver) = self.sh.palette();
         if pver != self.palette_ver {
@@ -584,7 +639,7 @@ impl Worker {
         let ck = (self.page.clone(), key);
         let held = self.held.get(&key);
         let (label, icon, color) = key_look(kd, &cfg, &self.cfg, pal, st.on);
-        let mut v = KeyVisual { icon, label, ..Default::default() };
+        let mut v = KeyVisual { icon, label, artwork: kd.image.clone(), clock: kd.clock.then(|| self.clock.text.clone()), disabled: kd.disabled, ..Default::default() };
         // state → colors
         match &kd.action {
             Action::Scene { .. } => {
@@ -662,6 +717,11 @@ impl Worker {
             v.edge = Some((pal.yellow, 3));
         }
         v.pressed = held.is_some() && kd.b.hold_ms == 0;
+        if !kd.available() {
+            v.pressed = false;
+            v.progress = None;
+            v.dim = kd.disabled;
+        }
         v
     }
 }
@@ -727,4 +787,134 @@ pub fn key_look(kd: &KeyDef, cfg: &se_core::Config, deck: &DeckCfg, pal: &Palett
     }
     let icon = render::icon_glyph(&icon).map(String::from).unwrap_or(icon);
     (label, icon, color)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arc_swap::ArcSwap;
+    use parking_lot::{Mutex, RwLock};
+    use std::collections::{BTreeMap, VecDeque};
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+
+    fn worker(src: &str) -> (Worker, crossbeam_channel::Receiver<se_hub::CoreMsg>, tokio::runtime::Runtime) {
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let (hub, core_rx) = se_hub::Hub::new(Arc::new(se_clock::Clock::new()));
+        let sh = Arc::new(Shared {
+            hub: hub.clone(),
+            exec: exec::Exec { hub, rt: rt.handle().clone() },
+            project_root: ".".into(),
+            data_dir: ".".into(),
+            core: ArcSwap::from_pointee(se_core::Config::default()),
+            ctl: ArcSwap::from_pointee(crate::config::Controllers::default()),
+            palette: ArcSwap::from_pointee((Palette::from_theme(&se_ui_kit::Theme::default()), 0)),
+            fonts: RwLock::new(None),
+            preset_rem: ArcSwap::from_pointee(HashMap::new()),
+            hid_claims: Mutex::new(HashMap::new()),
+            hid_event: Mutex::new(None),
+            health_dirty: AtomicBool::new(false),
+            learn: Mutex::new(None),
+            learning: AtomicBool::new(false),
+            meta: Mutex::new(HashMap::new()),
+            monitor_until: AtomicU64::new(0),
+            t0: Instant::now(),
+            monitor: Mutex::new(VecDeque::new()),
+            midi_status: Mutex::new(Vec::new()),
+            decks: Mutex::new(BTreeMap::new()),
+            midi: Mutex::new(None),
+            watchers: Mutex::new(Vec::new()),
+            voice: Mutex::new(None),
+        });
+        let crate::config::Parsed::Deck(cfg) = crate::config::parse_file("test", "controllers/test.toml", &src.parse().unwrap()).unwrap() else { panic!() };
+        let (_, rx) = crossbeam_channel::unbounded();
+        let worker = Worker::new(sh, Arc::new(cfg), rx, Arc::new(Mutex::new(Preview::default())), Arc::new(Mutex::new(DeckStatus::default())));
+        (worker, core_rx, rt)
+    }
+
+    #[test]
+    fn disabled_keys_cannot_emit_events_fire_hold_confirm_or_release() {
+        let (mut w, core_rx, _rt) = worker(r#"
+kind = "deck"
+start_page = "main"
+[page.main.key.0]
+do = ["set lights.test true"]
+release = ["set lights.test false"]
+disabled = true
+[page.main.key.1]
+momentary = "lights.test"
+hold = "1ms"
+disabled = true
+[page.main.key.2]
+do = ["set lights.test true"]
+confirm = true
+disabled = true
+[page.main.key.3]
+do = ["set lights.test true"]
+[page.other.key.0]
+page = "main"
+disabled = true
+"#);
+        for key in 0..3 {
+            w.key_event(key, true);
+            w.key_event(key, false);
+            for _ in 0..2 {
+                w.command(DeckCmd::Press { key, page: None, origin: Origin::Deck, causal: None });
+                w.command(DeckCmd::Release { key, page: None, origin: Origin::Deck, causal: None });
+            }
+        }
+        w.command(DeckCmd::Press { key: 0, page: Some("other".into()), origin: Origin::Deck, causal: None });
+        w.tick_holds();
+        assert_eq!(w.page, "main", "pressing an unavailable key on another page cannot navigate");
+        assert!(matches!(core_rx.try_recv(), Err(crossbeam_channel::TryRecvError::Empty)), "disabled input must not submit a command or a deck.key event");
+        assert!(w.held.is_empty() && w.confirm.is_empty() && w.fired.is_empty());
+        // A live key still submits its command through the same path.
+        w.command(DeckCmd::Press { key: 3, page: None, origin: Origin::Deck, causal: None });
+        let se_hub::CoreMsg::Input(se_core::Input::Command { cmd }) = core_rx.try_recv().unwrap() else { panic!() };
+        assert!(matches!(cmd.op, se_proto::Op::Set { address, value: Value::Bool(true) } if address == "lights.test"));
+    }
+
+    #[test]
+    fn disabling_a_held_key_cancels_pending_fire_and_release() {
+        let (mut w, core_rx, _rt) = worker(r#"
+kind = "deck"
+[page.main.key.0]
+momentary = "lights.test"
+[page.main.key.1]
+do = ["set lights.test true"]
+hold = "1ms"
+"#);
+        w.press(0, Origin::Deck, None);
+        w.press(1, Origin::Deck, None);
+        w.held.get_mut(&1).unwrap().0 = Instant::now() - Duration::from_secs(1);
+        let mut cfg = (*w.cfg).clone();
+        for key in cfg.pages[0].keys.values_mut() {
+            key.disabled = true;
+        }
+        w.command(DeckCmd::Config(Arc::new(cfg)));
+        // Discard the original enabled press and the config's page publications.
+        core_rx.try_iter().for_each(drop);
+        w.tick_holds();
+        w.release(0, Origin::Deck, None);
+        w.release(1, Origin::Deck, None);
+        assert!(matches!(core_rx.try_recv(), Err(crossbeam_channel::TryRecvError::Empty)), "reload must cancel a pending hold and must not run a now-disabled release action");
+    }
+
+    #[test]
+    fn local_clock_changes_visual_only_at_second_boundaries() {
+        let mut clock = LocalClock::default();
+        let t = UNIX_EPOCH + Duration::from_secs(1_700_000_019);
+        clock.update(t).unwrap();
+        let first = KeyVisual { clock: Some(clock.text.clone()), fg: [255, 190, 30], ..Default::default() };
+        clock.update(t + Duration::from_millis(999)).unwrap();
+        let same = KeyVisual { clock: Some(clock.text.clone()), ..first.clone() };
+        assert_eq!(first.id(), same.id());
+        assert_eq!(render::render_rgb(None, &first, 72, false), render::render_rgb(None, &same, 72, false));
+        clock.update(t + Duration::from_secs(1)).unwrap();
+        let next = KeyVisual { clock: Some(clock.text.clone()), ..first.clone() };
+        assert_ne!(first.id(), next.id());
+        assert_ne!(render::render_rgb(None, &first, 72, false), render::render_rgb(None, &next, 72, false));
+        let first_second: u8 = first.clock.as_ref().unwrap()[6..].parse().unwrap();
+        let next_second: u8 = next.clock.as_ref().unwrap()[6..].parse().unwrap();
+        assert_eq!(next_second, (first_second + 1) % 60);
+    }
 }

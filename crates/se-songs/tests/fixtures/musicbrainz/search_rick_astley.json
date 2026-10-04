@@ -1,0 +1,538 @@
+{
+  "created": "2026-09-30T18:04:12.000Z",
+  "count": 6,
+  "offset": 0,
+  "recordings": [
+    {
+      "id": "c95fd3f9-1a2b-4c3d-8e4f-5a6b7c8d9e02",
+      "score": 100,
+      "title": "Never Gonna Give You Up",
+      "length": 212000,
+      "video": true,
+      "disambiguation": "music video",
+      "artist-credit": [
+        {
+          "name": "Rick Astley",
+          "artist": {
+            "id": "db92a151-1ac2-438b-bc43-b82e149ddd50",
+            "name": "Rick Astley",
+            "sort-name": "Astley, Rick",
+            "disambiguation": "English singer-songwriter"
+          }
+        }
+      ],
+      "first-release-date": "2009-10-25",
+      "releases": [
+        {
+          "id": "e0e0e0e0-0000-4000-8000-00000000a002",
+          "status-id": "4e304316-386d-3409-af2e-78857eec5cfe",
+          "count": 1,
+          "title": "Never Gonna Give You Up",
+          "status": "Official",
+          "release-group": {
+            "id": "a1b2c3d4-0000-4000-8000-000000000013",
+            "type-id": "d6038452-8ee0-3f68-affc-2de9a1ede0b9",
+            "primary-type-id": "d6038452-8ee0-3f68-affc-2de9a1ede0b9",
+            "title": "Never Gonna Give You Up",
+            "primary-type": "Single"
+          },
+          "date": "2009-10-25",
+          "country": "XW",
+          "release-events": [
+            {
+              "date": "2009-10-25",
+              "area": {
+                "id": "525d4e18-3d00-31b9-a58b-a146a916de8f",
+                "name": "[Worldwide]",
+                "sort-name": "[Worldwide]",
+                "iso-3166-1-codes": [
+                  "XW"
+                ]
+              }
+            }
+          ],
+          "track-count": 1,
+          "media": [
+            {
+              "position": 1,
+              "format": "Digital Media",
+              "track": [
+                {
+                  "id": "e0e0e0e0-0000-4000-8000-000000007a7a",
+                  "number": "1",
+                  "title": "Never Gonna Give You Up (video)",
+                  "length": 212000
+                }
+              ],
+              "track-count": 1,
+              "track-offset": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "c95fd3f9-1a2b-4c3d-8e4f-5a6b7c8d9e03",
+      "score": 100,
+      "title": "Never Gonna Give You Up (Pianoforte)",
+      "length": 220133,
+      "video": null,
+      "artist-credit": [
+        {
+          "name": "Rick Astley",
+          "artist": {
+            "id": "db92a151-1ac2-438b-bc43-b82e149ddd50",
+            "name": "Rick Astley",
+            "sort-name": "Astley, Rick",
+            "disambiguation": "English singer-songwriter"
+          }
+        }
+      ],
+      "first-release-date": "2022-07-29",
+      "releases": [
+        {
+          "id": "e0e0e0e0-0000-4000-8000-00000000a003",
+          "status-id": "4e304316-386d-3409-af2e-78857eec5cfe",
+          "count": 1,
+          "title": "Never Gonna Give You Up (Pianoforte)",
+          "status": "Official",
+          "release-group": {
+            "id": "a1b2c3d4-0000-4000-8000-000000000014",
+            "type-id": "d6038452-8ee0-3f68-affc-2de9a1ede0b9",
+            "primary-type-id": "d6038452-8ee0-3f68-affc-2de9a1ede0b9",
+            "title": "Never Gonna Give You Up (Pianoforte)",
+            "primary-type": "Single"
+          },
+          "date": "2022-07-29",
+          "country": "XW",
+          "release-events": [
+            {
+              "date": "2022-07-29",
+              "area": {
+                "id": "525d4e18-3d00-31b9-a58b-a146a916de8f",
+                "name": "[Worldwide]",
+                "sort-name": "[Worldwide]",
+                "iso-3166-1-codes": [
+                  "XW"
+                ]
+              }
+            }
+          ],
+          "track-count": 1,
+          "media": [
+            {
+              "position": 1,
+              "format": "Digital Media",
+              "track": [
+                {
+                  "id": "e0e0e0e0-0000-4000-8000-000000007a7a",
+                  "number": "1",
+                  "title": "Never Gonna Give You Up (Pianoforte)",
+                  "length": 220133
+                }
+              ],
+              "track-count": 1,
+              "track-offset": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "c95fd3f9-1a2b-4c3d-8e4f-5a6b7c8d9e01",
+      "score": 100,
+      "title": "Never Gonna Give You Up",
+      "length": 213573,
+      "video": null,
+      "artist-credit": [
+        {
+          "name": "Rick Astley",
+          "artist": {
+            "id": "db92a151-1ac2-438b-bc43-b82e149ddd50",
+            "name": "Rick Astley",
+            "sort-name": "Astley, Rick",
+            "disambiguation": "English singer-songwriter"
+          }
+        }
+      ],
+      "first-release-date": "1987-07-27",
+      "releases": [
+        {
+          "id": "e0e0e0e0-0000-4000-8000-00000000a011",
+          "status-id": "4e304316-386d-3409-af2e-78857eec5cfe",
+          "count": 1,
+          "title": "Greatest Hits",
+          "status": "Official",
+          "release-group": {
+            "id": "a1b2c3d4-0000-4000-8000-000000000012",
+            "type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+            "primary-type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+            "title": "Greatest Hits",
+            "primary-type": "Album",
+            "secondary-types": [
+              "Compilation"
+            ],
+            "secondary-type-ids": [
+              "dd2a21e1-0c00-3729-a7a0-de60b84eb5d1"
+            ]
+          },
+          "date": "2002-10-28",
+          "country": "GB",
+          "release-events": [
+            {
+              "date": "2002-10-28",
+              "area": {
+                "id": "8a754a16-0027-3a29-b6d7-2b40ea0481ed",
+                "name": "United Kingdom",
+                "sort-name": "United Kingdom",
+                "iso-3166-1-codes": [
+                  "GB"
+                ]
+              }
+            }
+          ],
+          "track-count": 16,
+          "media": [
+            {
+              "position": 1,
+              "format": "CD",
+              "track": [
+                {
+                  "id": "e0e0e0e0-0000-4000-8000-000000007a7a",
+                  "number": "1",
+                  "title": "Never Gonna Give You Up",
+                  "length": 213000
+                }
+              ],
+              "track-count": 16,
+              "track-offset": 0
+            }
+          ]
+        },
+        {
+          "id": "e0e0e0e0-0000-4000-8000-00000000a001",
+          "status-id": "4e304316-386d-3409-af2e-78857eec5cfe",
+          "count": 1,
+          "title": "Never Gonna Give You Up",
+          "status": "Official",
+          "release-group": {
+            "id": "a1b2c3d4-0000-4000-8000-000000000001",
+            "type-id": "d6038452-8ee0-3f68-affc-2de9a1ede0b9",
+            "primary-type-id": "d6038452-8ee0-3f68-affc-2de9a1ede0b9",
+            "title": "Never Gonna Give You Up",
+            "primary-type": "Single"
+          },
+          "date": "1987-07-27",
+          "country": "GB",
+          "release-events": [
+            {
+              "date": "1987-07-27",
+              "area": {
+                "id": "8a754a16-0027-3a29-b6d7-2b40ea0481ed",
+                "name": "United Kingdom",
+                "sort-name": "United Kingdom",
+                "iso-3166-1-codes": [
+                  "GB"
+                ]
+              }
+            }
+          ],
+          "track-count": 2,
+          "media": [
+            {
+              "position": 1,
+              "format": "7\" Vinyl",
+              "track": [
+                {
+                  "id": "e0e0e0e0-0000-4000-8000-000000007a7a",
+                  "number": "A",
+                  "title": "Never Gonna Give You Up",
+                  "length": 213000
+                }
+              ],
+              "track-count": 2,
+              "track-offset": 0
+            }
+          ]
+        },
+        {
+          "id": "e0e0e0e0-0000-4000-8000-00000000a012",
+          "status-id": "4e304316-386d-3409-af2e-78857eec5cfe",
+          "count": 1,
+          "title": "Whenever You Need Somebody",
+          "status": "Official",
+          "release-group": {
+            "id": "a1b2c3d4-0000-4000-8000-000000000011",
+            "type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+            "primary-type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+            "title": "Whenever You Need Somebody",
+            "primary-type": "Album"
+          },
+          "date": "1987-11-16",
+          "country": "GB",
+          "release-events": [
+            {
+              "date": "1987-11-16",
+              "area": {
+                "id": "8a754a16-0027-3a29-b6d7-2b40ea0481ed",
+                "name": "United Kingdom",
+                "sort-name": "United Kingdom",
+                "iso-3166-1-codes": [
+                  "GB"
+                ]
+              }
+            }
+          ],
+          "track-count": 10,
+          "media": [
+            {
+              "position": 1,
+              "format": "CD",
+              "track": [
+                {
+                  "id": "e0e0e0e0-0000-4000-8000-000000007a7a",
+                  "number": "1",
+                  "title": "Never Gonna Give You Up",
+                  "length": 213573
+                }
+              ],
+              "track-count": 10,
+              "track-offset": 0
+            }
+          ]
+        }
+      ],
+      "isrcs": [
+        "GBARL9300135"
+      ],
+      "tags": [
+        {
+          "count": 3,
+          "name": "dance-pop"
+        },
+        {
+          "count": 1,
+          "name": "pop"
+        },
+        {
+          "count": 1,
+          "name": "80s"
+        }
+      ]
+    },
+    {
+      "id": "c95fd3f9-1a2b-4c3d-8e4f-5a6b7c8d9e04",
+      "score": 95,
+      "title": "Never Gonna Give You Up",
+      "length": 280693,
+      "video": null,
+      "artist-credit": [
+        {
+          "name": "Cake",
+          "artist": {
+            "id": "f3c3d4fa-5b0a-47b6-8ab0-3e0e8e9a2d6f",
+            "name": "Cake",
+            "sort-name": "Cake",
+            "disambiguation": "US alternative rock band"
+          }
+        }
+      ],
+      "first-release-date": "2004-08-17",
+      "releases": [
+        {
+          "id": "e0e0e0e0-0000-4000-8000-00000000a004",
+          "status-id": "4e304316-386d-3409-af2e-78857eec5cfe",
+          "count": 1,
+          "title": "B-Sides and Rarities",
+          "status": "Official",
+          "release-group": {
+            "id": "a1b2c3d4-0000-4000-8000-000000000015",
+            "type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+            "primary-type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+            "title": "B-Sides and Rarities",
+            "primary-type": "Album",
+            "secondary-types": [
+              "Compilation"
+            ],
+            "secondary-type-ids": [
+              "dd2a21e1-0c00-3729-a7a0-de60b84eb5d1"
+            ]
+          },
+          "date": "2007-11-13",
+          "country": "US",
+          "release-events": [
+            {
+              "date": "2007-11-13",
+              "area": {
+                "id": "489ce91b-6658-3307-9877-795b68554c98",
+                "name": "United States",
+                "sort-name": "United States",
+                "iso-3166-1-codes": [
+                  "US"
+                ]
+              }
+            }
+          ],
+          "track-count": 10,
+          "media": [
+            {
+              "position": 1,
+              "format": "CD",
+              "track": [
+                {
+                  "id": "e0e0e0e0-0000-4000-8000-000000007a7a",
+                  "number": "4",
+                  "title": "Never Gonna Give You Up",
+                  "length": 280693
+                }
+              ],
+              "track-count": 10,
+              "track-offset": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "c95fd3f9-1a2b-4c3d-8e4f-5a6b7c8d9e05",
+      "score": 88,
+      "title": "Never Gonna Give You Up",
+      "length": 199000,
+      "video": null,
+      "disambiguation": "demo",
+      "artist-credit": [
+        {
+          "name": "Rick Astley",
+          "artist": {
+            "id": "db92a151-1ac2-438b-bc43-b82e149ddd50",
+            "name": "Rick Astley",
+            "sort-name": "Astley, Rick",
+            "disambiguation": "English singer-songwriter"
+          }
+        }
+      ],
+      "first-release-date": "1980",
+      "releases": [
+        {
+          "id": "e0e0e0e0-0000-4000-8000-00000000a005",
+          "status-id": "1156806e-d06a-38bd-83f0-cf2284a808b9",
+          "count": 1,
+          "title": "Demos & Rarities",
+          "status": "Bootleg",
+          "release-group": {
+            "id": "a1b2c3d4-0000-4000-8000-000000000016",
+            "type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+            "primary-type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+            "title": "Demos & Rarities",
+            "primary-type": "Album",
+            "secondary-types": [
+              "Compilation"
+            ],
+            "secondary-type-ids": [
+              "dd2a21e1-0c00-3729-a7a0-de60b84eb5d1"
+            ]
+          },
+          "date": "1980",
+          "country": "GB",
+          "release-events": [
+            {
+              "date": "1980",
+              "area": {
+                "id": "8a754a16-0027-3a29-b6d7-2b40ea0481ed",
+                "name": "United Kingdom",
+                "sort-name": "United Kingdom",
+                "iso-3166-1-codes": [
+                  "GB"
+                ]
+              }
+            }
+          ],
+          "track-count": 12,
+          "media": [
+            {
+              "position": 1,
+              "format": "Cassette",
+              "track": [
+                {
+                  "id": "e0e0e0e0-0000-4000-8000-000000007a7a",
+                  "number": "3",
+                  "title": "Never Gonna Give You Up (demo)",
+                  "length": 199000
+                }
+              ],
+              "track-count": 12,
+              "track-offset": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "c95fd3f9-1a2b-4c3d-8e4f-5a6b7c8d9e06",
+      "score": 71,
+      "title": "Together Forever",
+      "length": 205000,
+      "video": null,
+      "artist-credit": [
+        {
+          "name": "Rick Astley",
+          "artist": {
+            "id": "db92a151-1ac2-438b-bc43-b82e149ddd50",
+            "name": "Rick Astley",
+            "sort-name": "Astley, Rick",
+            "disambiguation": "English singer-songwriter"
+          }
+        }
+      ],
+      "first-release-date": "1988-02-15",
+      "releases": [
+        {
+          "id": "e0e0e0e0-0000-4000-8000-00000000a006",
+          "status-id": "4e304316-386d-3409-af2e-78857eec5cfe",
+          "count": 1,
+          "title": "Together Forever",
+          "status": "Official",
+          "release-group": {
+            "id": "a1b2c3d4-0000-4000-8000-000000000017",
+            "type-id": "d6038452-8ee0-3f68-affc-2de9a1ede0b9",
+            "primary-type-id": "d6038452-8ee0-3f68-affc-2de9a1ede0b9",
+            "title": "Together Forever",
+            "primary-type": "Single"
+          },
+          "date": "1988-02-15",
+          "country": "GB",
+          "release-events": [
+            {
+              "date": "1988-02-15",
+              "area": {
+                "id": "8a754a16-0027-3a29-b6d7-2b40ea0481ed",
+                "name": "United Kingdom",
+                "sort-name": "United Kingdom",
+                "iso-3166-1-codes": [
+                  "GB"
+                ]
+              }
+            }
+          ],
+          "track-count": 2,
+          "media": [
+            {
+              "position": 1,
+              "format": "7\" Vinyl",
+              "track": [
+                {
+                  "id": "e0e0e0e0-0000-4000-8000-000000007a7a",
+                  "number": "A",
+                  "title": "Together Forever",
+                  "length": 205000
+                }
+              ],
+              "track-count": 2,
+              "track-offset": 0
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

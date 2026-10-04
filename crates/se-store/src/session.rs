@@ -134,7 +134,7 @@ impl SessionWriter {
         Ok(())
     }
 
-    /// Merge keys into `meta.toml` (OBS recording paths, clock mappings, …).
+    /// Merge keys into `meta.toml` (recording paths, clock mappings, …).
     pub fn set_meta(&self, key: &str, value: &Value) -> Result<()> {
         let p = self.dir.join("meta.toml");
         let mut doc: toml_edit::DocumentMut = std::fs::read_to_string(&p).unwrap_or_default().parse()?;

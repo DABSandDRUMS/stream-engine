@@ -26,6 +26,9 @@ pub struct Item {
     pub z: i64,
     pub order: u32,
     pub blend: Blend,
+    /// Atomic compositor membership, including the originating scene during a morph.
+    pub group: Option<(u32, u32)>,
+    pub group_z: i64,
     /// Custom enter/exit style during a morph: (`Plan::styles` index, presence 0–1).
     pub style: Option<(u32, f32)>,
 }
@@ -101,6 +104,12 @@ pub fn eval_layout(plan: &Plan, scene: usize, layout: usize, size: [f32; 2], sna
     // canvas drawn at another size (the half-size preview) scales them with its picture.
     let px = size[0] / plan.canvases[layout].width.max(1) as f32;
     for (ni, n) in s.layouts[layout].nodes.iter().enumerate() {
+        let group = n.group.map(|gi| &s.layouts[layout].groups[gi as usize]);
+        if group.is_some_and(|g| !g.visible || g.opacity <= 0.002
+            || g.when.is_some_and(|w| !whens.eval(w as usize, &plan.whens[w as usize], snap, res)))
+        {
+            continue;
+        }
         if !res.bool(snap, n.visible, n.def.visible) {
             continue;
         }
@@ -133,6 +142,8 @@ pub fn eval_layout(plan: &Plan, scene: usize, layout: usize, size: [f32; 2], sna
             z: res.i64(snap, n.z, n.def.z),
             order: ni as u32,
             blend: n.blend,
+            group: n.group.map(|gi| (scene as u32, gi)),
+            group_z: group.map_or(0, |g| g.z),
             style: None,
         });
     }
@@ -141,7 +152,11 @@ pub fn eval_layout(plan: &Plan, scene: usize, layout: usize, size: [f32; 2], sna
 /// Cull off-canvas/transparent items and sort by (z, order) without allocating.
 pub fn finish(items: &mut Vec<Item>, size: [f32; 2]) {
     items.retain(|i| i.on_canvas(size[0], size[1]));
-    items.sort_unstable_by(|a, b| a.z.cmp(&b.z).then(a.order.cmp(&b.order)));
+    items.sort_unstable_by(|a, b| {
+        let az = if a.group.is_some() { a.group_z } else { a.z };
+        let bz = if b.group.is_some() { b.group_z } else { b.z };
+        az.cmp(&bz).then_with(|| a.group.cmp(&b.group)).then(a.z.cmp(&b.z)).then(a.order.cmp(&b.order))
+    });
 }
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
@@ -172,6 +187,27 @@ pub fn apply_style(it: &mut Item, style: Style, p: f32, entering: bool, size: [f
             it.radius *= s;
             it.opacity *= p;
         }
+        Style::Slide => {
+            let [x, y, w, h] = it.rect;
+            let (cx, cy) = (x + w * 0.5, y + h * 0.5);
+            // Use the same rotation-safe circle as culling so even rotated corners clear.
+            let (rx, ry) = if it.rotation == 0.0 { (w * 0.5, h * 0.5) } else {
+                let r = w.hypot(h) * 0.5;
+                (r, r)
+            };
+            let distances = [cx + rx + 2.0, size[0] - cx + rx + 2.0, cy + ry + 2.0, size[1] - cy + ry + 2.0];
+            let mut edge = 0;
+            for i in 1..4 {
+                if distances[i] < distances[edge] { edge = i; }
+            }
+            let travel = distances[edge].max(0.0) * (1.0 - p);
+            match edge {
+                0 => it.rect[0] -= travel,
+                1 => it.rect[0] += travel,
+                2 => it.rect[1] -= travel,
+                _ => it.rect[1] += travel,
+            }
+        }
         Style::SlideLeft | Style::SlideRight | Style::SlideUp | Style::SlideDown => {
             // entering: arrive moving in the style's direction; exiting: leave in it
             let dir = match style {
@@ -196,12 +232,14 @@ pub struct MorphScratch {
     a: Vec<Item>,
     b: Vec<Item>,
     matched: Vec<bool>,
+    /// Glide: the `b` index each `a` item is matched with (`u32::MAX`: none).
+    pair: Vec<u32>,
 }
 
 impl MorphScratch {
     /// Pre-sized for `nodes` per scene so the frame loop never grows it.
     pub fn with_capacity(nodes: usize) -> MorphScratch {
-        MorphScratch { a: Vec::with_capacity(nodes), b: Vec::with_capacity(nodes), matched: Vec::with_capacity(nodes) }
+        MorphScratch { a: Vec::with_capacity(nodes), b: Vec::with_capacity(nodes), matched: Vec::with_capacity(nodes), pair: Vec::with_capacity(nodes) }
     }
 }
 
@@ -222,7 +260,7 @@ pub fn eval_morph(
     scratch: &mut MorphScratch,
     out: &mut Vec<Item>,
 ) {
-    let MorphScratch { a, b, matched } = scratch;
+    let MorphScratch { a, b, matched, .. } = scratch;
     a.clear();
     b.clear();
     eval_layout(plan, from, layout, size, snap, res, whens, a);
@@ -245,6 +283,10 @@ pub fn eval_morph(
                 // keep the incoming stacking, but let the outgoing order lead until halfway
                 m.z = if t < 0.5 { s.z } else { it.z };
                 m.order = if t < 0.5 { base + ai as u32 } else { m.order };
+                if t < 0.5 {
+                    m.group = s.group;
+                    m.group_z = s.group_z;
+                }
             }
             None => {
                 let style = it.node(plan).enter.unwrap_or(tr.enter);
@@ -262,6 +304,99 @@ pub fn eval_morph(
         let style = it.node(plan).exit.unwrap_or(tr.exit);
         apply_style(&mut m, style, 1.0 - t, false, size);
         out.push(m);
+    }
+}
+
+/// Interpolated geometry of a matched pair (`a` outgoing, `b` incoming) onto `m`.
+fn lerp_geometry(m: &mut Item, a: &Item, b: &Item, t: f32) {
+    m.rect = lerp4(a.rect, b.rect, t);
+    m.crop = lerp4(a.crop, b.crop, t);
+    m.radius = lerp(a.radius, b.radius, t);
+    m.opacity = lerp(a.opacity, b.opacity, t);
+    m.rotation = lerp(a.rotation, b.rotation, t);
+}
+
+/// Glide styles receive role-local presence. Exit fade/scale retain the outgoing image as a
+/// fallback; the layer crossfade handles their disappearance without exposing black.
+fn apply_glide_style(it: &mut Item, style: Style, p: f32, entering: bool, size: [f32; 2]) {
+    match style {
+        Style::Fade if !entering => {}
+        Style::Scale if !entering => {
+            let opacity = it.opacity;
+            apply_style(it, style, p, entering, size);
+            it.opacity = opacity;
+        }
+        Style::Custom(i) if entering => {
+            it.style = Some((i, p));
+            it.opacity *= p;
+        }
+        _ => apply_style(it, style, p, entering, size),
+    }
+    if entering && p <= 0.0 {
+        it.opacity = 0.0;
+    }
+}
+
+/// Clamp linear transition time to a role's configured interval.
+pub fn window(u: f32, [start, end]: [f32; 2]) -> f32 {
+    ((u - start) / (end - start)).clamp(0.0, 1.0)
+}
+
+pub fn glide_fade(tr: &TransitionPlan, u: f32) -> f32 {
+    let p = window(u, tr.fade_window);
+    p * p * (3.0 - 2.0 * p)
+}
+
+/// Glide between scene `from` and `to` at LINEAR progress `u`: the same matching and geometry as
+/// [`eval_morph`], but drawn as two sides that each keep their own scene's node identity (fx,
+/// mask, group) and stacking for the whole transition. `out_a` gets every outgoing item (matched
+/// ones at the interpolated geometry, the rest leaving with their exit style), `out_b` every
+/// incoming one (matched at the same geometry, the rest arriving with their enter style). The
+/// renderer crossfades the two sides (`glide_pass`).
+#[allow(clippy::too_many_arguments)]
+pub fn eval_glide(
+    plan: &Plan,
+    tr: &TransitionPlan,
+    from: usize,
+    to: usize,
+    layout: usize,
+    size: [f32; 2],
+    u: f32,
+    snap: &Snapshot,
+    res: &Resolved,
+    whens: &mut Whens,
+    scratch: &mut MorphScratch,
+    out_a: &mut Vec<Item>,
+    out_b: &mut Vec<Item>,
+) {
+    let t = ease(tr.ease, u);
+    let enter = ease(Ease::Decelerate, window(u, tr.enter_window));
+    let exit = 1.0 - ease(Ease::Accelerate, window(u, tr.exit_window));
+    let MorphScratch { a, b, pair, .. } = scratch;
+    a.clear();
+    b.clear();
+    eval_layout(plan, from, layout, size, snap, res, whens, a);
+    eval_layout(plan, to, layout, size, snap, res, whens, b);
+    pair.clear();
+    pair.resize(a.len(), u32::MAX);
+    for (bi, it) in b.iter().enumerate() {
+        let mut m = *it;
+        match a.iter().enumerate().position(|(ai, x)| pair[ai] == u32::MAX && x.source == it.source) {
+            Some(ai) => {
+                pair[ai] = bi as u32;
+                lerp_geometry(&mut m, &a[ai], it, t);
+            }
+            None => apply_glide_style(&mut m, it.node(plan).enter.unwrap_or(tr.enter), enter, true, size),
+        }
+        out_b.push(m);
+    }
+    for (ai, it) in a.iter().enumerate() {
+        let mut m = *it;
+        match pair[ai] {
+            u32::MAX => apply_glide_style(&mut m, it.node(plan).exit.unwrap_or(tr.exit), exit, false, size),
+            bi => lerp_geometry(&mut m, it, &b[bi as usize], t),
+        }
+        out_a.push(m);
     }
 }
 
@@ -419,6 +554,108 @@ mod tests {
         let done = transition_state(&p, &snap, &res, 2_000_000_000);
         assert!(!done.active && done.progress == 1.0);
     }
+    #[test]
+    fn nearest_edge_slide_clears_canvas_and_returns_to_exact_geometry() {
+        let p = plan();
+        let snap = snapshot(&[], &[]);
+        let base = eval(&p, "a", &snap)[0];
+        for (rect, axis, sign) in [
+            ([10.0, 400.0, 100.0, 80.0], 0, -1.0),
+            ([1800.0, 400.0, 100.0, 80.0], 0, 1.0),
+            ([800.0, 10.0, 100.0, 80.0], 1, -1.0),
+            ([800.0, 990.0, 100.0, 80.0], 1, 1.0),
+        ] {
+            for rotation in [0.0, 0.8] {
+                let mut original = base;
+                original.rect = rect;
+                original.rotation = rotation;
+                for entering in [true, false] {
+                    let mut gone = original;
+                    apply_style(&mut gone, Style::Slide, 0.0, entering, [1920.0, 1080.0]);
+                    assert!(!gone.on_canvas(1920.0, 1080.0), "{gone:?}");
+                    assert!((gone.rect[axis] - rect[axis]) * sign > 0.0);
+                    assert_eq!(gone.rect[1 - axis], rect[1 - axis]);
+                    let mut present = original;
+                    apply_style(&mut present, Style::Slide, 1.0, entering, [1920.0, 1080.0]);
+                    assert_eq!(present, original);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn glide_roles_overlap_and_keep_scene_identity() {
+        let mut p = plan();
+        let tr = p.transition_index["morph"];
+        p.transitions[tr].ease = Ease::Standard;
+        p.transitions[tr].exit = Style::Slide;
+        p.scenes[p.scene_index["b"]].layouts[WIDE].nodes[1].enter = Some(Style::Fade);
+        let snap = snapshot(&[("show.mode", Value::Str("live".into()))], &[]);
+        let a = eval(&p, "a", &snap);
+        let b = eval(&p, "b", &snap);
+        let mut res = Resolved::default();
+        res.update(&snap, &p.state, &p.signals);
+        let mut whens = Whens::default();
+        whens.reset(p.whens.len());
+        let mut scratch = MorphScratch::default();
+        let mut outgoing = Vec::new();
+        let mut incoming = Vec::new();
+        for u in [0.0, 0.2, 0.3, 0.4, 0.5, 0.9, 1.0] {
+            outgoing.clear();
+            incoming.clear();
+            eval_glide(&p, &p.transitions[tr], p.scene_index["a"], p.scene_index["b"], WIDE, [1920.0, 1080.0], u, &snap, &res, &mut whens, &mut scratch, &mut outgoing, &mut incoming);
+            let oa = outgoing.iter().find(|it| it.source == b[0].source).unwrap();
+            let ib = &incoming[0];
+            assert_eq!((oa.scene, oa.node, oa.z, oa.group), (a[1].scene, a[1].node, a[1].z, a[1].group));
+            assert_eq!((ib.scene, ib.node, ib.z, ib.group), (b[0].scene, b[0].node, b[0].z, b[0].group));
+            assert_eq!(oa.rect, ib.rect);
+            let expected = lerp4(a[1].rect, b[0].rect, ease(Ease::Standard, u));
+            assert_eq!(ib.rect, expected);
+            if u <= 0.3 { assert_eq!(incoming[1].opacity, 0.0); }
+            if u == 0.4 {
+                assert!(incoming[1].opacity > 0.0);
+                assert!(outgoing[0].on_canvas(1920.0, 1080.0), "roles overlap");
+            }
+            if u >= 0.5 { assert!(!outgoing[0].on_canvas(1920.0, 1080.0)); }
+            if u == 1.0 { assert_eq!(incoming[1], b[1]); }
+        }
+    }
+
+    #[test]
+    fn glide_custom_enter_presence_is_transparent_before_phase_and_continuous_after() {
+        let p = plan();
+        let snap = snapshot(&[], &[]);
+        let original = eval(&p, "a", &snap)[0];
+        for u in [0.0, 0.2, 0.3, 0.3001, 0.7, 1.0] {
+            let presence = ease(Ease::Decelerate, window(u, [0.3, 1.0]));
+            let mut entering = original;
+            apply_glide_style(&mut entering, Style::Custom(0), presence, true, [1920.0, 1080.0]);
+            assert_eq!(entering.style, Some((0, presence)));
+            assert_eq!(entering.opacity, original.opacity * presence);
+            if u <= 0.3 { assert!(!entering.on_canvas(1920.0, 1080.0)); }
+            if u == 0.3001 { assert!(entering.opacity < 0.01); }
+            if u == 1.0 { assert_eq!(entering.opacity, original.opacity); }
+        }
+        let mut leaving = original;
+        apply_glide_style(&mut leaving, Style::Custom(0), 0.0, false, [1920.0, 1080.0]);
+        assert_eq!(leaving.style, Some((0, 0.0)));
+    }
+
+
+    #[test]
+    fn invalid_glide_windows_report_error_and_use_safe_defaults() {
+        let c = config(&[
+            ("project", "project", "schema = 1"),
+            ("transitions", "bad", "kind = \"glide\"\nenter_window = [0.8, 0.2]\nexit_window = [-0.1, 0.5]\nfade_window = [0.4, 0.4]"),
+            ("transitions", "valid", "kind = \"glide\"\nenter_window = [0, 0.8]\nexit_window = [0.1, 0.9]\nfade_window = [0, 1]"),
+        ]);
+        let p = Plan::build(&c, &[], PathBuf::from("/tmp"));
+        assert_eq!(p.errors.len(), 3, "{:?}", p.errors);
+        let tr = p.transition("bad");
+        assert_eq!((tr.enter_window, tr.exit_window, tr.fade_window), ([0.3, 1.0], [0.0, 0.5], [0.15, 0.75]));
+        let valid = p.transition("valid");
+        assert_eq!((valid.enter_window, valid.exit_window, valid.fade_window), ([0.0, 0.8], [0.1, 0.9], [0.0, 1.0]));
+    }
 
     #[test]
     fn steady_state_is_allocation_free() {
@@ -429,16 +666,22 @@ mod tests {
         let mut whens = Whens::default();
         whens.reset(p.whens.len());
         let mut out = Vec::with_capacity(64);
+        let mut out_b = Vec::with_capacity(64);
         let mut scratch = MorphScratch::default();
         let tr = p.transition("morph");
         let (a, b) = (p.scene_index["a"], p.scene_index["b"]);
         eval_morph(&p, tr, a, b, WIDE, [1920.0, 1080.0], 0.3, &snap, &res, &mut whens, &mut scratch, &mut out);
+        out.clear();
+        eval_glide(&p, tr, a, b, WIDE, [1920.0, 1080.0], 0.3, &snap, &res, &mut whens, &mut scratch, &mut out, &mut out_b);
         let s = se_alloc::Scope::begin();
         for i in 0..100 {
             out.clear();
             eval_morph(&p, tr, a, b, WIDE, [1920.0, 1080.0], i as f32 / 100.0, &snap, &res, &mut whens, &mut scratch, &mut out);
             finish(&mut out, [1920.0, 1080.0]);
             eval_layout(&p, b, WIDE, [1920.0, 1080.0], &snap, &res, &mut whens, &mut out);
+            out.clear();
+            out_b.clear();
+            eval_glide(&p, tr, a, b, WIDE, [1920.0, 1080.0], i as f32 / 100.0, &snap, &res, &mut whens, &mut scratch, &mut out, &mut out_b);
         }
         assert_eq!(s.allocs(), 0);
     }

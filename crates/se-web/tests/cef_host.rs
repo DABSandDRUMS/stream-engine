@@ -21,7 +21,10 @@ use se_proto::Value;
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener};
+use std::os::fd::{AsFd, AsRawFd};
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
@@ -241,6 +244,63 @@ fn scene(w: f32, h: f32) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs CEF, NVIDIA GPU and ffmpeg with libvpx-vp9"]
+async fn decoded_video_keeps_playing_across_loops() {
+    // Real decoded native video buffers exercise a different shared-image backing from
+    // CSS/WebGL animation. ANGLE Vulkan without VulkanFromANGLE resets the GPU here.
+    let encoded = std::process::Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=red:s=720x720:r=30:d=1[r];color=c=blue:s=720x720:r=30:d=1[b];[r][b]concat=n=2:v=1:a=0",
+            "-an",
+            "-c:v",
+            "libvpx-vp9",
+            "-threads",
+            "2",
+            "-deadline",
+            "realtime",
+            "-cpu-used",
+            "8",
+            "-f",
+            "webm",
+            "pipe:1",
+        ])
+        .output()
+        .expect("ffmpeg with libvpx-vp9 is required");
+    assert!(encoded.status.success(), "{}", String::from_utf8_lossy(&encoded.stderr));
+    let page = format!(
+        r#"<style>body{{margin:0}}video{{width:100vw;height:100vh}}</style><video autoplay muted loop></video>
+<script>document.querySelector('video').src=URL.createObjectURL(new Blob([new Uint8Array({:?})],{{type:'video/webm'}}));</script>"#,
+        encoded.stdout,
+    );
+    let e = Engine::start(
+        "[canvas.wide]\nnodes = [{src = \"patch.video\", rect = [0.0, 0.0, 1.0, 1.0]}]",
+        &[("video", "kind = \"web\"\nsize = [720, 720]\nfps = 30", &page)],
+    )
+    .await;
+    let mut reader = e.reader("patch.video").await;
+    // Classify the two colors, allowing for decoder YUV color-matrix conversion.
+    let red = |f: &Frame| {
+        let [b, g, r, a] = f.center();
+        r > 200 && g < 80 && b < 80 && a == 255
+    };
+    let blue = |f: &Frame| {
+        let [b, g, r, a] = f.center();
+        b > 200 && g < 80 && r < 80 && a == 255
+    };
+    next_frame(&mut reader, "decoded red video", red).await;
+    next_frame(&mut reader, "decoded blue video", blue).await;
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    next_frame(&mut reader, "red video after repeated loops", red).await;
+    next_frame(&mut reader, "blue video after repeated loops", blue).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs the CEF runtime: scripts/install-cef.sh, then cargo test -p se-web -- --ignored"]
 async fn renders_patch_pages_into_video_slots_and_resizes_live() {
     let e = Engine::start(&scene(0.25, 0.25), &[("solid", "kind = \"web\"", ANIMATED), ("alpha", "kind = \"web\"\nsize = [64, 32]\nfps = 10", ALPHA)]).await;
@@ -454,4 +514,78 @@ async fn delivers_webaudio_into_the_audio_slot() {
     let lr = samples.as_chunks::<2>().0.iter().map(|c| (c[0] - c[1]).abs()).fold(0f32, f32::max);
     assert!(lr < 1e-3, "mono oscillator → identical L/R, max diff {lr}");
     assert!((rate - 48_000.0).abs() < 48_000.0 * 0.25, "≈48 kHz stereo expected, got {rate:.0} frames/s");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the CEF runtime (scripts/install-cef.sh)"]
+async fn host_exits_cleanly_when_ipc_and_log_readers_disappear() {
+    use se_web::protocol::{self, FromHost, ToHost};
+
+    let paths = se_web::find_host(Path::new("/nonexistent")).expect(se_web::INSTALL_HINT);
+    let dir = tempfile::tempdir().unwrap();
+    let (ours, theirs) = protocol::socketpair().unwrap();
+    // Standard-input mapping uses the spawn implementation's file actions, not pre_exec.
+    let mut child = tokio::process::Command::new(&paths.exe)
+        .arg(format!("--se-ipc-fd={}", libc::STDIN_FILENO))
+        .arg(format!("--se-profile={}", dir.path().join("profile").display()))
+        .arg(format!("--se-log-file={}", dir.path().join("host.log").display()))
+        .env("LD_LIBRARY_PATH", &paths.runtime_dir)
+        .current_dir(&paths.runtime_dir)
+        .stdin(Stdio::from(theirs))
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut surfaces = HashMap::new();
+    let mut buf = Vec::new();
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(!remaining.is_zero(), "host did not render before teardown");
+        let mut poll = libc::pollfd { fd: ours.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        // SAFETY: poll points to one initialized descriptor entry.
+        assert!(unsafe { libc::poll(&mut poll, 1, remaining.as_millis() as i32) } > 0, "host receive timed out");
+        let (msg, fd) = protocol::recv::<FromHost>(ours.as_fd(), &mut buf).unwrap().expect("host exited before rendering");
+        match msg {
+            FromHost::Hello { .. } => {
+                protocol::send(
+                    ours.as_fd(),
+                    &ToHost::Open {
+                        id: 1,
+                        url: "data:text/html,<style>html{background:rgb(0,255,0)}</style>".into(),
+                        width: 32,
+                        height: 32,
+                        fps: 30,
+                        youtube_account: None,
+                    },
+                    None,
+                    false,
+                )
+                .unwrap();
+            }
+            FromHost::Surface { surface, width, height, stride, .. } => {
+                surfaces.insert(surface, (std::fs::File::from(fd.expect("surface memfd")), width, height, stride));
+            }
+            FromHost::Frame { id, surface, slot, .. } => {
+                let (file, width, height, stride) = &surfaces[&surface];
+                let offset =
+                    u64::from(slot) * u64::from(*stride) * u64::from(*height) + u64::from(*height / 2) * u64::from(*stride) + u64::from(*width / 2) * 4;
+                let mut pixel = [0; 4];
+                file.read_exact_at(&mut pixel, offset).unwrap();
+                protocol::send(ours.as_fd(), &ToHost::FrameDone { id, surface, slot }, None, false).unwrap();
+                if pixel == GREEN {
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    // Model runtime teardown: stderr forwarding stops before the host closes its browsers.
+    drop(child.stderr.take());
+    // SAFETY: the same hangup used by Session::drop, on our still-owned socket.
+    assert_eq!(unsafe { libc::shutdown(ours.as_raw_fd(), libc::SHUT_RDWR) }, 0);
+    drop(ours);
+    let status = tokio::time::timeout(Duration::from_secs(6), child.wait()).await.expect("host did not shut down before its watchdog").unwrap();
+    assert_eq!(status.code(), Some(0), "host aborted during disconnected browser teardown: {status}");
 }

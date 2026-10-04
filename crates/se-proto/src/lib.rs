@@ -3,6 +3,7 @@
 
 pub mod address;
 pub mod command;
+pub mod palette;
 pub mod types;
 pub mod value;
 pub mod wire;

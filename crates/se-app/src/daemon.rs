@@ -33,11 +33,18 @@ pub enum SessionMsg {
     Signals(u64, Arc<Vec<String>>, Vec<f32>),
     Marker(Value),
     Meta(String, Value),
+    /// Persist recorder metadata before file finalization permits session rotation.
+    Persist {
+        session: String,
+        values: Value,
+        done: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
     Flush,
     /// Close the current session and start `new_id` (with a Start record).
     Rotate {
         new_id: String,
         start: LogRec,
+        done: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
     Close,
 }
@@ -207,6 +214,7 @@ fn session_thread(root: PathBuf, id: String, start: LogRec, rx: crossbeam_channe
         }
     };
     let mut w = open(&id, &start);
+    let mut current_id = id;
     let mut last_flush = std::time::Instant::now();
     loop {
         let msg = match rx.recv_timeout(Duration::from_millis(500)) {
@@ -215,13 +223,29 @@ fn session_thread(root: PathBuf, id: String, start: LogRec, rx: crossbeam_channe
             Err(_) => break,
         };
         match msg {
-            Some(SessionMsg::Rotate { new_id, start }) => {
-                if let Some(old) = w.take() {
-                    let _ = old.close();
-                }
+            Some(SessionMsg::Rotate { new_id, start, done }) => {
+                let closed = w.take().map_or(Ok(()), |old| old.close().map_err(|e| format!("{e:#}")));
                 w = open(&new_id, &start);
+                current_id = new_id;
+                let result = closed.and_then(|_| w.as_ref().map(|_| ()).ok_or_else(|| "new session writer unavailable".to_string()));
+                let _ = done.send(result);
             }
             Some(SessionMsg::Close) => break,
+            Some(SessionMsg::Persist { session, values, done }) => {
+                let result = if session != current_id {
+                    Err(format!("cannot persist recording metadata for closed session {session}"))
+                } else if let Some(writer) = w.as_mut() {
+                    match values {
+                        Value::Map(values) => {
+                            values.iter().try_for_each(|(key, value)| writer.set_meta(key, value)).and_then(|_| writer.flush()).map_err(|e| format!("{e:#}"))
+                        }
+                        _ => Err("session.persist needs a values map".into()),
+                    }
+                } else {
+                    Err("session writer unavailable".into())
+                };
+                let _ = done.send(result);
+            }
             Some(m) => {
                 if let Some(w) = w.as_mut() {
                     let r = match m {
@@ -232,7 +256,7 @@ fn session_thread(root: PathBuf, id: String, start: LogRec, rx: crossbeam_channe
                         SessionMsg::Marker(m) => w.add_marker(&m),
                         SessionMsg::Meta(k, v) => w.set_meta(&k, &v),
                         SessionMsg::Flush => w.flush(),
-                        SessionMsg::Rotate { .. } | SessionMsg::Close => Ok(()),
+                        SessionMsg::Rotate { .. } | SessionMsg::Persist { .. } | SessionMsg::Close => Ok(()),
                     };
                     if let Err(e) = r {
                         tracing::warn!("session write: {e:#}");
@@ -396,6 +420,11 @@ async fn async_main(ctx: Ctx, journal_events: tokio::sync::mpsc::UnboundedReceiv
         _ = tokio::signal::ctrl_c() => tracing::info!("SIGINT"),
     }
     let _ = sd_notify::notify(&[sd_notify::NotifyState::Stopping]);
+    // The app owns recording. Finalize encoders and persist their last metadata before
+    // stopping subsystems or closing the session writer.
+    if let Err(e) = ctx.hub.query("recording.finalize", Value::Null).await {
+        tracing::warn!("recording finalization on shutdown: {e}");
+    }
     save_runtime(&ctx).await;
     let _ = ctx.log_tx.send(SessionMsg::Flush);
     crate::subsystems::stop(&ctx).await;
@@ -404,10 +433,14 @@ async fn async_main(ctx: Ctx, journal_events: tokio::sync::mpsc::UnboundedReceiv
 }
 
 pub fn reload(ctx: &Ctx, paths: &[String]) {
+    // Watcher reloads must not observe a half-written multi-file input edit.
+    let _write_guard = crate::project_io::CONFIG_WRITE.lock();
     let loaded = ctx.project.load();
     let mut next = Config::build(&loaded.files);
     let prev = ctx.config.lock().clone();
-    next = next.merge_last_good(&prev, &loaded.failed);
+    let mut failed = loaded.failed.clone();
+    failed.extend(next.errors.iter().map(|e| e.file.clone()));
+    next = next.merge_last_good(&prev, &failed);
     next.errors.extend(loaded.errors.clone());
     let n = next.errors.len();
     for e in &next.errors {
@@ -474,5 +507,34 @@ async fn persist_loop(ctx: Ctx) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn recording_metadata_is_persisted_before_close_and_cannot_leak_into_next_show() {
+        let root = tempfile::tempdir().unwrap();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let dir = root.path().to_owned();
+        let start = || LogRec::Start { t0: 1, period: 4_166_666, tick: 0, wall_ns: 0, restore: None };
+        let thread = std::thread::spawn(move || session_thread(dir, "first".into(), start(), rx));
+        let (done, ack) = tokio::sync::oneshot::channel();
+        let recordings = Value::List(vec![Value::map().with("path", "wide.mkv").with("start_ns", 1000i64).with("end_ns", 9000i64)]);
+        tx.send(SessionMsg::Persist { session: "first".into(), values: Value::map().with("recordings", recordings), done }).unwrap();
+        ack.await.unwrap().unwrap();
+        let meta: toml::Value = toml::from_str(&std::fs::read_to_string(root.path().join("first/meta.toml")).unwrap()).unwrap();
+        assert_eq!(meta["recordings"][0]["end_ns"].as_integer(), Some(9000));
+        let (done, ack) = tokio::sync::oneshot::channel();
+        tx.send(SessionMsg::Rotate { new_id: "second".into(), start: start(), done }).unwrap();
+        ack.await.unwrap().unwrap();
+        let (done, ack) = tokio::sync::oneshot::channel();
+        tx.send(SessionMsg::Persist { session: "first".into(), values: Value::map().with("recordings", Value::List(vec![])), done }).unwrap();
+        assert!(ack.await.unwrap().is_err(), "late metadata must not overwrite the next show");
+        assert!(!root.path().join("second/meta.toml").exists());
+        tx.send(SessionMsg::Close).unwrap();
+        thread.join().unwrap();
     }
 }

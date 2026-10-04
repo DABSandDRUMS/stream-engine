@@ -165,13 +165,19 @@ fn load_recordings(files: &SessionFiles) -> (Vec<Rec>, Vec<String>) {
     (out, problems)
 }
 
-/// Wide (canonical, multitrack) recording for a moment: the `wide` canvas when present.
+/// Wide (canonical, multitrack) recording for a moment: the master recording covering `t`.
+/// ISOs (cameras, extra canvases) are video-only and never chosen. Older shows without roles
+/// prefer the `wide` canvas, then any recording that is not `tall`.
 fn wide_for(recs: &[Rec], t: u64) -> Option<usize> {
-    recs.iter().position(|r| r.rec.canvas == "wide" && r.covers(t)).or_else(|| recs.iter().position(|r| r.rec.canvas != "tall" && r.covers(t)))
+    let rank = |r: &Rec| match (r.rec.role.as_str(), r.rec.canvas.as_str()) {
+        ("master", _) | ("", "wide") => 0,
+        _ => 1,
+    };
+    recs.iter().enumerate().filter(|(_, r)| r.rec.is_master() && r.covers(t)).min_by_key(|(_, r)| rank(r)).map(|(i, _)| i)
 }
 
 fn tall_for(recs: &[Rec], t0: u64, t1: u64) -> Option<&Rec> {
-    recs.iter().find(|r| r.rec.canvas == "tall" && r.covers(t0) && r.covers(t1))
+    recs.iter().find(|r| r.rec.is_tall() && r.covers(t0) && r.covers(t1))
 }
 
 /// Everything needed to render one clip.
@@ -423,7 +429,7 @@ pub fn process(env: &JobEnv, session: &str, progress: &dyn Fn(Progress)) -> Resu
         if files.markers.is_empty() {
             return Ok(report);
         }
-        return Err(format!("no OBS recordings in {}/meta.toml", dir.display()));
+        return Err(format!("no recordings in {}/meta.toml", dir.display()));
     }
     let (recs, problems) = load_recordings(&files);
     report.skipped.extend(problems);
@@ -852,14 +858,14 @@ pub fn make(env: &JobEnv, session: &str, t_in: f64, t_out: f64, progress: &dyn F
     let paths = show::paths_for(&dir);
     let origin = show::read_manifest(&paths)
         .map(|m| m.t0_ns.max(0) as u64)
-        .or_else(|| recs.iter().filter(|r| r.rec.canvas != "tall").map(|r| r.start_ns).min())
-        .ok_or_else(|| format!("no wide recording for session {session}: {}", errors.join("; ")))?;
+        .or_else(|| recs.iter().filter(|r| r.rec.is_master()).map(|r| r.start_ns).min())
+        .ok_or_else(|| format!("no master recording for session {session}: {}", errors.join("; ")))?;
     let from = origin.saturating_add((t_in * 1e9) as u64);
     let to = origin.saturating_add((t_out * 1e9) as u64);
-    let wide = recs
-        .iter()
-        .position(|r| r.rec.canvas != "tall" && r.covers(from) && r.covers(to))
-        .ok_or_else(|| "manual selection must fit inside one wide recording".to_string())?;
+    let wide = wide_for(&recs, from)
+        .filter(|&i| recs[i].covers(to))
+        .or_else(|| recs.iter().position(|r| r.rec.is_master() && r.covers(from) && r.covers(to)))
+        .ok_or_else(|| "manual selection must fit inside one master recording segment".to_string())?;
     let rec = &recs[wide];
     let (local_in, local_out) = (rec.at(from), rec.at(to));
     let last_ns = recs.iter().map(|r| r.start_ns.saturating_add((r.probe.duration * 1e9) as u64)).max().unwrap_or(to);
@@ -1094,10 +1100,35 @@ mod tests {
     }
 
     #[test]
+    fn clip_master_is_chosen_by_role_never_an_iso() {
+        let rec = |canvas: &str, role: &str, source: &str, start_s: u64, duration: f64| Rec {
+            rec: Recording { canvas: canvas.into(), role: role.into(), source: source.into(), start_ns: Some(start_s * 1_000_000_000), ..Default::default() },
+            probe: Probe { duration, ..Default::default() },
+            start_ns: start_s * 1_000_000_000,
+        };
+        // An ISO listed first and named "wide" must never become the clip master.
+        let recs = [
+            rec("wide", "iso", "camera:cam_kit", 0, 100.0),
+            rec("tall", "iso", "canvas:tall", 0, 100.0),
+            rec("main", "master", "canvas:wide", 0, 40.0),
+            rec("main", "master", "canvas:wide", 45, 55.0),
+        ];
+        assert_eq!(wide_for(&recs, 10_000_000_000), Some(2));
+        assert_eq!(wide_for(&recs, 50_000_000_000), Some(3), "a restarted master segment covers later moments");
+        assert_eq!(wide_for(&recs, 42_000_000_000), None, "the gap between master segments has no master");
+        assert!(tall_for(&recs, 1_000_000_000, 2_000_000_000).is_some_and(|r| r.rec.source == "canvas:tall"));
+        // Older shows without roles: wide first, tall never.
+        let legacy = [rec("tall", "", "", 0, 100.0), rec("cam", "", "", 0, 100.0), rec("wide", "", "", 0, 100.0)];
+        assert_eq!(wide_for(&legacy, 1_000_000_000), Some(2));
+        assert_eq!(wide_for(&legacy[..2], 1_000_000_000), Some(1));
+        assert!(tall_for(&legacy, 0, 1_000_000_000).is_some_and(|r| r.rec.canvas == "tall"));
+    }
+
+    #[test]
     fn indexed_words_map_show_time_to_recording_without_retranscription() {
         let manifest = show::Manifest { t0_ns: 5_000_000_000, ..Default::default() };
         let rec = Rec {
-            rec: Recording { canvas: "wide".into(), path: PathBuf::new(), start_ns: Some(3_000_000_000), end_ns: None, tracks: vec![] },
+            rec: Recording { canvas: "wide".into(), path: PathBuf::new(), start_ns: Some(3_000_000_000), ..Default::default() },
             probe: Probe { duration: 60.0, ..Default::default() },
             start_ns: 3_000_000_000,
         };
@@ -1202,7 +1233,9 @@ mod tests {
             let log = String::from_utf8_lossy(&output.stderr);
             log.lines().filter_map(|line| line.split("RMS level dB:").nth(1)).filter_map(|v| v.trim().parse::<f64>().ok()).next_back().unwrap()
         };
-        assert!(band_db(cut, 440) - band_db(cut, 200) > 10.0, "song bus should be audible, program must not be duplicated");
+        for hz in [200, 320, 440, 110] {
+            assert!(band_db(cut, hz) > -45.0, "selected source {hz} Hz missing from manual clip");
+        }
         assert_eq!(store::feedback(&db, "test").unwrap()[0].get_path("action").and_then(Value::as_str), Some("manual"));
         let report = process(&env, "test", &|_| {}).unwrap();
         assert_eq!((report.clips, report.failed), (1, 0), "a song needs a candidate without markers or Whisper");
@@ -1210,6 +1243,8 @@ mod tests {
         assert_eq!((generated.kind.as_str(), generated.song.as_deref(), generated.dmca_risk), ("song", Some("Live Song"), true));
         assert!(!generated.music_dropped && generated.captions.is_empty());
         let generated_cut = Path::new(generated.wide_path.as_deref().unwrap());
-        assert!(band_db(generated_cut, 440) - band_db(generated_cut, 200) > 10.0);
+        for hz in [200, 320, 440, 110] {
+            assert!(band_db(generated_cut, hz) > -45.0, "selected source {hz} Hz missing from automatic clip");
+        }
     }
 }

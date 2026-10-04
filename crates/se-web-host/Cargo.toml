@@ -12,6 +12,8 @@ path = "src/main.rs"
 
 [dependencies]
 cef.workspace = true
+flate2 = "1.1"
 se-web = { path = "../se-web", default-features = false }
 libc.workspace = true
 parking_lot.workspace = true
+serde_json.workspace = true

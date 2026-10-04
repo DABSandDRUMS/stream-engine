@@ -1,0 +1,5 @@
+label = "Warm stage"
+fx = [
+  { id = "warmth", name = "grade", amount = 1.0, level = 1.0, warmth = 0.18, tint = 0.04, contrast = 1.08, saturation = 1.10, lift = 0.015, exposure = 0.05 },
+  { id = "edges", name = "vignette", amount = 0.25, level = 1.0, radius = 0.85, softness = 0.60 },
+]

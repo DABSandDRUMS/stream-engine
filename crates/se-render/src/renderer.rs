@@ -14,11 +14,12 @@ use crate::limiter::{CELLS, FlashDetector};
 use crate::lut::Lut;
 use crate::patches::{FrameInputs, KIND_PATCH, PatchRt};
 use crate::perf::{P_ATLAS, P_OUTPUT, P_PREVIEW, P_SOURCES, P_TALL, P_WIDE, Stats, Timestamps};
-use crate::pipelines::{Pipelines, UserPipes, transition_manifest};
+use crate::pipelines::{Pipelines, UserPipes, glide_layout, transition_manifest};
 use crate::plan::{ATLAS, Attach, CANVASES, EffectKind, LAYOUTS, PREVIEW, Plan, ShaderSource, SourceKind, TALL, TrKind, WIDE, atlas_tiles};
-use crate::resources::{Arena, BindCache, Layouts, MappedRing, Tex};
+use crate::resources::{Arena, BindCache, FreezePhotos, Layouts, MappedRing, Tex};
 use crate::scene::{self, Item, MorphScratch, TrState};
 use crate::sources::{VideoGpu, color_settings};
+use se_core::config::NodeFit;
 use se_frames::{FramesServer, RingDesc, RingKind, ShmBuffer};
 use se_hub::draw::DrawReader;
 use se_hub::media::VideoReader;
@@ -155,6 +156,8 @@ struct Src {
     fx: [Option<Tex>; 2],
     /// Which `fx` texture holds this frame's result (None = no active source effects).
     fx_out: Option<usize>,
+    layer_fx: [[Option<Tex>; 2]; LAYOUTS],
+    layer_fx_out: [Option<usize>; LAYOUTS],
     used: u8,
     last_lut: String,
 }
@@ -162,6 +165,9 @@ struct Src {
 impl Src {
     /// Texture placements sample for `layout`, and whether it is premultiplied.
     fn tex(&self, layout: usize) -> Option<(&Tex, bool)> {
+        if let Some(i) = self.layer_fx_out[layout] {
+            return self.layer_fx[layout][i].as_ref().map(|t| (t, true));
+        }
         match &self.rt {
             SourceRt::Video(v) => {
                 if !v.has_frame {
@@ -291,6 +297,7 @@ pub struct Renderer {
     canvases: Vec<CanvasRt>,
     sources: Vec<Src>,
     patches: Vec<PatchRt>,
+    freeze_photos: FreezePhotos,
     transitions: HashMap<String, TransitionRt>,
     /// Compiled custom enter/exit style files by path.
     styles: HashMap<String, TransitionRt>,
@@ -301,6 +308,8 @@ pub struct Renderer {
     fx_counts: FxCounts,
     fade_layout: se_patch::wgsl::Layout,
     fade_buf: Vec<f32>,
+    glide_layout: se_patch::wgsl::Layout,
+    glide_buf: Vec<f32>,
     luts: HashMap<String, Slot>,
     lut_views: Vec<wgpu::TextureView>,
     masks: HashMap<String, Slot>,
@@ -362,6 +371,7 @@ impl Renderer {
             }
         };
         let fade_layout = se_patch::wgsl::Layout::new(&transition_manifest("fade", &[]));
+        let glide_layout = glide_layout();
         let arena = Arena::new(&gpu.device, 4 << 20);
         stats.device_ok.store(true, Ordering::Relaxed);
         let mut r = Renderer {
@@ -376,6 +386,7 @@ impl Renderer {
             canvases: Vec::new(),
             sources: Vec::new(),
             patches: Vec::new(),
+            freeze_photos: FreezePhotos::new(stats.freeze_photos.clone()),
             transitions: HashMap::new(),
             styles: HashMap::new(),
             user_patch_pipes: HashMap::new(),
@@ -383,6 +394,8 @@ impl Renderer {
             fx_counts: FxCounts::default(),
             fade_buf: vec![0.0; fade_layout.floats],
             fade_layout,
+            glide_buf: vec![0.0; glide_layout.floats],
+            glide_layout,
             luts: HashMap::new(),
             lut_views: Vec::new(),
             masks: HashMap::new(),
@@ -469,6 +482,8 @@ impl Renderer {
                     },
                     fx: [None, None],
                     fx_out: None,
+                    layer_fx: std::array::from_fn(|_| [None, None]),
+                    layer_fx_out: [None; LAYOUTS],
                     used: 0,
                     last_lut: String::new(),
                 },
@@ -652,10 +667,14 @@ impl Renderer {
                 }
             }
             Msg::PatchTrigger { patch, payload } => {
+                if patch == "freeze_frame" {
+                    self.freeze_photos.request();
+                }
                 if let Some(i) = self.plan.patch_index.get(&patch) {
                     let rt = &mut self.patches[*i];
                     rt.trigger_count = rt.trigger_count.wrapping_add(1);
                     rt.trigger = payload;
+                    rt.trigger_at = None;
                 }
             }
         }
@@ -685,6 +704,7 @@ impl Renderer {
         {
             let _p = se_alloc::Pause::new();
             let _ = self.gpu.device.poll(wgpu::PollType::Poll);
+            self.freeze_photos.retry_worker(now);
         }
         if let Some(ts) = &mut self.ts
             && ts.poll()
@@ -732,6 +752,11 @@ impl Renderer {
                 match tp.kind {
                     TrKind::Morph | TrKind::Combined => {
                         scene::eval_morph(&plan, tp, from, to, layout, size, tr.eased(&plan), snap, &self.res, &mut self.whens, &mut self.morph, &mut cv.items);
+                    }
+                    TrKind::Glide => {
+                        // incoming side → items (drawn as the program), outgoing → items_b
+                        let t = tr.progress;
+                        scene::eval_glide(&plan, tp, from, to, layout, size, t, snap, &self.res, &mut self.whens, &mut self.morph, &mut cv.items_b, &mut cv.items);
                     }
                     TrKind::Shader => {
                         scene::eval_layout(&plan, to, layout, size, snap, &self.res, &mut self.whens, &mut cv.items);
@@ -864,7 +889,7 @@ impl Renderer {
             .sources
             .iter()
             .map(|s| {
-                let fx: u64 = s.fx.iter().flatten().map(Tex::bytes).sum();
+                let fx: u64 = s.fx.iter().flatten().chain(s.layer_fx.iter().flat_map(|l| l.iter().flatten())).map(Tex::bytes).sum();
                 fx + match &s.rt {
                     SourceRt::Video(v) => v.bytes,
                     SourceRt::Draw { layers, .. } | SourceRt::Patch { layers, .. } => layers.iter().flatten().map(Tex::bytes).sum(),
@@ -872,7 +897,8 @@ impl Renderer {
                 }
             })
             .sum();
-        c + s + (4 << 20)
+        let p: u64 = self.patches.iter().map(PatchRt::frame_bytes).sum();
+        c + s + p + (4 << 20) + self.freeze_photos.bytes()
     }
 
     fn flash_scale(&self) -> f32 {
@@ -934,6 +960,7 @@ impl Renderer {
             binds,
             sources,
             patches,
+            freeze_photos,
             luts,
             lut_views,
             assets,
@@ -959,7 +986,7 @@ impl Renderer {
                 SourceRt::Video(v) => {
                     let SourceKind::Video { slot } = &sp.kind else { continue };
                     let fresh = inputs.video.get_mut(slot.as_str()).and_then(|r| r.fresh());
-                    v.upload(device, enc, binds, &sp.name, fresh);
+                    v.upload(gpu, enc, binds, &sp.name, fresh);
                     let lut_path = res.str(snap, sp.color.lut).unwrap_or("");
                     let mut lut = None;
                     if !lut_path.is_empty() {
@@ -997,10 +1024,10 @@ impl Renderer {
                             let (a, b) = (a.as_ref().expect("allocated"), b.as_ref().expect("allocated"));
                             let mut cur = out;
                             let mut which = 0;
-                            let chain = Chain { evals: fx, fused, region: [0.0, 0.0, 1.0, 1.0], scissor: None, quarter: None };
+                            let chain = Chain { evals: fx, fused, region: [0.0, 0.0, 1.0, 1.0], scissor: None, quarter: None, ctx: CANVASES };
                             for step in Steps::new(&plan, fx, fused) {
                                 let dst = if which == 0 { a } else { b };
-                                apply_step(enc, &mut g, &plan, patches, &chain, step, cur, dst, snap, res, fi, lut_views, fx_counts);
+                                apply_step(enc, &mut g, &plan, patches, freeze_photos, &chain, step, cur, dst, snap, res, fi, lut_views, fx_counts);
                                 cur = dst;
                                 s.fx_out = Some(which);
                                 which ^= 1;
@@ -1046,15 +1073,70 @@ impl Renderer {
                         }
                         rt.last_render_ns[li] = now_ns.max(1);
                         let res_px = [t.size[0] as f32, t.size[1] as f32];
-                        let off = rt.uniforms(pp, snap, res, fi, res_px, se_patch::wgsl::FULL, 0.0, None, arena);
+                        let off = rt.uniforms(pp, snap, res, fi, res_px, se_patch::wgsl::FULL, 0.0, None, None, None, arena);
                         if !simulated {
                             rt.simulate(device, enc, layouts, arena, binds, *frame, off, count);
                             simulated = true;
                         }
-                        rt.draw(device, enc, layouts, arena, binds, &t.view, off, None, None, count);
+                        rt.draw(device, enc, layouts, arena, binds, &t.view, off, None, None, count, None);
                     }
                 }
                 SourceRt::Patch { patch: None, .. } | SourceRt::Solid(_) => {}
+            }
+            // Generated sources share their post-FX image across all placements in a layout.
+            s.layer_fx_out = [None; LAYOUTS];
+            if !matches!(s.rt, SourceRt::Video(_)) && !sp.fx.is_empty() {
+                fx.clear();
+                let cx = FxContext { plan: &plan, snap, res, trigger_levels, flash_scale: 1.0 };
+                compose::eval_attaches(&cx, whens, &mut LutTable { map: luts, assets }, &sp.fx, fx);
+                if !fx.is_empty() {
+                    for li in 0..LAYOUTS {
+                        if s.used & (1 << li) == 0 { continue; }
+                        let (input, premult, color, size) = match &s.rt {
+                            SourceRt::Draw { layers, seq } if seq[li] != 0 => match layers[li].as_ref() {
+                                Some(t) => (Some(t), false, [0.0; 4], t.size),
+                                None => continue,
+                            },
+                            SourceRt::Patch { layers, .. } => match layers[li].as_ref() {
+                                Some(t) => (Some(t), true, [0.0; 4], t.size),
+                                None => continue,
+                            },
+                            SourceRt::Solid(color) => (None, true, *color, sp.sizes[li]),
+                            _ => continue,
+                        };
+                        if size[0] == 0 || size[1] == 0 { continue; }
+                        for t in &mut s.layer_fx[li] {
+                            if t.as_ref().is_none_or(|t| t.size != size) {
+                                if let Some(old) = t.as_ref() { binds.forget(old.id); }
+                                let _p = se_alloc::Pause::new();
+                                *t = Some(Tex::target(device, &format!("{} source fx", sp.name), size));
+                            }
+                        }
+                        let mut g = Gfx { device, layouts, pipes, arena, binds };
+                        let [a, b] = &s.layer_fx[li];
+                        let (a, b) = (a.as_ref().expect("allocated"), b.as_ref().expect("allocated"));
+                        {
+                            let _p = se_alloc::Pause::new();
+                            let mut pass = compose::begin(enc, "source fx input", &a.view, Some([0.0; 4]));
+                            let u = NodeUniform {
+                                dst: [0.0, 0.0, size[0] as f32, size[1] as f32],
+                                uv: [0.0, 0.0, 1.0, 1.0],
+                                target_size: [size[0] as f32, size[1] as f32], color,
+                                opacity: 1.0, premultiplied: f32::from(u8::from(premult)),
+                                solid: f32::from(u8::from(input.is_none())), ..Default::default()
+                            };
+                            compose::draw_node(&mut pass, &mut g, &u, input, None, &pipes.composite_copy);
+                        }
+                        let mut current = 0;
+                        let chain = Chain { evals: fx, fused, region: [0.0, 0.0, 1.0, 1.0], scissor: None, quarter: None, ctx: CANVASES + li };
+                        for step in Steps::new(&plan, fx, fused) {
+                            let (src, dst) = if current == 0 { (a, b) } else { (b, a) };
+                            apply_step(enc, &mut g, &plan, patches, freeze_photos, &chain, step, src, dst, snap, res, fi, lut_views, fx_counts);
+                            current ^= 1;
+                        }
+                        s.layer_fx_out[li] = Some(current);
+                    }
+                }
             }
         }
     }
@@ -1097,6 +1179,7 @@ impl Renderer {
             canvases,
             sources,
             patches,
+            freeze_photos,
             luts,
             lut_views,
             masks,
@@ -1113,6 +1196,8 @@ impl Renderer {
             styles,
             fade_layout,
             fade_buf,
+            glide_layout,
+            glide_buf,
             fused,
             fx_counts,
             ..
@@ -1154,7 +1239,10 @@ impl Renderer {
                 if fx_node.is_empty() && it.style.is_none() {
                     continue;
                 }
-                let Some((stex, premult)) = sources[it.source as usize].tex(layout) else { continue };
+                let source = &sources[it.source as usize];
+                let texture = source.tex(layout);
+                let (stex, premult) = texture.map_or((None, true), |(t, p)| (Some(t), p));
+                let color = match source.rt { SourceRt::Solid(c) => c, _ => plan.settings.no_signal };
                 while cv.pool.len() < used_pool + 2 {
                     let _p = se_alloc::Pause::new();
                     cv.pool.push(Tex::target(device, &format!("{} node fx", plan.canvases[c].name), size));
@@ -1164,25 +1252,29 @@ impl Renderer {
                 {
                     let _p = se_alloc::Pause::new();
                     let mut pass = compose::begin(enc, "node fx source", &cv.pool[used_pool].view, Some([0.0; 4]));
+                    let (content, uv) = source_placement(&plan, &it, stex, size);
                     let u = NodeUniform {
                         dst: it.rect,
-                        uv: it.crop,
+                        uv,
+                        content,
                         target_size: [size[0] as f32, size[1] as f32],
                         opacity: 1.0,
                         premultiplied: f32::from(u8::from(premult)),
+                        color,
+                        solid: f32::from(u8::from(stex.is_none())),
                         ..Default::default()
                     };
                     let pipes = g.pipes;
-                    compose::draw_node(&mut pass, &mut g, &u, Some(stex), None, &pipes.composite_copy);
+                    compose::draw_node(&mut pass, &mut g, &u, stex, None, &pipes.composite_copy);
                 }
                 let scissor = scissor_of(region, size);
                 let mut cur = used_pool;
                 let spare_idx = used_pool + 1;
                 let mut spare = spare_idx;
-                let chain = Chain { evals: fx_node, fused, region, scissor, quarter: None };
+                let chain = Chain { evals: fx_node, fused, region, scissor, quarter: None, ctx: c };
                 for step in Steps::new(&plan, fx_node, fused) {
                     let (src_t, dst_t) = (&cv.pool[cur], &cv.pool[spare]);
-                    apply_step(enc, &mut g, &plan, patches, &chain, step, src_t, dst_t, snap, res, fi, lut_views, fx_counts);
+                    apply_step(enc, &mut g, &plan, patches, freeze_photos, &chain, step, src_t, dst_t, snap, res, fi, lut_views, fx_counts);
                     std::mem::swap(&mut cur, &mut spare);
                 }
                 if let Some((st, presence)) = it.style {
@@ -1201,10 +1293,45 @@ impl Renderer {
             }
         }
 
+        // Compositor groups reuse the node arena, with a transparent isolated parent surface.
+        // Even bypassed groups remain atomic layers: bypass only gates their FX chain.
+        for pass_b in [false, true] {
+            let (items, slots) = if pass_b { (&cv.items_b, &mut cv.slots_b) } else { (&cv.items, &mut cv.slots) };
+            let mut i = 0;
+            while i < items.len() {
+                let Some((scene, gi)) = items[i].group else { i += 1; continue };
+                let start = i;
+                while i < items.len() && items[i].group == Some((scene, gi)) { i += 1; }
+                let group = &plan.scenes[scene as usize].layouts[layout].groups[gi as usize];
+                while cv.pool.len() < used_pool + 2 {
+                    let _p = se_alloc::Pause::new();
+                    cv.pool.push(Tex::target(device, &format!("{} group fx", plan.canvases[c].name), size));
+                }
+                {
+                    let _p = se_alloc::Pause::new();
+                    let mut pass = compose::begin(enc, "group", &cv.pool[used_pool].view, Some([0.0; 4]));
+                    for k in start..i {
+                        draw_item(&mut pass, &mut g, &plan, &items[k], slots[k], &cv.pool, sources, layout, size, masks, mask_views);
+                    }
+                }
+                fx_node.clear();
+                compose::eval_attaches(&cx, whens, &mut LutTable { map: luts, assets }, &group.fx, fx_node);
+                let (mut gc, mut gs) = (used_pool, used_pool + 1);
+                run_chain(enc, &mut g, &plan, patches, freeze_photos, fx_node, fused, &cv.pool, &cv.quarter, &mut gc, &mut gs, c, snap, res, fi, lut_views, fx_counts);
+                if gc != used_pool { cv.pool.swap(used_pool, gc); }
+                slots[start..i].fill(used_pool as i32);
+                used_pool += 1;
+            }
+        }
+
         // scene pass(es)
         let bg_color = |scene: Option<usize>| scene.and_then(|s| plan.scenes[s].layouts[layout].background).unwrap_or([0.0, 0.0, 0.0, 1.0]);
         let shader_tr = tr.active && matches!(plan.transitions[tr.transition].kind, TrKind::Shader);
         let combined_tr = tr.active && matches!(plan.transitions[tr.transition].kind, TrKind::Combined);
+        let glide_tr = tr.active && matches!(plan.transitions[tr.transition].kind, TrKind::Glide);
+        // Scene effects may modify background RGB/alpha. Render backgrounds through those FX
+        // and blend complete sides, rather than adding an unprocessed background afterwards.
+        let full_scene_glide = glide_tr && [tr.from, program].into_iter().flatten().any(|s| !plan.scenes[s].layouts[layout].fx.is_empty());
         let draw_items = |g: &mut Gfx,
                           enc: &mut wgpu::CommandEncoder,
                           items: &[Item],
@@ -1217,60 +1344,43 @@ impl Renderer {
             let _p = se_alloc::Pause::new();
             let mut pass = compose::begin(enc, "scene", &target.view, Some(clear));
             for (i, it) in items.iter().enumerate() {
-                let node = it.node(&plan);
-                let mask = node.mask.as_deref().and_then(|m| match masks.get(m) {
-                    Some(Slot::Ready(id) | Slot::Reloading(id)) => Some((*id, &mask_views[(*id - 1_000_001) as usize])),
-                    _ => None,
-                });
-                let (tex, uv, premult) = if slots[i] >= 0 {
-                    let r = rect_region(it.rect, size);
-                    (Some(&pool[slots[i] as usize]), r, true)
+                if let Some((scene, gi)) = it.group {
+                    if i > 0 && items[i - 1].group == it.group { continue; }
+                    let group = &plan.scenes[scene as usize].layouts[layout].groups[gi as usize];
+                    let u = NodeUniform {
+                        dst: [0.0, 0.0, size[0] as f32, size[1] as f32],
+                        uv: [0.0, 0.0, 1.0, 1.0],
+                        target_size: [size[0] as f32, size[1] as f32],
+                        opacity: group.opacity.clamp(0.0, 1.0),
+                        premultiplied: 1.0,
+                        ..Default::default()
+                    };
+                    let pipeline = compose::blend_pipeline(g.pipes, group.blend);
+                    compose::draw_node(&mut pass, g, &u, Some(&pool[slots[i] as usize]), None, pipeline);
                 } else {
-                    match sources[it.source as usize].tex(layout) {
-                        Some((t, p)) => (Some(t), it.crop, p),
-                        None => (None, it.crop, true),
-                    }
-                };
-                let color = match &sources[it.source as usize].rt {
-                    SourceRt::Solid(c) => *c,
-                    _ => plan.settings.no_signal,
-                };
-                if tex.is_none() && color[3] <= 0.0 {
-                    continue;
+                    draw_item(&mut pass, g, &plan, it, slots[i], pool, sources, layout, size, masks, mask_views);
                 }
-                let u = NodeUniform {
-                    dst: it.rect,
-                    uv,
-                    color,
-                    target_size: [size[0] as f32, size[1] as f32],
-                    radius: it.radius,
-                    opacity: it.opacity,
-                    rotation: it.rotation,
-                    premultiplied: f32::from(u8::from(premult)),
-                    use_mask: f32::from(u8::from(mask.is_some())),
-                    solid: f32::from(u8::from(tex.is_none())),
-                };
-                let pipeline = compose::blend_pipeline(g.pipes, it.blend);
-                compose::draw_node(&mut pass, g, &u, tex, mask, pipeline);
             }
         };
-        // program scene → t[0]
-        draw_items(&mut g, enc, &cv.items, &cv.slots, &cv.pool, &cv.t[0], bg_color(program), masks, mask_views);
+        // program scene → t[0] (a glide's incoming side on transparent: `glide_pass` adds its
+        // background)
+        let program_clear = if glide_tr && !full_scene_glide { [0.0; 4] } else { bg_color(program) };
+        draw_items(&mut g, enc, &cv.items, &cv.slots, &cv.pool, &cv.t[0], program_clear, masks, mask_views);
         let (mut cur, mut spare) = (0usize, 3usize);
         if let Some(s) = program {
             fx.clear();
             compose::eval_attaches(&cx, whens, &mut LutTable { map: luts, assets }, &plan.scenes[s].layouts[layout].fx, fx);
-            run_chain(enc, &mut g, &plan, patches, fx, fused, &cv.t, &cv.quarter, &mut cur, &mut spare, snap, res, fi, lut_views, fx_counts);
+            run_chain(enc, &mut g, &plan, patches, freeze_photos, fx, fused, &cv.t, &cv.quarter, &mut cur, &mut spare, c, snap, res, fi, lut_views, fx_counts);
         }
-        if shader_tr || combined_tr {
-            let (a_idx, b_idx) = if shader_tr {
+        if shader_tr || combined_tr || glide_tr {
+            let (a_idx, b_idx) = if shader_tr || glide_tr {
                 // outgoing scene → t[1] (+ its scene effects, ping-pong with t[2])
                 draw_items(&mut g, enc, &cv.items_b, &cv.slots_b, &cv.pool, &cv.t[1], bg_color(tr.from), masks, mask_views);
                 let (mut fcur, mut fspare) = (1usize, 2usize);
                 if let Some(f) = tr.from {
                     fx.clear();
                     compose::eval_attaches(&cx, whens, &mut LutTable { map: luts, assets }, &plan.scenes[f].layouts[layout].fx, fx);
-                    run_chain(enc, &mut g, &plan, patches, fx, fused, &cv.t, &cv.quarter, &mut fcur, &mut fspare, snap, res, fi, lut_views, fx_counts);
+                    run_chain(enc, &mut g, &plan, patches, freeze_photos, fx, fused, &cv.t, &cv.quarter, &mut fcur, &mut fspare, c, snap, res, fi, lut_views, fx_counts);
                 }
                 (fcur, cur)
             } else {
@@ -1278,24 +1388,13 @@ impl Renderer {
             };
             let out = (0..4).find(|i| *i != a_idx && *i != b_idx).expect("4 targets");
             let tp = &plan.transitions[tr.transition];
-            transition_pass(
-                enc,
-                &mut g,
-                &plan,
-                tp,
-                transitions,
-                patches,
-                fade_layout,
-                fade_buf,
-                &cv.t[a_idx],
-                &cv.t[b_idx],
-                &cv.t[out],
-                // shaders follow the transition's `ease` too (an overshooting ease stops at B)
-                tr.eased(&plan).clamp(0.0, 1.0),
-                snap,
-                res,
-                fi,
-            );
+            // shaders follow the transition's `ease` too (an overshooting ease stops at B)
+            let t = tr.eased(&plan).clamp(0.0, 1.0);
+            if glide_tr {
+                glide_pass(enc, &mut g, glide_layout, glide_buf, &cv.t[a_idx], &cv.t[b_idx], &cv.t[out], tr.progress, scene::glide_fade(tp, tr.progress), full_scene_glide, bg_color(program), fi);
+            } else {
+                transition_pass(enc, &mut g, &plan, tp, transitions, patches, fade_layout, fade_buf, &cv.t[a_idx], &cv.t[b_idx], &cv.t[out], t, snap, res, fi);
+            }
             cur = out;
             spare = (0..4).find(|i| *i != cur).expect("4 targets");
         }
@@ -1303,13 +1402,19 @@ impl Renderer {
         draw_overlays(enc, &mut g, &plan, c, sources, &cv.t[cur], true, &cx, whens);
         fx.clear();
         compose::eval_attaches(&cx, whens, &mut LutTable { map: luts, assets }, &plan.canvases[c].fx, fx);
-        compose::eval_attaches(&cx, whens, &mut LutTable { map: luts, assets }, globals_canvas, fx);
-        run_chain(enc, &mut g, &plan, patches, fx, fused, &cv.t, &cv.quarter, &mut cur, &mut spare, snap, res, fi, lut_views, fx_counts);
+        let (gate, default) = plan.canvases[c].fx_gate;
+        if res.bool(snap, gate, default) {
+            compose::eval_attaches(&cx, whens, &mut LutTable { map: luts, assets }, globals_canvas, fx);
+        }
+        run_chain(enc, &mut g, &plan, patches, freeze_photos, fx, fused, &cv.t, &cv.quarter, &mut cur, &mut spare, c, snap, res, fi, lut_views, fx_counts);
         draw_overlays(enc, &mut g, &plan, c, sources, &cv.t[cur], false, &cx, whens);
         fx.clear();
         compose::eval_attaches(&cx, whens, &mut LutTable { map: luts, assets }, &plan.canvases[c].output_fx, fx);
-        compose::eval_attaches(&cx, whens, &mut LutTable { map: luts, assets }, globals_output, fx);
-        run_chain(enc, &mut g, &plan, patches, fx, fused, &cv.t, &cv.quarter, &mut cur, &mut spare, snap, res, fi, lut_views, fx_counts);
+        let (gate, default) = plan.canvases[c].output_fx_gate;
+        if res.bool(snap, gate, default) {
+            compose::eval_attaches(&cx, whens, &mut LutTable { map: luts, assets }, globals_output, fx);
+        }
+        run_chain(enc, &mut g, &plan, patches, freeze_photos, fx, fused, &cv.t, &cv.quarter, &mut cur, &mut spare, c, snap, res, fi, lut_views, fx_counts);
 
         // final: flash limiter (program canvases) or plain copy (preview)
         if c == PREVIEW {
@@ -1389,7 +1494,7 @@ impl Renderer {
                         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
                         mapped_at_creation: false,
                     }),
-                    readback: MappedRing::new(device, "flash readback", 4, (CELLS * 4) as u64, false),
+                    readback: MappedRing::new(device, "flash readback", 4, (CELLS * 4) as u64),
                     detector: FlashDetector::new(plan.settings.max_flashes),
                     times: [0; 4],
                 });
@@ -1479,7 +1584,7 @@ impl Renderer {
                         Ok(()) => {
                             cv.shm = Some(Shm {
                                 bufs,
-                                readback: MappedRing::new(device, "shm readback", 3, row as u64 * cv.size[1] as u64, false),
+                                readback: MappedRing::new(device, "shm readback", 3, row as u64 * cv.size[1] as u64),
                                 row,
                                 pending: Vec::with_capacity(SHM_PENDING),
                             });
@@ -1579,9 +1684,10 @@ impl Renderer {
 
     fn after_submit(&mut self) {
         let _p = se_alloc::Pause::new();
+        self.freeze_photos.after_submit();
         for s in &mut self.sources {
             if let SourceRt::Video(v) = &mut s.rt {
-                v.after_submit();
+                v.after_submit(&self.gpu.queue);
             }
         }
         for cv in &mut self.canvases {
@@ -1617,6 +1723,57 @@ impl Renderer {
     pub fn frame_count(&self) -> u64 {
         self.frame
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_item(
+    pass: &mut wgpu::RenderPass, g: &mut Gfx, plan: &Plan, it: &Item,
+    slot: i32, pool: &[Tex], sources: &[Src], layout: usize, size: [u32; 2],
+    masks: &HashMap<String, Slot>, mask_views: &[wgpu::TextureView],
+) {
+    let node = it.node(plan);
+    let mask = node.mask.as_deref().and_then(|m| match masks.get(m) {
+        Some(Slot::Ready(id) | Slot::Reloading(id)) => Some((*id, &mask_views[(*id - 1_000_001) as usize])),
+        _ => None,
+    });
+    let (tex, uv, content, premult) = if slot >= 0 {
+        (Some(&pool[slot as usize]), rect_region(it.rect, size), [0.0; 4], true)
+    } else {
+        match sources[it.source as usize].tex(layout) {
+            Some((t, p)) => {
+                let (content, uv) = source_placement(plan, it, Some(t), size);
+                (Some(t), uv, content, p)
+            }
+            None => (None, it.crop, [0.0; 4], true),
+        }
+    };
+    let color = match &sources[it.source as usize].rt {
+        SourceRt::Solid(c) => *c,
+        _ => plan.settings.no_signal,
+    };
+    if tex.is_none() && color[3] <= 0.0 { return; }
+    let u = NodeUniform {
+        dst: it.rect, uv, color, content,
+        target_size: [size[0] as f32, size[1] as f32],
+        radius: it.radius, opacity: it.opacity, rotation: it.rotation,
+        premultiplied: f32::from(u8::from(premult)),
+        use_mask: f32::from(u8::from(mask.is_some())),
+        solid: f32::from(u8::from(tex.is_none())),
+    };
+    let pipeline = compose::blend_pipeline(g.pipes, it.blend);
+    compose::draw_node(pass, g, &u, tex, mask, pipeline);
+}
+
+/// Fit the sampled source before either the direct draw or the node-FX input copy.
+/// Pool outputs already contain window-sized, fitted content and must not be fitted again.
+fn source_placement(plan: &Plan, it: &Item, tex: Option<&Tex>, size: [u32; 2]) -> ([f32; 4], [f32; 4]) {
+    let fit = it.node(plan).fit;
+    if fit == NodeFit::Stretch {
+        return ([0.0; 4], it.crop);
+    }
+    let Some(tex) = tex else { return ([0.0; 4], it.crop) };
+    let canvas_scale = size[0] as f32 / plan.canvases[it.layout as usize].width.max(1) as f32;
+    fit.placement(it.rect, it.crop, [tex.size[0] as f32, tex.size[1] as f32], canvas_scale)
 }
 
 /// Largest box of `aspect` centered in `cell` (px).
@@ -1661,30 +1818,34 @@ struct Chain<'a> {
     scissor: Option<[u32; 4]>,
     /// Quarter-resolution targets for blur (canvas chains).
     quarter: Option<&'a [Tex]>,
+    /// Render context of the chain's frame-state effects ([`crate::patches::CONTEXTS`]).
+    ctx: usize,
 }
 
-/// Run an effect chain on canvas targets, ping-ponging between `cur` and `spare`.
+/// Run an effect chain on canvas targets of canvas `ctx`, ping-ponging between `cur` and `spare`.
 #[allow(clippy::too_many_arguments)]
 fn run_chain(
     enc: &mut wgpu::CommandEncoder,
     g: &mut Gfx,
     plan: &Plan,
     patches: &mut [PatchRt],
+    freeze_photos: &mut FreezePhotos,
     evals: &[FxEval],
     fused: &[FusedPipe],
     t: &[Tex],
     quarter: &[Tex],
     cur: &mut usize,
     spare: &mut usize,
+    ctx: usize,
     snap: &Snapshot,
     res: &Resolved,
     fi: &FrameInputs,
     lut_views: &[wgpu::TextureView],
     counts: &mut FxCounts,
 ) {
-    let chain = Chain { evals, fused, region: [0.0, 0.0, 1.0, 1.0], scissor: None, quarter: Some(quarter) };
+    let chain = Chain { evals, fused, region: [0.0, 0.0, 1.0, 1.0], scissor: None, quarter: Some(quarter), ctx };
     for step in Steps::new(plan, evals, fused) {
-        apply_step(enc, g, plan, patches, &chain, step, &t[*cur], &t[*spare], snap, res, fi, lut_views, counts);
+        apply_step(enc, g, plan, patches, freeze_photos, &chain, step, &t[*cur], &t[*spare], snap, res, fi, lut_views, counts);
         std::mem::swap(cur, spare);
     }
 }
@@ -1697,6 +1858,7 @@ fn apply_step(
     g: &mut Gfx,
     plan: &Plan,
     patches: &mut [PatchRt],
+    freeze_photos: &mut FreezePhotos,
     chain: &Chain,
     step: Step,
     input: &Tex,
@@ -1710,7 +1872,7 @@ fn apply_step(
     counts.passes += 1;
     match step {
         Step::Single(i) => {
-            apply_effect(enc, g, plan, patches, &chain.evals[i], input, out, chain.quarter, chain.region, chain.scissor, snap, res, fi, lut_views);
+            apply_effect(enc, g, plan, patches, freeze_photos, &chain.evals[i], input, out, chain.quarter, chain.region, chain.scissor, chain.ctx, snap, res, fi, lut_views);
         }
         Step::Fused { first, len, pipe, slots } => {
             counts.fused += len as u32;
@@ -1733,19 +1895,22 @@ fn apply_step(
     }
 }
 
-/// One effect `input → out` over `region` (uv), scissored for node effects.
+/// One effect `input → out` over `region` (uv), scissored for node effects; `ctx` is the render
+/// context of frame-state effects.
 #[allow(clippy::too_many_arguments)]
 fn apply_effect(
     enc: &mut wgpu::CommandEncoder,
     g: &mut Gfx,
     plan: &Plan,
     patches: &mut [PatchRt],
+    freeze_photos: &mut FreezePhotos,
     e: &FxEval,
     input: &Tex,
     out: &Tex,
     quarter: Option<&[Tex]>,
     region: [f32; 4],
     scissor: Option<[u32; 4]>,
+    ctx: usize,
     snap: &Snapshot,
     res: &Resolved,
     fi: &FrameInputs,
@@ -1791,8 +1956,17 @@ fn apply_effect(
         EffectKind::Patch(id) => {
             let Some(pi) = plan.patch_index.get(id).copied() else { return };
             let rt = &mut patches[pi];
-            let off = rt.uniforms(&plan.patches[pi], snap, res, fi, size, region, 0.0, Some(e.strength), g.arena);
-            if !rt.draw(g.device, enc, g.layouts, g.arena, g.binds, &out.view, off, Some(input), None, 0) {
+            let frames = rt.frame_state(g.device, enc, g.binds, e.frame_state, ctx, out.size, fi.frame);
+            let slot = e.patch_slot.map(|index| &plan.patch_slots[index]);
+            let off = rt.uniforms(&plan.patches[pi], snap, res, fi, size, region, 0.0, Some(e.strength), slot, frames, g.arena);
+            if rt.draw(g.device, enc, g.layouts, g.arena, g.binds, &out.view, off, Some(input), None, 0, frames) {
+                rt.record_frames(enc, frames, input, out, fi.frame);
+                if id == "freeze_frame" {
+                    if let Some(state) = rt.recorded_state(frames) {
+                        freeze_photos.capture(g.device, enc, state, ctx);
+                    }
+                }
+            } else {
                 // not compiled (yet): pass the input through unchanged
                 compose::blit(enc, g, BlitUniform { mode: BLIT_COPY, ..Default::default() }, input, None, &out.view);
             }
@@ -1810,6 +1984,7 @@ fn transition_fixed(fi: &FrameInputs, size: [f32; 2], progress: f32) -> se_patch
         resolution: size,
         progress,
         trigger_count: 0,
+        trigger_age: se_patch::wgsl::NEVER_TRIGGERED,
         region: se_patch::wgsl::FULL,
         trigger: &se_patch::wgsl::NO_TRIGGER,
         palette: &fi.palette,
@@ -1841,8 +2016,8 @@ fn transition_pass(
         && let Some(pi) = plan.patch_index.get(id).copied()
     {
         let rt = &mut patches[pi];
-        let off = rt.uniforms(&plan.patches[pi], snap, res, fi, size, se_patch::wgsl::FULL, progress, Some(1.0), g.arena);
-        if rt.draw(g.device, enc, g.layouts, g.arena, g.binds, &out.view, off, Some(a), Some(b), 0) {
+        let off = rt.uniforms(&plan.patches[pi], snap, res, fi, size, se_patch::wgsl::FULL, progress, Some(1.0), None, None, g.arena);
+        if rt.draw(g.device, enc, g.layouts, g.arena, g.binds, &out.view, off, Some(a), Some(b), 0, None) {
             return;
         }
     }
@@ -1866,6 +2041,22 @@ fn transition_pass(
         }
     };
     header_pass(enc, g, "transition", pipeline, off, a, b, out);
+}
+
+/// Glide composite of `a` (outgoing scene on its background) and `b` (incoming scene on
+/// transparent, premultiplied) at linear progress `u`, independent crossfade weight `fade`,
+/// (`shaders/glide.wgsl`).
+#[allow(clippy::too_many_arguments)]
+fn glide_pass(enc: &mut wgpu::CommandEncoder, g: &mut Gfx, layout: &se_patch::wgsl::Layout, buf: &mut [f32], a: &Tex, b: &Tex, out: &Tex, u: f32, fade: f32, full_scene: bool, bg: [f32; 4], fi: &FrameInputs) {
+    let size = [out.size[0] as f32, out.size[1] as f32];
+    layout.write(buf, &transition_fixed(fi, size, u), |_, name| match name {
+        "fade" => [fade, 0.0, 0.0, 0.0],
+        "full_scene" => [u32::from(full_scene) as f32, 0.0, 0.0, 0.0],
+        _ => bg,
+    }, |_, _| 0.0);
+    let off = g.arena.push_f32(buf);
+    let pipes = g.pipes;
+    header_pass(enc, g, "glide", &pipes.glide, off, a, b, out);
 }
 
 /// One full-screen pass of a shader compiled with the generated header (`a` → `se_input`,
@@ -1894,10 +2085,13 @@ fn header_pass(enc: &mut wgpu::CommandEncoder, g: &mut Gfx, label: &'static str,
     pass.draw(0..3, 0..1);
 }
 
-/// Whether custom style `style` can run this frame (its shader is compiled).
+/// Whether custom style `style` can run this frame (its shader is compiled; `feedback = "state"`
+/// effects need a frame-state instance, which styles do not have).
 fn style_ready(plan: &Plan, patches: &[PatchRt], styles: &HashMap<String, TransitionRt>, style: u32) -> bool {
     match plan.styles.get(style as usize) {
-        Some(ShaderSource::Patch(id)) => plan.patch_index.get(id).is_some_and(|pi| matches!(patches[*pi].pipes.as_deref(), Some(UserPipes::Fullscreen(_)))),
+        Some(ShaderSource::Patch(id)) => plan.patch_index.get(id).is_some_and(|pi| {
+            matches!(patches[*pi].pipes.as_deref(), Some(UserPipes::Fullscreen(_))) && patches[*pi].layout.feedback != se_patch::Feedback::State
+        }),
         Some(ShaderSource::File(p)) => p.to_str().is_some_and(|k| styles.contains_key(k)),
         _ => false,
     }
@@ -1926,8 +2120,8 @@ fn style_pass(
         Some(ShaderSource::Patch(id)) => {
             let Some(pi) = plan.patch_index.get(id).copied() else { return };
             let rt = &mut patches[pi];
-            let off = rt.uniforms(&plan.patches[pi], snap, res, fi, size, region, presence, Some(1.0), g.arena);
-            rt.draw(g.device, enc, g.layouts, g.arena, g.binds, &out.view, off, Some(input), None, 0);
+            let off = rt.uniforms(&plan.patches[pi], snap, res, fi, size, region, presence, Some(1.0), None, None, g.arena);
+            rt.draw(g.device, enc, g.layouts, g.arena, g.binds, &out.view, off, Some(input), None, 0, None);
         }
         Some(ShaderSource::File(p)) => {
             let Some(s) = p.to_str().and_then(|k| styles.get_mut(k)) else { return };

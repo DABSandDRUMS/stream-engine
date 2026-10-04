@@ -28,6 +28,8 @@ pub struct NodeUniform {
     pub premultiplied: f32,
     pub use_mask: f32,
     pub solid: f32,
+    /// Native source content within `dst`; zero selects the full window (stretch).
+    pub content: [f32; 4],
 }
 
 #[repr(C)]
@@ -224,6 +226,9 @@ pub struct FxEval {
     pub group: Option<u32>,
     /// Index into the renderer's LUT table (Exec::Lut).
     pub lut: u32,
+    pub patch_slot: Option<usize>,
+    /// Frame-state instance of a `feedback`/`history` patch effect ([`Attach::frame_state`]).
+    pub frame_state: Option<u32>,
 }
 
 /// Looks up (and requests) LUT textures by path.
@@ -246,6 +251,7 @@ fn read_param(cx: &FxContext, src: ParamSrc, default: f32) -> f32 {
     match src {
         ParamSrc::Global(a) => cx.res.f32(cx.snap, a, default),
         ParamSrc::Local(a, v) => cx.res.f32(cx.snap, a, v),
+        ParamSrc::Inherited(a, global) => cx.res.f32(cx.snap, a, cx.res.f32(cx.snap, global, default)),
         ParamSrc::Const(v) => v,
     }
 }
@@ -255,8 +261,9 @@ pub fn eval_attaches(cx: &FxContext, whens: &mut Whens, luts: &mut dyn LutLookup
     let start = out.len();
     for a in attaches {
         let e = &cx.plan.effects[a.effect];
-        if let Some(en) = a.enabled
-            && !cx.res.bool(cx.snap, en, true)
+        if a.chain.is_some_and(|(gate, default)| !cx.res.bool(cx.snap, gate, default))
+            || a.enabled.is_some_and(|en| !cx.res.bool(cx.snap, en, a.enabled_default))
+            || (a.enabled.is_none() && !a.enabled_default)
         {
             continue;
         }
@@ -270,19 +277,20 @@ pub fn eval_attaches(cx: &FxContext, whens: &mut Whens, luts: &mut dyn LutLookup
             *p = read_param(cx, a.params[i], e.defaults.get(i).copied().unwrap_or(0.0));
         }
         let env = cx.res.f32(cx.snap, e.env, 0.0).clamp(0.0, 1.0);
+        let triggered = a.triggered.map_or(a.triggered_default, |addr| cx.res.bool(cx.snap, addr, a.triggered_default));
         let mut strength = match &e.kind {
             EffectKind::Builtin(_) => {
-                let level = cx.trigger_levels.get(a.effect).copied().flatten().unwrap_or(params[1]);
+                let level = if a.global { cx.trigger_levels.get(a.effect).copied().flatten().unwrap_or(params[1]) } else { params[1] };
                 if a.global {
                     params[0].max(level * env)
-                } else if a.triggered_only {
+                } else if triggered {
                     level * env
                 } else {
                     params[0]
                 }
             }
             EffectKind::Patch(_) => {
-                if a.triggered_only {
+                if triggered {
                     env
                 } else {
                     1.0
@@ -307,6 +315,8 @@ pub fn eval_attaches(cx: &FxContext, whens: &mut Whens, luts: &mut dyn LutLookup
         {
             let path = match &a.file {
                 Some(StrSrc::Addr(addr)) => cx.res.str(cx.snap, *addr),
+                Some(StrSrc::Local(addr, fallback)) => cx.res.str(cx.snap, *addr).or(Some(fallback.as_str())),
+                Some(StrSrc::Inherited(addr, global)) => cx.res.str(cx.snap, *addr).or_else(|| cx.res.str(cx.snap, *global)),
                 Some(StrSrc::Const(s)) => Some(s.as_str()),
                 None => None,
             };
@@ -315,7 +325,7 @@ pub fn eval_attaches(cx: &FxContext, whens: &mut Whens, luts: &mut dyn LutLookup
                 None => continue,
             }
         }
-        out.push(FxEval { effect: a.effect, strength, params, group: a.group, lut });
+        out.push(FxEval { effect: a.effect, strength, params, group: a.group, lut, patch_slot: a.patch_slot, frame_state: a.frame_state });
     }
     // exclusive groups: keep the strongest (later wins ties)
     let mut i = start;
@@ -359,7 +369,8 @@ mod tests {
 
     #[test]
     fn uniform_layouts_match_wgsl() {
-        assert_eq!(std::mem::size_of::<NodeUniform>(), 80);
+        assert_eq!(std::mem::size_of::<NodeUniform>(), 96);
+        assert_eq!(std::mem::offset_of!(NodeUniform, content), 80);
         assert_eq!(std::mem::size_of::<FxUniform>(), 112);
         assert_eq!(std::mem::offset_of!(FxUniform, params), 32);
         assert_eq!(std::mem::offset_of!(FxUniform, beat_phase), 96);
@@ -389,7 +400,7 @@ mod tests {
             (
                 "scenes",
                 "s",
-                "fx = [{ name = \"vhs\", group = \"look\", amount = 0.3 }, { name = \"grade\", group = \"look\", amount = 0.8, warmth = 0.5 }, { name = \"rgb_split\", enabled = false }, { name = \"pixelate\", when = \"mode == 'chill'\" }]\n[canvas.wide]\nnodes = []",
+                "fx = [{ name = \"vhs\", group = \"look\", amount = 0.3 }, { name = \"grade\", group = \"look\", amount = 0.8, warmth = 0.5 }, { name = \"rgb_split\", triggered = true }, { name = \"pixelate\", when = \"mode == 'chill'\" }]\n[canvas.wide]\nnodes = []",
             ),
         ]);
         let p = Plan::build(&c, &[], PathBuf::from("/tmp"));

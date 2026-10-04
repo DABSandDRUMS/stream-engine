@@ -7,6 +7,8 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::Instant;
 
 pub const EVENT_CAP: usize = 500;
+/// Chat retention counts messages, not unrelated engine activity.
+pub const CHAT_CAP: usize = 500;
 pub const LOG_CAP: usize = 2000;
 pub const TRACE_CAP: usize = 5000;
 /// Samples of history kept per signal (30 Hz push → ~8.5 s).
@@ -18,6 +20,8 @@ pub struct LogLine {
     pub target: String,
     pub msg: String,
     pub ts: u64,
+    /// Wall clock (unix ms) when this UI received it (diagnostic bundles line it up with the journal).
+    pub received_ms: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -51,6 +55,8 @@ pub struct Model {
     /// Metadata by address (fetched on demand with `Get { meta: true }`).
     pub meta: HashMap<String, Meta>,
     pub events: VecDeque<Event>,
+    /// Recent chat after moderation, retained independently of the activity feed.
+    pub chat_messages: VecDeque<Event>,
     /// Total events received (monotonic; lets views notice new ones cheaply).
     pub events_seen: u64,
     pub logs: VecDeque<LogLine>,
@@ -82,6 +88,8 @@ pub fn subscription() -> Subscription {
             "project.**".into(),
             "system.**".into(),
             "obs.**".into(),
+            "recording.**".into(),
+            "archive.**".into(),
             "stream.**".into(),
             "health.**".into(),
             "perf.**".into(),
@@ -130,6 +138,7 @@ impl Model {
             fetched: BTreeMap::new(),
             meta: HashMap::new(),
             events: VecDeque::new(),
+            chat_messages: VecDeque::new(),
             events_seen: 0,
             logs: VecDeque::new(),
             trace: VecDeque::new(),
@@ -306,6 +315,28 @@ impl Model {
                 self.store_values(entries);
             }
             ServerMsg::Event { event } => {
+                match event.ty.as_str() {
+                    "twitch.chat" => {
+                        if self.chat_messages.len() >= CHAT_CAP {
+                            self.chat_messages.pop_front();
+                        }
+                        self.chat_messages.push_back(event.clone());
+                    }
+                    "twitch.chat.delete" => {
+                        if let Some(id) = event.payload.get_path("message_id").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                            self.chat_messages.retain(|m| m.payload.get_path("message_id").and_then(Value::as_str) != Some(id));
+                        }
+                    }
+                    "twitch.user.purge" => {
+                        if let Some(uid) = event.payload.get_path("user_id").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                            self.chat_messages.retain(|m| {
+                                m.payload.get_path("user_id").and_then(Value::as_str) != Some(uid) && m.actor.as_ref().map(|a| a.id.as_str()) != Some(uid)
+                            });
+                        }
+                    }
+                    "twitch.chat.clear" => self.chat_messages.clear(),
+                    _ => {}
+                }
                 if self.events.len() >= EVENT_CAP {
                     self.events.pop_front();
                 }
@@ -331,7 +362,8 @@ impl Model {
                 if self.logs.len() >= LOG_CAP {
                     self.logs.pop_front();
                 }
-                self.logs.push_back(LogLine { level, target, msg, ts });
+                let received_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64);
+                self.logs.push_back(LogLine { level, target, msg, ts, received_ms });
             }
             ServerMsg::Trace { req: None, records } => {
                 for r in records {
@@ -401,6 +433,75 @@ mod tests {
     fn model() -> Model {
         // A socket path that never exists: the client just keeps retrying in the background.
         Model::new(Some(std::path::PathBuf::from("/nonexistent/se-ui-test.sock")))
+    }
+
+    #[test]
+    fn chat_survives_unrelated_event_traffic() {
+        use egui_kittest::Harness;
+        use egui_kittest::kittest::Queryable;
+
+        struct ChatApp(crate::app::App);
+        impl eframe::App for ChatApp {
+            fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
+                egui::CentralPanel::default().show(ui, |ui| crate::views::rail::chat(&mut self.0, ui));
+            }
+        }
+        let mut h = Harness::builder().with_size([380.0, 600.0]).build_eframe(|cc| {
+            ChatApp(crate::app::App::new(
+                cc,
+                crate::UiOpts { socket: Some("/nonexistent/se-ui-chat-test.sock".into()), layout: Some("single".into()), program_only: false },
+            ))
+        });
+        let m = &mut h.state_mut().0.m;
+        m.apply(ServerMsg::Event {
+            event: Event::new(
+                "twitch.chat",
+                se_proto::Origin::System,
+                Value::map().with("message_id", "keep").with("user", "viewer").with("message", "Keep this chat visible"),
+            ),
+        });
+        for _ in 0..EVENT_CAP {
+            m.apply(ServerMsg::Event { event: Event::new("audio.beat", se_proto::Origin::System, Value::Null) });
+        }
+        h.run();
+        h.get_by_label("Keep this chat visible");
+    }
+
+    #[test]
+    fn retained_chat_obeys_moderation_after_activity_rolls_over() {
+        let mut m = model();
+        for (id, uid, actor_id) in [("deleted", "a", ""), ("purged", "b", ""), ("actor_only", "", "b"), ("kept", "c", "")] {
+            let mut event = Event::new("twitch.chat", se_proto::Origin::System, Value::map().with("message_id", id).with("user_id", uid));
+            event.actor = Some(se_proto::Actor { id: actor_id.into(), ..Default::default() });
+            m.apply(ServerMsg::Event { event });
+        }
+        for _ in 0..EVENT_CAP {
+            m.apply(ServerMsg::Event { event: Event::new("audio.beat", se_proto::Origin::System, Value::Null) });
+        }
+        for ty in ["twitch.chat.delete", "twitch.user.purge"] {
+            m.apply(ServerMsg::Event { event: Event::new(ty, se_proto::Origin::System, Value::Null) });
+        }
+        assert_eq!(m.chat_messages.len(), 4, "missing identifiers must not remove messages");
+        m.apply(ServerMsg::Event { event: Event::new("twitch.chat.delete", se_proto::Origin::System, Value::map().with("message_id", "deleted")) });
+        m.apply(ServerMsg::Event { event: Event::new("twitch.user.purge", se_proto::Origin::System, Value::map().with("user_id", "b")) });
+        let ids: Vec<_> = m.chat_messages.iter().map(|e| e.payload.get_path("message_id").and_then(Value::as_str)).collect();
+        assert_eq!(ids, [Some("kept")]);
+        for _ in 0..EVENT_CAP {
+            m.apply(ServerMsg::Event { event: Event::new("audio.beat", se_proto::Origin::System, Value::Null) });
+        }
+        assert_eq!(m.chat_messages.front().unwrap().payload.get_path("message_id").and_then(Value::as_str), Some("kept"));
+        m.apply(ServerMsg::Event { event: Event::new("twitch.chat.clear", se_proto::Origin::System, Value::Null) });
+        assert!(m.chat_messages.is_empty());
+    }
+
+    #[test]
+    fn chat_retention_evicts_only_the_oldest_message_at_capacity() {
+        let mut m = model();
+        for i in 0..CHAT_CAP + 2 {
+            m.apply(ServerMsg::Event { event: Event::new("twitch.chat", se_proto::Origin::System, Value::map().with("message", i as i64)) });
+        }
+        let messages: Vec<_> = m.chat_messages.iter().map(|e| e.payload.get_path("message").and_then(Value::as_i64).unwrap()).collect();
+        assert_eq!(messages, (2..CHAT_CAP as i64 + 2).collect::<Vec<_>>());
     }
 
     #[test]

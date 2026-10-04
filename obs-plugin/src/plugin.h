@@ -20,7 +20,7 @@
 
 enum se_fallback_mode {
 	SE_FALLBACK_OFF,    /* never switch automatically */
-	SE_FALLBACK_LIVE,   /* switch only while an output (stream/recording) is active */
+	SE_FALLBACK_LIVE,   /* switch only while a stream output is active */
 	SE_FALLBACK_ALWAYS, /* switch whenever a visible feed goes stale */
 };
 
@@ -51,12 +51,13 @@ struct se_canvas_source {
 	int32_t cur; /* displayed buffer (dmabuf) or -1 */
 	uint64_t cur_seq;
 	void *cur_fence; /* GLsync after the latest draw of `cur` */
+	bool cur_drawn; /* NULL fence after a failed allocation still means GPU work is pending */
 	bool has_image;
 	struct {
 		uint32_t buffer;
 		uint64_t seq;
-		void *fence; /* NULL: never drawn, or GL sync objects unavailable (then `age` decides) */
-		uint32_t age; /* ticks since retirement */
+		void *fence;
+		bool drawn; /* never-drawn buffers need no GPU completion fence */
 	} retired[SE_MAX_BUFFERS * 2];
 	size_t n_retired;
 	bool import_failed_logged;
@@ -64,13 +65,11 @@ struct se_canvas_source {
 };
 
 struct se_plugin {
-	pthread_mutex_t mu; /* guards config, sources, scene_name, record_dir, track_names */
+	pthread_mutex_t mu; /* guards config, sources, scene_name, stream_output */
 	struct se_config config;
 	struct se_canvas_source *sources[SE_MAX_SOURCES];
 	size_t n_sources;
 	char scene_name[256];
-	char record_dir[1024];
-	char track_names[6][128];
 
 	struct se_control *control;
 	atomic_bool exiting;
@@ -79,9 +78,6 @@ struct se_plugin {
 
 	/* frontend outputs captured on the UI thread (weak refs; guarded by mu) */
 	obs_weak_output_t *stream_output;
-	obs_weak_output_t *record_output;
-	uint64_t stream_start_obs_ns;
-	uint64_t record_start_obs_ns;
 };
 
 extern struct se_plugin se_g;
@@ -126,7 +122,8 @@ json_t *se_setup_sources(void);
 void se_canvas_kind_for_video(video_t *video, char *out, size_t len);
 
 /* gl-fence.c (graphics thread) */
+enum se_gl_fence_status { SE_GL_FENCE_PENDING, SE_GL_FENCE_COMPLETE, SE_GL_FENCE_FAILED };
 void *se_gl_fence_create(void);
-bool se_gl_fence_signaled(void *fence);
+enum se_gl_fence_status se_gl_fence_poll(void *fence);
 void se_gl_fence_destroy(void *fence);
 bool se_gl_fence_available(void);

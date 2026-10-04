@@ -1,0 +1,28 @@
+# Kaleidoscope Fill — a burst: the picture folds into an N-fold mirrored kaleidoscope that blooms
+# open from its center, ticks round on every beat (eased, locked to the beat clock), breathes a
+# little with the kick, and shrinks back to the plain picture as the trigger releases. Mirrored
+# wedges and mirror-repeated borders mean there are no seams or edges anywhere.
+# Fire it: `patch.kaleidoscope_fill.trigger` (preset, alert, chat command, deck key). It runs
+# canvas-wide through its global instance while its envelope is up.
+# Fire it on fills with a rule on snare onsets that land off the beat in the second half of a bar:
+#   [[rule]]
+#   name = "kaleidoscope on fills"
+#   when = "band.snare"
+#   if = "event.velocity > 0.4 && lfo.bar >= 0.5 && beat.phase > 0.15 && beat.phase < 0.85"
+#   do = ["patch.kaleidoscope_fill.trigger"]
+#   cooldown = { global = "12s" }
+# (`retrigger = "replace"` restarts the hold, so a long fill keeps it open.)
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "effect"
+label       = "Kaleidoscope Fill"
+description = "The picture folds into a beat-rotating mirrored kaleidoscope that blooms open from the kit and closes again"
+params.amount   = { type = "float", default = 1.0, range = [0.0, 1.0], description = "Mix with the plain picture at full envelope" }
+params.segments = { type = "int", default = 6, range = [2, 16], description = "Mirrored wedges around the circle" }
+params.center   = { type = "vec2", default = [0.5, 0.55], range = [0.0, 1.0], description = "Kaleidoscope center on screen (uv, 0,0 top-left)" }
+params.source   = { type = "vec2", default = [0.4, 0.7], range = [0.0, 1.0], description = "Apex of the mirrored wedge in the picture (uv); the wedge opens downward from it into the kit" }
+params.zoom     = { type = "float", default = 0.8, range = [0.3, 2.5], description = "Scale of the mirrored picture (higher = more of the frame per wedge)" }
+params.spin     = { type = "float", default = 1.0, range = [0.0, 4.0], description = "Wedges turned per bar (eased tick on each beat)" }
+params.pulse    = { type = "float", default = 0.5, range = [0.0, 1.0], description = "How much the kick breathes the pattern" }
+trigger = { attack = "350ms", hold = "12s", release = "900ms", retrigger = "replace" }
+budget = { gpu_ms = 0.1 }

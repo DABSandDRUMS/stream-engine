@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Stream Engine Apple Music Control",
+  "version": "1.0.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAp8lkkbB6yW+l14KINu6bpqUDus6VYX6wmNGoiUPlFPXmX5nUDOkJF7pSbbBUn60bWsI1aKWVbSk8FeIi4cpWIIX/MM7qHQVhG2wsGaU6X8ONP6Iq07P7ahfTV/hR6TT5rhMS4aypVJ4Dd/iLw0ZuAI5o7lJYi8/5LuiaEpeoH05Bhmk2OAQC8Ml0KZL0E6EuoU3lvs2LqJZFjSEYDx/C7T8LOCfAn5LSGKdiizi2sbDiXRtSlhXT+ydkqSNaYDNo/zo8BEehDgns+73E+xqOTvwF7z5SBmrLrlneEEcpEJlpU+KuLzw2EPL1hB/1PZNZFhLFt6U1JZGH/kYCrDBA4QIDAQAB",
+  "description": "Control the installed Apple Music web app through Stream Engine native messaging.",
+  "minimum_chrome_version": "105",
+  "permissions": ["nativeMessaging", "scripting", "alarms"],
+  "host_permissions": ["https://music.apple.com/*"],
+  "background": {
+    "service_worker": "background.js"
+  }
+}

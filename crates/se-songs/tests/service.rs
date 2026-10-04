@@ -1,7 +1,8 @@
 //! End-to-end tests of the song-request service against a real hub/core and a local HTTP
-//! server replaying recorded YouTube Data API responses (tests/fixtures/youtube).
+//! server replaying recorded YouTube Data API responses (tests/fixtures/youtube) and
+//! hand-written MusicBrainz responses (tests/fixtures/musicbrainz).
 
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
@@ -30,6 +31,8 @@ struct Api {
     searches: AtomicUsize,
     quota_gone: AtomicBool,
     key_seen: Mutex<Vec<String>>,
+    /// MusicBrainz requests (`path?query`) and the User-Agent each one sent.
+    mb: Mutex<Vec<(String, String)>>,
 }
 
 fn all_videos() -> HashMap<String, J> {
@@ -62,9 +65,38 @@ async fn search(State(api): State<Arc<Api>>, Query(q): Query<HashMap<String, Str
     (axum::http::StatusCode::OK, Json(body))
 }
 
+fn mb_fixture(name: &str) -> Option<J> {
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/musicbrainz").join(name);
+    std::fs::read_to_string(p).ok().map(|s| serde_json::from_str(&s).unwrap())
+}
+
+fn user_agent(h: &axum::http::HeaderMap) -> String {
+    h.get("user-agent").and_then(|v| v.to_str().ok()).unwrap_or("").to_string()
+}
+
+async fn mb_search(State(api): State<Arc<Api>>, h: axum::http::HeaderMap, Query(q): Query<HashMap<String, String>>) -> impl IntoResponse {
+    let query = q.get("query").cloned().unwrap_or_default();
+    api.mb.lock().push((format!("recording?{query}"), user_agent(&h)));
+    let file = if query.contains("artist:\"Rick Astley\"") { "search_rick_astley.json" } else { "search_empty.json" };
+    Json(mb_fixture(file).unwrap())
+}
+
+async fn mb_lookup(State(api): State<Arc<Api>>, h: axum::http::HeaderMap, Path((kind, id)): Path<(String, String)>) -> impl IntoResponse {
+    api.mb.lock().push((format!("{kind}/{id}"), user_agent(&h)));
+    match mb_fixture(&format!("{kind}_{id}.json")) {
+        Some(j) => (axum::http::StatusCode::OK, Json(j)),
+        None => (axum::http::StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not Found", "help": "For usage, please see: https://musicbrainz.org/development/mmd" }))),
+    }
+}
+
 async fn api_server() -> (Arc<Api>, String) {
     let api = Arc::new(Api::default());
-    let app = Router::new().route("/youtube/v3/videos", get(videos)).route("/youtube/v3/search", get(search)).with_state(api.clone());
+    let app = Router::new()
+        .route("/youtube/v3/videos", get(videos))
+        .route("/youtube/v3/search", get(search))
+        .route("/ws/2/recording", get(mb_search))
+        .route("/ws/2/{kind}/{id}", get(mb_lookup))
+        .with_state(api.clone());
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
@@ -97,14 +129,25 @@ struct Rig {
     twitch: mpsc::UnboundedReceiver<Command>,
     bus: broadcast::Receiver<Arc<Bus>>,
     secrets: Arc<MemSecrets>,
+    page: Mutex<String>,
     _dir: tempfile::TempDir,
 }
 
 const KEY: &str = "AIzaTESTKEY0123456789abcdefghijklmnopq";
+const CHANNEL: &str = "UCaaaaaaaaaaaaaaaaaaaaaa";
+const DELEGATE: &str = "123456789";
 
 async fn rig(extra_songs: &str, key: Option<&str>) -> Rig {
+    let r = rig_unverified(extra_songs, key, true, se_store::Db::memory().unwrap()).await;
+    r.connect_verified("test").await;
+    r
+}
+
+async fn rig_unverified(extra_songs: &str, key: Option<&str>, configured: bool, db: se_store::Db) -> Rig {
     let (api, base) = api_server().await;
-    let project = format!("schema = 1\n[songs]\nregion = \"US\"\napi_base = \"{base}\"\ncrossfade = \"0ms\"\n{extra_songs}\n");
+    let account = if configured { format!("youtube_channel = \"{CHANNEL}\"\nyoutube_delegate = \"{DELEGATE}\"\n") } else { String::new() };
+    let mb = base.replace("/youtube/v3", "/ws/2");
+    let project = format!("schema = 1\n[songs]\nregion = \"US\"\napi_base = \"{base}\"\nmetadata_base = \"{mb}\"\ncrossfade = \"0ms\"\n{account}{extra_songs}\n");
     let files = vec![SourceFile { kind: "project".into(), name: "project".into(), path: "project.toml".into(), table: project.parse().unwrap() }];
     let config = Config::build(&files);
     assert!(config.errors.is_empty(), "{:?}", config.errors);
@@ -120,7 +163,7 @@ async fn rig(extra_songs: &str, key: Option<&str>) -> Rig {
     std::mem::forget(_tx);
     let ctx = EngineCtx {
         hub: hub.clone(),
-        db: se_store::Db::memory().unwrap(),
+        db,
         project_root: dir.path().to_path_buf(),
         data_dir: dir.path().to_path_buf(),
         share_dir: dir.path().to_path_buf(),
@@ -133,7 +176,7 @@ async fn rig(extra_songs: &str, key: Option<&str>) -> Rig {
         secrets.set(se_songs::secrets::YOUTUBE_KEY, k).unwrap();
     }
     se_songs::service::spawn(ctx, secrets.clone()).await.unwrap();
-    Rig { hub, api, chat, twitch, bus, secrets, _dir: dir }
+    Rig { hub, api, chat, twitch, bus, secrets, page: Mutex::new("test".into()), _dir: dir }
 }
 
 fn viewer(name: &str, role: Role) -> Actor {
@@ -191,7 +234,18 @@ impl Rig {
     }
 
     async fn report(&self, args: Value) -> Value {
+        let args = if args.get_path("page").is_none() { args.with("page", self.page.lock().clone()) } else { args };
+        if args.get_path("ev").and_then(Value::as_str) == Some("hello") {
+            *self.page.lock() = args.get_path("page").and_then(Value::as_str).unwrap_or("").to_string();
+        }
         self.hub.query("song.player", args).await.unwrap()
+    }
+
+    async fn connect_verified(&self, page: &str) -> Value {
+        self.report(Value::map().with("ev", "hello").with("page", page)).await;
+        self.report(Value::map().with("ev", "account").with("verified", true).with("channel", CHANNEL).with("delegate", DELEGATE).with("error", "")).await;
+        self.queue().await; // actor barrier: account reports are asynchronous
+        self.state("song.player").await
     }
 
     async fn state(&self, addr: &str) -> Value {
@@ -229,7 +283,7 @@ async fn sr_link_is_validated_queued_and_played() {
     assert_eq!(q.get_path("quota.used").and_then(Value::as_i64), Some(1));
 
     // the player page connects and plays it
-    let d = r.report(Value::map().with("ev", "hello").with("page", "t")).await;
+    let d = r.connect_verified("t").await;
     assert_eq!(d.get_path("active").and_then(Value::as_str), Some("a"));
     assert_eq!(d.get_path("a.id").and_then(Value::as_str), Some("dQw4w9WgXcQ"));
     assert_eq!(d.get_path("a.cmd").and_then(Value::as_str), Some("play"));
@@ -396,7 +450,7 @@ async fn gapless_handover_errors_skip_and_redemptions() {
     let b = viewer("b_user", Role::Everyone);
     r.sr("https://youtu.be/fJ9rUzIMcZQ", &b);
     assert!(r.said().await.contains("#1"));
-    let d = r.report(Value::map().with("ev", "hello").with("page", "p1")).await;
+    let d = r.connect_verified("p1").await;
     let (e1, e2) = (d.get_path("a.entry").and_then(Value::as_i64).unwrap(), d.get_path("b.entry").and_then(Value::as_i64).unwrap());
     assert_eq!(d.get_path("b.cmd").and_then(Value::as_str), Some("cue"), "next song preloads in slot b");
     assert_eq!(d.get_path("b.auto"), Some(&Value::Bool(true)));
@@ -477,4 +531,256 @@ async fn key_management_and_no_key_mode() {
     r.chat_cmd("youtube.key.clear", Value::Null, &a);
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(r.secrets.get(se_songs::secrets::YOUTUBE_KEY).unwrap().is_some());
+}
+
+fn assert_stopped_slots(desired: &Value) {
+    for slot in ["a", "b"] {
+        assert_eq!(desired.get_path(&format!("{slot}.id")).and_then(Value::as_str), Some(""));
+        assert_eq!(desired.get_path(&format!("{slot}.cmd")).and_then(Value::as_str), Some("stop"));
+        assert_eq!(desired.get_path(&format!("{slot}.auto")), Some(&Value::Bool(false)));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unconfigured_or_unverified_account_blocks_operator_and_chat_without_lookup() {
+    for configured in [false, true] {
+        let mut r = rig_unverified("", Some(KEY), configured, se_store::Db::memory().unwrap()).await;
+        r.operator("queue.close", Value::Null);
+        r.operator("queue.pause", Value::Null);
+        r.queue().await;
+        let hello = r.report(Value::map().with("ev", "hello")).await;
+        assert_stopped_slots(&hello);
+        assert_eq!(hello.get_path("required_channel").and_then(Value::as_str), Some(if configured { CHANNEL } else { "" }));
+        r.operator("queue.open", Value::Null);
+        r.operator("queue.resume", Value::Null);
+        r.operator("queue.policy.set", Value::map().with("open", true));
+        r.operator("queue.request", Value::map().with("text", "dQw4w9WgXcQ"));
+        let fan = viewer("locked", Role::Everyone);
+        r.sr("https://youtu.be/dQw4w9WgXcQ", &fan);
+        r.said().await; // queue-action FIFO barrier; queries use a separate route.
+        let q = r.queue().await;
+        assert_eq!(q.get_path("open"), Some(&Value::Bool(false)));
+        assert_eq!(q.get_path("paused"), Some(&Value::Bool(true)));
+        assert_eq!(q.get_path("now"), Some(&Value::Null));
+        assert!(q.get_path("upcoming").and_then(Value::as_list).unwrap().is_empty());
+        assert_eq!(r.api.videos.load(Ordering::SeqCst), 0);
+        assert_eq!(r.api.searches.load(Ordering::SeqCst), 0);
+        assert_eq!(r.state("health.player").await.get_path("status").and_then(Value::as_str), Some("warn"));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restored_rows_stay_held_through_mismatch_reconnect_and_exact_channel_release() {
+    use se_songs::queue::{Entry, Paid, Status};
+    use se_songs::store::Store;
+    let db = se_store::Db::memory().unwrap();
+    let store = Store::open(db.clone()).unwrap();
+    store.kv_set("paused", &Value::Bool(true)).unwrap();
+    let mut current = Entry {
+        id: 0,
+        video: "dQw4w9WgXcQ".into(),
+        title: "Restored current".into(),
+        channel: "Artist".into(),
+        duration_s: 213,
+        user: "fan".into(),
+        user_id: Some("fan-id".into()),
+        role: Role::Everyone,
+        status: Status::Playing,
+        paid: Some(Paid { redemption_id: Some("untouched-redemption".into()), ..Default::default() }),
+        requested_at: 1,
+        started_at: Some(2),
+        ended_at: None,
+        note: None,
+    };
+    current.id = store.insert_entry(&current).unwrap();
+    store.update_entry(&current).unwrap();
+    let mut next = current.clone();
+    next.id = 0;
+    next.video = "fJ9rUzIMcZQ".into();
+    next.title = "Restored upcoming".into();
+    next.status = Status::Queued;
+    next.started_at = None;
+    next.paid = None;
+    next.id = store.insert_entry(&next).unwrap();
+    store.save_order(&[next.id]).unwrap();
+    store.kv_set("position", &Value::map().with("entry", current.id).with("t", 27.0)).unwrap();
+    let mut r = rig_unverified("", Some(KEY), true, db).await;
+    assert_stopped_slots(&r.state("song.player").await);
+    let hello = r.report(Value::map().with("ev", "hello")).await;
+    assert_stopped_slots(&hello);
+    r.report(Value::map().with("ev", "account").with("verified", true).with("channel", "UCbbbbbbbbbbbbbbbbbbbbbb").with("delegate", DELEGATE)).await;
+    r.queue().await;
+    assert_stopped_slots(&r.state("song.player").await);
+    r.operator("queue.resume", Value::Null);
+    r.sr("https://youtu.be/dQw4w9WgXcQ", &viewer("held", Role::Everyone));
+    r.said().await; // the rejected request follows resume on the same queue action route.
+    r.report(Value::map().with("ev", "ended").with("slot", "a").with("entry", current.id)).await;
+    r.report(Value::map().with("ev", "error").with("slot", "b").with("entry", next.id).with("code", 150)).await;
+    let held = r.queue().await;
+    assert_eq!(held.get_path("paused"), Some(&Value::Bool(true)));
+    assert_eq!(r.api.videos.load(Ordering::SeqCst), 0);
+    assert_eq!(held.get_path("now.id").and_then(Value::as_i64), Some(current.id));
+    assert_eq!(held.get_path("upcoming.0.id").and_then(Value::as_i64), Some(next.id));
+    assert!(held.get_path("history").and_then(Value::as_list).unwrap().is_empty());
+    assert!(r.twitch.try_recv().is_err(), "identity failure must not refund or fulfill stored rows");
+    let (stored_current, stored_upcoming, _) = store.load_active().unwrap();
+    assert_eq!(stored_current, Some(current.clone()));
+    assert_eq!(stored_upcoming, vec![next.clone()]);
+    let released = r.connect_verified("test").await;
+    assert_eq!(released.get_path("a.id").and_then(Value::as_str), Some(current.video.as_str()));
+    assert_eq!(released.get_path("a.start").and_then(Value::as_f64), Some(27.0));
+    assert_eq!(released.get_path("a.cmd").and_then(Value::as_str), Some("pause"));
+    assert_eq!(released.get_path("b.id").and_then(Value::as_str), Some(next.video.as_str()));
+    assert_eq!(released.get_path("b.cmd").and_then(Value::as_str), Some("cue"));
+    assert_eq!(released.get_path("b.auto"), Some(&Value::Bool(false)));
+    let reconnected = r.report(Value::map().with("ev", "hello").with("page", "new-page")).await;
+    assert_stopped_slots(&reconnected);
+    r.report(Value::map().with("ev", "account").with("page", "test").with("verified", true).with("channel", CHANNEL).with("delegate", DELEGATE)).await;
+    r.queue().await;
+    assert_stopped_slots(&r.state("song.player").await);
+    r.report(Value::map().with("ev", "account").with("verified", true).with("channel", CHANNEL).with("delegate", DELEGATE)).await;
+    r.queue().await;
+    assert_eq!(r.state("song.player").await.get_path("a.id").and_then(Value::as_str), Some(current.video.as_str()));
+    while let Ok(bus) = r.bus.try_recv() {
+        if let Bus::Event(event) = &*bus {
+            assert!(!matches!(event.ty.as_str(), "queue.song_started" | "queue.song_ended" | "queue.song_error"));
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn transient_identity_failure_after_restart_resumes_when_verified() {
+    use se_songs::queue::{Entry, Status};
+    use se_songs::store::Store;
+    let db = se_store::Db::memory().unwrap();
+    let store = Store::open(db.clone()).unwrap();
+    let mut current = Entry {
+        id: 0,
+        video: "dQw4w9WgXcQ".into(),
+        title: "Restored current".into(),
+        channel: "Artist".into(),
+        duration_s: 213,
+        user: "fan".into(),
+        user_id: Some("fan-id".into()),
+        role: Role::Everyone,
+        status: Status::Playing,
+        paid: None,
+        requested_at: 1,
+        started_at: Some(2),
+        ended_at: None,
+        note: None,
+    };
+    current.id = store.insert_entry(&current).unwrap();
+    store.update_entry(&current).unwrap();
+    let r = rig_unverified("", Some(KEY), true, db).await;
+    r.report(Value::map().with("ev", "hello")).await;
+    r.report(Value::map().with("ev", "account").with("verified", false).with("channel", "").with("delegate", "").with("error", "signing in")).await;
+    assert_eq!(r.queue().await.get_path("paused"), Some(&Value::Bool(true)), "unverified identity holds playback");
+    let released = r.connect_verified("test").await;
+    assert_eq!(released.get_path("a.id").and_then(Value::as_str), Some(current.video.as_str()));
+    assert_eq!(released.get_path("a.cmd").and_then(Value::as_str), Some("play"));
+    assert_eq!(r.queue().await.get_path("paused"), Some(&Value::Bool(false)));
+    assert_eq!(store.kv_get("paused"), None, "an identity hold is never saved as an operator pause");
+}
+
+/// Poll a state address until it equals `want` (metadata arrives asynchronously).
+async fn wait_state(r: &Rig, addr: &str, want: Value) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let v = r.state(addr).await;
+        if v == want {
+            return;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "{addr} stayed {v:?}, wanted {want:?}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn musicbrainz_metadata_reaches_entries_and_state_without_touching_playback() {
+    let db = se_store::Db::memory().unwrap();
+    let mut r = rig_unverified("", Some(KEY), true, db.clone()).await;
+    r.connect_verified("test").await;
+    let fan = viewer("drumfan42", Role::Everyone);
+    r.sr("https://youtu.be/dQw4w9WgXcQ", &fan);
+    r.said().await;
+    // first sight: nothing cached yet; artist/title come from the video title
+    let requested = r.event("queue.song_requested").await;
+    assert_eq!(requested.payload.get_path("artist").and_then(Value::as_str), Some("Rick Astley"));
+    assert_eq!(requested.payload.get_path("genres"), Some(&Value::List(vec![])));
+    assert!(requested.payload.get_path("year").unwrap().is_null());
+    let desired = r.state("song.player").await;
+    let before = r.queue().await;
+
+    wait_state(&r, "song.current.year", Value::Int(1987)).await;
+    assert_eq!(r.state("song.current.title").await, Value::from("Never Gonna Give You Up"));
+    assert_eq!(r.state("song.current.artist").await, Value::from("Rick Astley"));
+    assert_eq!(r.state("song.current.genres").await, Value::from(vec!["dance-pop", "synth-pop", "pop"]));
+    let q = r.queue().await;
+    assert_eq!(q.get_path("now.artist").and_then(Value::as_str), Some("Rick Astley"));
+    assert_eq!(q.get_path("now.genres.0").and_then(Value::as_str), Some("dance-pop"));
+    assert_eq!(q.get_path("now.year").and_then(Value::as_i64), Some(1987));
+    // metadata only: the player and the queue are exactly as before
+    assert_eq!(r.state("song.player").await, desired);
+    for k in ["now.id", "now.status", "now.title", "upcoming", "pending"] {
+        assert_eq!(q.get_path(k), before.get_path(k), "{k}");
+    }
+    // one search, one recording lookup, polite User-Agent
+    let mb = r.api.mb.lock().clone();
+    assert_eq!(mb.len(), 2, "{mb:?}");
+    assert_eq!(mb[0].0, "recording?recording:\"Never Gonna Give You Up\" AND artist:\"Rick Astley\"");
+    assert_eq!(mb[1].0, "recording/c95fd3f9-1a2b-4c3d-8e4f-5a6b7c8d9e01");
+    assert!(mb.iter().all(|(_, ua)| ua.starts_with("stream-engine/") && ua.contains("https://github.com/DABSandDRUMS/stream-engine")), "{mb:?}");
+    // playback events carry the fields
+    let d = r.connect_verified("t").await;
+    let entry = d.get_path("a.entry").and_then(Value::as_i64).unwrap();
+    r.report(Value::map().with("ev", "state").with("slot", "a").with("entry", entry).with("state", "playing").with("t", 0.5).with("dur", 213.0)).await;
+    let started = r.event("queue.song_started").await;
+    assert_eq!(started.payload.get_path("genres.1").and_then(Value::as_str), Some("synth-pop"));
+
+    // after a restart the restored song is answered from the runtime-DB cache: no requests
+    let r2 = rig_unverified("", Some(KEY), true, db).await;
+    assert_eq!(r2.state("song.current.genres").await, Value::from(vec!["dance-pop", "synth-pop", "pop"]));
+    assert_eq!(r2.state("song.current.year").await, Value::Int(1987));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(r2.api.mb.lock().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn metadata_off_reads_the_title_only_and_state_clears_between_songs() {
+    let mut r = rig("metadata = false", Some(KEY)).await;
+    let fan = viewer("drumfan42", Role::Everyone);
+    r.sr("https://youtu.be/dQw4w9WgXcQ", &fan);
+    r.said().await;
+    assert_eq!(r.state("song.current.title").await, Value::from("Never Gonna Give You Up"));
+    assert_eq!(r.state("song.current.artist").await, Value::from("Rick Astley"));
+    assert_eq!(r.state("song.current.genres").await, Value::List(vec![]));
+    assert_eq!(r.state("song.current.year").await, Value::Null);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(r.api.mb.lock().is_empty(), "no MusicBrainz requests with metadata = false");
+    // nothing playing: cleared
+    r.operator("queue.skip", Value::Null);
+    wait_state(&r, "song.current.title", Value::from("")).await;
+    assert_eq!(r.state("song.current.artist").await, Value::from(""));
+    assert_eq!(r.state("song.current.genres").await, Value::List(vec![]));
+    assert_eq!(r.state("song.current.year").await, Value::Null);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn queue_theme_survives_restart_without_releasing_the_player_hold() {
+    let db = se_store::Db::memory().unwrap();
+    let r = rig_unverified("metadata = false", None, true, db.clone()).await;
+    let before = r.state("song.player").await;
+    r.operator("queue.theme.set", Value::map().with("theme", "modern"));
+    wait_state(&r, "queue.theme", Value::from("modern")).await;
+    assert_eq!(r.queue().await.get_path("theme").and_then(Value::as_str), Some("modern"));
+    assert_eq!(r.state("song.player").await, before);
+    assert_eq!(r.queue().await.get_path("paused"), Some(&Value::Bool(true)));
+
+    let restarted = rig_unverified("metadata = false", None, true, db).await;
+    wait_state(&restarted, "queue.theme", Value::from("modern")).await;
+    assert_eq!(restarted.queue().await.get_path("theme").and_then(Value::as_str), Some("modern"));
+    restarted.operator("queue.theme.set", Value::map().with("theme", "win31"));
+    wait_state(&restarted, "queue.theme", Value::from("win31")).await;
+    assert_eq!(restarted.queue().await.get_path("paused"), Some(&Value::Bool(true)));
 }

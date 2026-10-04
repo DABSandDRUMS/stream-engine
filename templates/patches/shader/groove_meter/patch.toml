@@ -1,0 +1,18 @@
+# Groove Meter — a little Windows 3.1 instrument window in a corner: an analog VU-style gauge
+# whose needle shows "groove lock" (how tightly the latest kick and snare hits sit on the beat
+# grid) plus how hard the band is playing, a level LED bar under it, and a red fill lamp. Fills
+# throw the needle into the red zone and the redline, lamp and caption flash with the 16ths.
+# A trigger (alert) pegs the needle for a moment. Always-on overlay, so no manifest trigger: the
+# accent is timed from se.trigger_age. Talking (band stopped) lets the needle fall to rest.
+# Attach: overlay layer `patch.groove_meter`.
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "overlay"
+label       = "Groove Meter"
+description = "Win 3.1 VU gauge whose needle shows how locked-in the kick and snare are, redlining on fills"
+params.corner      = { type = "enum", options = ["bottom_left", "bottom_right", "top_left", "top_right"], default = "bottom_left", description = "Which corner the window sits in" }
+params.margin      = { type = "vec2", default = [0.012, 0.02], range = [0.0, 0.5], description = "Distance from the corner (uv of the frame)" }
+params.scale       = { type = "float", default = 1.0, range = [0.5, 3.0], description = "Window size; pixels snap to whole multiples" }
+params.tolerance   = { type = "float", default = 1.0, range = [0.3, 3.0], unit = "x", description = "How much timing spread still counts as locked (1 = about 10-55 ms)" }
+params.title_color = { type = "color", default = "#a0e6c8", description = "Title bar colour (the stream's mint by default; caption text picks black or white)" }
+budget = { gpu_ms = 0.1 }

@@ -149,6 +149,7 @@ pub enum Enc {
         hi: u8,
         hz: Option<(f32, f32)>,
         open: u8,
+        closed: Option<u8>,
     },
     Raw {
         index: usize,
@@ -217,10 +218,48 @@ pub struct Fixture {
     pub position: [f32; 2],
     pub rotation: f32,
     pub notes: Option<String>,
+    /// Installed coordinates/orientation are calibrated; otherwise only index-ordered effects.
+    pub layout_verified: bool,
     /// Root head (same id as the fixture).
     pub root: usize,
     /// Leaf heads (the root itself, or its cells).
     pub leaves: Vec<usize>,
+}
+
+/// Effective channel ownership, not a promise of unrestricted raw-byte access.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChannelControl {
+    Operator,
+    Fixed,
+    Managed,
+    Blocked,
+}
+
+impl ChannelControl {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Operator => "operator",
+            Self::Fixed => "fixed",
+            Self::Managed => "managed",
+            Self::Blocked => "blocked",
+        }
+    }
+}
+
+/// One physical slot, including cells and channels deliberately not exposed as attributes.
+#[derive(Clone, Copy, Debug)]
+pub struct ChannelCapability<'a> {
+    /// 1-based slot within the fixture.
+    pub local_channel: usize,
+    /// 1-based address in the fixture's universe.
+    pub address: usize,
+    /// Compiled head owning this slot (root or individual pixel).
+    pub head: usize,
+    pub channel: &'a Channel,
+    pub control: ChannelControl,
+    /// Hardware rate control is available only with calibration and an allowing policy.
+    /// A shutter may still have managed steady-open/blackout behavior when this is false.
+    pub strobe_available: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -295,6 +334,14 @@ impl Default for Safety {
     }
 }
 
+/// Static ambient fallback, compiled once; never an authored playback or room takeover.
+#[derive(Clone, Debug)]
+pub struct Idle {
+    pub heads: Vec<usize>,
+    pub color: [f32; 3],
+    pub intensity: f32,
+}
+
 /// The compiled rig.
 #[derive(Clone, Debug)]
 pub struct Rig {
@@ -305,6 +352,10 @@ pub struct Rig {
     /// Universe numbers in use (fixtures and outputs), sorted; `ChanEnc::universe` indexes this.
     pub universes: Vec<u16>,
     pub outputs: Vec<OutputDef>,
+    /// Hard transport interlock; disarmed rigs still render/query offline but never open outputs.
+    pub output_armed: bool,
+    pub main_light: Option<crate::main_light::Config>,
+    pub idle: Option<Idle>,
     pub safety: Safety,
     pub rate_hz: f32,
     pub rt_priority: i32,
@@ -325,6 +376,36 @@ impl Rig {
     }
     pub fn universe_index(&self, u: u16) -> Option<usize> {
         self.universes.iter().position(|x| *x == u)
+    }
+
+    /// Complete physical footprint in address order, borrowing profile channel metadata.
+    /// This query-time iterator does not add work or allocation to per-frame encoding.
+    pub fn fixture_channels(&self, fixture: usize) -> impl Iterator<Item = ChannelCapability<'_>> {
+        let f = self.fixtures.get(fixture);
+        let mode = f.and_then(|f| self.profiles.get(&f.profile)?.mode(Some(&f.mode)));
+        let master_off = mode.map(|m| if m.cells_first { m.cells as usize * m.cell_channels.len() } else { 0 }).unwrap_or(0);
+        (0..f.map_or(0, |f| f.footprint)).map(move |offset| {
+            let f = f.expect("nonempty fixture footprint");
+            let m = mode.expect("compiled fixture mode");
+            let master = offset >= master_off && offset < master_off + m.channels.len();
+            let (head, channel) = if master {
+                (f.root, &m.channels[offset - master_off])
+            } else {
+                let cell_offset = if m.cells_first { offset } else { offset - m.channels.len() };
+                let width = m.cell_channels.len();
+                (f.leaves[cell_offset / width], &m.cell_channels[cell_offset % width])
+            };
+            let strobe_available = matches!(channel.role, Role::Strobe | Role::Shutter)
+                && channel.hz.is_some() && self.safety.strobe == StrobePolicy::Limit;
+            let control = match channel.role {
+                Role::Fixed => ChannelControl::Fixed,
+                Role::Shutter => ChannelControl::Managed,
+                Role::Strobe if !strobe_available => ChannelControl::Blocked,
+                Role::Dimmer if !self.heads[head].leaf => ChannelControl::Managed,
+                _ => ChannelControl::Operator,
+            };
+            ChannelCapability { local_channel: offset + 1, address: f.address as usize + offset, head, channel, control, strobe_available }
+        })
     }
 
     /// Heads a cue value for `attr` on `target` (fixture, cell, group, or `all`) lands on:
@@ -373,7 +454,7 @@ impl Rig {
     /// Compile `lights/rig.toml` against the profile library. Errors in single fixtures are
     /// collected (that fixture is skipped); a structurally broken file is an `Err`.
     pub fn compile(table: &toml::Table, profiles: BTreeMap<String, Profile>, mut errors: Vec<String>) -> Result<Rig, String> {
-        let raw: RawRig = toml::Value::Table(table.clone()).try_into().map_err(|e: toml::de::Error| e.message().to_string())?;
+        let mut raw: RawRig = toml::Value::Table(table.clone()).try_into().map_err(|e: toml::de::Error| e.message().to_string())?;
         let mut rig = Rig {
             fixtures: Vec::new(),
             heads: Vec::new(),
@@ -386,9 +467,13 @@ impl Rig {
             rt_priority: raw.output.rt_priority.unwrap_or(40).clamp(0, 98),
             rdm_on_start: raw.rdm.discover_on_start.unwrap_or(true),
             profiles,
+            output_armed: raw.output.armed.unwrap_or(false),
+            main_light: raw.main_light.take(),
+            idle: None,
             errors: Vec::new(),
         };
         rig.safety = raw.safety.build()?;
+        if let Some(main_light) = &rig.main_light { main_light.validate()?; }
         // universes → occupied channels (overlap detection)
         let mut occupied: BTreeMap<(u16, usize), String> = BTreeMap::new();
         let mut universes = BTreeSet::new();
@@ -435,6 +520,17 @@ impl Rig {
                 Ok(members) => rig.add_group(name, members),
                 Err(e) => errors.push(format!("group `{name}`: {e}")),
             }
+        }
+        if let Some(idle) = raw.idle {
+            if !idle.intensity.is_finite() || !(0.0..=1.0).contains(&idle.intensity) {
+                return Err("idle intensity must be between 0 and 1".into());
+            }
+            let color = Value::from(idle.color).as_color().ok_or("idle color must be an RGB color")?;
+            let heads = rig.leaves_for(&idle.target)?;
+            if heads.is_empty() || heads.iter().any(|h| rig.heads[*h].attr("color").is_none()) {
+                return Err("idle target must contain RGB heads".into());
+            }
+            rig.idle = Some(Idle { heads, color: [color[0], color[1], color[2]], intensity: idle.intensity });
         }
         rig.errors = errors;
         Ok(rig)
@@ -555,6 +651,7 @@ impl Rig {
             position,
             rotation,
             notes: f.notes.clone(),
+            layout_verified: f.layout_verified.unwrap_or(false),
             root,
             leaves,
         });
@@ -595,7 +692,7 @@ impl Rig {
                 Role::Prism => Enc::Scalar { slot: slot::PRISM, fine: false, lo, hi },
                 Role::GoboRotate => Enc::Scalar { slot: slot::GOBO_ROTATE, fine: false, lo, hi },
                 Role::Gobo => Enc::Gobo { values: c.slots.iter().map(|s| s.value).collect() },
-                Role::Strobe | Role::Shutter => Enc::Strobe { lo, hi, hz: c.hz, open: c.open },
+                Role::Strobe | Role::Shutter => Enc::Strobe { lo, hi, hz: c.hz, open: c.open, closed: c.closed },
                 Role::Raw => Enc::Raw { index: self.heads[head].raw_names.iter().position(|n| *n == c.name).unwrap_or(0) },
                 Role::Fixed => Enc::Fixed(c.default),
             };
@@ -736,6 +833,16 @@ struct RawRig {
     safety: RawSafety,
     #[serde(default)]
     rdm: RawRdm,
+    main_light: Option<crate::main_light::Config>,
+    idle: Option<RawIdle>,
+}
+
+#[derive(Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+struct RawIdle {
+    target: String,
+    color: String,
+    intensity: f32,
 }
 
 #[derive(Deserialize, Clone)]
@@ -756,6 +863,7 @@ struct RawFixture {
     invert_tilt: bool,
     #[serde(default)]
     notes: Option<String>,
+    layout_verified: Option<bool>,
 }
 
 impl RawRig {
@@ -770,6 +878,7 @@ impl RawRig {
 struct RawOutputCfg {
     rate_hz: Option<f32>,
     rt_priority: Option<i32>,
+    armed: Option<bool>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -1000,6 +1109,57 @@ loop2 = ["loop1"]
         assert_eq!(r.heads_for("back", "color").unwrap(), vec![root]);
         assert_eq!(r.leaves_for("back").unwrap().len(), 8);
         assert_eq!(r.heads_for("bar_3", "color").unwrap(), vec![r.head("bar_3").unwrap()]);
+    }
+
+    #[test]
+    fn original_stick_pixels_and_master_at_universe_boundary() {
+        let r = rig("[fixtures.stick]\nprofile = \"chauvet_freedom_stick\"\nmode = \"50ch\"\naddress = 463");
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        let f = &r.fixtures[0];
+        let map: Vec<_> = r.fixture_channels(0).collect();
+        assert_eq!(map.len(), 50);
+        for pixel in 0..16 {
+            let head = r.head(&format!("stick_{}", pixel + 1)).unwrap();
+            assert_eq!(r.heads_for(&format!("stick_{}", pixel + 1), "color").unwrap(), vec![head]);
+            for (component, role) in [Role::Red, Role::Green, Role::Blue].into_iter().enumerate() {
+                let offset = pixel * 3 + component;
+                let c = map[offset];
+                assert_eq!((c.local_channel, c.address, c.head, c.channel.role, c.control),
+                    (offset + 1, 463 + offset, head, role, ChannelControl::Operator));
+                assert!(r.chans.iter().any(|enc| enc.head == head && enc.channel == c.address - 1));
+            }
+        }
+        assert_eq!((map[48].address, map[48].head, map[48].control), (511, f.root, ChannelControl::Blocked));
+        assert!(!map[48].strobe_available);
+        assert_eq!((map[49].address, map[49].head, map[49].control), (512, f.root, ChannelControl::Managed));
+        assert!(r.chans.iter().any(|c| c.channel == 511 && c.enc == Enc::MasterDimmer));
+        let overflow = rig("[fixtures.stick]\nprofile = \"chauvet_freedom_stick\"\nmode = \"50ch\"\naddress = 464");
+        assert!(overflow.fixtures.is_empty());
+        assert!(overflow.errors.iter().any(|e| e.contains("does not fit")));
+        assert!(r.profiles["chauvet_freedom_stick"].mode(Some("55ch")).is_none());
+    }
+
+    #[test]
+    fn direct_rig_channels_distinguish_operator_fixed_and_managed_control() {
+        let r = rig("[fixtures.par]\nprofile = \"chauvet_freedom_par_tri6\"\nmode = \"9ch\"\naddress = 200\n\
+            [fixtures.scan]\nprofile = \"adj_inno_pocket_scan\"\nmode = \"6ch\"\naddress = 15");
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        let par: Vec<_> = r.fixture_channels(r.fixture("par").unwrap()).collect();
+        for c in &par[..4] {
+            assert_eq!(c.control, ChannelControl::Operator);
+        }
+        for (offset, value) in [(4, 0), (6, 0), (7, 0), (8, 52)] {
+            assert_eq!((par[offset].control, par[offset].channel.default), (ChannelControl::Fixed, value));
+        }
+        assert_eq!(par[5].control, ChannelControl::Blocked);
+        let scan: Vec<_> = r.fixture_channels(r.fixture("scan").unwrap()).collect();
+        assert_eq!((scan[2].control, scan[2].channel.open, scan[2].channel.closed), (ChannelControl::Managed, 8, Some(0)));
+        assert!(!scan[2].strobe_available);
+        assert_eq!(scan[3].channel.role, Role::Gobo);
+        assert_eq!(scan[3].channel.slots.iter().map(|s| s.value).collect::<Vec<_>>(), vec![0, 8, 15, 22, 29, 36, 43, 50, 57]);
+        assert!(r.heads[scan[3].head].attr("color").is_none());
+        assert_eq!((scan[5].control, scan[5].channel.default), (ChannelControl::Fixed, 0));
+        assert_eq!(r.fixture_channels(usize::MAX).count(), 0);
     }
 
     #[test]

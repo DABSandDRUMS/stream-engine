@@ -1,0 +1,18 @@
+# Window cascade: Window > Cascade. On the trigger the picture shrinks into a Windows 3.1 window
+# and more windows (each a live copy of the whole frame) pop in one after another down a
+# diagonal cascade, the newest one active. On release they close from the front back and the
+# first one maximizes back to the full picture. Hard snare hits flash the active caption.
+# Burst-only: it runs canvas-wide while `patch.<id>.env` > 0 (fire `patch.window_cascade`).
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "effect"
+label       = "Window cascade"
+description = "The picture splits into a diagonal cascade of Windows 3.1 windows, each a live copy, then collapses back"
+params.amount      = { type = "float", default = 1.0, range = [0.0, 1.0], description = "0 turns the effect off" }
+params.windows     = { type = "int", default = 7, range = [2, 12], description = "Windows in the cascade (a bigger trigger amount adds up to 3)" }
+params.size        = { type = "float", default = 1.0, range = [0.4, 1.0], description = "Window size relative to the largest cascade that fits" }
+params.title_color = { type = "color", default = "#98dbc5", description = "Active caption colour (inactive captions are white)" }
+params.desktop     = { type = "color", default = "#008080", description = "Desktop colour behind the windows" }
+params.flash       = { type = "bool", default = true, description = "Hard snare hits flash the active caption" }
+trigger = { attack = "50ms", hold = "2s", release = "900ms" }
+budget = { gpu_ms = 0.2 }

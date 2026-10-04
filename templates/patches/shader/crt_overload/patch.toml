@@ -1,0 +1,16 @@
+# CRT overload: the layer below shown on a curved CRT tube. Subtle at rest, kicks pulse the
+# beam, and the trigger blows it into a full overload (vertical roll, sync tear, snow) that
+# settles back to the baseline look over a 14.6 s envelope. Always-on: attach it
+# (`fx = [{ name = "patch.crt_overload", amount = 0.6 }]`); fire `patch.crt_overload` for the overload.
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "effect"
+label       = "CRT overload"
+description = "Curved CRT tube with scanlines and slot mask that pulses on kicks and overloads into rolling, tearing static on trigger"
+params.amount    = { type = "float", default = 0.6, range = [0.0, 2.0], description = "Baseline CRT strength (curvature, mask, scanlines, bloom)" }
+params.curve     = { type = "float", default = 0.5, range = [0.0, 1.0], description = "Barrel curvature of the tube" }
+params.scanlines = { type = "float", default = 0.55, range = [0.0, 1.0], description = "Scanline darkness" }
+params.mask      = { type = "float", default = 0.4, range = [0.0, 1.0], description = "RGB slot-mask strength" }
+params.pulse     = { type = "float", default = 1.0, range = [0.0, 2.0], description = "How hard kicks and snares pump bloom and misconvergence" }
+budget = { gpu_ms = 0.4 }
+trigger = { attack = "600ms", hold = "12s", release = "2s", retrigger = "replace" }

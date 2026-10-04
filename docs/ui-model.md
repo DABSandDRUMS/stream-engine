@@ -30,6 +30,7 @@ Event ──► Alert (queued, temporary) ──► shown by a source that draws
 | **Action** | What to do when a trigger fires: switch scene, turn an effect on/off, set or animate a setting, play a sound, run a light cue, show a notification, say something in chat… A **saved action** is a named list of actions any trigger can run; it can last a while, toggle, or stay on until released. | Automation → Actions |
 | **Modulation** | A live link from a signal (audio level, bass, beat, LFO, MIDI fader, viewer count) to any numeric setting: layer offset follows the kick, effect strength follows the bass. | ∿ next to any setting; all links in Automation → Modulation |
 | **Alert** | A temporary, queued presentation for a viewer event (follow, sub, cheer…): text, image, sound, voice, duration, priority, veto. Drawn by a source that shows alerts, placed in a scene or on every scene. | Automation → Alerts |
+| **Auto sequence** | A list of scenes the show switches between by itself on a timer, in order or at random, each with its own time and transition. One runs at a time. | Automation → Auto sequence; on/off in Overview |
 
 Rules of thumb:
 
@@ -51,13 +52,13 @@ Overview   Edit   Clipping
            ├─ SHOW
            │   ├─ Scenes          Scenes · Effects · Transitions
            │   ├─ Sources         Sources · Files
-           │   └─ Automation      Events · Alerts · Buttons & pedals · Chat commands · Actions · Modulation · Timelines
+           │   └─ Automation      Events · Alerts · Buttons & pedals · Chat commands · Actions · Modulation · Timelines · Auto sequence
            ├─ PRODUCTION
            │   ├─ Sound           Mix · Mixing desk · Read-out voice
            │   └─ Lights
            ├─ CHANNEL
            │   └─ Community       Chat bot · Song requests · Twitch · Goals · Giveaways
-           └─ Settings            Get started · Devices · Accounts & app · Backups · History · Performance · Troubleshooting
+           └─ Settings            Get started · Devices · Accounts & app · Backups · History · Performance · Health · Troubleshooting
 ```
 
 ## Layout grammar

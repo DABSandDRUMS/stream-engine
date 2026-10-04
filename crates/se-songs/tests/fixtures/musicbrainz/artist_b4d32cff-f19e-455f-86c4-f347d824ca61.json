@@ -1,0 +1,37 @@
+{
+  "id": "b4d32cff-f19e-455f-86c4-f347d824ca61",
+  "name": "Panic! at the Disco",
+  "sort-name": "Panic! at the Disco",
+  "type": "Group",
+  "type-id": "e431f5f6-b5d2-343d-8b36-72607fffb74b",
+  "country": "US",
+  "disambiguation": "",
+  "life-span": {
+    "begin": "2004",
+    "end": "2023-01-24",
+    "ended": true
+  },
+  "genres": [],
+  "tags": [
+    {
+      "name": "pop punk",
+      "count": 5
+    },
+    {
+      "name": "seen live",
+      "count": 4
+    },
+    {
+      "name": "emo",
+      "count": 3
+    },
+    {
+      "name": "american",
+      "count": 2
+    },
+    {
+      "name": "2000s",
+      "count": 1
+    }
+  ]
+}

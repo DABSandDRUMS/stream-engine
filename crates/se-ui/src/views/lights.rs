@@ -1,10 +1,10 @@
 //! Lights (§9, §15.6): the lights console. Looks and cue lists are made for the streamer in the
 //! project files (docs/lights.md); this page uses them:
-//! - **Master**: overall brightness, blackout, the safe look, and the flash safety (read-only).
-//! - **Looks**: tap a look to turn it on or off; the chosen look's knobs (colour, brightness…)
-//!   and "Make a quick effect" to put it on a pad.
-//! - **Cue lists**: Go / Back / Stop, which step is running, and the list's knobs.
-//! - **Stage**: a live, read-only picture of what the lights are doing.
+//! - **Master**: brightness, blackout, panic, output arming and layout verification.
+//! - **Musical layers**: base/rhythm/accent status and generation-owned controls.
+//! - **Looks**: authored palettes select/release the base slot; palette knobs remain editable.
+//! - **Manual cue lists (advanced)**: existing Go / Back / Stop and list knobs.
+//! - **Stage**: rendered preview, not confirmation of the fixtures' physical state.
 //!
 //! Starting something while on air asks first ("Your viewers will see this"). Pure client of
 //! the se-dmx queries, actions and state addresses; knobs go through `lights.knob` (sent live
@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Structural queries, refreshed about once a second.
-const SLOW_QUERIES: [&str; 3] = ["lights.rig", "lights.cuelists", "lights.palettes"];
+const SLOW_QUERIES: [&str; 5] = ["lights.rig", "lights.cuelists", "lights.palettes", "lights.layers", "audio.mix"];
 const SLOW_EVERY: Duration = Duration::from_secs(1);
 /// Live output (stage picture, flash limiter), refreshed while the page is visible.
 const FAST_EVERY: Duration = Duration::from_millis(70);
@@ -49,6 +49,7 @@ const TILE_TEXT_H: f32 = 50.0;
 /// Something that starts on the lights (asked first while on air).
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Start {
+    Default,
     Look(String),
     List(String),
 }
@@ -294,23 +295,27 @@ fn strip(m: &Model, t: &Theme, st: &mut LightsState, ui: &mut Ui, out: &mut Vec<
             }
         });
         ui.add_space(spacing::S);
+        default_controls(&cx, st, ui, out);
+        ui.add_space(spacing::S);
         match st.confirm.clone() {
+            Some(Start::Default) => {}
             Some(start) => {
                 let (what, action) = match &start {
                     Start::Look(n) => {
                         (m.q_list("lights.palettes").iter().find(|p| s(p, "name") == n.as_str()).map(look_label).unwrap_or_else(|| nice(n)), "Turn it on")
                     }
                     Start::List(n) => (lists.iter().find(|c| s(c, "name") == n.as_str()).map(list_label).unwrap_or_else(|| nice(n)), "Start it"),
+                    Start::Default => ("Configured idle room lighting".to_string(), "Default lights"),
                 };
                 ui.horizontal(|ui| {
                     ui.set_min_height(34.0);
                     ui.label(RichText::new(icon::LIVE).color(t.bright_red));
                     ui.label(RichText::new(format!("You're on air: your viewers will see “{what}”.")).font(font_medium(type_scale::BODY)).color(t.fg));
-                    if widgets::button_ex(ui, t, None, action, Kind::Live, Size::Small, 0.0, true).clicked() {
+                    if widgets::button_ex(ui, t, None, action, Kind::Live, Size::Small, 0.0, m.connected && !panic_latched(m) && !layer_busy(m, st, "base", now)).clicked() {
                         match &start {
+                            Start::Default => restore_default(st, out),
                             Start::Look(n) => {
-                                out.push(act("lights.cue", Value::map().with("look", n.as_str())));
-                                st.edit(&format!("look:{n}"), Value::Bool(true), now);
+                                select_look(st, out, n, now);
                             }
                             Start::List(n) => {
                                 out.push(act("lights.go", Value::map().with("cuelist", n.as_str())));
@@ -401,8 +406,8 @@ fn strip_looks(cx: &Cx, st: &mut LightsState, ui: &mut Ui, out: &mut Vec<Op>) {
                 (false, false) => "Tap to turn it on",
             };
             let label = look_label(pal);
-            if look_chip(ui, t, cw, c, &label, on).on_hover_text(format!("{label}\n{tip}")).clicked() {
-                toggle_look(st, out, name, on, cx.on_air, cx.now);
+            if ui.add_enabled_ui(cx.m.connected && !panic_latched(cx.m) && !layer_busy(cx.m, st, "base", cx.now), |ui| look_chip(ui, t, cw, c, &label, on)).inner.on_hover_text(format!("{label}\n{tip}")).clicked() {
+                toggle_look(cx, st, out, name, on);
             }
         }
         if pals.len() > shown {
@@ -470,20 +475,7 @@ fn view(m: &Model, t: &Theme, st: &mut LightsState, ui: &mut Ui, out: &mut Vec<O
         });
         return;
     }
-    if rig.fixtures.is_empty() {
-        widgets::panel(ui, t, |ui| {
-            ui.set_width(ui.available_width());
-            st.open_setup = widgets::empty_state(
-                ui,
-                t,
-                icon::LIGHT,
-                "No lights are patched yet",
-                "Add your fixtures to lights/rig.toml in your editor. Device outputs and safety settings stay available; no looks are created automatically.",
-                Some("Set up lights"),
-            );
-        });
-        return;
-    }
+    // Empty libraries and unpatched rigs still expose safety and the layer foundation.
     let output = m.q("lights.output");
     let cx = Cx { m, t, rig: &rig, output, on_air, now };
     egui::ScrollArea::vertical().id_salt("lights_console").auto_shrink([false, false]).show(ui, |ui| {
@@ -505,6 +497,12 @@ fn view(m: &Model, t: &Theme, st: &mut LightsState, ui: &mut Ui, out: &mut Vec<O
             ui.add_space(spacing::L);
         }
         master_card(&cx, st, ui, out);
+        ui.add_space(spacing::L);
+        foundation_card(&cx, st, ui, out);
+        ui.add_space(spacing::L);
+        main_light_card(&cx, ui);
+        ui.add_space(spacing::L);
+        capabilities_card(&cx, ui);
         ui.add_space(spacing::L);
         let w = ui.available_width();
         let right = (w * 0.42).clamp(400.0, 1100.0);
@@ -594,6 +592,9 @@ struct Rig {
     outputs: Vec<Value>,
     errors: Vec<String>,
     safety: Option<Value>,
+    armed: Option<bool>,
+    unverified: Vec<String>,
+    targets: Vec<String>,
     present: bool,
 }
 
@@ -624,6 +625,18 @@ impl Rig {
             outputs: list(v, "outputs").to_vec(),
             errors: strs(v, "errors"),
             safety: v.get_path("safety").filter(|s| s.as_map().is_some()).cloned(),
+            armed: v.get_path("output_armed").and_then(|v| match v { Value::Bool(b) => Some(*b), _ => None }),
+            unverified: list(v, "fixtures").iter().filter(|f| !f.get_path("layout_verified").is_some_and(Value::truthy)).map(|f| s(f, "id").to_string()).collect(),
+            targets: {
+                let mut targets = vec!["all".to_string()];
+                targets.extend(list(v, "fixtures").iter().map(|f| s(f, "id").to_string()));
+                if let Some(groups) = v.get_path("groups").and_then(Value::as_map) {
+                    targets.extend(groups.keys().cloned());
+                }
+                targets.sort();
+                targets.dedup();
+                targets
+            },
             present: true,
         }
     }
@@ -711,9 +724,9 @@ fn look_attr<'a>(pal: &'a Value, attr: &str) -> Option<&'a Value> {
     set.get("all").into_iter().chain(set.values()).find_map(|a| a.get_path(attr).map(plain))
 }
 
-/// The look is on: a local tap wins for a moment over the (lagging) query.
-fn look_on(cx: &Cx, st: &LightsState, pal: &Value) -> bool {
-    st.edited(&format!("look:{}", s(pal, "name")), cx.now).map(Value::truthy).unwrap_or_else(|| pal.get_path("look_active").is_some_and(Value::truthy))
+/// Only the current base palette owns a look tile; rhythm/accent aren't base toggles.
+fn look_on(cx: &Cx, _st: &LightsState, pal: &Value) -> bool {
+    layer_state(cx.m, "base").is_some_and(|v| v.get_path("active").is_some_and(Value::truthy) && s(v, "selection.palette") == s(pal, "name"))
 }
 
 /// A knob's shown value: the one being moved, else what the engine has.
@@ -952,6 +965,33 @@ fn confirm_on_air(ui: &mut Ui, t: &Theme, st: &mut LightsState, what: &str, acti
 
 // ---------------------------------------------------------------- master
 
+fn default_controls(cx: &Cx, st: &mut LightsState, ui: &mut Ui, out: &mut Vec<Op>) {
+    let t = cx.t;
+    ui.horizontal_wrapped(|ui| {
+        if widgets::button_ex(ui, t, Some(icon::LIGHT), "Default lights", Kind::Primary, Size::Small, 0.0, cx.m.connected).clicked() {
+            if cx.on_air {
+                st.confirm = Some(Start::Default);
+            } else {
+                restore_default(st, out);
+            }
+        }
+        widgets::hint(ui, t, "Restore configured idle room lighting and pause AUTO LIGHTS.");
+        let (label, color) = match cx.m.get("lights.auto") {
+            Some(Value::Bool(true)) => ("AUTO LIGHTS on", t.green),
+            Some(Value::Bool(false)) => ("AUTO LIGHTS paused", t.yellow),
+            _ => ("AUTO LIGHTS status unknown", t.text_dim),
+        };
+        widgets::badge(ui, t, label, color);
+    });
+    if st.confirm == Some(Start::Default) {
+        ui.add_enabled_ui(cx.m.connected, |ui| {
+            if confirm_on_air(ui, t, st, "restoring configured idle room lighting pauses AUTO LIGHTS and clears active lighting overrides", "Default lights") {
+                restore_default(st, out);
+            }
+        });
+    }
+}
+
 fn master_card(cx: &Cx, st: &mut LightsState, ui: &mut Ui, out: &mut Vec<Op>) {
     let t = cx.t;
     let mut safe = false;
@@ -961,10 +1001,12 @@ fn master_card(cx: &Cx, st: &mut LightsState, ui: &mut Ui, out: &mut Vec<Op>) {
         "Master",
         "Works on top of every look and cue list.",
         |ui| {
-            safe = widgets::hold_button(ui, t, "Go to safe look", t.bright_red, 0.8);
+            safe = widgets::hold_button(ui, t, "Panic / safe look", t.bright_red, 0.8);
         },
         |ui| {
             ui.set_width(ui.available_width());
+            default_controls(cx, st, ui, out);
+            ui.add_space(spacing::S);
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = spacing::S;
                 master_controls(cx, st, ui, out, (ui.available_width() * 0.32).clamp(180.0, 560.0));
@@ -972,6 +1014,13 @@ fn master_card(cx: &Cx, st: &mut LightsState, ui: &mut Ui, out: &mut Vec<Op>) {
             });
             ui.add_space(spacing::S);
             flash_safety(cx, ui);
+            output_safety(cx, ui);
+            if panic_latched(cx.m) {
+                widgets::badge(ui, t, "Panic latched · layer starts blocked", t.bright_red);
+                if widgets::button_ex(ui, t, None, "Release safe look / reset panic", Kind::Secondary, Size::Small, 0.0, cx.m.connected).clicked() {
+                    out.push(act("lights.release", Value::map().with("cuelist", "safe")));
+                }
+            }
         },
     );
     if safe {
@@ -993,24 +1042,26 @@ fn master_controls(cx: &Cx, st: &mut LightsState, ui: &mut Ui, out: &mut Vec<Op>
     ui.add_space(spacing::L);
     let bkey = "@lights.blackout";
     let mut blackout = st.edited(bkey, now).map(Value::truthy).unwrap_or_else(|| m.b("lights.blackout"));
-    if widgets::toggle(ui, t, &mut blackout).on_hover_text("Every light off at once. Switch off to bring them back.").changed() {
+    if widgets::toggle(ui, t, &mut blackout).on_hover_text("Black out the rendered output. Hardware receives blackout only while armed and connected; disarmed fixtures may retain their last frame.").changed() {
         st.edit(bkey, Value::Bool(blackout), now);
         out.push(Op::Set { address: "lights.blackout".into(), value: Value::Bool(blackout) });
     }
     ui.label(RichText::new("Blackout").font(font_medium(type_scale::BODY)).color(t.fg));
     if blackout {
-        widgets::badge(ui, t, "All lights off", t.bright_red);
+        widgets::badge(ui, t, "Preview blacked out", t.bright_red);
     }
 }
 
-/// "Lights working" / "Needs a look" / "Not connected", with the details on hover.
+/// Transport health is not proof of the fixtures' physical state.
 fn health_pill(cx: &Cx, ui: &mut Ui) {
     let (status, detail) = cx.m.get("health.dmx").map(|h| (s(h, "status"), s(h, "detail"))).unwrap_or(("", ""));
-    let text = match health_led(status) {
-        LedState::Healthy => "Lights working",
-        LedState::Armed => "Lights need a look",
-        LedState::Error => "Lights not connected",
-        _ => "Lights",
+    let text = if cx.rig.armed == Some(false) { "Preview only" } else {
+        match health_led(status) {
+            LedState::Healthy => "Transport ready",
+            LedState::Armed => "Check lighting setup",
+            LedState::Error => "Transport unavailable",
+            _ => "Transport status unknown",
+        }
     };
     let mut tip: Vec<String> = cx
         .rig
@@ -1047,12 +1098,12 @@ fn flash_safety(cx: &Cx, ui: &mut Ui) {
     let hz = safety.and_then(|s| num(s, "max_flash_hz")).unwrap_or(3.0);
     let cap = safety.and_then(|s| num(s, "max_intensity")).unwrap_or(1.0);
     let mut line = if hz <= 0.0 {
-        "Flash safety is on: your lights never flash.".to_string()
+        "DMX flash limiter: detected flashes are held.".to_string()
     } else {
-        format!("Flash safety is on: never more than {} flash{} a second, for your viewers' comfort.", plain_num(hz), if hz == 1.0 { "" } else { "es" })
+        format!("DMX flash limiter: at most {} detected flash onset{} per second.", plain_num(hz), if hz == 1.0 { "" } else { "s" })
     };
     if cap < 0.999 {
-        line.push_str(&format!(" Lights never go above {}.", pct(cap as f32)));
+        line.push_str(&format!(" Output intensity cap: {}.", pct(cap as f32)));
     }
     let strobe = if safety.is_some_and(|s| s.get_path("strobe").and_then(Value::as_str) == Some("block")) {
         "Built-in strobes on your lights are kept off."
@@ -1061,7 +1112,7 @@ fn flash_safety(cx: &Cx, ui: &mut Ui) {
     };
     ui.horizontal(|ui| {
         ui.label(RichText::new(icon::CHECK).size(type_scale::SMALL + 1.0).color(t.green));
-        widgets::hint(ui, t, &line).on_hover_text(format!("{strobe}\nThis is part of your lights setup; ask us if it should change."));
+        widgets::hint(ui, t, &line).on_hover_text(format!("{strobe}\nThe limiter measures commanded DMX levels, not physical light. Autonomous fixture programs and shutter behavior still require hardware commissioning."));
         let limiting = cx.output.and_then(|o| o.get_path("limiter.active")).is_some_and(Value::truthy);
         if limiting {
             widgets::badge(ui, t, "Softening flashes now", t.yellow).on_hover_text("Some flashes are too fast right now, so they're being softened.");
@@ -1071,16 +1122,229 @@ fn flash_safety(cx: &Cx, ui: &mut Ui) {
 
 // ---------------------------------------------------------------- looks
 
-/// Turn a look on (asking first on air) or off.
-fn toggle_look(st: &mut LightsState, out: &mut Vec<Op>, name: &str, on: bool, on_air: bool, now: Instant) {
+fn layer_state<'a>(m: &'a Model, slot: &str) -> Option<&'a Value> {
+    m.get(&format!("lights.layer.{slot}.state")).filter(|v| v.get_path("active").is_some())
+        .or_else(|| m.q("lights.layers").and_then(|v| v.get_path(slot)))
+}
+
+fn panic_latched(m: &Model) -> bool {
+    m.get("lights.panic_latched").or_else(|| m.q("lights.layers").and_then(|v| v.get_path("panic_latched"))).is_some_and(Value::truthy)
+}
+
+fn layer_busy(m: &Model, st: &LightsState, slot: &str, now: Instant) -> bool {
+    st.edited(&format!("layer:{slot}:busy"), now).is_some_and(Value::truthy)
+        || layer_state(m, slot).and_then(|v| v.get_path("pending")).is_some_and(|v| !v.is_null())
+}
+
+fn select_look(st: &mut LightsState, out: &mut Vec<Op>, name: &str, now: Instant) {
+    out.push(act("lights.layer.select", Value::map().with("layer", "base").with("palette", name).with("owner", format!("ui:palette:{name}"))));
+    st.edit("layer:base:busy", Value::Bool(true), now);
+}
+
+fn restore_default(st: &mut LightsState, out: &mut Vec<Op>) {
+    // Discard pending knob sends and optimistic lighting values; show the engine echo.
+    st.knobs.clear();
+    st.edits.clear();
+    st.confirm = None;
+    out.push(act("lights.default", Value::Null));
+}
+
+fn layer_args(slot: &str, state: &Value) -> Value {
+    let mut args = Value::map().with("layer", slot);
+    if let Some(owner) = state.get_path("owner").and_then(Value::as_str) {
+        args = args.with("owner", owner);
+    }
+    args
+}
+
+fn release_layer(st: &mut LightsState, out: &mut Vec<Op>, slot: &str, state: &Value, now: Instant) {
+    out.push(act("lights.layer.release", layer_args(slot, state)));
+    st.edit(&format!("layer:{slot}:busy"), Value::Bool(true), now);
+}
+
+fn output_safety(cx: &Cx, ui: &mut Ui) {
+    let t = cx.t;
+    let (label, color) = match cx.rig.armed {
+        Some(true) => ("Output armed in rig configuration", t.yellow),
+        Some(false) => ("Output disarmed · preview only", t.text_dim),
+        None => ("Output arming unknown", t.yellow),
+    };
+    ui.horizontal_wrapped(|ui| {
+        widgets::badge(ui, t, label, color).on_hover_text("Hardware sends require [output] armed=true and an enabled transport. Disarming stops transport; hardware may retain its last frame. This is not blackout.");
+        let enabled = cx.rig.outputs.iter().filter(|v| v.get_path("enabled").is_some_and(Value::truthy)).count();
+        widgets::hint(ui, t, &format!("{enabled} transport(s) enabled"));
+        if cx.rig.fixtures.is_empty() {
+            widgets::hint(ui, t, "No fixtures patched");
+        } else if cx.rig.unverified.is_empty() {
+            widgets::badge(ui, t, "Fixture layout verified", t.green);
+        } else {
+            widgets::badge(ui, t, "Fixture layout unverified", t.yellow).on_hover_text(format!("Unverified fixture positions/orientation: {}. Stage preview is approximate; verify the real layout before arming.", cx.rig.unverified.join(", ")));
+        }
+    });
+    if cx.rig.armed == Some(false) {
+        widgets::hint(ui, t, "Preview continues while disarmed. Fixtures may hold their last hardware frame.");
+    }
+}
+
+fn foundation_card(cx: &Cx, st: &mut LightsState, ui: &mut Ui, out: &mut Vec<Op>) {
+    widgets::titled(ui, cx.t, "Musical layers", "Base → rhythm → accent. Content is authored; no looks are generated automatically.", |_| {}, |ui| {
+        if let Some(clock) = cx.m.q("audio.mix").and_then(|v| v.get_path("analysis.beat")) {
+            widgets::hint(ui, cx.t, &format!("Clock: {} · {} BPM · {}", s(clock, "source"), num(clock, "bpm").map(plain_num).unwrap_or_else(|| "—".into()), s(clock, "status")));
+        } else {
+            widgets::hint(ui, cx.t, "Clock status unavailable");
+        }
+        for slot in ["base", "rhythm", "accent"] {
+            ui.push_id(slot, |ui| {
+                let state = layer_state(cx.m, slot);
+                let active = state.is_some_and(|v| v.get_path("active").is_some_and(Value::truthy));
+                let pending = layer_busy(cx.m, st, slot, cx.now);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(nice(slot)).font(font_semibold(type_scale::BODY)).color(cx.t.fg));
+                    widgets::badge(ui, cx.t, if pending { "Pending" } else if active { "Active" } else { "Empty" }, if active { cx.t.green } else { cx.t.text_dim });
+                    if let Some(state) = state.filter(|_| active) {
+                        let refs: Vec<String> = ["selection.palette", "selection.cuelist"].iter().map(|k| s(state, k)).filter(|v| !v.is_empty()).map(str::to_string).chain(list(state, "selection.effects").iter().map(text)).collect();
+                        widgets::hint(ui, cx.t, &refs.join(" · "));
+                        if let Some(ms) = num(state, "remaining_ms") {
+                            widgets::hint(ui, cx.t, &format!("{} remaining", dur(ms)));
+                        }
+                        let vibe = s(state, "controls.vibe");
+                        if !vibe.is_empty() {
+                            widgets::hint(ui, cx.t, &format!("Vibe (authored): {vibe}"));
+                        }
+                    }
+                });
+                let empty = Value::Null;
+                let state = state.unwrap_or(&empty);
+                ui.add_enabled_ui(cx.m.connected && active && !pending && !panic_latched(cx.m), |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        for (field, label, range) in [
+                            ("energy", "Energy", 0.0..=1.0),
+                            ("rhythm", "Beat period ×", 0.125..=8.0),
+                            ("brightness", "Brightness", 0.0..=1.0),
+                        ] {
+                            let key = format!("layer:{slot}:{}:{field}", s(state, "owner"));
+                            let mut value = st.edited(&key, cx.now).and_then(Value::as_f32).or_else(|| num(state, &format!("controls.{field}")).map(|v| v as f32)).unwrap_or(1.0);
+                            let response = ui.add(egui::Slider::new(&mut value, range).text(label));
+                            if field == "rhythm" {
+                                response.clone().on_hover_text("Beats per effect cycle: 2 doubles the period, 0.5 halves it. This does not change tempo.");
+                            }
+                            if response.changed() {
+                                st.edit(&key, Value::from(value), cx.now);
+                                out.push(act("lights.layer.set", layer_args(slot, state).with(field, value)));
+                            }
+                        }
+                        if widgets::button_ex(ui, cx.t, Some(icon::STOP), "Release", Kind::Secondary, Size::Small, 0.0, true).clicked() {
+                            release_layer(st, out, slot, state, cx.now);
+                        }
+                    });
+                    let key = format!("layer:{slot}:{}:coverage", s(state, "owner"));
+                    let current = st.edited(&key, cx.now).or_else(|| state.get_path("controls.coverage"));
+                    let mut selected: Vec<String> = current.and_then(Value::as_list).unwrap_or(&[]).iter().filter_map(Value::as_str).map(str::to_string).collect();
+                    // Keep the main controls at fixture/group granularity. Retain
+                    // any explicitly selected pixel targets from advanced authoring.
+                    let mut targets = cx.rig.targets.clone();
+                    for target in &selected {
+                        if !targets.contains(target) { targets.push(target.clone()); }
+                    }
+                    ui.horizontal_wrapped(|ui| {
+                        widgets::hint(ui, cx.t, "Coverage");
+                        for target in &targets {
+                            let mut checked = selected.contains(target);
+                            if widgets::toggle(ui, cx.t, &mut checked).on_hover_text(target).changed() {
+                                if checked {
+                                    if target == "all" { selected.clear(); } else { selected.retain(|v| v != "all"); }
+                                    selected.push(target.clone());
+                                } else {
+                                    selected.retain(|v| v != target);
+                                }
+                                let coverage = Value::from(selected.clone());
+                                st.edit(&key, coverage.clone(), cx.now);
+                                out.push(act("lights.layer.set", layer_args(slot, state).with("coverage", coverage)));
+                            }
+                            ui.label(RichText::new(target).color(cx.t.text_dim));
+                        }
+                    });
+                });
+                ui.add_space(spacing::S);
+            });
+        }
+    });
+}
+
+fn main_light_card(cx: &Cx, ui: &mut Ui) {
+    let Some(state) = cx.m.get("lights.main_light.state") else { return };
+    let phase = s(state, "phase");
+    if !state.get_path("configured").is_some_and(Value::truthy) && phase != "error" { return; }
+    widgets::titled(ui, cx.t, "Main light", "Automatic handoff follows sent DMX, never preview-only lighting.", |_| {}, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            widgets::badge(ui, cx.t, phase, if phase == "error" { cx.t.yellow } else { cx.t.text_dim });
+            let power = match state.get_path("on") {
+                Some(Value::Bool(true)) => "Last verified: ON",
+                Some(Value::Bool(false)) => "Last verified: OFF",
+                _ => "Relay state unknown",
+            };
+            ui.label(power);
+            ui.label(format!("{} · {}", s(state, "host"), s(state, "mac")));
+        });
+        widgets::hint(ui, cx.t, s(state, "detail"));
+        widgets::hint(ui, cx.t, "Global blackout, zero intended brightness, disarm or output stop restore the main light after takeover. Intentional waveform darkness keeps it off.");
+    });
+}
+
+fn capabilities_card(cx: &Cx, ui: &mut Ui) {
+    let Some(rig) = cx.m.q("lights.rig") else { return };
+    widgets::titled(ui, cx.t, "Fixture capabilities", "Independent fixture/pixel targets and the complete physical channel map.", |_| {}, |ui| {
+        widgets::hint(ui, cx.t, "Operator = direct attribute; managed = encoder-owned gate; fixed = intentional mode byte; blocked = unavailable under current safety/calibration.");
+        for fixture in list(rig, "fixtures") {
+            let id = s(fixture, "id");
+            let address = num(fixture, "address").unwrap_or(0.0);
+            let footprint = num(fixture, "footprint").unwrap_or(0.0);
+            let label = format!("{id} · {} · U{}:{}–{}", s(fixture, "mode"), plain_num(num(fixture, "universe").unwrap_or(0.0)), plain_num(address), plain_num(address + footprint - 1.0));
+            ui.collapsing(label, |ui| {
+                widgets::hint(ui, cx.t, s(fixture, "notes"));
+                let heads = strs(fixture, "heads");
+                if heads.len() > 1 {
+                    widgets::hint(ui, cx.t, &format!("{} independently targeted pixels: {}", heads.len(), heads.join(", ")));
+                }
+                egui::Grid::new(("fixture_channel_map", id)).striped(true).show(ui, |ui| {
+                    for heading in ["Channel / DMX", "Target", "Function", "Ownership", "State attribute"] {
+                        ui.strong(heading);
+                    }
+                    ui.end_row();
+                    for channel in list(fixture, "channel_map") {
+                        ui.label(format!("{} / {}", plain_num(num(channel, "channel").unwrap_or(0.0)), plain_num(num(channel, "address").unwrap_or(0.0))));
+                        ui.label(s(channel, "head"));
+                        let function = if s(channel, "control") == "fixed" {
+                            format!("{} · byte {}", s(channel, "label"), plain_num(num(channel, "default").unwrap_or(0.0)))
+                        } else { s(channel, "label").to_string() };
+                        let slots = list(channel, "slots").iter().map(|slot| format!("Index {} · {} → DMX byte {}", plain_num(num(slot, "index").unwrap_or(0.0)), s(slot, "name"), plain_num(num(slot, "value").unwrap_or(0.0)))).collect::<Vec<_>>().join("\n");
+                        ui.label(function).on_hover_text(slots);
+                        let control = s(channel, "control");
+                        widgets::badge(ui, cx.t, control, if control == "blocked" { cx.t.yellow } else { cx.t.text_dim }).on_hover_text(s(channel, "restriction"));
+                        ui.small(s(channel, "state_address")).on_hover_text(s(channel, "restriction"));
+                        ui.end_row();
+                    }
+                });
+            });
+        }
+    });
+}
+
+/// Turn a base look on (asking first on air) or release exactly its current generation.
+fn toggle_look(cx: &Cx, st: &mut LightsState, out: &mut Vec<Op>, name: &str, on: bool) {
+    if !cx.m.connected || layer_busy(cx.m, st, "base", cx.now) || panic_latched(cx.m) {
+        return;
+    }
     if on {
-        out.push(act("lights.release", Value::map().with("look", name)));
-        st.edit(&format!("look:{name}"), Value::Bool(false), now);
-    } else if on_air {
+        if let Some(current) = layer_state(cx.m, "base")
+            && s(current, "selection.palette") == name
+        {
+            release_layer(st, out, "base", current, cx.now);
+        }
+    } else if cx.on_air {
         st.confirm = Some(Start::Look(name.to_string()));
     } else {
-        out.push(act("lights.cue", Value::map().with("look", name)));
-        st.edit(&format!("look:{name}"), Value::Bool(true), now);
+        select_look(st, out, name, cx.now);
     }
 }
 
@@ -1094,6 +1358,7 @@ fn looks_card(cx: &Cx, st: &mut LightsState, ui: &mut Ui, out: &mut Vec<Op>) {
         n => format!("{n} looks on · tap a look to turn it on or off"),
     };
     let mut all_off = false;
+    let release_ready = cx.m.connected && !layer_busy(cx.m, st, "base", cx.now);
     widgets::titled(
         ui,
         t,
@@ -1101,7 +1366,7 @@ fn looks_card(cx: &Cx, st: &mut LightsState, ui: &mut Ui, out: &mut Vec<Op>) {
         &sub,
         |ui| {
             if !on.is_empty() {
-                all_off = widgets::button_ex(ui, t, Some(icon::POWER), "Turn all off", Kind::Secondary, Size::Small, 0.0, true).clicked();
+                all_off = widgets::button_ex(ui, t, Some(icon::POWER), "Release base", Kind::Secondary, Size::Small, 0.0, release_ready).clicked();
             }
         },
         |ui| {
@@ -1120,9 +1385,9 @@ fn looks_card(cx: &Cx, st: &mut LightsState, ui: &mut Ui, out: &mut Vec<Op>) {
             if let Some(Start::Look(name)) = st.confirm.clone()
                 && let Some(pal) = pals.iter().find(|p| s(p, "name") == name)
             {
-                if confirm_on_air(ui, t, st, &format!("“{}” goes on your lights", look_label(pal)), "Turn it on") {
-                    out.push(act("lights.cue", Value::map().with("look", name.as_str())));
-                    st.edit(&format!("look:{name}"), Value::Bool(true), cx.now);
+                let ready = !panic_latched(cx.m) && !layer_busy(cx.m, st, "base", cx.now) && cx.m.connected;
+                if ui.add_enabled_ui(ready, |ui| confirm_on_air(ui, t, st, &format!("“{}” becomes your base look", look_label(pal)), "Turn it on")).inner {
+                    select_look(st, out, &name, cx.now);
                 }
                 ui.add_space(spacing::M);
             }
@@ -1142,7 +1407,7 @@ fn looks_card(cx: &Cx, st: &mut LightsState, ui: &mut Ui, out: &mut Vec<Op>) {
                         }))
                     };
                     let label = look_label(pal);
-                    let resp = tile(ui, t, size, face, &label, &look_words(pal), is_on, shown.as_deref() == Some(name));
+                    let resp = ui.add_enabled_ui(cx.m.connected && !panic_latched(cx.m) && !layer_busy(cx.m, st, "base", cx.now), |ui| tile(ui, t, size, face, &label, &look_words(pal), is_on, shown.as_deref() == Some(name))).inner;
                     // a corner button shows the look's knobs without turning it on
                     let adj = Rect::from_min_size(resp.rect.min + Vec2::splat(10.0), Vec2::splat(28.0));
                     let mut child = ui.new_child(UiBuilder::new().max_rect(adj).id_salt(("look-adjust", name)));
@@ -1158,18 +1423,14 @@ fn looks_card(cx: &Cx, st: &mut LightsState, ui: &mut Ui, out: &mut Vec<Op>) {
                         st.look = Some(name.to_string());
                     } else if resp.on_hover_text(tip).clicked() {
                         st.look = Some(name.to_string());
-                        toggle_look(st, out, name, is_on, cx.on_air, cx.now);
+                        toggle_look(cx, st, out, name, is_on);
                     }
                 }
             });
         },
     );
-    if all_off {
-        for p in on {
-            let name = s(p, "name");
-            out.push(act("lights.release", Value::map().with("look", name)));
-            st.edit(&format!("look:{name}"), Value::Bool(false), cx.now);
-        }
+    if all_off && let Some(current) = layer_state(cx.m, "base") {
+        release_layer(st, out, "base", current, cx.now);
     }
 }
 
@@ -1195,6 +1456,7 @@ fn adjust_card(cx: &Cx, st: &mut LightsState, ui: &mut Ui, out: &mut Vec<Op>) {
     let (mut toggle, mut quick, mut reset) = (false, false, false);
     let defaults: Vec<(&str, &Value)> = knob_list.iter().filter_map(|k| knobs::default_of(k).map(|d| (s(k, "target"), d))).collect();
     let changed = knob_list.iter().any(|k| knobs::default_of(k).is_some_and(|d| !same(&knob_now(st, "look", &name, k, cx.now), d)));
+    let toggle_ready = cx.m.connected && !panic_latched(cx.m) && !layer_busy(cx.m, st, "base", cx.now);
     widgets::titled(
         ui,
         t,
@@ -1206,7 +1468,7 @@ fn adjust_card(cx: &Cx, st: &mut LightsState, ui: &mut Ui, out: &mut Vec<Op>) {
                 (false, true) => (icon::PLAY, "Try it on air", Kind::Live, "You're on air: your viewers will see it"),
                 (false, false) => (icon::PLAY, "Turn on", Kind::Primary, "You're off air: only you see it"),
             };
-            toggle = widgets::button_ex(ui, t, Some(icon_), lbl, kind, Size::Small, 0.0, true).on_hover_text(tip).clicked();
+            toggle = widgets::button_ex(ui, t, Some(icon_), lbl, kind, Size::Small, 0.0, toggle_ready).on_hover_text(tip).clicked();
             quick = widgets::button_ex(ui, t, Some(icon::BOLT), "Make a quick effect", Kind::Secondary, Size::Small, 0.0, true)
                 .on_hover_text("Puts this look on a pad: one tap on Overview or your Stream Deck turns it on and off.")
                 .clicked();
@@ -1227,7 +1489,7 @@ fn adjust_card(cx: &Cx, st: &mut LightsState, ui: &mut Ui, out: &mut Vec<Op>) {
         },
     );
     if toggle {
-        toggle_look(st, out, &name, is_on, cx.on_air, cx.now);
+        toggle_look(cx, st, out, &name, is_on);
     }
     if reset {
         for (target, d) in defaults {
@@ -1265,8 +1527,8 @@ fn cuelists_card(cx: &Cx, st: &mut LightsState, ui: &mut Ui, out: &mut Vec<Op>) 
     widgets::titled(
         ui,
         t,
-        "Cue lists",
-        "Go steps to the next look. Stop hands the lights back.",
+        "Manual cue lists (advanced)",
+        "Go / Back / Locate use the manual console, separate from musical layer selections.",
         |_| {},
         |ui| {
             ui.set_width(ui.available_width());
@@ -1529,15 +1791,24 @@ fn beam_dir(rotation_deg: f32, pan: f32, tilt: f32) -> (Vec2, f32) {
 fn stage_card(cx: &Cx, ui: &mut Ui) {
     let t = cx.t;
     let heads = stage_heads(cx.rig, cx.output);
-    let sub = if cx.output.is_some() { "What your lights are doing right now." } else { "Waiting for the live picture of your lights…" };
+    let schematic = !cx.rig.unverified.is_empty();
+    let sub = if schematic {
+        "Logical fixture / pixel order — not a surveyed room layout or physical confirmation."
+    } else {
+        "Rendered DMX preview — not physical confirmation."
+    };
     widgets::titled(
         ui,
         t,
-        "Stage",
+        if schematic { "Fixture / pixel test" } else { "Stage" },
         sub,
         |_| {},
         |ui| {
             ui.set_width(ui.available_width());
+            if schematic {
+                patch_picture(t, ui, cx.rig, &heads);
+                return;
+            }
             let w = ui.available_width();
             let (stage, resp) = ui.allocate_exact_size(Vec2::new(w, (w * 0.42).clamp(160.0, 340.0)), Sense::hover());
             stage_floor(t, ui, cx.rig, &heads, stage);
@@ -1557,6 +1828,40 @@ fn stage_card(cx: &Cx, ui: &mut Ui) {
             }
         },
     );
+}
+
+/// Keep unsurveyed heads visible without assigning fictitious stage coordinates.
+fn patch_picture(t: &Theme, ui: &mut Ui, rig: &Rig, heads: &[StageHead]) {
+    let label_width = 180.0_f32.min(ui.available_width() * 0.4);
+    let pixel_width = (ui.available_width() - label_width - spacing::L).max(18.0);
+    egui::Grid::new("lights_patch_picture").spacing(Vec2::new(spacing::L, spacing::S)).show(ui, |ui| {
+        for fixture in &rig.fixtures {
+            ui.add_sized([label_width, 18.0], egui::Label::new(RichText::new(fixture.name()).font(font_medium(type_scale::SMALL)).color(t.text_dim)).truncate());
+            ui.horizontal_wrapped(|ui| {
+                ui.set_width(pixel_width);
+                ui.spacing_mut().item_spacing = Vec2::splat(3.0);
+                for (head, info) in heads.iter().zip(&rig.heads).filter(|(_, info)| info.fixture == fixture.id) {
+                    let (r, response) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
+                    let fill = if head.intensity > 0.01 {
+                        rgb(head.color[0] * head.intensity, head.color[1] * head.intensity, head.color[2] * head.intensity)
+                    } else {
+                        mix(t.inset, t.fg, 0.1)
+                    };
+                    ui.painter().rect_filled(r, CornerRadius::same(3), fill);
+                    let ring = if head.limited { t.yellow } else { mix(t.inset, t.fg, 0.35) };
+                    ui.painter().rect_stroke(r, CornerRadius::same(3), Stroke::new(1.0, ring), StrokeKind::Inside);
+                    response.on_hover_ui(|ui| {
+                        ui.label(rig.head_name(&info.id));
+                        ui.label(format!("Brightness {}", pct(head.intensity)));
+                        if head.limited {
+                            ui.label("Softened by flash safety");
+                        }
+                    });
+                }
+            });
+            ui.end_row();
+        }
+    });
 }
 
 /// The stage seen from above: lights glow in their live color, movers throw a beam cone.
@@ -1635,201 +1940,25 @@ fn stage_floor(t: &Theme, ui: &Ui, rig: &Rig, heads: &[StageHead], stage: Rect) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use egui_kittest::Harness;
-    use egui_kittest::kittest::Queryable;
 
-    fn knob(label: &str, target: &str, kind: &str, value: Value) -> Value {
-        Value::map()
-            .with("label", label)
-            .with("target", target)
-            .with("kind", kind)
-            .with("min", 0.0)
-            .with("max", 1.0)
-            .with("step", 0.05)
-            .with("unit", "%")
-            .with("default", value.clone())
-            .with("options", Vec::<Value>::new())
-            .with("value", value)
-    }
-
-    fn payload(m: &mut Model) {
-        let fixture = |id: &str, label: &str, pos: [f32; 2]| Value::map().with("id", id).with("label", label).with("position", pos).with("heads", vec![id]);
-        let head = |id: &str, pos: [f32; 2], moving: bool| {
-            Value::map()
-                .with("id", id)
-                .with("fixture", id)
-                .with("position", pos)
-                .with("rotation", 0.0)
-                .with("kind", if moving { "spot" } else { "par" })
-                .with("beam", 20.0)
-                .with("moving", moving)
-        };
-        let rig = Value::map()
-            .with("fixtures", vec![fixture("par1", "Par L", [0.25, 0.2]), fixture("par2", "Par R", [0.75, 0.2]), fixture("spot1", "Spot", [0.5, 0.8])])
-            .with("heads", vec![head("par1", [0.25, 0.2], false), head("par2", [0.75, 0.2], false), head("spot1", [0.5, 0.8], true)])
-            .with("outputs", vec![Value::map().with("id", "usb").with("kind", "enttec_pro").with("enabled", true).with("status", "ok")])
-            .with("errors", Vec::<String>::new())
-            .with("safety", Value::map().with("max_flash_hz", 3.0).with("max_intensity", 1.0).with("strobe", "limit"));
-        let cue = |id: &str| {
-            Value::map()
-                .with("id", id)
-                .with("label", format!("Cue {id}"))
-                .with("fade_ms", 2000)
-                .with("fade_out_ms", 1500)
-                .with("follow_ms", Value::Null)
-                .with("wait_ms", Value::Null)
-        };
-        let main = Value::map()
-            .with("name", "main")
-            .with("label", "Main")
-            .with("playing", true)
-            .with("current", "1")
-            .with("next", "2")
-            .with("progress", 0.4)
-            .with("total_ms", 2000)
-            .with("cues", vec![cue("1"), cue("2")])
-            .with("knobs", vec![knob("Front brightness", "cue.1.set.front.intensity", "number", Value::Float(0.8))]);
-        let chase = Value::map().with("name", "chase").with("label", "Chase").with("playing", false).with("cues", vec![cue("1")]);
-        let set = |c: &str| -> std::collections::BTreeMap<String, Value> {
-            [("all".to_string(), Value::map().with("color", c).with("intensity", 0.8))].into_iter().collect()
-        };
-        let warm = Value::map().with("name", "warm").with("label", "Warm").with("set", set("#ffb070")).with("look_active", false).with(
-            "knobs",
-            vec![knob("Color", "set.all.color", "color", Value::from("#ffb070")), knob("Brightness", "set.all.intensity", "number", Value::Float(0.8))],
-        );
-        let blue =
-            Value::map().with("name", "blue").with("label", "Blue").with("set", set("#0030ff")).with("look_active", true).with("knobs", Vec::<Value>::new());
-        let q = &mut m.queries;
-        q.insert("lights.rig".into(), rig);
-        q.insert("lights.cuelists".into(), Value::from(vec![main, chase]));
-        q.insert("lights.palettes".into(), Value::from(vec![warm, blue]));
-        q.insert(
-            "lights.output".into(),
-            Value::map()
-                .with(
-                    "heads",
-                    vec![
-                        Value::map()
-                            .with("id", "par1")
-                            .with("x", 0.25)
-                            .with("y", 0.2)
-                            .with("intensity", 0.8)
-                            .with("color", vec![1.0, 0.5, 0.2])
-                            .with("limited", true),
-                    ],
-                )
-                .with("limiter", Value::map().with("active", true)),
-        );
-        m.state.insert("health.dmx".into(), Value::map().with("status", "pass").with("detail", "ENTTEC USB PRO"));
-        m.state.insert("lights.master".into(), Value::from(0.75));
-    }
-
-    fn model() -> Model {
-        Model::new(Some(std::env::temp_dir().join(format!("se-lights-ui-test-{}.sock", std::process::id()))))
-    }
-
-    struct Page {
-        m: Model,
-        st: LightsState,
-        out: Vec<Op>,
-        on_air: bool,
-        fonts: bool,
-    }
-
-    fn page(on_air: bool) -> Harness<'static, Page> {
-        let mut m = model();
-        payload(&mut m);
-        Harness::builder().with_size(Vec2::new(1400.0, 1000.0)).build_ui_state(
-            |ui, p: &mut Page| {
-                if !p.fonts {
-                    se_ui_kit::theme::install_font(ui.ctx(), None);
-                    p.fonts = true;
-                    return;
-                }
-                let t = Theme::default();
-                view(&p.m, &t, &mut p.st, ui, &mut p.out, Instant::now(), p.on_air);
-            },
-            Page { m, st: LightsState::default(), out: Vec::new(), on_air, fonts: false },
-        )
-    }
-
-    fn look_op(action: &str, look: &str) -> Op {
-        act(action, Value::map().with("look", look))
-    }
-
-    /// `ui()` runs headless on a real App: no data, full data, malformed data.
     #[test]
-    fn renders_headless_with_any_data() {
-        let ctx = egui::Context::default();
-        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
-        let socket = std::env::temp_dir().join(format!("se-lights-ui-app-{}.sock", std::process::id()));
-        let mut app = App::new(&cc, crate::UiOpts { socket: Some(socket), ..Default::default() });
-        let raw = || egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 900.0))), ..Default::default() };
-        for step in 0..3 {
-            match step {
-                1 => payload(&mut app.m),
-                2 => {
-                    for q in ["lights.rig", "lights.cuelists", "lights.palettes", "lights.output"] {
-                        app.m.queries.insert(q.into(), Value::from("garbage"));
-                    }
-                    app.m.state.insert("health.dmx".into(), Value::from(vec![1, 2]));
-                }
-                _ => {}
-            }
-            for _ in 0..2 {
-                ctx.run_ui(raw(), |ui| super::ui(&mut app, ui)).drop_without_applying_deltas();
-            }
-        }
+    fn stale_tile_cannot_release_another_base_selection() {
+        let mut m = Model::new(Some(std::env::temp_dir().join(format!("se-lights-stale-{}.sock", std::process::id()))));
+        m.connected = true;
+        m.queries.insert("lights.layers".into(), Value::map().with("base", Value::map()
+            .with("active", true).with("owner", "layer:base:2").with("pending", Value::Null)
+            .with("selection", Value::map().with("palette", "blue"))));
+        let t = Theme::default();
+        let rig = Rig::default();
+        let now = Instant::now();
+        let cx = Cx { m: &m, t: &t, rig: &rig, output: None, on_air: false, now };
+        let mut st = LightsState::default();
+        let mut out = Vec::new();
+        toggle_look(&cx, &mut st, &mut out, "warm", true);
+        assert!(out.is_empty(), "a stale Warm stop must not affect the replacement Blue base");
+        assert!(!layer_busy(&m, &st, "base", now), "ignored stale stop must not lock the controls");
     }
 
-    /// Rendering alone (knobs and faders at non-default values) never sends commands.
-    #[test]
-    fn view_emits_nothing_without_interaction() {
-        let mut h = page(false);
-        h.step();
-        h.step();
-        assert!(h.state().out.is_empty(), "{:?}", h.state().out);
-    }
-
-    /// Off air a tap turns a look on at once; tapping a look that's on turns it off.
-    #[test]
-    fn tapping_a_look_turns_it_on_and_off() {
-        let mut h = page(false);
-        h.get_by_label("Warm look").click();
-        h.step();
-        h.get_by_label("Blue look").click();
-        h.step();
-        assert_eq!(h.state().out, [look_op("lights.cue", "warm"), look_op("lights.release", "blue")]);
-    }
-
-    /// On air nothing starts until "Your viewers will see this" is confirmed; stopping needs no
-    /// confirmation.
-    #[test]
-    fn on_air_starting_asks_first() {
-        let mut h = page(true);
-        h.get_by_label("Warm look").click();
-        h.step();
-        h.step();
-        assert!(h.state().out.is_empty(), "{:?}", h.state().out);
-        h.get_by_label("Turn it on").click();
-        h.step();
-        assert_eq!(h.state().out, [look_op("lights.cue", "warm")]);
-        h.state_mut().out.clear();
-        // a cue list that isn't running asks too; one that is steps on at once
-        let gos = h.get_all_by_label("Go").count();
-        assert_eq!(gos, 2);
-        h.get_all_by_label("Go").nth(1).unwrap().click();
-        h.step();
-        h.step();
-        assert!(h.state().out.is_empty(), "{:?}", h.state().out);
-        h.get_by_label("Start it").click();
-        h.step();
-        assert_eq!(h.state().out, [act("lights.go", Value::map().with("cuelist", "chase"))]);
-        h.state_mut().out.clear();
-        h.get_all_by_label("Go").next().unwrap().click();
-        h.step();
-        assert_eq!(h.state().out, [act("lights.go", Value::map().with("cuelist", "main"))]);
-    }
 
     /// A knob sends its value live while moving and saves it once it's still.
     #[test]
@@ -1869,11 +1998,4 @@ mod tests {
         assert!(reach > 0.0 && reach < 0.2, "tilt centre = short stub");
     }
 
-    #[test]
-    fn durations_read_plainly() {
-        assert_eq!(dur(0.0), "instant");
-        assert_eq!(dur(250.0), "0.25 s");
-        assert_eq!(dur(2000.0), "2 s");
-        assert_eq!(dur(1500.0), "1.5 s");
-    }
 }

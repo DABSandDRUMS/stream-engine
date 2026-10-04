@@ -1,5 +1,5 @@
-//! Scenes → Effects: the effect library. Every effect the show can use, grouped by what it works
-//! on, as a list with the selected one on the right:
+//! Scenes → Effects: universal video-FX target racks and the global effect library.
+//! The library groups every effect the show can use, with the selected one on the right:
 //! - Picture effects: the built-ins from [`scene_edit::EFFECTS`] (the one shared catalog), with
 //!   their project-wide defaults (`fx.<name>.<param>`, saved with `set_base`; a layer or scene
 //!   that writes its own value wins), "Flash it" (the `fx.<name>` trigger) and where they're used;
@@ -7,8 +7,9 @@
 //!   flash, where they're used, files;
 //! - Sound processors: `dsp` patches with `layer = "audio-effect"`, used on sound channels.
 //!
-//! Effects are put on layers and scenes in the scene inspector; this page sets them up. "New
-//! custom effect" picks a kind, then a starting point, then makes it (`patch.new`).
+//! Target racks edit source, layer, scene, layout, group, master-canvas and output chains,
+//! including reusable-chain save/apply. The scene inspector shares the same slot controls.
+//! "New custom effect" picks a kind and starting point, then creates it (`patch.new`).
 
 use crate::app::{App, ViewId};
 use crate::views::live::nice;
@@ -78,6 +79,7 @@ struct State {
     uses_seq: u64,
     scenes_at: f64,
     mix_at: f64,
+    rack: bool,
 }
 
 fn state_id() -> egui::Id {
@@ -192,7 +194,16 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     let now = ui.input(|i| i.time);
     patches::refresh(app, ui);
     let mut st: State = ui.data_mut(|d| std::mem::take(d.get_temp_mut_or_default::<State>(state_id())));
-    view(app, ui, &mut st, now);
+    ui.horizontal(|ui| {
+        ui.selectable_value(&mut st.rack, true, "Target racks / saved chains");
+        ui.selectable_value(&mut st.rack, false, "Effect library / defaults");
+    });
+    ui.separator();
+    if st.rack {
+        crate::views::fx_rack::ui(app, ui);
+    } else {
+        view(app, ui, &mut st, now);
+    }
     ui.data_mut(|d| d.insert_temp(state_id(), st));
 }
 
@@ -306,7 +317,7 @@ fn list_pane(ui: &mut egui::Ui, t: &Theme, groups: &[(&str, Vec<Row>)], sel: Opt
         }
     });
     ui.add_space(spacing::S);
-    widgets::hint(ui, t, "Add effects to layers in the scene inspector.");
+    widgets::hint(ui, t, "Attach effects in Target racks or the scene inspector.");
     out
 }
 
@@ -345,6 +356,48 @@ fn making(ui: &mut egui::Ui, t: &Theme) {
 
 // ---- built-in effects ------------------------------------------------------------------------------
 
+/// Shared auto-only controls for the library and a quick effect's constituent effects.
+pub(super) fn automatic_controls(app: &mut App, ui: &mut egui::Ui, t: &Theme, root: &str) {
+    let enabled_addr = format!("{root}.auto.enabled");
+    let interval_addr = format!("{root}.auto.interval");
+    let asked = ui.make_persistent_id(("auto-effect-fetch", root));
+    if app.m.connected && !ui.data(|d| d.get_temp::<bool>(asked).unwrap_or(false)) {
+        app.m.fetch(&enabled_addr);
+        app.m.fetch(&interval_addr);
+        ui.data_mut(|d| d.insert_temp(asked, true));
+    }
+    widgets::inspector_section(ui, t, ("auto-effect", root), "Automatic triggers", true, |_| {}, |ui| {
+        widgets::hint(ui, t, "Only automatic starts. Manual buttons and channel points still work.");
+        let mut enabled = if app.m.get(&enabled_addr).is_none_or(Value::truthy) { 1 } else { 0 };
+        if ui.add(egui::Slider::new(&mut enabled, 0..=1).text("Auto-only enabled")
+            .custom_formatter(|value, _| if value >= 0.5 { "On".into() } else { "Off".into() })).changed() {
+            app.m.command(Op::SetBase { address: enabled_addr, value: Value::Bool(enabled == 1) });
+        }
+        let unit_id = ui.make_persistent_id(("auto-effect-unit", root));
+        let mut minutes = ui.data(|d| d.get_temp::<bool>(unit_id).unwrap_or(false));
+        ui.horizontal(|ui| {
+            ui.label("Minimum automatic interval");
+            ui.selectable_value(&mut minutes, false, "Seconds");
+            ui.selectable_value(&mut minutes, true, "Minutes");
+        });
+        ui.data_mut(|d| d.insert_temp(unit_id, minutes));
+        let draft_id = ui.make_persistent_id(("auto-effect-interval", root));
+        let seconds = ui.data(|d| d.get_temp::<f64>(draft_id))
+            .unwrap_or_else(|| app.m.get(&interval_addr).and_then(Value::as_f64).unwrap_or(0.0));
+        let scale = if minutes { 60.0 } else { 1.0 };
+        let mut value = seconds / scale;
+        let response = ui.add(egui::Slider::new(&mut value, 0.0..=(86_400.0 / scale))
+            .logarithmic(true).smallest_positive(1.0 / scale).suffix(if minutes { " min" } else { " s" }));
+        if response.dragged() {
+            ui.data_mut(|d| d.insert_temp(draft_id, value * scale));
+        } else if response.changed() || response.drag_stopped() {
+            ui.data_mut(|d| d.remove::<f64>(draft_id));
+            app.m.command(Op::SetBase { address: interval_addr, value: Value::Float(value * scale) });
+        }
+        widgets::hint(ui, t, "0 adds no extra wait. This is a minimum between successful automatic starts, not a guaranteed periodic trigger. The AUTO FX master switch, music context and other scheduling limits still apply.");
+    });
+}
+
 fn builtin_ui(app: &mut App, ui: &mut egui::Ui, t: &Theme, st: &mut State, def: &'static FxDef, now: f64) {
     let id = def.id;
     let addr = |p: &str| format!("fx.{id}.{p}");
@@ -362,6 +415,7 @@ fn builtin_ui(app: &mut App, ui: &mut egui::Ui, t: &Theme, st: &mut State, def: 
             app.m.command(Op::SetBase { address: addr(p.name), value: Value::Float(p.default) });
         }
     }
+    automatic_controls(app, ui, t, &format!("fx.{id}"));
     if !def.on_layers {
         widgets::callout(
             ui,
@@ -661,6 +715,7 @@ fn patch_ui(app: &mut App, ui: &mut egui::Ui, t: &Theme, st: &mut State, p: &Val
         ui.add_space(spacing::M);
     }
 
+    if !sound { automatic_controls(app, ui, t, &format!("patch.{id}")); }
     let has_params = p.get_path("params").and_then(Value::as_list).is_some_and(|l| !l.is_empty());
     widgets::inspector_section(
         ui,

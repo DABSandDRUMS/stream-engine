@@ -1,0 +1,12 @@
+# Minesweeper margin: classic Minesweeper tiles framing the screen edges, played on the beat.
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "overlay"
+label       = "Minesweeper Margin"
+description = "Win 3.1 Minesweeper tiles around the screen edge that open on the beat; the trigger sets off a mine chain reaction"
+params.amount    = { type = "float", default = 1.0, range = [0.0, 1.0], description = "Frame opacity" }
+params.thickness = { type = "int", default = 1, range = [1, 4], description = "Rows of tiles along each edge" }
+params.tile      = { type = "float", default = 0.032, range = [0.015, 0.08], description = "Tile size (fraction of screen height)" }
+params.mines     = { type = "float", default = 0.16, range = [0.05, 0.35], description = "Share of tiles that are mines" }
+params.pace      = { type = "float", default = 1.0, range = [0.25, 3.0], description = "How fast the board gets opened" }
+budget = { gpu_ms = 0.2 }

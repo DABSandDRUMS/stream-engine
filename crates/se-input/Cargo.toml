@@ -28,6 +28,7 @@ alsa = "0.12"
 
 ab_glyph = "0.2"
 jpeg-encoder = "0.7"
+image = { version = "0.25", default-features = false, features = ["png"] }
 base64 = "0.23"
 whisper-rs = { version = "0.16", features = ["tracing_backend"] }
 ureq = "3"

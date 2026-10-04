@@ -1,35 +1,103 @@
 # Audio
 
-The audio subsystem (`crates/se-audio`, PLAN §8) runs our own PipeWire graph: it captures the
-band (the StudioLive 16R main mix on the Studio 24c input), mixes the YouTube player, TTS, sound
-effects, and game audio into buses, runs effect chains and ducking, publishes every bus to OBS
-as its own PipeWire node, and analyses the band and music in real time (levels, bands, onsets,
-tempo/beat) for rules, bindings, lights, and visuals.
+The audio graph is configurable: hardware inputs, virtual sources and generated sounds can
+feed named buses, published PipeWire sources, playback outputs and a monitor mix. No particular
+interface, mixer or motherboard output is required.
 
-```text
-Studio 24c in ──► input `band` ─┐                                 ┌─► se-band ─┐
-hub.audio "youtube" ──► music ──┤  bus: fx chain → duck → fader → ├─► se-music ├─► se-program ─► OBS
-hub.audio "tts"     ──► tts ────┤       limiter                   ├─► se-tts   │  (fx, limiter)
-audio.play (sampler) ──► sfx ───┤                                 ├─► se-sfx   │
-hub.audio "game"    ──► game ───┘                                 └─► se-game ─┘
-```
+The app captures feeds selected in **Settings → Accounts & app → Recording**.
+OBS only streams and has its own audio selection. A finished hardware or software mix remains
+one complete recorded source; bus names do not create isolated stems. Separate recording
+tracks exist only when separate feeds are actually selected.
+
+`[playback]` routes selected post-fader buses to a chosen output. For an external mixer return,
+exclude any input/bus already carrying that return to avoid feedback. Choose the target and
+buses to match your actual wiring; do not assume an output is safe because of its device name.
 
 Crates: `se-audio` (graph, PipeWire, control), `se-dsp` (effects, sampler, wasm host; reference:
 [audio-effects.md](audio-effects.md)), `se-analysis` (live + offline analysis).
+
+This workstation's external-mixer route is:
+
+```text
+YouTube → music bus → motherboard rear stereo output → StudioLive 16R
+StudioLive 16R whole mix → Studio 24c stereo input → OBS
+```
+
+`~/stream-project/audio/graph.toml [playback]` sends only `music` to
+`alsa_output.usb-Generic_USB_Audio-00.HiFi__Speaker__sink`, channels 1/2.
+The `band` bus captures the 24c input for analysis and is excluded from playback.
+Do not capture `se-music` or `se-program` alongside the 24c whole mix in OBS:
+that would duplicate the music and bypass the 16R channel fader.
+The saved OBS Mic/Aux source uses the default input, currently the Studio 24c;
+desktop defaults are not changed by this playback route.
+
+
+## Inputs, app audio, and buses
+
+- **Audio inputs** are capture feeds you explicitly add: an interface channel, microphone,
+  virtual source, or loopback. An empty input configuration captures nothing; it does not
+  guess an interface or recreate a removed input.
+- **App audio** comes from running features such as song playback, TTS, sound effects and
+  audio patches. These producers are not additional physical inputs.
+- **Mix buses** combine those feeds. `music`, `sfx`, `tts`, `scene` and `program` always exist
+  for app audio; audio from every scene layer (`patch.*`) goes to the one `scene` bus
+  ("Scene audio"). `band`, `game`, `drums` and `mic` exist only when an input, route or setting uses
+  them; none of them implies hardware. Bus strips and their effects are under
+  **Sound → Mix → Advanced**, not in the input-facing mixer.
+
+Every input has a **Name** you choose (`label = "16R output"` in its `[inputs.<id>]` table).
+The app shows that name everywhere: Sources, the Overview sound bar, routing, signals for
+lights, and the PipeWire bus description (for example "Stream Engine: 16R output"). A bus is
+named after the inputs routed into it. Without a name, an input shows its configured device;
+a bus nothing feeds keeps its identifier. The app never substitutes invented names.
+The mixer (Sources, the Overview sound bar and the mixer popout) has one control per capture
+input and one per kind of app audio — Music, Sound effects, Read-out voice, Scene audio — which
+sets that group's level. It never shows one channel per scene layer or producer; those stay
+adjustable individually under **Advanced → What plays here**.
+The starter project does not preconfigure a Studio 24c capture input.
+
+Manage capture feeds from **Sound → Mix** with **Add input** and **Manage inputs**. Choose a
+discovered device or enter its exact source target, select its channels and destination bus,
+then choose **Save input**. Changes remain a draft until saved; a project reload does not
+overwrite an open draft. Saving or removing an input updates the project and reloads the graph.
+Discovery alone never adds an input. Removal is refused while another configuration entry
+depends on it; the manager identifies those references rather than silently breaking them.
+
+Camera and media-file scene sources are managed separately under **Inputs**. The recorder
+has its own source selection in **Settings → Accounts & app → Recording**.
+
+### Saved-input API
+
+`project.audio.inputs` reports saved inputs with their effective settings, origin file/key
+locations, dependency references, configured-bus intent and parse errors. It remains available
+when the audio subsystem is stopped; `audio.mix` describes the running graph instead.
+
+- `project.audio.input.save {name, target, channels, bus, create?, gain?, mute?, delay_ms?}`:
+  use `create: true` for a new name; omit it when editing an existing input. Channels are
+  one-based device channel numbers. Existing names stay fixed.
+- `project.audio.input.remove {name}`: removes every merged definition of the input so an
+  older fragment cannot bring it back after restart.
+
+Edits preserve unrelated effects, comments and configuration. Success emits
+`project.audio.inputs.changed {name}` after persistence and reload; failure emits
+`project.audio.input.failed {name, action, error}`. A command transport acknowledgement alone
+does not confirm persistence.
+
 
 ## PipeWire nodes
 
 | Node | Kind | What |
 |---|---|---|
 | `se-engine` | filter (DSP ports) | the whole graph; runs in PipeWire's real-time data thread |
-| `se-band`, `se-music`, `se-sfx`, `se-tts`, `se-game`, `se-program` (+ `se-drums`, `se-mic`) | `Audio/Source/Virtual` | one stereo source per bus, for OBS |
+| `se-music`, `se-sfx`, `se-tts`, `se-program` (+ `se-band`, `se-game`, `se-drums`, `se-mic` only when used) | `Audio/Source/Virtual` | software buses; selectable feeds, not automatically recorded stems |
 
 Check them with `pw-cli ls Node | grep -A2 se-` or `pactl list short sources | grep se-`.
 
-**OBS:** add *Audio Input Capture (PulseAudio)* sources: `se-program` for the stream mix, and
-`se-band`, `se-music`, … on separate tracks for the recording (so VODs/clips can drop music).
-The engine links everything itself (WirePlumber doesn't touch `se-engine`); links are re-made
-on hotplug. `health.audio.obs` turns green when something captures `se-program`.
+**Streaming:** select the intended audio feed in OBS and avoid capturing the same mix twice.
+`obs.setup` adds video sources only; it configures neither audio nor recording. Check the OBS
+meter for the stream and a short app recording for the separately selected recording feeds.
+The engine links its PipeWire graph itself (WirePlumber doesn't touch `se-engine`); links are
+re-made on hotplug.
 
 **Real-time scheduling:** the data thread must run `SCHED_FIFO`. The user is in the `realtime`
 group (`realtime-privileges`); the limits apply after a fresh login (the PipeWire daemon and the
@@ -57,8 +125,8 @@ quantum = 256              # frames per PipeWire cycle (32–2048); 64 for the d
 rate = 48000
 max_delay = "2s"           # A/V delay buffer per input/source
 
-[inputs.band]              # hardware capture → bus
-target = "Studio 24c"      # node.name, or case-insensitive substring of node.name/description
+[inputs.band]              # selected capture source → bus
+target = "Your input source" # node.name, or case-insensitive substring of node.name/description
                            # (hardware sources and virtual sources/loopbacks; never our own se-* nodes)
 channels = [1, 2]          # 1-based device channels (1 = mono, 2 = stereo)
 bus = "band"               # default: the input's own name (creates the bus)
@@ -70,7 +138,7 @@ fx = [ … ]                 # input insert chain (same format as bus chains)
 [slots]                    # hub.audio producers → buses (patterns; config wins over defaults)
 "youtube" = "music"        # or { bus = "music", delay = "120ms" }
 "web.*" = "music"          # defaults: youtube, web.* → music; tts, tts.* → tts; sfx.* → sfx;
-                           #           game, game.* → game; patch.* → sfx; timecode.* → none
+                           #           game, game.* → game; patch.* → scene; timecode.* → none
 
 [buses.music]
 gain = -3.0                # dB (live: audio.bus.music.gain)
@@ -102,7 +170,7 @@ voices = 2                 # polyphony per sound (oldest voice is stolen with a 
 
 [analysis]
 buses = ["band", "music"]  # analysed into <bus>.* signals
-beat_source = "auto"       # beat.* from band when confident, else music; or a bus name
+beat_source = "auto"       # audible music first, otherwise most confident audible bus; or a bus name
 min_bpm = 70
 max_bpm = 180
 mic = "vox"                # input analysed as the mic: mic.level, mic.hype, mic.talking
@@ -113,16 +181,21 @@ talk_hold = "600ms"
 bus = "sfx"
 gain = -6.0
 
-[monitor]                  # low-latency drummer monitor (M12)
-target = "Studio 24c"      # sink node
+[playback]                 # selected post-fader buses to your chosen output
+target = "Your playback output"
+channels = [1, 2]
+buses = ["music", "sfx", "tts", "game"] # exclude any bus carrying this output's return
+
+[monitor]                  # separate low-latency monitor, if needed
+target = "Your monitor output"
 channels = [1, 2]
 buses = ["drums"]          # post-chain, pre-fader
 inputs = ["kick", "snare"] # post input chain
 gain = 0.0
-fx = [ … ]                 # lighter chain than the stream path
+fx = [ … ]
 
 [direct."timecode.ltc"]    # a hub.audio slot straight to a device channel (never mixed)
-target = "Studio 24c"
+target = "Your timecode output"
 channel = 2
 
 [drums.pads.kick]          # per-drum triggers on close mics (M12) → drums.kick {velocity}
@@ -187,7 +260,8 @@ State (declared with metadata — the UI builds controls from it):
 
 Signals: `band.*` and `music.*` (`level`, `peak` linear; `lufs` short-term, `lufs_m`; `bass`,
 `mid`, `high` linear band RMS; `b.0`…`b.30` 1/3-octave bands; `centroid` 0–1; `kick`, `snare`,
-`hat` onset envelopes; `flux`, `novelty`), `beat.bpm`, `beat.phase`, `beat.confidence`,
+`hat` onset envelopes; `flux`, `novelty`), `beat.bpm`, `beat.phase`, `beat.position`,
+`beat.confidence`, `beat.locked`, `beat.freewheel`, `beat.source`,
 `mic.level`, `mic.hype`, `mic.voice` (voice-detector score 0–1), `mic.talking` (with `analysis.mic`), `audio.<bus>.level|peak` and
 `audio.input.<n>.level|peak` (meters, linear), `audio.duck.amount` (0–1), `drums.<pad>`.
 All level-like signals are linear (proportional to the audio), so binding `auto_normalize`
@@ -205,7 +279,8 @@ Actions:
 | `audio.stop` | fade out all sounds |
 | `audio.duck {on: true\|false\|"toggle", hold?, depth?}` | manual ducking (release with `on=false`; `hold="8s"` auto-releases) |
 | `audio.panic` | safe mix: sounds stopped, effects released, ducking off, bus gains/mutes back to the project values (the core's `panic` sends it) |
-| `audio.tap` / `audio.tap.clear` | tap tempo (≥ 2 taps within 2 s) / back to detected tempo |
+| `audio.tap` / `audio.tap.clear` | tap tempo (≥ 2 taps within 2 s) / clear all tempo overrides back to automatic detection |
+| `audio.bpm {bpm}` / `audio.bpm.clear` | explicit finite 20–400 BPM / clear all tempo overrides back to automatic detection |
 | `audio.fx.trigger\|release\|bypass\|enable\|set bus=<b>\|input=<i> fx=<e> …` | effect control by name (`set` takes `param=… value=…`) |
 | `audio.monitor.measure {input?}` | click on the monitor output, detect it on the input → `audio.monitor.roundtrip_ms` (needs a loopback cable) |
 | `audio.reload` | re-read sounds and dsp patches and rebuild the graph |
@@ -236,6 +311,51 @@ with a manifest `trigger` is gated by its envelope (`trigger patch.ringmod`). Ov
 crossfade and `patch.<id>.error` says why. Rebuilding `main.wasm` hot-swaps every instance at a
 block boundary with a crossfade; a module that fails to compile leaves the old one live.
 
+## Musical timing
+
+Audio publishes one continuous musical clock, shared by the audio transport and lighting.
+`beat.position` is the monotonic beat count; `beat.phase` is its fractional part (0–1),
+and `beat.bpm` is the clock's tempo, not operator energy or vibe. The clock runs even
+without audible input: it starts at 120 BPM, then retains the last trusted tempo through
+silence, uncertain estimates, or a disconnected input instead of resetting to a default.
+Automatic tempo converges with a two-second smoothing time; phase correction slews at
+at most 20% of the beat rate, so reacquisition never jumps backwards.
+
+With `analysis.beat_source = "auto"`, a fresh audible `music` bus owns the clock's
+input, even if the drum kit is more confident. While the song tracker is acquiring,
+the clock honestly freewheels; selecting the song does not manufacture confidence.
+Without audible music, auto chooses a fresh audible non-mic bus by measured beat
+confidence (other live buses require a 0.15 confidence advantage for two seconds to
+replace it). A silent or stale bus yields immediately, including during acquisition;
+with no audible bus, auto has no selected bus. An explicit bus name disables this
+source preference, not the confidence or freshness requirements.
+
+Stereo tap timing uses audio frames, not interleaved sample counts. This keeps
+observations aligned to the master clock during long playback. The beat tracker
+needs at least two seconds of onset history before its first estimate; regular
+rhythms can acquire after a few seconds, but ambiguous or non-percussive material
+may remain freewheeling. Track tempo and confidence in `analysis.music` are the
+actual detector measurements, distinct from the slewed global clock.
+
+Automatic lock requires confidence ≥ 0.6, remains locked down to 0.35, and expires
+250 ms after the last audible analysis observation. Silent, stopped, or rebuilt sources
+relinquish confidence; they cannot leave a stale lock. `beat.confidence` is effective
+confidence (0 when freewheeling), `beat.locked` and `beat.freewheel` are complementary
+0/1 signals, and `beat.source` is 0 = fallback, 1 = live audio, 2 = explicit BPM,
+3 = tap. `audio.mix` → `analysis.beat` exposes readable `source`, `status`, selected
+`bus`, `age_ms` (age of that bus's latest analysed audio, or null), tempo, position,
+phase, and confidence. The global `beat` events follow this same clock, including
+freewheel; `downbeat` marks a four-beat clock boundary, not a verified musical meter.
+
+An explicit `audio.bpm` overrides detection immediately without resetting beat position.
+Two valid taps supersede either explicit BPM or automatic detection; a single tap does
+not replace the current tempo. Explicit BPM can in turn replace a tapped tempo.
+Either clear action releases every tempo override; fresh live audio must reacquire
+lock, and the released tempo freewheels until then. Manual/tap overrides remain usable
+without audio input and report confidence 1. Lighting follows `beat.position` when
+available and uses the same allocation-free clock implementation to freewheel if
+publications stop; repeated reads never reset phase.
+
 ## Offline analysis (library songs)
 
 `analysis.grid {path: "songs/x.flac"}` decodes and analyses a file (beat grid, downbeats,
@@ -243,7 +363,11 @@ sections with labels, chorus candidates, waveform peaks per 10 ms), caches the r
 runtime DB by content hash, and returns
 `{media: "file:<hash>", duration, bpm, beats, downbeats, sections: [{start, end, label}], chorus, peaks}`
 (seconds). `analysis.grid {media: "file:<hash>"}` returns the cached result or null. Timelines use
-it for beat-snapped cues and suggested chorus cues. YouTube audio gets live analysis only.
+it for beat-snapped cues and suggested chorus cues. These are **offline editing grids**,
+not live clock locks: the current local sampler does not publish synchronized persistent
+file identity/playback position, and the song player reports YouTube playback rather than
+local-file playback. Live audio remains the universal automatic timing source; merely
+loading a cached grid or pausing/replacing a timeline cannot confer musical clock lock.
 
 ## Taps (Rust API for other subsystems)
 
@@ -280,8 +404,9 @@ with a loopback cable from the monitor output to an input and `audio.monitor.mea
 
 ## Troubleshooting
 
-* `health.audio.input.band` fails: the Studio 24c isn't present or its profile has no input —
-  `pactl list short sources | grep -i 24c`.
-* No sound in OBS: `health.audio.obs`; in OBS pick the `stream-engine program` source.
+* `health.audio.input.band` fails: check the configured source and input profile with
+  `pactl list short sources`, then correct the input target.
+* No sound in OBS: check its selected streaming source and meter. For silent app recordings,
+  check **Settings → Accounts & app → Recording**, `recording.status` and `health.recording` instead.
 * `health.audio.rt` fails with `RLIMIT_RTPRIO=0`: log out and in again (see above).
 * Xruns at 64: raise `quantum` to 128/256 for the stream path; keep 64 only with the monitor.

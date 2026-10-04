@@ -8,13 +8,20 @@
 //! `clips.hype.delay_ms`, `clips.hype.markers`, `clips.job.*`, `clips.pending`.
 //! Signal: `hype.score`. Events: `clips.progress`, `clips.done`, `clips.failed`,
 //! `clips.updated`.
+//!
+//! After the show: all background work (indexing, clip jobs, uploads, the archive) runs only
+//! while the show is offline ([`live`]) and is stopped or frozen within 2 s when it goes live;
+//! [`archive`] turns each recorded show into its compact forever copy.
 
+pub mod archive;
 pub mod captions;
+pub mod capture;
 pub mod config;
 pub mod ffmpeg;
 pub mod hype;
 pub mod index;
 pub mod job;
+pub mod live;
 pub mod recording;
 pub mod select;
 pub mod session;
@@ -49,6 +56,7 @@ struct Shared {
     queue: Mutex<VecDeque<Work>>,
     queued: Mutex<HashSet<String>>,
     wake: mpsc::UnboundedSender<()>,
+    live: live::LiveGuard,
 }
 
 impl Shared {
@@ -101,7 +109,15 @@ pub async fn start(ctx: EngineCtx) -> anyhow::Result<()> {
     });
     let (cfg_tx, cfg_rx) = watch::channel(Arc::new(initial));
     let (wake_tx, wake_rx) = mpsc::unbounded_channel();
-    let shared = Arc::new(Shared { ctx: ctx.clone(), cfg: cfg_rx, queue: Mutex::new(VecDeque::new()), queued: Mutex::new(HashSet::new()), wake: wake_tx });
+    let live = live::LiveGuard::spawn(ctx.hub.clone());
+    let shared = Arc::new(Shared {
+        ctx: ctx.clone(),
+        cfg: cfg_rx,
+        queue: Mutex::new(VecDeque::new()),
+        queued: Mutex::new(HashSet::new()),
+        wake: wake_tx,
+        live: live.clone(),
+    });
     declare(&shared);
 
     // config hot reload (a broken [clips] keeps the last good settings)
@@ -127,7 +143,8 @@ pub async fn start(ctx: EngineCtx) -> anyhow::Result<()> {
     tokio::spawn(events(shared.clone()));
     register_queries(&shared);
     recording::start(ctx.clone()).await?;
-    index::start(ctx.clone()).await?;
+    index::start(ctx.clone(), live.clone()).await?;
+    archive::start(ctx.clone(), live).await?;
     tokio::spawn(preflight(shared.clone()));
     // resume jobs interrupted by a restart
     for s in store::jobs_unfinished(&ctx.db).unwrap_or_default() {
@@ -274,6 +291,8 @@ async fn events(sh: Arc<Shared>) {
 
 // ---- worker ----------------------------------------------------------------------------------
 
+/// One work item at a time, and none while the show is LIVE (crate::live): an item stopped by
+/// a LIVE transition goes back to the front of the queue and resumes after the show.
 async fn worker(sh: Arc<Shared>, mut wake: mpsc::UnboundedReceiver<()>) {
     loop {
         let next = sh.queue.lock().pop_front();
@@ -284,10 +303,43 @@ async fn worker(sh: Arc<Shared>, mut wake: mpsc::UnboundedReceiver<()>) {
             }
             continue;
         };
-        sh.hub().publish("clips.job.queue", Value::Int(sh.queue.lock().len() as i64));
-        run_work(&sh, w).await;
+        sh.hub().publish("clips.job.queue", Value::Int(sh.queue.lock().len() as i64 + 1));
+        if sh.live.is_live() {
+            hold_for_live(&sh, &w).await;
+        }
+        if run_work(&sh, w.clone()).await == Outcome::Interrupted {
+            sh.queue.lock().push_front(w.clone());
+            hold_for_live(&sh, &w).await;
+            continue;
+        }
         sh.publish_pending();
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Outcome {
+    Finished,
+    /// Stopped because the show went live; run again afterwards.
+    Interrupted,
+}
+
+async fn hold_for_live(sh: &Shared, w: &Work) {
+    let reason = sh.live.reason().unwrap_or_default();
+    let hub = sh.hub();
+    hub.publish("clips.job.state", Value::Str("idle".into()));
+    hub.publish("clips.job.stage", Value::Str(format!("waiting for the show to end ({reason})")));
+    if let Work::Process(s) = w {
+        let _ = store::job_update(&sh.ctx.db, s, "queued", "waiting: the show is live", None, 0, &Value::Null);
+    }
+    sh.live.wait_offline().await;
+}
+
+/// Run blocking post-show work niced on its own thread under the live guard.
+async fn guarded<T: Send + 'static>(sh: &Shared, nice: i32, what: &'static str, f: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    let halt = sh.live.halt(live::OnHold::Cancel);
+    tokio::task::spawn_blocking(move || transcribe::niced(nice, move || live::with_halt(halt, f)).and_then(|r| r))
+        .await
+        .unwrap_or_else(|e| Err(format!("{what} panicked: {e}")))
 }
 
 fn progress_fn(hub: Arc<Hub>) -> impl Fn(job::Progress) + Send + 'static {
@@ -309,7 +361,7 @@ fn progress_fn(hub: Arc<Hub>) -> impl Fn(job::Progress) + Send + 'static {
     }
 }
 
-async fn run_work(sh: &Arc<Shared>, w: Work) {
+async fn run_work(sh: &Arc<Shared>, w: Work) -> Outcome {
     let hub = sh.hub().clone();
     let env = sh.env();
     let nice = env.cfg.nice;
@@ -317,33 +369,28 @@ async fn run_work(sh: &Arc<Shared>, w: Work) {
         Work::Process(session) => {
             hub.publish("clips.job.state", Value::Str("running".into()));
             hub.publish("clips.job.session", Value::Str(session.clone()));
-            // the session usually closes right after "stop OBS": let the recording finish first
-            let waited = std::time::Instant::now();
-            if hub.snapshot.load().bool("obs.record.active") {
-                hub.publish("clips.job.stage", Value::Str("waiting for OBS to stop recording".into()));
-            }
-            while hub.snapshot.load().bool("obs.record.active") && waited.elapsed() < Duration::from_secs(600) {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
             let _ = store::job_update(&env.db, &session, "running", "load", None, 0, &Value::Null);
             let prog = progress_fn(hub.clone());
             let s = session.clone();
             let index_hub = hub.clone();
             let index_cfg = show::RecordingConfig::from_section(sh.ctx.project_section("recording").as_ref());
-            let res = tokio::task::spawn_blocking(move || {
-                transcribe::niced(nice, move || {
-                    if let Ok(cfg) = index_cfg
-                        && cfg.index.enabled
-                        && let Err(e) = index::ensure_with(&job::session_dir(&env, &s), &s, &cfg, &env.cfg, &env.data_dir)
-                    {
-                        index_hub.log("warn", TARGET, format!("show timeline for {s}: {e}; cutting from markers and events"));
+            let res = guarded(sh, nice, "clip job", move || {
+                if let Ok(cfg) = index_cfg
+                    && cfg.index.enabled
+                    && let Err(e) = index::ensure_with(&job::session_dir(&env, &s), &s, &cfg, &env.cfg, &env.data_dir)
+                {
+                    if live::current().is_some_and(|h| h.stop_now()) {
+                        return Err(e);
                     }
-                    job::process(&env, &s, &prog)
-                })
-                .and_then(|r| r)
+                    index_hub.log("warn", TARGET, format!("show timeline for {s}: {e}; cutting from markers and events"));
+                }
+                job::process(&env, &s, &prog)
             })
-            .await
-            .unwrap_or_else(|e| Err(format!("clip job panicked: {e}")));
+            .await;
+            if stopped(sh, &res) {
+                let _ = store::job_update(&sh.ctx.db, &session, "queued", "waiting: the show is live", None, 0, &Value::Null);
+                return Outcome::Interrupted;
+            }
             sh.queued.lock().remove(&session);
             let env = sh.env();
             match res {
@@ -383,9 +430,10 @@ async fn run_work(sh: &Arc<Shared>, w: Work) {
             hub.publish("clips.job.stage", Value::Str("cutting your selection".into()));
             let prog = progress_fn(hub.clone());
             let s = session.clone();
-            let res = tokio::task::spawn_blocking(move || transcribe::niced(nice, move || job::make(&env, &s, t_in, t_out, &prog)).and_then(|r| r))
-                .await
-                .unwrap_or_else(|e| Err(format!("manual clip panicked: {e}")));
+            let res = guarded(sh, nice, "manual clip", move || job::make(&env, &s, t_in, t_out, &prog)).await;
+            if stopped(sh, &res) {
+                return Outcome::Interrupted;
+            }
             hub.publish("clips.job.state", Value::Str("idle".into()));
             match res {
                 Ok(row) => {
@@ -399,9 +447,10 @@ async fn run_work(sh: &Arc<Shared>, w: Work) {
         Work::Retrim { id, t_in, t_out } => {
             hub.publish("clips.job.state", Value::Str("running".into()));
             let prog = progress_fn(hub.clone());
-            let res = tokio::task::spawn_blocking(move || transcribe::niced(nice, move || job::retrim(&env, id, t_in, t_out, &prog)).and_then(|r| r))
-                .await
-                .unwrap_or_else(|e| Err(format!("retrim panicked: {e}")));
+            let res = guarded(sh, nice, "retrim", move || job::retrim(&env, id, t_in, t_out, &prog)).await;
+            if stopped(sh, &res) {
+                return Outcome::Interrupted;
+            }
             hub.publish("clips.job.state", Value::Str("idle".into()));
             match res {
                 Ok(row) => {
@@ -412,7 +461,10 @@ async fn run_work(sh: &Arc<Shared>, w: Work) {
             }
         }
         Work::Upload(id) => {
-            let res = tokio::task::spawn_blocking(move || job::upload(&env, id)).await.unwrap_or_else(|e| Err(format!("upload panicked: {e}")));
+            let res = guarded(sh, nice, "upload", move || job::upload(&env, id)).await;
+            if stopped(sh, &res) {
+                return Outcome::Interrupted;
+            }
             match res {
                 Ok(url) => {
                     if let Ok(Some(row)) = store::get(&sh.ctx.db, id) {
@@ -428,6 +480,12 @@ async fn run_work(sh: &Arc<Shared>, w: Work) {
             }
         }
     }
+    Outcome::Finished
+}
+
+/// An error while the show is live is the guard stopping the work: run it again later.
+fn stopped<T>(sh: &Shared, res: &Result<T, String>) -> bool {
+    res.is_err() && sh.live.is_live()
 }
 
 // ---- actions ---------------------------------------------------------------------------------
@@ -454,6 +512,12 @@ async fn actions(sh: Arc<Shared>) {
     }
 }
 
+fn recording_busy(hub: &Hub, session: &str) -> bool {
+    let snap = hub.snapshot.load();
+    hub.info.read().session == session
+        && ["recording.active", "recording.starting", "recording.stopping"].iter().any(|key| snap.bool(key))
+}
+
 fn action(sh: &Arc<Shared>, name: &str, args: &Value) -> Result<(), String> {
     let db = &sh.ctx.db;
     let id = || arg(args, "id", 0).and_then(Value::as_i64).ok_or_else(|| "needs a clip id (id=N)".to_string());
@@ -467,6 +531,9 @@ fn action(sh: &Arc<Shared>, name: &str, args: &Value) -> Result<(), String> {
         }
         "clips.make" => {
             let session = arg(args, "session", 0).and_then(Value::as_str).ok_or("needs a session")?;
+            if recording_busy(sh.hub(), session) {
+                return Err("finish this recording before making a clip".into());
+            }
             let t_in = arg(args, "in", 1).and_then(seconds).ok_or("needs a start time")?;
             let t_out = arg(args, "out", 2).and_then(seconds).ok_or("needs an end time")?;
             if !t_in.is_finite() || !t_out.is_finite() || t_in < 0.0 || t_out <= t_in {
@@ -633,5 +700,42 @@ mod tests {
         let args = Value::map().with("args", vec![Value::Int(7), Value::Float(1.5)]);
         assert_eq!(arg(&args, "id", 0).and_then(Value::as_i64), Some(7));
         assert_eq!(arg(&args, "in", 1).and_then(seconds), Some(1.5));
+    }
+
+    /// LAW: an older show's clip job never runs while a show is live; it starts afterwards.
+    #[tokio::test]
+    async fn clip_jobs_wait_while_live_and_run_after_the_show() {
+        let root = tempfile::tempdir().unwrap();
+        let (hub, _rx) = Hub::new(Arc::new(se_clock::Clock::new()));
+        let (_cfg_tx, config) = watch::channel(Arc::new(se_core::Config::default()));
+        let db = se_store::Db::memory().unwrap();
+        store::migrate(&db).unwrap();
+        let ctx = EngineCtx {
+            hub,
+            db: db.clone(),
+            project_root: root.path().to_path_buf(),
+            data_dir: root.path().to_path_buf(),
+            share_dir: root.path().to_path_buf(),
+            config,
+            http: "127.0.0.1:0".parse().unwrap(),
+            dev: true,
+        };
+        let (live, live_tx) = live::LiveGuard::manual(Some("show mode is live"));
+        let (_clips_tx, cfg) = watch::channel(Arc::new(ClipsConfig::default()));
+        let (wake, wake_rx) = mpsc::unbounded_channel();
+        let sh = Arc::new(Shared { ctx, cfg, queue: Mutex::new(VecDeque::new()), queued: Mutex::new(HashSet::new()), wake, live });
+        tokio::spawn(worker(sh.clone(), wake_rx));
+        sh.push(Work::Process("older-show".into()));
+        let state = || store::job(&db, "older-show").unwrap().unwrap().get_path("state").and_then(Value::as_str).map(String::from);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(state().as_deref(), Some("queued"), "held while live");
+        live_tx.send(None).unwrap();
+        for _ in 0..100 {
+            if state().as_deref() != Some("queued") && state().as_deref() != Some("running") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(matches!(state().as_deref(), Some("done" | "failed")), "ran once offline: {:?}", state());
     }
 }

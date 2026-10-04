@@ -1,0 +1,277 @@
+{
+  "created": "2026-09-30T18:05:42.000Z",
+  "count": 3,
+  "offset": 0,
+  "recordings": [
+    {
+      "id": "5e45ef6c-1920-4949-b8fb-2347e1b33c0d",
+      "score": 100,
+      "title": "Bohemian Rhapsody",
+      "length": 352000,
+      "video": null,
+      "disambiguation": "live, 1976-04-04: Nippon Budokan, Tokyo, Japan",
+      "artist-credit": [
+        {
+          "name": "Queen",
+          "artist": {
+            "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+            "name": "Queen",
+            "sort-name": "Queen",
+            "disambiguation": "UK rock group"
+          }
+        }
+      ],
+      "first-release-date": "1976-04-04",
+      "releases": [
+        {
+          "id": "e0e0e0e0-0000-4000-8000-00000000b006",
+          "status-id": "1156806e-d06a-38bd-83f0-cf2284a808b9",
+          "count": 1,
+          "title": "Budokan 1976",
+          "status": "Bootleg",
+          "release-group": {
+            "id": "a1b2c3d4-0000-4000-8000-000000000025",
+            "type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+            "primary-type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+            "title": "Budokan 1976",
+            "primary-type": "Album",
+            "secondary-types": [
+              "Live"
+            ],
+            "secondary-type-ids": [
+              "dd2a21e1-0c00-3729-a7a0-de60b84eb5d1"
+            ]
+          },
+          "date": "1976-04-04",
+          "country": "JP",
+          "release-events": [
+            {
+              "date": "1976-04-04",
+              "area": {
+                "id": "2db42837-c832-3c27-b4a3-08198f75693c",
+                "name": "Japan",
+                "sort-name": "Japan",
+                "iso-3166-1-codes": [
+                  "JP"
+                ]
+              }
+            }
+          ],
+          "track-count": 18,
+          "media": [
+            {
+              "position": 1,
+              "format": "CD",
+              "track": [
+                {
+                  "id": "e0e0e0e0-0000-4000-8000-000000007a7a",
+                  "number": "9",
+                  "title": "Bohemian Rhapsody",
+                  "length": 352000
+                }
+              ],
+              "track-count": 18,
+              "track-offset": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "b1a9c0e9-d987-4042-ae91-78d6a3267d69",
+      "score": 100,
+      "title": "Bohemian Rhapsody",
+      "length": 355000,
+      "video": null,
+      "artist-credit": [
+        {
+          "name": "Queen",
+          "artist": {
+            "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+            "name": "Queen",
+            "sort-name": "Queen",
+            "disambiguation": "UK rock group"
+          }
+        }
+      ],
+      "first-release-date": "1975-10-31",
+      "releases": [
+        {
+          "id": "e0e0e0e0-0000-4000-8000-00000000b001",
+          "status-id": "4e304316-386d-3409-af2e-78857eec5cfe",
+          "count": 1,
+          "title": "A Night at the Opera",
+          "status": "Official",
+          "release-group": {
+            "id": "a1b2c3d4-0000-4000-8000-000000000002",
+            "type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+            "primary-type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+            "title": "A Night at the Opera",
+            "primary-type": "Album"
+          },
+          "date": "1975-11-21",
+          "country": "GB",
+          "release-events": [
+            {
+              "date": "1975-11-21",
+              "area": {
+                "id": "8a754a16-0027-3a29-b6d7-2b40ea0481ed",
+                "name": "United Kingdom",
+                "sort-name": "United Kingdom",
+                "iso-3166-1-codes": [
+                  "GB"
+                ]
+              }
+            }
+          ],
+          "track-count": 12,
+          "media": [
+            {
+              "position": 1,
+              "format": "12\" Vinyl",
+              "track": [
+                {
+                  "id": "e0e0e0e0-0000-4000-8000-000000007a7a",
+                  "number": "B6",
+                  "title": "Bohemian Rhapsody",
+                  "length": 355000
+                }
+              ],
+              "track-count": 12,
+              "track-offset": 0
+            }
+          ]
+        },
+        {
+          "id": "e0e0e0e0-0000-4000-8000-00000000b002",
+          "status-id": "4e304316-386d-3409-af2e-78857eec5cfe",
+          "count": 1,
+          "title": "Greatest Hits",
+          "status": "Official",
+          "release-group": {
+            "id": "a1b2c3d4-0000-4000-8000-000000000021",
+            "type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+            "primary-type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+            "title": "Greatest Hits",
+            "primary-type": "Album",
+            "secondary-types": [
+              "Compilation"
+            ],
+            "secondary-type-ids": [
+              "dd2a21e1-0c00-3729-a7a0-de60b84eb5d1"
+            ]
+          },
+          "date": "1981-10-26",
+          "country": "GB",
+          "release-events": [
+            {
+              "date": "1981-10-26",
+              "area": {
+                "id": "8a754a16-0027-3a29-b6d7-2b40ea0481ed",
+                "name": "United Kingdom",
+                "sort-name": "United Kingdom",
+                "iso-3166-1-codes": [
+                  "GB"
+                ]
+              }
+            }
+          ],
+          "track-count": 17,
+          "media": [
+            {
+              "position": 1,
+              "format": "12\" Vinyl",
+              "track": [
+                {
+                  "id": "e0e0e0e0-0000-4000-8000-000000007a7a",
+                  "number": "A1",
+                  "title": "Bohemian Rhapsody",
+                  "length": 355000
+                }
+              ],
+              "track-count": 17,
+              "track-offset": 0
+            }
+          ]
+        }
+      ],
+      "isrcs": [
+        "GBUM71029604"
+      ]
+    },
+    {
+      "id": "a1e63b5e-d73d-40d8-867b-7aeed46955e1",
+      "score": 92,
+      "title": "Bohemian Rhapsody",
+      "length": 352000,
+      "video": null,
+      "disambiguation": "live, 1976-04-04: Nippon Budokan, Tokyo, Japan",
+      "artist-credit": [
+        {
+          "name": "Queen",
+          "artist": {
+            "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+            "name": "Queen",
+            "sort-name": "Queen",
+            "disambiguation": "UK rock group"
+          }
+        }
+      ],
+      "first-release-date": "1976-04-04",
+      "releases": [
+        {
+          "id": "e0e0e0e0-0000-4000-8000-00000000b006",
+          "status-id": "1156806e-d06a-38bd-83f0-cf2284a808b9",
+          "count": 1,
+          "title": "Budokan 1976",
+          "status": "Bootleg",
+          "release-group": {
+            "id": "a1b2c3d4-0000-4000-8000-000000000025",
+            "type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+            "primary-type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+            "title": "Budokan 1976",
+            "primary-type": "Album",
+            "secondary-types": [
+              "Live"
+            ],
+            "secondary-type-ids": [
+              "dd2a21e1-0c00-3729-a7a0-de60b84eb5d1"
+            ]
+          },
+          "date": "1976-04-04",
+          "country": "JP",
+          "release-events": [
+            {
+              "date": "1976-04-04",
+              "area": {
+                "id": "2db42837-c832-3c27-b4a3-08198f75693c",
+                "name": "Japan",
+                "sort-name": "Japan",
+                "iso-3166-1-codes": [
+                  "JP"
+                ]
+              }
+            }
+          ],
+          "track-count": 18,
+          "media": [
+            {
+              "position": 1,
+              "format": "CD",
+              "track": [
+                {
+                  "id": "e0e0e0e0-0000-4000-8000-000000007a7a",
+                  "number": "9",
+                  "title": "Bohemian Rhapsody",
+                  "length": 352000
+                }
+              ],
+              "track-count": 18,
+              "track-offset": 0
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

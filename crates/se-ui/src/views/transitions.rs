@@ -294,7 +294,7 @@ fn shader_base(shader: Option<&str>) -> Option<&str> {
 fn look_of(kind: &str, shader: Option<&str>) -> Look {
     match (kind, shader_base(shader)) {
         ("cut", _) => Look::Cut,
-        ("morph", _) => Look::Glide,
+        ("morph" | "glide", _) => Look::Glide,
         ("combined", Some("glitch")) => Look::GlideGlitch,
         ("combined", Some("zoomblur")) => Look::GlideZoom,
         ("combined", _) => Look::Glide,

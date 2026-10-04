@@ -1,0 +1,25 @@
+# Cymbal fireflies: warm glowing motes drift up from the two cymbal areas, wander on a smooth
+# noise flow, blink gently, and fade out. Hat/crash energy raises the spawn rate (capped by
+# `max_rate`). Always on (no manifest trigger, so the overlay is never hidden); firing
+# `patch.cymbal_fireflies.trigger` still counts as a trigger and throws a swirl of motes around
+# both cymbals — bigger payloads (`amount`/`bits`/`count`) make a bigger swirl.
+kind        = "particles"
+layer       = "overlay"
+label       = "Cymbal fireflies"
+description = "Warm soft fireflies rising from the cymbals, busier with hats and crashes; a trigger swirls them"
+particles   = { count = 1024, sim = "sim.wgsl", draw = "draw.wgsl" }
+params.amount    = { type = "float", default = 1.0, range = [0.0, 2.0], description = "Overall glow strength" }
+params.emitter_a = { type = "vec2", default = [0.10, 0.55], range = [0.0, 1.0], description = "Upper-left cymbal (uv, 0,0 top-left)" }
+params.emitter_b = { type = "vec2", default = [0.93, 0.50], range = [0.0, 1.0], description = "Upper-right cymbal (uv, 0,0 top-left)" }
+params.spread    = { type = "float", default = 0.09, range = [0.0, 0.3], description = "Emitter width (fraction of height)" }
+params.rate      = { type = "float", default = 5.0, range = [0.0, 30.0], description = "Motes per second with no cymbals playing" }
+params.hat_gain  = { type = "float", default = 14.0, range = [0.0, 60.0], description = "Extra motes per second at full hat/crash energy" }
+params.max_rate  = { type = "float", default = 14.0, range = [0.0, 60.0], description = "Spawn-rate ceiling (motes per second)" }
+params.size      = { type = "float", default = 0.006, range = [0.002, 0.03], description = "Mote core size (fraction of height)" }
+params.rise      = { type = "float", default = 0.035, range = [0.0, 0.2], description = "Upward drift speed (heights per second)" }
+params.wander    = { type = "float", default = 0.045, range = [0.0, 0.2], description = "Noise wander speed (heights per second)" }
+params.lifetime  = { type = "float", default = 6.0, range = [1.0, 15.0], description = "Average mote lifetime (seconds)" }
+params.burst     = { type = "float", default = 1.0, range = [0.0, 2.0], description = "Trigger swirl size (share of the swirl pool)" }
+params.color_a   = { type = "color", default = "#ffd27a", description = "Warm gold" }
+params.color_b   = { type = "color", default = "#ff9a4a", description = "Amber" }
+budget = { gpu_ms = 0.3 }

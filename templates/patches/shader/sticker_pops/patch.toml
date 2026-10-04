@@ -1,0 +1,16 @@
+# Sticker pops: chunky pixel stickers (heart, star, WOW bubble, smiley) slap into the frame
+# corners on a trigger, spring and wobble, then peel off as the envelope releases. The trigger
+# count picks the sticker; bigger payloads (`amount`/`bits`/`count`) add more stickers (up to 4).
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "overlay"
+label       = "Sticker pops"
+description = "Pixel-art stickers with white die-cut borders spring into the corners on a trigger, wobble, and peel off"
+params.size     = { type = "float", default = 0.24, range = [0.08, 0.5], description = "Sticker height (fraction of the frame height)" }
+params.margin   = { type = "float", default = 0.035, range = [0.0, 0.2], description = "Gap between sticker and frame edge (fraction of height)" }
+params.tilt     = { type = "float", default = 9.0, range = [0.0, 30.0], unit = "deg", description = "Resting tilt toward the frame center" }
+params.bounce   = { type = "float", default = 1.0, range = [0.0, 2.0], description = "Spring overshoot and wobble strength" }
+params.stagger  = { type = "float", default = 0.16, range = [0.0, 0.6], unit = "s", description = "Delay between extra stickers of one trigger" }
+params.max_stickers = { type = "int", default = 4, range = [1, 4], description = "Most stickers one trigger can place" }
+trigger = { attack = "60ms", hold = "2600ms", release = "900ms", retrigger = "replace" }
+budget  = { gpu_ms = 0.4 }

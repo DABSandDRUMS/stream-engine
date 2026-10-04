@@ -39,6 +39,6 @@ fullscreen = true
 
 [show]
 # Live page
-rail_tab = "chat"     # chat | events | queue | mod
+rail_tab = "queue"    # queue | events | mod; chat stays visible
 rail_width = 380.0
 multiview = false     # multiview lives in its own window on DP-2

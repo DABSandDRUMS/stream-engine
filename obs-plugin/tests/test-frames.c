@@ -151,6 +151,7 @@ static void test_session(const char *path)
 	struct se_frames_stats st;
 	se_frames_client_stats(c, &st);
 	CHECK(st.connected && st.last_frame_ns == 0, "connected, no frames yet");
+	CHECK(!se_frames_client_import_current(c, 0), "no import is current before a canvas arrives");
 
 	/* canvas for another canvas id is ignored */
 	struct shm_canvas other;
@@ -170,6 +171,7 @@ static void test_session(const char *path)
 	      "import geometry");
 	uint64_t epoch1 = acc.import ? acc.import->epoch : 0;
 	CHECK(epoch1 == 1, "first epoch is 1 (got %llu)", (unsigned long long)epoch1);
+	CHECK(se_frames_client_import_current(c, epoch1), "received import is current");
 
 	/* frame without fence: pixels visible through the client's read-only mapping */
 	memset(shm.maps[0], 0xab, (size_t)shm.stride * 32);
@@ -244,6 +246,9 @@ static void test_session(const char *path)
 	CHECK(poll_update(c, &acc, 1000, true, false), "import gen 2");
 	CHECK(acc.import && acc.import->generation == 2 && acc.import->epoch == epoch1 + 1 && acc.import->width == 32,
 	      "gen 2 import");
+	uint64_t epoch2 = acc.import ? acc.import->epoch : 0;
+	CHECK(!se_frames_client_import_current(c, epoch1) && se_frames_client_import_current(c, epoch2),
+	      "canvas replacement invalidates the old import");
 	se_frames_client_release(c, epoch1, 2, 6); /* belongs to the dead generation */
 	CHECK(no_message(fd, 150), "no release for a previous generation");
 	CHECK(send_frame(fd, SE_CANVAS_TALL, 0, 1, 1, -1), "frame of old generation after re-create");
@@ -261,6 +266,8 @@ static void test_session(const char *path)
 	CHECK(fd >= 0, "client reconnected");
 	CHECK(fs_recv(fd, &hello, sizeof(hello), 1000) == (ssize_t)sizeof(hello) && hello.h.type == SE_MSG_HELLO,
 	      "hello after reconnect");
+	CHECK(!se_frames_client_import_current(c, epoch2),
+	      "reconnected socket must not make the disconnected import current");
 	se_frames_client_stats(c, &st);
 	CHECK(st.protocol_errors == 1 && st.connects == 2, "errors %llu connects %llu",
 	      (unsigned long long)st.protocol_errors, (unsigned long long)st.connects);
@@ -270,6 +277,7 @@ static void test_session(const char *path)
 	se_frames_import_free(acc.import);
 	acc.import = NULL;
 	CHECK(poll_update(c, &acc, 1000, true, false) && acc.import->epoch == epoch1 + 2, "epoch advances on re-send");
+	CHECK(se_frames_client_import_current(c, acc.import->epoch), "fresh reconnect import is current");
 
 	/* goodbye marks the feed stale-by-shutdown but keeps the import */
 	struct se_goodbye bye = {.h = se_hdr_make(SE_MSG_GOODBYE), .reason = SE_GOODBYE_SHUTDOWN, .canvas = SE_CANVAS_ALL};
@@ -292,6 +300,8 @@ static void test_session(const char *path)
 	CHECK(fd >= 0, "reconnect after bad magic");
 	CHECK(fs_recv(fd, &hello, sizeof(hello), 1000) == (ssize_t)sizeof(hello), "hello");
 
+	CHECK(!se_frames_client_import_current(c, acc.import->epoch),
+	      "protocol-error disconnect invalidates the displayed import");
 	/* engine closes the socket: client reconnects with backoff */
 	close(fd);
 	fd = fs_accept(lfd, 3000);

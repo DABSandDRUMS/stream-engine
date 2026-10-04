@@ -1,0 +1,27 @@
+# Freeze frame: on the trigger the picture stops on that exact moment, like hitting pause on a
+# VCR in Windows 3.1 Media Player: a shutter blink, a slow push-in on the still, film grain and a
+# faint VCR tracking band, and a "Media Player / PAUSED" window that zooms open. On release the
+# window closes and the live picture fades back in.
+# Uses frame feedback in state mode: the clean frozen frame is captured into the instance's state
+# buffer on the first frame of the envelope and carried over exactly (state alpha keeps the
+# capture time); zoom, grain and the window are drawn on top each frame and never baked in. A new
+# trigger while frozen extends the hold on the same still (retrigger = "replace"); the next
+# trigger after the envelope ended freezes a new moment.
+# Burst effect: fire `patch.freeze_frame.trigger` (alert, chat command, deck key); it runs
+# canvas-wide through its global instance while the envelope is up.
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "effect"
+label       = "Freeze Frame"
+description = "The picture freezes on the trigger moment with a slow push-in, film grain and a Win 3.1 Media Player PAUSED window, then plays on"
+feedback    = "state"
+trigger     = { attack = "30ms", hold = "2.5s", release = "400ms", retrigger = "replace" }
+params.zoom     = { type = "float", default = 0.06, range = [0.0, 0.25], description = "Push-in on the still over the freeze" }
+params.focus    = { type = "vec2", default = [0.5, 0.55], range = [0.0, 1.0], description = "Point the push-in moves towards (0-1 of the frame)" }
+params.grain    = { type = "float", default = 0.5, range = [0.0, 1.0], description = "Film grain strength" }
+params.fade     = { type = "float", default = 0.3, range = [0.0, 1.0], description = "How much colour drains from the still" }
+params.tracking = { type = "bool", default = true, description = "Faint drifting VCR tracking band" }
+params.position = { type = "vec2", default = [0.5, 0.14], range = [0.0, 1.0], description = "PAUSED window centre (0-1 of the frame), kept on screen" }
+params.scale    = { type = "float", default = 1.0, range = [0.0, 3.0], description = "PAUSED window size, pixels snap to whole multiples (0 hides it)" }
+params.caption_color = { type = "color", default = "#98dbc5", description = "PAUSED window title bar colour (default matches the stream's window captions)" }
+budget = { gpu_ms = 0.2 }

@@ -5,6 +5,7 @@
 use crate::app::App;
 use crate::frames::{Canvas, FrameTexture};
 use egui::{Color32, CornerRadius, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
+use se_core::config::NodeFit;
 use se_proto::Value;
 use se_ui_kit::theme::{font_bold, font_medium, radius, type_scale};
 use se_ui_kit::widgets::{LedState, led_color};
@@ -131,11 +132,14 @@ pub fn schematic_ex(app: &App, p: &egui::Painter, rect: Rect, scene: &str, canva
             Vec2::new(n.rect[2] * rect.width(), n.rect[3] * rect.height()),
         );
         let radius = CornerRadius::same(((n.radius / cw) * rect.width()).clamp(0.0, 40.0) as u8);
-        let tile = tiles.iter().find(|(s, _)| *s == n.src).map(|(_, r)| *r);
+        let source_size = if n.fit == NodeFit::Native { source_native_size(app, &n.src) } else { None };
+        let tile = tiles.iter().find(|(s, _)| *s == n.src)
+            .filter(|_| n.fit == NodeFit::Stretch || source_size.is_some())
+            .map(|(_, r)| *r);
         match (atlas.as_ref(), tile) {
             (Some(a), Some(tr)) => {
-                let uv = crop_uv(tr, n.crop);
-                p.add(egui::Shape::Rect(egui::epaint::RectShape::filled(r, radius, Color32::WHITE.gamma_multiply(n.opacity)).with_texture(a.id, uv)));
+                let (dst, uv) = source_placement(n.fit, r, n.crop, tr, source_size.unwrap_or([0.0; 2]), a.size, rect.width() / cw);
+                p.add(egui::Shape::Rect(egui::epaint::RectShape::filled(dst, radius, Color32::WHITE.gamma_multiply(n.opacity)).with_texture(a.id, uv)));
             }
             _ => {
                 p.rect_filled(r, radius, se_ui_kit::theme::mix(t.surface_hi, Color32::BLACK, 0.2 * (1.0 - n.opacity)));
@@ -152,6 +156,58 @@ pub fn schematic_ex(app: &App, p: &egui::Painter, rect: Rect, scene: &str, canva
     }
 }
 
+/// Current texture dimensions, sharing the model's existing query cache.
+fn source_native_size(app: &App, src: &str) -> Option<[f32; 2]> {
+    let valid = |size: [f32; 2]| size.iter().all(|v| v.is_finite() && *v > 0.0).then_some(size);
+    let list_size = |v: &Value| {
+        let list = v.as_list()?;
+        valid([list.first()?.as_f64()? as f32, list.get(1)?.as_f64()? as f32])
+    };
+    if let Some(web) = app.m.q("web").and_then(|v| v.get_path("sources")).and_then(Value::as_list)
+        .unwrap_or(&[]).iter().find(|s| s.get_path("slot").and_then(Value::as_str) == Some(src))
+    {
+        return web.get_path("frame_size").and_then(list_size).or_else(|| web.get_path("size").and_then(list_size));
+    }
+    if let Some(source) = app.m.q_list("sources").iter().find(|s| s.get_path("name").and_then(Value::as_str) == Some(src)) {
+        let measured = source.get_path("width").and_then(Value::as_f64)
+            .zip(source.get_path("height").and_then(Value::as_f64))
+            .and_then(|(w, h)| valid([w as f32, h as f32]));
+        return measured.or_else(|| source.get_path("size").and_then(list_size));
+    }
+    let id = src.strip_prefix("patch.")?;
+    app.m.q_list("patches").iter().find(|p| p.get_path("id").and_then(Value::as_str) == Some(id))
+        .filter(|p| p.get_path("kind").and_then(Value::as_str) != Some("web"))
+        .and_then(|p| p.get_path("size")).and_then(list_size)
+}
+
+/// Native placement operates in source UVs, not atlas UVs: the atlas letterboxes each source.
+fn source_placement(fit: NodeFit, window: Rect, crop: [f32; 4], tile: [f32; 4], source_size: [f32; 2], atlas_size: [u32; 2], canvas_scale: f32) -> (Rect, Rect) {
+    if fit == NodeFit::Stretch {
+        return (window, crop_uv(tile, crop));
+    }
+    let source_uv = crop_uv([0.0, 0.0, 1.0, 1.0], crop);
+    let (dst, uv) = fit.placement(
+        [window.left(), window.top(), window.width(), window.height()],
+        [source_uv.min.x, source_uv.min.y, source_uv.max.x, source_uv.max.y],
+        source_size,
+        canvas_scale,
+    );
+    let tile_px = [tile[2] * atlas_size[0] as f32, tile[3] * atlas_size[1] as f32];
+    let scale = (tile_px[0] / source_size[0]).min(tile_px[1] / source_size[1]);
+    let content = [
+        source_size[0] * scale / atlas_size[0] as f32,
+        source_size[1] * scale / atlas_size[1] as f32,
+    ];
+    let origin = [tile[0] + (tile[2] - content[0]) * 0.5, tile[1] + (tile[3] - content[1]) * 0.5];
+    (
+        uv_of(dst),
+        Rect::from_min_max(
+            Pos2::new(origin[0] + uv[0] * content[0], origin[1] + uv[1] * content[1]),
+            Pos2::new(origin[0] + uv[2] * content[0], origin[1] + uv[3] * content[1]),
+        ),
+    )
+}
+
 /// Apply a node crop (`[l, t, r, b]` insets of the source) to a tile's atlas uv rect.
 pub fn crop_uv(tile: [f32; 4], crop: [f32; 4]) -> Rect {
     let [x, y, w, h] = tile;
@@ -166,6 +222,7 @@ pub struct NodeView {
     pub src: String,
     pub rect: [f32; 4],
     pub crop: [f32; 4],
+    pub fit: NodeFit,
     pub radius: f32,
     pub opacity: f32,
     pub offset: [f32; 2],
@@ -178,6 +235,9 @@ pub fn scene_nodes(app: &App, scene: &str, canvas: &str) -> Vec<NodeView> {
     let prefix = format!("scene.{scene}.node.");
     let suffix = format!(".rect.{canvas}");
     let mut out = Vec::new();
+    let config_nodes = app.build.scene_config(scene)
+        .and_then(|s| s.get_path("canvas")).and_then(|c| c.get_path(canvas))
+        .and_then(|c| c.get_path("nodes")).and_then(Value::as_list).unwrap_or(&[]);
     for (a, v) in app.m.state.range(prefix.clone()..) {
         if !a.starts_with(&prefix) {
             break;
@@ -189,11 +249,17 @@ pub fn scene_nodes(app: &App, scene: &str, canvas: &str) -> Vec<NodeView> {
         let Some(rect) = v.as_vec4() else { continue };
         let g = |k: &str| app.m.get(&format!("{prefix}{id}.{k}"));
         let f = |k: &str, d: f64| g(k).and_then(Value::as_f64).unwrap_or(d) as f32;
+        let config = config_nodes.iter().find(|n| {
+            let src = n.get_path("src").and_then(Value::as_str).unwrap_or("");
+            n.get_path("id").and_then(Value::as_str).filter(|s| !s.is_empty()).unwrap_or(src) == id
+        });
         out.push(NodeView {
             id: id.to_string(),
-            src: app.build.node_src(scene, id).unwrap_or(id).to_string(),
+            src: config.and_then(|n| n.get_path("src")).and_then(Value::as_str)
+                .or_else(|| app.build.node_src(scene, id)).unwrap_or(id).to_string(),
             rect,
             crop: g(&format!("crop.{canvas}")).and_then(Value::as_vec4).unwrap_or([0.0; 4]),
+            fit: if config.and_then(|n| n.get_path("fit")).and_then(Value::as_str) == Some("native") { NodeFit::Native } else { NodeFit::Stretch },
             radius: f(&format!("radius.{canvas}"), 0.0),
             opacity: f("opacity", 1.0),
             offset: [f("offset_x", 0.0), f("offset_y", 0.0)],
@@ -303,5 +369,42 @@ mod tests {
         assert!((uv.width() - 0.2).abs() < 1e-6 && (uv.height() - 0.4).abs() < 1e-6);
         let full = crop_uv([0.0, 0.0, 0.5, 0.5], [0.6, 0.0, 0.6, 0.0]);
         assert_eq!(full, uv_of([0.0, 0.0, 0.5, 0.5]));
+    }
+
+    fn assert_rect(actual: Rect, expected: [f32; 4]) {
+        for (a, e) in [actual.left(), actual.top(), actual.width(), actual.height()].into_iter().zip(expected) {
+            assert!((a - e).abs() < 1e-5, "{actual:?} != {expected:?}");
+        }
+    }
+
+    #[test]
+    fn native_atlas_resize_clips_top_right_and_pads_without_scaling_pixels() {
+        let placement = |window| source_placement(
+            NodeFit::Native, uv_of(window), [0.0; 4], [0.0, 0.0, 1.0, 1.0], [800.0, 800.0], [1600, 900], 0.25,
+        );
+        let (small, small_uv) = placement([10.0, 20.0, 100.0, 100.0]);
+        assert_rect(small, [10.0, 20.0, 100.0, 100.0]);
+        assert_rect(small_uv, [0.21875, 0.5, 0.28125, 0.5]);
+        let (large, large_uv) = placement([10.0, 20.0, 300.0, 300.0]);
+        assert_rect(large, [10.0, 120.0, 200.0, 200.0]);
+        assert_rect(large_uv, [0.21875, 0.0, 0.5625, 1.0]);
+        assert!((small.width() / small_uv.width() - large.width() / large_uv.width()).abs() < 1e-4);
+        assert!((small.height() / small_uv.height() - large.height() / large_uv.height()).abs() < 1e-4);
+    }
+
+    #[test]
+    fn native_atlas_crop_preserves_source_pixels_at_preview_scale() {
+        let (dst, uv) = source_placement(
+            NodeFit::Native, uv_of([10.0, 20.0, 100.0, 80.0]), [0.125, 0.25, 0.25, 0.125],
+            [0.0, 0.0, 1.0, 1.0], [800.0, 800.0], [1600, 900], 0.25,
+        );
+        assert_rect(dst, [10.0, 20.0, 100.0, 80.0]);
+        assert_rect(uv, [0.2890625, 0.475, 0.28125, 0.4]);
+        let (dst, uv) = source_placement(
+            NodeFit::Native, uv_of([10.0, 20.0, 50.0, 40.0]), [0.125, 0.25, 0.25, 0.125],
+            [0.0, 0.0, 1.0, 1.0], [800.0, 800.0], [1600, 900], 0.125,
+        );
+        assert_rect(dst, [10.0, 20.0, 50.0, 40.0]);
+        assert_rect(uv, [0.2890625, 0.475, 0.28125, 0.4]);
     }
 }

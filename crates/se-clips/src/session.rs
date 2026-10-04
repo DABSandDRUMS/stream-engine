@@ -1,6 +1,5 @@
-//! Session files the clip job reads (§3.3): `markers.json` (hype + manual markers, master
-//! clock) and `meta.toml` (OBS recordings with their master-clock start, track layout, clock
-//! mappings — written by the OBS adapter through `session.meta`).
+//! Session files the clip job reads (§3.3): `markers.json` (master-clock markers) and
+//! `meta.toml` (app-recorded files with their master-clock start and configured track layout).
 
 use crate::config::ClipsConfig;
 use crate::show;
@@ -257,7 +256,7 @@ pub fn candidates(markers: &[Marker], cfg: &ClipsConfig) -> Vec<Candidate> {
     out
 }
 
-/// One audio stream of a recording (OBS track layout from `session.meta recordings`).
+/// One configured audio stream of an app recording (`meta.toml recordings`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TrackInfo {
     pub index: usize,
@@ -267,9 +266,14 @@ pub struct TrackInfo {
     pub devices: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Recording {
+    /// Configured input name (`main`, `kit`, legacy `wide`/`tall`).
     pub canvas: String,
+    /// `master` | `iso`; empty for recordings made before roles existed.
+    pub role: String,
+    /// Configured source (`canvas:wide`, `camera:cam_kit`, …); empty for older recordings.
+    pub source: String,
     pub path: PathBuf,
     /// Master-clock ns of the file's t = 0.
     pub start_ns: Option<Ts>,
@@ -281,6 +285,21 @@ impl Recording {
     /// Seconds into this file for a master time.
     pub fn offset_s(&self, t: Ts) -> Option<f64> {
         self.start_ns.map(|s| (t as f64 - s as f64) / S)
+    }
+
+    /// A video-only isolated angle (camera or extra canvas).
+    pub fn is_iso(&self) -> bool {
+        self.role == "iso"
+    }
+
+    /// The canonical multitrack show file. Older recordings without a role: anything but `tall`.
+    pub fn is_master(&self) -> bool {
+        if self.role.is_empty() { self.canvas != "tall" } else { self.role == "master" }
+    }
+
+    /// A recording of the tall (9:16) canvas.
+    pub fn is_tall(&self) -> bool {
+        if self.source.is_empty() { self.canvas == "tall" } else { self.source == "canvas:tall" }
     }
 }
 
@@ -294,8 +313,8 @@ fn strings(v: Option<&toml::Value>) -> Vec<String> {
     v.and_then(toml::Value::as_array).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default()
 }
 
-/// Parse `meta.toml`. Recordings without a master start fall back to the `clock.obs_record`
-/// mapping (which maps master time to ns into the current recording).
+/// Parse per-file recorder timestamps. A missing start time remains unknown; never borrow
+/// another subsystem's clock and silently misalign a clip.
 pub fn parse_meta(text: &str) -> Result<SessionMeta, String> {
     let doc: toml::Table = toml::from_str(text).map_err(|e| format!("meta.toml: {}", e.message()))?;
     let clock = match doc.get("clock") {
@@ -323,20 +342,16 @@ pub fn parse_meta(text: &str) -> Result<SessionMeta, String> {
             })
             .unwrap_or_default();
         let int = |k: &str| r.get(k).and_then(toml::Value::as_integer).filter(|x| *x >= 0).map(|x| x as Ts);
+        let text = |k: &str| r.get(k).and_then(toml::Value::as_str).unwrap_or("").to_string();
         recordings.push(Recording {
             canvas: r.get("canvas").and_then(toml::Value::as_str).unwrap_or("wide").to_string(),
+            role: text("role"),
+            source: text("source"),
             path: PathBuf::from(path),
             start_ns: int("start_ns"),
             end_ns: int("end_ns"),
             tracks,
         });
-    }
-    if let Some(c) = &clock
-        && let Some(start) = c.obs_record.to_master(0)
-    {
-        for r in recordings.iter_mut().filter(|r| r.start_ns.is_none()) {
-            r.start_ns = Some(start);
-        }
     }
     Ok(SessionMeta { recordings, clock })
 }
@@ -441,7 +456,7 @@ mod tests {
     }
 
     #[test]
-    fn meta_recordings_tracks_and_clock_fallback() {
+    fn meta_recordings_keep_per_file_timestamps_and_unknown_starts() {
         let text = r#"
 recordings = [
   { canvas = "wide", path = "/v/a.mkv", start_ns = 5000000000, end_ns = 9000000000, tracks = [
@@ -449,7 +464,7 @@ recordings = [
       { index = 1, mixer = 2, name = "Track 2", sources = ["se-music"], devices = ["se-music"] } ] },
   { canvas = "tall", path = "/v/b.mkv" },
 ]
-clock = { obs_record = { master_ref = 7000000000, other_ref = 0, rate = 1.0, valid = true }, twitch_delay_ms = 2500,
+clock = { twitch_delay_ms = 2500,
           wall = { master_ref = 0, other_ref = 0, rate = 1.0, valid = false }, obs_stream = { master_ref = 0, other_ref = 0, rate = 1.0, valid = false },
           audio = { master_ref = 0, other_ref = 0, rate = 1.0, valid = false } }
 "#;
@@ -457,7 +472,7 @@ clock = { obs_record = { master_ref = 7000000000, other_ref = 0, rate = 1.0, val
         assert_eq!(m.recordings.len(), 2);
         assert_eq!(m.recordings[0].tracks[1].devices, vec!["se-music"]);
         assert_eq!(m.recordings[0].offset_s(6_500_000_000), Some(1.5));
-        assert_eq!(m.recordings[1].start_ns, Some(7_000_000_000), "clock fallback");
+        assert_eq!(m.recordings[1].start_ns, None, "missing timestamps must not inherit another file's origin");
         assert_eq!(m.clock.unwrap().twitch_delay_ms, 2500);
         assert!(parse_meta("recordings = 3").unwrap().recordings.is_empty());
         assert!(parse_meta("= broken").is_err());

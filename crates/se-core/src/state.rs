@@ -1,5 +1,5 @@
 //! The state tree (§2.1): every addressable value with metadata and layered resolution
-//! `base → scene → bindings → overrides (priority, HTP/LTP) → clamps`, with provenance.
+//! `base → live palette reference → scene → bindings → overrides (priority, HTP/LTP) → clamps`.
 
 use crate::config::BindMode;
 use se_proto::wire::{Layer, Provenance};
@@ -26,8 +26,14 @@ impl Anim {
     }
 }
 
-/// Interpolate numbers and numeric lists; other values step at the end.
+/// Interpolate colors, numbers and numeric lists; other values step at the end.
 pub fn lerp_value(a: &Value, b: &Value, t: f64) -> Value {
+    if (matches!(a, Value::Str(_)) || matches!(b, Value::Str(_)))
+        && let (Some(a), Some(b)) = (a.as_color(), b.as_color())
+    {
+        let rgba: [f32; 4] = std::array::from_fn(|i| a[i] + (b[i] - a[i]) * t as f32);
+        return Value::from(rgba);
+    }
     match (a, b) {
         (Value::List(x), Value::List(y)) if x.len() == y.len() => Value::List(x.iter().zip(y).map(|(p, q)| lerp_value(p, q, t)).collect()),
         _ => match (a.as_f64(), b.as_f64()) {
@@ -77,11 +83,29 @@ pub struct Mod {
     pub value: f64,
 }
 
+/// A finite, one-way reference from an authored video FX parameter to the shared palette.
+#[derive(Clone, Debug)]
+pub struct PaletteLink {
+    reference: se_proto::palette::Reference,
+    value: Option<Value>,
+}
+
+impl PaletteLink {
+    fn parse(address: &str, value: &Value) -> Option<Self> {
+        let video = address.starts_with("source.") || address.starts_with("scene.")
+            || address.starts_with("render.canvas.") || address.starts_with("render.output.");
+        if !video || !address.contains(".fx.") { return None; }
+        Some(Self { reference: se_proto::palette::Reference::parse(value.as_str()?)?, value: None })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Param {
     pub addr: String,
     pub meta: Meta,
     pub base: Value,
+    /// Authored live palette input; runtime overrides still take precedence.
+    pub palette_link: Option<PaletteLink>,
     pub scene: Option<Value>,
     pub mods: Vec<Mod>,
     pub overrides: Vec<Override>,
@@ -109,6 +133,9 @@ pub struct StateTree {
     live: Vec<bool>,
     dirty: Vec<usize>,
     is_dirty: Vec<bool>,
+    palette_targets: Vec<usize>,
+    palette_sources: [Option<usize>; se_proto::palette::SLOTS.len()],
+    palette_generation: u64,
 }
 
 impl StateTree {
@@ -141,7 +168,7 @@ impl StateTree {
             if !p.declared || p.meta != meta {
                 if !p.declared {
                     p.base = if p.base_explicit { meta.coerce(&p.base) } else { meta.default.clone() };
-                } else if p.base == p.meta.default {
+                } else if !p.base_explicit && p.base == p.meta.default {
                     p.base = meta.default.clone();
                 }
                 p.meta = meta;
@@ -152,6 +179,15 @@ impl StateTree {
         }
         let v = meta.default.clone();
         self.insert(addr, meta, v, true)
+    }
+
+    /// Revert an authored base to the service default while retaining runtime layers.
+    pub fn reset_base(&mut self, id: usize) {
+        self.params[id].base = self.params[id].meta.default.clone();
+        self.params[id].base_explicit = false;
+        self.params[id].palette_link = None;
+        self.palette_targets.retain(|target| *target != id);
+        self.mark(id);
     }
 
     /// Get or implicitly create an address (untyped) holding `v` as its base.
@@ -166,10 +202,13 @@ impl StateTree {
     fn insert(&mut self, addr: &str, meta: Meta, base: Value, declared: bool) -> usize {
         let i = self.params.len();
         let resolved = meta.coerce(&base);
+        let palette_link = PaletteLink::parse(addr, &base);
+        if palette_link.is_some() { self.palette_targets.push(i); }
         self.params.push(Param {
             addr: addr.to_string(),
             meta,
             base,
+            palette_link,
             scene: None,
             mods: Vec::new(),
             overrides: Vec::new(),
@@ -218,6 +257,8 @@ impl StateTree {
         self.dirty.clear();
         self.dirty.extend(self.is_dirty.iter().enumerate().filter_map(|(i, dirty)| dirty.then_some(i)));
         self.generation += 1;
+        self.palette_targets.clear();
+        self.palette_targets.extend(self.params.iter().enumerate().filter_map(|(i, p)| p.palette_link.is_some().then_some(i)));
         before - self.params.len()
     }
 
@@ -233,6 +274,13 @@ impl StateTree {
     }
 
     pub fn set_base(&mut self, i: usize, v: Value) -> Value {
+        let next = PaletteLink::parse(&self.params[i].addr, &v);
+        let old_reference = self.params[i].palette_link.as_ref().map(|link| link.reference);
+        if old_reference != next.as_ref().map(|link| link.reference) {
+            if old_reference.is_none() && next.is_some() { self.palette_targets.push(i); }
+            if next.is_none() { self.palette_targets.retain(|target| *target != i); }
+            self.params[i].palette_link = next;
+        }
         self.params[i].base_explicit = true;
         let old = std::mem::replace(&mut self.params[i].base, v);
         self.mark(i);
@@ -319,8 +367,59 @@ impl StateTree {
         }
     }
 
+    fn sync_palette_links(&mut self, now: Ts) {
+        if self.palette_targets.is_empty() { return; }
+        let changed_generation = self.palette_generation != self.generation;
+        if changed_generation {
+            self.palette_sources = se_proto::palette::ADDRESSES.map(|address| self.id(address));
+            self.palette_generation = self.generation;
+        }
+        // Compute each used source at most once, including same-tick overrides/clamps.
+        let mut colors = [None; se_proto::palette::SLOTS.len()];
+        for k in 0..self.palette_targets.len() {
+            let target = self.palette_targets[k];
+            let reference = self.params[target].palette_link.as_ref().expect("indexed palette target").reference;
+            let slot = reference.slot();
+            let source = self.palette_sources[slot];
+            if !changed_generation && !self.is_dirty[target]
+                && source.is_none_or(|source| !self.is_dirty[source] && !self.live[source])
+            { continue; }
+            let color = match colors[slot] {
+                Some(color) => color,
+                None => {
+                    let color = source.and_then(|source| {
+                        if self.is_dirty[source] || self.live[source] {
+                            resolve_param(&self.params[source], now, None).as_color()
+                        } else { self.params[source].resolved.as_color() }
+                    });
+                    colors[slot] = Some(color);
+                    color
+                }
+            };
+            let current = self.params[target].palette_link.as_ref().expect("indexed palette target").value.as_ref();
+            let value = match (color, reference.component(), &self.params[target].meta.ty) {
+                (Some(rgba), None, ValueType::Color) => {
+                    if current.and_then(Value::as_color) == Some(rgba) { continue; }
+                    Some(Value::from(rgba))
+                }
+                (Some(rgba), Some(component), ValueType::Float) => {
+                    let component = rgba[component] as f64;
+                    if current.and_then(Value::as_f64) == Some(component) { continue; }
+                    Some(Value::Float(component))
+                }
+                _ => {
+                    if current.is_none() { continue; }
+                    None // Never reinterpret text, gates, or unrelated numeric settings.
+                }
+            };
+            self.params[target].palette_link.as_mut().expect("indexed palette target").value = value;
+            self.mark(target);
+        }
+    }
+
     /// Re-resolve dirty and live params. Calls `changed(id, &value)` for every changed value.
     pub fn resolve(&mut self, now: Ts, mut changed: impl FnMut(usize, &Value)) {
+        self.sync_palette_links(now);
         for i in 0..self.params.len() {
             if self.live[i] {
                 self.mark(i);
@@ -369,12 +468,12 @@ impl StateTree {
     /// Addresses matching a pattern (or exact address).
     pub fn matching<'a>(&'a self, pattern: &'a str) -> impl Iterator<Item = usize> + 'a {
         let exact = self.id(pattern);
-        self.params.iter().enumerate().filter_map(move |(i, p)| {
-            if exact.is_some() {
-                return (exact == Some(i)).then_some(i);
-            }
-            address::matches(pattern, &p.addr).then_some(i)
-        })
+        let ids = match exact {
+            Some(i) => i..i + 1,
+            None if !address::is_pattern(pattern) => 0..0,
+            None => 0..self.params.len(),
+        };
+        ids.filter(move |&i| exact.is_some() || address::matches(pattern, &self.params[i].addr))
     }
 }
 
@@ -401,27 +500,26 @@ fn num_or_list(v: &Value, f: &dyn Fn(f64) -> f64) -> Value {
 
 /// Resolve one param, optionally recording provenance layers.
 pub fn resolve_param(p: &Param, now: Ts, mut prov: Option<&mut Vec<Layer>>) -> Value {
+    let explain = prov.is_some();
     let mut push = |kind: &str, source: &str, priority: Option<u16>, value: &Value, active: bool| {
         if let Some(l) = prov.as_deref_mut() {
             l.push(Layer { kind: kind.into(), source: source.into(), priority, value: value.clone(), active });
         }
     };
-    let mut v = p.base.clone();
-    push("base", "project", None, &p.base, p.scene.is_none());
+    let palette_value = p.palette_link.as_ref().and_then(|link| link.value.as_ref());
+    let mut v = palette_value.unwrap_or(&p.base).clone();
+    push("base", "project", None, &p.base, p.scene.is_none() && palette_value.is_none());
+    if let Some(link) = &p.palette_link && let Some(value) = palette_value {
+        push("palette", link.reference.address(), None, value, p.scene.is_none());
+    }
     if let Some(s) = &p.scene {
         v = s.clone();
         push("scene", "scene", None, s, true);
     }
-    // bindings
-    for m in &p.mods {
-        let before = v.clone();
-        v = match m.mode {
-            BindMode::Add => num_or_list(&v, &|x| x + m.value),
-            BindMode::Multiply => num_or_list(&v, &|x| x * m.value),
-            BindMode::Replace => Value::Float(m.value),
-        };
-        let _ = before;
-        push("binding", &m.source, None, &Value::Float(m.value), true);
+    // `replace` bindings sit under overrides: an override (cue, preset, manual) beats them.
+    for m in p.mods.iter().filter(|m| m.mode == BindMode::Replace) {
+        v = Value::Float(m.value);
+        push("binding", &m.source, None, &v, true);
     }
     // overrides
     if !p.overrides.is_empty() {
@@ -436,21 +534,34 @@ pub fn resolve_param(p: &Param, now: Ts, mut prov: Option<&mut Vec<Layer>>) -> V
                     winner = Some(k);
                 }
             }
-            for (k, o) in p.overrides.iter().enumerate() {
-                push(if o.anim.is_some() { "animation" } else { "override" }, &o.key, Some(o.priority), &o.current(now), winner == Some(k));
+            if explain {
+                for (k, o) in p.overrides.iter().enumerate() {
+                    push(if o.anim.is_some() { "animation" } else { "override" }, &o.key, Some(o.priority), &o.current(now), winner == Some(k));
+                }
             }
             if let Some(b) = best {
                 v = Value::Float(b);
             }
         } else {
             let win = p.overrides.iter().enumerate().max_by(|(_, a), (_, b)| a.priority.cmp(&b.priority).then(a.seq.cmp(&b.seq))).map(|(k, _)| k);
-            for (k, o) in p.overrides.iter().enumerate() {
-                push(if o.anim.is_some() { "animation" } else { "override" }, &o.key, Some(o.priority), &o.current(now), win == Some(k));
+            if explain {
+                for (k, o) in p.overrides.iter().enumerate() {
+                    push(if o.anim.is_some() { "animation" } else { "override" }, &o.key, Some(o.priority), &o.current(now), win == Some(k));
+                }
             }
             if let Some(k) = win {
                 v = p.overrides[k].current(now);
             }
         }
+    }
+    // `add` / `multiply` bindings modulate whatever won (base, scene, replace binding or
+    // override), in declaration order; the result is clamped to the address range below.
+    for m in p.mods.iter().filter(|m| m.mode != BindMode::Replace) {
+        v = match m.mode {
+            BindMode::Add => num_or_list(&v, &|x| x + m.value),
+            _ => num_or_list(&v, &|x| x * m.value),
+        };
+        push("binding", &m.source, None, &Value::Float(m.value), true);
     }
     // clamps
     let mut out = p.meta.coerce(&v);
@@ -514,6 +625,38 @@ mod tests {
     }
 
     #[test]
+    fn resolution_without_provenance_matches_explain_through_animation_and_expiry() {
+        for merge in [Merge::Ltp, Merge::Htp] {
+            let mut t = StateTree::default();
+            let mut meta = Meta::float(0.2, [0.0, 1.0]);
+            meta.merge = merge;
+            let id = t.declare("lights.par.intensity", meta);
+            let mut animated = ov("cue", 100, 0.0);
+            animated.anim = Some(Anim { from: Value::Float(0.0), to: Value::Float(1.0), start: 0, dur: 1000, ease: Ease::Linear });
+            animated.expires = Some(2000);
+            t.put_override(id, animated);
+            t.put_override(id, ov("manual", 300, 0.4));
+            t.set_mods(id, vec![Mod { source: "music".into(), mode: BindMode::Multiply, value: 0.8 }]);
+            t.set_cap(id, Some([0.0, 0.6]));
+            for now in [0, 500, 1000, 1500, 2000] {
+                resolve(&mut t, now);
+                let explained = t.explain("lights.par.intensity", now).unwrap();
+                assert_eq!(t.value(id), &explained.value, "merge={merge:?}, now={now}");
+                assert_eq!(explained.layers.iter().filter(|l| l.active && matches!(l.kind.as_str(), "animation" | "override")).count(), 1);
+                if now == 500 {
+                    let layer = explained.layers.iter().find(|l| l.source == "cue").unwrap();
+                    assert_eq!(layer.kind, "animation");
+                    assert_eq!(layer.value, Value::Float(0.5));
+                    assert_eq!(layer.active, merge == Merge::Htp);
+                }
+                if now == 2000 {
+                    assert!(explained.layers.iter().all(|l| l.source != "cue"));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn animation_and_expiry() {
         let mut t = StateTree::default();
         let a = t.declare("x", Meta::float(0.0, [0.0, 10.0]));
@@ -530,15 +673,46 @@ mod tests {
     }
 
     #[test]
-    fn bindings_modulate_under_overrides() {
+    fn replace_bindings_sit_under_overrides() {
         let mut t = StateTree::default();
         let a = t.declare("y", Meta::float(1.0, [0.0, 100.0]));
-        t.set_mods(a, vec![Mod { source: "kick".into(), mode: BindMode::Add, value: 4.0 }]);
+        t.set_mods(a, vec![Mod { source: "fader".into(), mode: BindMode::Replace, value: 40.0 }]);
         resolve(&mut t, 0);
-        assert_eq!(t.value(a), &Value::Float(5.0));
+        assert_eq!(t.value(a), &Value::Float(40.0));
         t.put_override(a, ov("manual", 300, 2.0));
         resolve(&mut t, 0);
-        assert_eq!(t.value(a), &Value::Float(2.0));
+        assert_eq!(t.value(a), &Value::Float(2.0), "manual beats a replace binding");
+        t.remove_override(a, "manual");
+        resolve(&mut t, 0);
+        assert_eq!(t.value(a), &Value::Float(40.0), "binding is back once the override goes");
+    }
+
+    #[test]
+    fn add_and_multiply_bindings_modulate_the_override_winner_then_clamp() {
+        let mut t = StateTree::default();
+        let size = t.declare("lights.effect.pulse.size", Meta::float(1.0, [0.0, 1.0]));
+        t.put_override(size, ov("cue:pulse", 200, 0.8));
+        t.set_mods(size, vec![Mod { source: "music.level".into(), mode: BindMode::Multiply, value: 0.5 }]);
+        resolve(&mut t, 0);
+        assert_eq!(t.value(size), &Value::Float(0.4), "multiply scales the cue-written size");
+        t.put_override(size, ov("manual", 300, 0.6));
+        resolve(&mut t, 0);
+        assert_eq!(t.value(size), &Value::Float(0.3), "a manual override is modulated too");
+        let y = t.declare("y", Meta::float(1.0, [0.0, 10.0]));
+        t.put_override(y, ov("preset:p", 200, 2.0));
+        t.set_mods(y, vec![Mod { source: "kick".into(), mode: BindMode::Add, value: 4.0 }]);
+        resolve(&mut t, 0);
+        assert_eq!(t.value(y), &Value::Float(6.0), "add offsets the overridden value");
+        t.set_mods(y, vec![Mod { source: "kick".into(), mode: BindMode::Add, value: 9.0 }]);
+        resolve(&mut t, 0);
+        assert_eq!(t.value(y), &Value::Float(10.0), "clamped to the address range");
+        t.set_mods(y, vec![
+            Mod { source: "kick".into(), mode: BindMode::Add, value: 1.0 },
+            Mod { source: "fader".into(), mode: BindMode::Replace, value: 5.0 },
+        ]);
+        t.remove_override(y, "preset:p");
+        resolve(&mut t, 0);
+        assert_eq!(t.value(y), &Value::Float(6.0), "replace resolves first, then add modulates it");
     }
 
     #[test]
@@ -551,6 +725,9 @@ mod tests {
         t.declare("fx.rgb_split.amount", Meta::float(0.3, [0.0, 1.0]));
         assert_eq!(t.param(a).base, Value::Int(40), "explicit project value survives declaration");
         assert_eq!(t.param(b).base, Value::Float(0.3), "placeholder replaced by the declared default");
+        t.set_base(b, Value::Float(0.3));
+        t.declare("fx.rgb_split.amount", Meta::float(0.7, [0.0, 1.0]));
+        assert_eq!(t.param(b).base, Value::Float(0.3), "explicit value equal to previous default must survive reload");
     }
 
     #[test]
@@ -562,5 +739,68 @@ mod tests {
         assert_eq!(t.remove_prefix("patch.a"), 2);
         assert_eq!(t.id("patch.b.x"), Some(0));
         assert!(t.get("patch.a.x").is_none());
+    }
+
+    #[test]
+    fn matching_keeps_exact_and_wildcard_order_after_reindexing() {
+        let mut t = StateTree::default();
+        t.declare("patch.a", Meta::trigger());
+        t.declare("patch.a.x", Meta::float(0.0, [0.0, 1.0]));
+        t.declare("patch.b.x", Meta::float(0.0, [0.0, 1.0]));
+        assert_eq!(t.matching("patch.a").collect::<Vec<_>>(), vec![0]);
+        assert_eq!(t.matching("patch.*.x").collect::<Vec<_>>(), vec![1, 2]);
+        assert_eq!(t.matching("patch.**").collect::<Vec<_>>(), vec![0, 1, 2]);
+        assert!(t.matching("patch.missing").next().is_none());
+        t.remove_prefix("patch.a");
+        assert_eq!(t.matching("patch.b.x").collect::<Vec<_>>(), vec![0]);
+        assert_eq!(t.matching("patch.*.x").collect::<Vec<_>>(), vec![0]);
+    }
+
+    #[test]
+    fn live_video_palette_respects_manual_ownership_clamps_and_color_fades() {
+        let mut t = StateTree::default();
+        let accent = t.declare("palette.accent", Meta::color([1.0, 0.0, 0.0, 1.0]));
+        let tint = t.declare("source.cam.fx.frame.tint", Meta::color([1.0; 4]));
+        t.set_base(tint, Value::from("stream:accent"));
+        let component = t.declare("render.output.wide.fx.fade.color_b", Meta::float(0.0, [0.0, 0.4]));
+        t.set_base(component, Value::from("stream:accent.b"));
+        let title = t.declare("scene.show.node.cam.fx.frame.title", Meta::string(""));
+        t.set_base(title, Value::from("stream:accent"));
+        let mut manual = ov("manual", 300, 0.0);
+        manual.value = Value::from([0.0, 1.0, 0.0, 1.0]);
+        t.put_override(tint, manual);
+        let mut fade = ov("manual", 300, 0.0);
+        fade.anim = Some(Anim { from: Value::from([1.0, 0.0, 0.0, 1.0]), to: Value::from("#0000ff"), start: 0, dur: 1000, ease: Ease::Linear });
+        t.put_override(accent, fade);
+        resolve(&mut t, 500);
+        assert_eq!(t.value(tint), &Value::from([0.0, 1.0, 0.0, 1.0]), "local manual color wins during a shared fade");
+        assert_eq!(t.value(component), &Value::Float(0.4), "component references remain clamped");
+        assert_eq!(t.value(title), &Value::from("stream:accent"), "text parameters are not interpreted as colors");
+        t.remove_override(tint, "manual");
+        resolve(&mut t, 600);
+        let color = t.value(tint).as_color().unwrap();
+        assert!((color[0] - 0.4).abs() < 1e-6 && (color[2] - 0.6).abs() < 1e-6, "release reveals the current fade, not a captured color: {color:?}");
+        assert!(t.explain("source.cam.fx.frame.tint", 600).unwrap().layers.iter().any(|layer| layer.kind == "palette" && layer.source == "palette.accent"));
+    }
+
+    #[test]
+    fn palette_references_survive_late_declarations_and_reindexing_but_not_literal_replacement() {
+        let mut t = StateTree::default();
+        t.declare("source.old.fx.frame.tint", Meta::color([1.0; 4]));
+        let tint = t.ensure("scene.show.node.cam.fx.frame.tint", &Value::from("stream:accent"));
+        t.set_base(tint, Value::from("stream:accent"));
+        resolve(&mut t, 0);
+        t.declare("scene.show.node.cam.fx.frame.tint", Meta::color([1.0; 4]));
+        let accent = t.declare("palette.accent", Meta::color([0.2, 0.4, 0.8, 1.0]));
+        t.set_base(accent, Value::from([0.2, 0.4, 0.8, 1.0]));
+        t.remove_prefix("source.old");
+        resolve(&mut t, 0);
+        let tint = t.id("scene.show.node.cam.fx.frame.tint").unwrap();
+        assert_eq!(t.value(tint), &Value::from([0.2, 0.4, 0.8, 1.0]));
+        t.set_base(tint, Value::from([0.9, 0.1, 0.0, 1.0]));
+        let accent = t.id("palette.accent").unwrap();
+        t.set_base(accent, Value::from([0.0, 0.0, 1.0, 1.0]));
+        resolve(&mut t, 0);
+        assert_eq!(t.value(tint), &Value::from([0.9, 0.1, 0.0, 1.0]), "changing to a fixed authored color removes the live binding");
     }
 }

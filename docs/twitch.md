@@ -10,7 +10,9 @@ may *do* is decided by the policy pipeline in the core (`se_core::policy`, §12.
    **Register Your Application**:
    - Name: anything unique (e.g. `dabsanddrums-stream-engine`)
    - OAuth Redirect URLs: `http://localhost` (unused by the device flow, but required)
-   - Category: *Other*; **Client Type: Public** (the device code flow needs a public client)
+   - Category: *Other*; **Client Type: Public**. Client type can't be changed later.
+     A Confidential app authorizes once, but every refresh then fails with
+     `missing client secret`, so Twitch disconnects on the next engine restart.
 2. Copy the **Client ID** into the project's `project.toml`:
 
    ```toml
@@ -32,7 +34,11 @@ may *do* is decided by the policy pipeline in the core (`se_core::policy`, §12.
 
 Refresh tokens live only in the keyring (`stream-engine` / `twitch.refresh_token`,
 `twitch.bot_refresh_token`); access tokens are refreshed automatically and validated hourly.
-`streamctl do twitch.auth.logout` forgets them.
+At startup, network, DNS, or Twitch errors while exchanging the stored token are retried with
+backoff (2 s doubling to 60 s), so a late network at boot reconnects without operator action.
+Only a revoked grant needs `twitch.auth.start` again. Public-client refresh tokens rotate on
+each refresh and lapse after about 30 days unused, so a machine left off that long needs one
+re-authorization. `streamctl do twitch.auth.logout` forgets them.
 
 Scopes requested (broadcaster): `user:read:chat user:write:chat bits:read
 channel:read:subscriptions channel:read:hype_train channel:read:redemptions
@@ -180,6 +186,7 @@ fulfill = "auto"          # "manual": the fired handler fulfills/refunds itself
 modes = ["live"]          # default: [policy] effect_modes
 enabled = true
 paused = false
+fx = false                # true: an effect reward, paused on Twitch while effects are off
 ```
 
 The app creates and updates these on Twitch (they must be created by our Client ID to be
@@ -190,7 +197,14 @@ redemption runs its `fires` in order; the first command that fails — e.g. a pr
 `conflict = "reject"` that is already active — stops the rest and the redemption is refunded
 too (`policy.rejected` with that reason; the cooldowns and limits it took are given back). Only
 when every command ran does it get `twitch.fulfill` and the `twitch.redeem` event reach rules
-and alerts. Commands after a `wait` are only scheduled, so they can't refund it.
+and alerts. Commands after a `wait` are only scheduled, so they can't refund it. A preset with a
+`lane` whose lane is busy waits its turn and counts as run (fulfilled); a ninth waiting firing
+in the same lane fails and refunds. A `quantize` start is likewise only delayed.
+
+Rewards with `fx = true` follow the operator's **Effects on/off** switch (`fx.enabled`): when it
+turns false, the next reward sync (about half a second after the switch settles) sets them
+`is_paused` on Twitch, and turning effects back on unpauses them. `paused = true` keeps a
+reward paused either way; rewards without `fx` are never touched by the switch.
 
 ### For other subsystems
 

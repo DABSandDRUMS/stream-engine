@@ -1,0 +1,23 @@
+# Viewer claim: a trigger hands the snare to the viewer who fired it for `bars` bars. While the
+# claim runs, every snare hit flashes a rim light around the frame in the claimer's chat colour
+# (edge glow, a crisp border, and bright parts of the picture near the edges catch the tint), and
+# a small Win 3.1 button badge with a snare icon sits in a corner: it clicks down on every snare
+# hit and shows one pip per remaining bar. The claim starts with a colour sweep in from the edges
+# and the badge popping in; it ends by fading the rim and sliding the badge off. A new trigger
+# replaces the claim (new colour, full bar count).
+# No bar counter exists: the length is bars x 240 / beat.bpm seconds from the trigger (120 BPM
+# when no tempo is published), assuming a steady tempo.
+# Attach: fx = [{ name = "patch.viewer_claim" }] on the camera/scene; fire it from a rule, e.g. a
+# channel-point redeem: do = ["patch.viewer_claim.trigger"] (the user/colour come from the event).
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "effect"
+label       = "Viewer claim"
+description = "A viewer claims the snare for a few bars: every snare hit flashes a rim light in their chat colour, with a corner badge counting down the bars"
+params.amount = { type = "float", default = 1.0, range = [0.0, 2.0], description = "Overall strength" }
+params.bars   = { type = "int",   default = 2, range = [1, 16], description = "Bars the claim lasts" }
+params.glow   = { type = "float", default = 0.05, range = [0.01, 0.25], description = "How far the rim glow reaches into the frame (fraction of its height)" }
+params.idle   = { type = "float", default = 0.25, range = [0.0, 1.0], description = "Rim glow kept between snare hits while the claim runs" }
+params.corner = { type = "enum",  options = ["bottom_left", "bottom_right", "top_left", "top_right"], default = "bottom_left", description = "Corner of the badge" }
+params.scale  = { type = "float", default = 1.5, range = [0.5, 3.0], description = "Badge size; pixels snap to whole multiples" }
+budget        = { gpu_ms = 0.1 }

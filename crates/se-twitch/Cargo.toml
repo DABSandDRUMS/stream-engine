@@ -45,3 +45,7 @@ required-features = ["mock"]
 [[test]]
 name = "users_cache"
 required-features = ["mock"]
+
+[[test]]
+name = "rewards_fx"
+required-features = ["mock"]

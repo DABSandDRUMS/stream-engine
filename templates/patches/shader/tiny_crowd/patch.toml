@@ -1,0 +1,13 @@
+# Tiny crowd: pixel-art audience along the bottom edge of whatever it is attached to. An always-on
+# effect (no manifest trigger); firing the patch's trigger still makes everyone cheer (se.trigger_age).
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "effect"
+label       = "Tiny Crowd"
+description = "A row of tiny pixel-art fans along the bottom edge that bob to the beat, throw arms up on snares and cheer with hearts on the trigger"
+params.amount  = { type = "float", default = 1.0, range = [0.0, 1.0], description = "Crowd opacity" }
+params.height  = { type = "float", default = 0.08, range = [0.03, 0.2], description = "Crowd height (fraction of the frame); pixels snap to whole multiples" }
+params.density = { type = "float", default = 0.85, range = [0.1, 1.0], description = "How many spots in the row are filled" }
+params.arms    = { type = "float", default = 0.35, range = [0.0, 1.0], description = "Share of fans throwing an arm up on each snare hit" }
+params.cheer   = { type = "float", default = 3.0, range = [0.5, 8.0], unit = "s", description = "How long the crowd cheers after a trigger" }
+budget = { gpu_ms = 0.3 }

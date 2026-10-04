@@ -1,11 +1,13 @@
-//! Settings → Accounts & app (§15.6): Twitch accounts (device-code connect), keys kept in the
-//! system keyring (YouTube, tips relay; never written to project files), phones and tablets that
-//! may control the engine (§19), screen setups (layouts and the program window on the TV),
-//! appearance, and keyboard shortcuts (click to change; saved to `layouts/shortcuts.toml`).
+//! Settings → Accounts & app (§15.6): recording (see [`super::recording`]), Twitch accounts
+//! (device-code connect), keys kept in the system keyring (YouTube, tips relay; never written to
+//! project files), phones and tablets that may control the engine (§19), screen setups (layouts
+//! and the program window on the TV), appearance, and keyboard shortcuts (click to change; saved
+//! to `layouts/shortcuts.toml`).
 
 use crate::app::App;
 use crate::shortcuts::{self, ActionInfo};
 use crate::views::live::nice;
+use crate::views::recording::{self, RecordingState};
 use egui::{Align, Layout, RichText, Ui};
 use se_proto::Value;
 use se_ui_kit::Theme;
@@ -45,6 +47,7 @@ pub struct SettingsState {
     pub layout_name: String,
     /// Shortcut group on screen (Everyday / Scenes / Effect buttons).
     pub keys_group: usize,
+    pub recording: RecordingState,
 }
 
 fn refresh(app: &mut App) {
@@ -69,6 +72,8 @@ pub fn ui(app: &mut App, ui: &mut Ui) {
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         let w = ui.available_width().min(MAX_WIDTH);
         ui.set_max_width(w);
+        recording::settings(app, ui, &t);
+        ui.add_space(spacing::L);
         let n = if w >= THREE_COLUMNS {
             3
         } else if w >= TWO_COLUMNS {

@@ -53,6 +53,10 @@ pub fn switches(opts: &Opts) -> Vec<(&'static str, Option<String>)> {
                 // (`shared_texture_enabled` + `on_accelerated_paint` dmabufs), blocked on NVIDIA
                 // until CEF ships chromiumembedded/cef PR #4238 (PLAN §4.2).
                 s.push(("use-angle", Some("vulkan".into())));
+                // ANGLE alone leaves the compositor on an incompatible shared-image path:
+                // decoded native video frames fail in MailboxVideoFrameConverter and reset
+                // the GPU process. Share Vulkan with the compositor as well.
+                s.push(("enable-features", Some("Vulkan,VulkanFromANGLE".into())));
             } else {
                 s.push(("disable-gpu", None));
                 s.push(("disable-gpu-compositing", None));

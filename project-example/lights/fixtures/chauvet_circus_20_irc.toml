@@ -1,0 +1,13 @@
+# Circus 2.0 IRC UM Rev. 1 p.11. Raw macro fixture, not a direct-color wash.
+# Saved for commissioning; intentionally NOT PATCHED into this project's active rig.
+name = "Chauvet Circus 2.0 IRC"
+manufacturer = "Chauvet"
+kind = "other"
+notes = "Macro-only 4CH: no documented direct intensity/color or guaranteed DMX blackout. Program 0–15 is only 'No function', not proven dark. Raw channels bypass normalized strobe control; do not patch until program behavior and physical blackout isolation are verified."
+[modes.4ch]
+channels = [
+  { role = "raw", name = "program", default = 0 },
+  { role = "raw", name = "program_speed", default = 0 },
+  { role = "raw", name = "pods_strobe", default = 0 },
+  { role = "raw", name = "smd_strobe", default = 0 },
+]

@@ -32,7 +32,7 @@ static void load(void)
 	delete_sync = (delete_sync_fn)eglGetProcAddress("glDeleteSync");
 	if (!fence_sync || !client_wait_sync || !delete_sync) {
 		fence_sync = NULL;
-		blog(LOG_WARNING, "[stream-engine] GL sync objects unavailable; releasing buffers two frames after use");
+		blog(LOG_WARNING, "[stream-engine] GL sync objects unavailable; using the shared-memory path");
 	}
 }
 
@@ -49,12 +49,14 @@ void *se_gl_fence_create(void)
 	return fence_sync(GL_SYNC_GPU_COMMANDS_COMPLETE_, 0);
 }
 
-bool se_gl_fence_signaled(void *fence)
+enum se_gl_fence_status se_gl_fence_poll(void *fence)
 {
 	if (!fence || !fence_sync)
-		return true;
+		return SE_GL_FENCE_FAILED;
 	unsigned int r = client_wait_sync((GLsync_)fence, GL_SYNC_FLUSH_COMMANDS_BIT_, 0);
-	return r == GL_ALREADY_SIGNALED_ || r == GL_CONDITION_SATISFIED_ || r == GL_WAIT_FAILED_;
+	if (r == GL_ALREADY_SIGNALED_ || r == GL_CONDITION_SATISFIED_)
+		return SE_GL_FENCE_COMPLETE;
+	return r == GL_WAIT_FAILED_ ? SE_GL_FENCE_FAILED : SE_GL_FENCE_PENDING;
 }
 
 void se_gl_fence_destroy(void *fence)

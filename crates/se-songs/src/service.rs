@@ -1,9 +1,11 @@
 //! The song-request actor: owns the queue, policy, player controller and lookups, and talks to
 //! the hub (actions `queue.*`, `youtube.*`, `relay.*`; queries `queue`, `queue.*`,
-//! `song.player`, `youtube.status`, `relay.status`; state `queue.*`, `song.*`; signal
+//! `song.player`, `youtube.status`, `relay.status`; state `queue.*`, `song.*` (incl.
+//! `song.current.{title,artist,genres,year}` from [`crate::metadata`]); signal
 //! `song.position`, `queue.position` (0 … 1 through the current request); events `queue.song_requested|song_started|song_ended|song_error`).
 
 use crate::lookup::{Failed, Found, Lookup};
+use crate::metadata::{self, SongInfo};
 use crate::player::{Outcome, Player};
 use crate::policy::{self, Policy, QueueFacts, Reject, Requester};
 use crate::queue::{Entry, Paid, Queue, Status};
@@ -43,6 +45,9 @@ pub enum Msg {
     KeyStored(Option<String>, Result<(), String>),
     SecretStored(Option<String>, Result<(), String>),
     Settings(Box<Settings>),
+    SettingsInvalid(String),
+    /// A song metadata lookup finished.
+    Meta(metadata::Done),
 }
 
 /// A request travelling through gate → lookup → queue.
@@ -84,6 +89,7 @@ fn declare(hub: &Hub) {
     hub.declare("queue.next.title", ro(Meta::string(""), "Up next: title"));
     hub.declare("queue.next.user", ro(Meta::string(""), "Up next: requester"));
     hub.declare("queue.url", ro(Meta::string(""), "Public queue page (relay)"));
+    hub.declare("queue.theme", ro(Meta::enumeration("win31", &["win31", "modern"]), "Public queue page theme"));
     hub.declare("queue.lookup", ro(Meta::enumeration("off", &["full", "links", "library", "off"]), "What requests can use right now (quota/key)"));
     hub.declare("queue.quota.used", ro(Meta::int(0, [0.0, 1e9]).unit("units"), "YouTube API units used today (Pacific)"));
     hub.declare("queue.quota.remaining", ro(Meta::int(0, [0.0, 1e9]).unit("units"), "YouTube API units left today"));
@@ -98,6 +104,13 @@ fn declare(hub: &Hub) {
     );
     hub.declare("song.player", ro(Meta { ty: ValueType::Map, ..Default::default() }, "Desired state of the player page (web/player.html)"));
     hub.declare("song.volume", Meta::float(1.0, [0.0, 1.0]).owner(OWNER).describe("YouTube player volume (the music bus fader comes after it)"));
+    hub.declare("song.current.title", ro(Meta::string(""), "Current song: song title (MusicBrainz, else read from the video title); empty when no song"));
+    hub.declare("song.current.artist", ro(Meta::string(""), "Current song: artist (MusicBrainz, else read from the video title); empty when unknown"));
+    hub.declare(
+        "song.current.genres",
+        ro(Meta { ty: ValueType::List, default: Value::List(Vec::new()), ..Default::default() }, "Current song: genres, lowercase (MusicBrainz); empty when unknown"),
+    );
+    hub.declare("song.current.year", ro(Meta { ty: ValueType::Any, default: Value::Null, ..Default::default() }, "Current song: first-release year (int) or null"));
     for h in ["health.youtube", "health.player"] {
         hub.declare(h, ro(Meta { ty: ValueType::Map, ..Default::default() }, "song requests"));
     }
@@ -132,12 +145,18 @@ pub async fn spawn(ctx: EngineCtx, secrets: Arc<dyn SecretStore>) -> Result<Hand
     };
     declare(&hub);
     let relay = Relay::spawn(hub.clone(), store.clone());
+    crate::queue_page::spawn(hub.clone());
     relay.configure(settings.relay_url.clone(), relay_secret.clone());
 
     let policy: Policy = store.kv_get("policy").and_then(|v| serde_json::from_value(serde_json::Value::from(&v)).ok()).unwrap_or_default();
     let paused = store.kv_get("paused").is_some_and(|v| v.truthy());
+    let theme = match store.kv_get("theme").as_ref().and_then(Value::as_str) {
+        Some("modern") => "modern",
+        _ => "win31",
+    };
     let (current, upcoming, pending) = store.load_active()?;
     let mut player = Player::new(settings.crossfade_ms);
+    player.set_required_account(&settings.youtube_channel, &settings.youtube_delegate, Instant::now());
     if let Some(c) = &current {
         let at = store
             .kv_get("position")
@@ -145,10 +164,16 @@ pub async fn spawn(ctx: EngineCtx, secrets: Arc<dyn SecretStore>) -> Result<Hand
             .and_then(|p| p.get_path("t").and_then(Value::as_f64))
             .unwrap_or(0.0);
         player.play(c.id, &c.video, at, paused);
-        tracing::info!("songs: resuming \"{}\" at {}", c.title, fmt_duration(at as u32));
+        tracing::info!("songs: holding restored \"{}\" at {} until the embedded channel is verified", c.title, fmt_duration(at as u32));
     }
 
     let (tx, rx) = mpsc::unbounded_channel();
+    let meta_worker = {
+        let tx = tx.clone();
+        metadata::Worker::spawn(store.clone(), meta_client(&settings, &hub), move |d| {
+            let _ = tx.send(Msg::Meta(d));
+        })
+    };
     let mut songs = Songs {
         hub: hub.clone(),
         tx: tx.clone(),
@@ -163,6 +188,7 @@ pub async fn spawn(ctx: EngineCtx, secrets: Arc<dyn SecretStore>) -> Result<Hand
         queue: Queue { current, upcoming, pending },
         player,
         paused,
+        theme,
         votes: HashSet::new(),
         inflight: HashMap::new(),
         mode: None,
@@ -174,7 +200,15 @@ pub async fn spawn(ctx: EngineCtx, secrets: Arc<dyn SecretStore>) -> Result<Hand
         last_pos_save: Instant::now(),
         anchor: ((0, "idle", 0), 0.0, 0, Instant::now()),
         dirty: true,
+        meta: HashMap::new(),
+        meta_pending: HashSet::new(),
+        meta_worker,
     };
+    let restored: Vec<(String, String, String)> =
+        songs.queue.current.iter().chain(&songs.queue.upcoming).chain(&songs.queue.pending).map(|e| (e.video.clone(), e.title.clone(), e.channel.clone())).collect();
+    for (video, title, channel) in restored {
+        songs.ensure_meta(&video, &title, &channel);
+    }
     songs.sync_preload();
     songs.check_mode(false);
 
@@ -237,7 +271,12 @@ pub async fn spawn(ctx: EngineCtx, secrets: Arc<dyn SecretStore>) -> Result<Hand
                             break;
                         }
                     }
-                    Err(e) => ctx.hub.log("error", "songs", format!("project.toml: {e}; keeping the previous settings")),
+                    Err(e) => {
+                        ctx.hub.log("error", "songs", format!("project.toml: {e}; playback locked"));
+                        if tx.send(Msg::SettingsInvalid(e)).is_err() {
+                            break;
+                        }
+                    }
                 }
             }
         });
@@ -260,6 +299,7 @@ pub struct Songs {
     queue: Queue,
     player: Player,
     paused: bool,
+    theme: &'static str,
     votes: HashSet<String>,
     /// Lookups in flight per login (count toward per-user limits).
     inflight: HashMap<String, usize>,
@@ -274,6 +314,25 @@ pub struct Songs {
     /// `((entry, state, player rev), position, unix ms, taken)`.
     anchor: ((i64, &'static str, u64), f64, i64, Instant),
     dirty: bool,
+    /// Metadata of queued/current songs by video id (MusicBrainz match, else parsed title).
+    meta: HashMap<String, SongInfo>,
+    /// Videos with a lookup queued in the worker.
+    meta_pending: HashSet<String>,
+    meta_worker: metadata::Worker,
+}
+
+/// The MusicBrainz client for these settings (`None` when `[songs] metadata = false`).
+fn meta_client(s: &Settings, hub: &Hub) -> Option<Arc<metadata::Client>> {
+    if !s.metadata {
+        return None;
+    }
+    match metadata::Client::new(&s.metadata_base) {
+        Ok(c) => Some(Arc::new(c)),
+        Err(e) => {
+            hub.log("error", "songs", format!("MusicBrainz client: {e:#}"));
+            None
+        }
+    }
 }
 
 fn arg_str(args: &Value, k: &str) -> Option<String> {
@@ -332,12 +391,16 @@ impl Songs {
     }
 
     fn handle(&mut self, m: Msg) {
+        let rev = self.player.rev();
+        self.player.expire_account(Instant::now());
+        self.dirty |= self.player.rev() != rev;
         match m {
             Msg::Action(c) => self.action(c),
             Msg::Report(r, reply) => {
                 let now = Instant::now();
                 if r.get_path("ev").and_then(Value::as_str) == Some("hello") {
-                    let d = self.player.hello(now);
+                    let page = r.get_path("page").and_then(Value::as_str).unwrap_or("");
+                    let d = self.player.hello(page, now);
                     self.player_rev = 0; // force republish
                     self.dirty = true;
                     if let Some(reply) = reply {
@@ -347,6 +410,16 @@ impl Songs {
                 }
                 for o in self.player.report(&r, now) {
                     self.player_outcome(o);
+                }
+                // Unverified identity already stops both player slots and reports
+                // `queue.paused`; never persist a pause for it. A page reconnect or
+                // restart must resume on its own once the approved channel verifies.
+                if r.get_path("ev").and_then(Value::as_str) == Some("account")
+                    && self.player.account_verified(now)
+                    && !self.paused
+                    && self.queue.current.is_none()
+                {
+                    self.advance(None);
                 }
                 if let Some(entry) = self.player.take_started() {
                     self.started(entry);
@@ -378,6 +451,19 @@ impl Songs {
                 Err(e) => self.hub.log("error", "relay", format!("could not store the relay secret: {e}")),
             },
             Msg::Settings(s) => self.apply_settings(*s),
+            Msg::SettingsInvalid(error) => {
+                self.player.set_required_account("", "", Instant::now());
+                self.set_paused(true);
+                self.hub.log("warn", "songs", format!("YouTube account lock: {error}; fix [songs] youtube_channel and verify again"));
+                self.dirty = true;
+            }
+            Msg::Meta(d) => {
+                self.meta_pending.remove(&d.video);
+                if let Some(info) = d.info {
+                    self.meta.insert(d.video, info);
+                    self.dirty = true;
+                }
+            }
         }
     }
 
@@ -391,7 +477,11 @@ impl Songs {
         self.ledger.limit = s.daily_quota;
         self.ledger.link_reserve = s.link_reserve;
         self.player.set_crossfade(s.crossfade_ms);
+        self.player.set_required_account(&s.youtube_channel, &s.youtube_delegate, Instant::now());
         self.relay.configure(s.relay_url.clone(), self.relay_secret.clone());
+        if s.metadata != self.settings.metadata || s.metadata_base != self.settings.metadata_base {
+            self.meta_worker.set_client(meta_client(&s, &self.hub));
+        }
         self.settings = s;
         self.check_mode(false);
         self.dirty = true;
@@ -474,8 +564,11 @@ impl Songs {
         let cur = self.queue.current.clone();
         let next = self.queue.upcoming.first().cloned();
         let st = self.player.state();
-        self.set("queue.open", Value::Bool(self.policy.open));
-        self.set("queue.paused", Value::Bool(self.paused));
+        let verified = self.player.account_verified(Instant::now());
+        self.set("queue.open", Value::Bool(self.policy.open && verified));
+        self.set("queue.paused", Value::Bool(self.paused || !verified));
+        self.set("song.account", self.player.account(Instant::now()));
+        self.player_health();
         self.set("queue.playing", Value::Bool(st == "playing"));
         self.set("queue.length", Value::from(self.queue.upcoming.len()));
         self.set("queue.pending", Value::from(self.queue.pending.len()));
@@ -488,6 +581,7 @@ impl Songs {
         self.set("queue.next.title", Value::from(next.as_ref().map(|c| c.title.clone()).unwrap_or_default()));
         self.set("queue.next.user", Value::from(next.as_ref().map(|c| c.user.clone()).unwrap_or_default()));
         self.set("queue.url", Value::from(self.settings.queue_url.clone().unwrap_or_default()));
+        self.set("queue.theme", Value::from(self.theme));
         self.set("queue.lookup", Value::from(self.lookup_mode(now)));
         let day = self.ledger.day(now);
         self.set("queue.quota.used", Value::from(day.used));
@@ -499,6 +593,11 @@ impl Songs {
         };
         self.set("song.duration", Value::Float((dur * 1000.0).round() / 1000.0));
         self.set("song.media", Value::from(cur.as_ref().map(|c| format!("yt:{}", c.video)).unwrap_or_default()));
+        let info = cur.as_ref().map(|c| self.meta.get(&c.video).cloned().unwrap_or_else(|| SongInfo::parsed(&c.title, &c.channel)));
+        self.set("song.current.title", Value::from(info.as_ref().map(|i| i.title.clone()).unwrap_or_default()));
+        self.set("song.current.artist", Value::from(info.as_ref().and_then(|i| i.artist.clone()).unwrap_or_default()));
+        self.set("song.current.genres", Value::from(info.as_ref().map(|i| i.genres.clone()).unwrap_or_default()));
+        self.set("song.current.year", info.as_ref().and_then(|i| i.year).map(Value::from).unwrap_or(Value::Null));
         if self.player.rev() != self.player_rev {
             self.player_rev = self.player.rev();
             let d = self.player.desired();
@@ -595,6 +694,7 @@ impl Songs {
             .collect();
         Value::map()
             .with("v", 1)
+            .with("theme", self.theme)
             .with("open", self.policy.open)
             .with("paused", self.paused)
             .with("now", now_v.unwrap_or(Value::Null))
@@ -616,22 +716,24 @@ impl Songs {
     fn tick_slow(&mut self) {
         let now = Instant::now();
         self.check_mode(true);
+        self.player.expire_account(now);
         if let Some(c) = &self.queue.current
             && now.duration_since(self.last_pos_save) >= Duration::from_secs(5)
         {
             self.last_pos_save = now;
             let _ = self.store.kv_set("position", &Value::map().with("entry", c.id).with("t", self.player.position(now)));
         }
-        let waiting = self.queue.current.is_some() || !self.queue.upcoming.is_empty();
-        let (st, detail) = if self.player.connected(now) {
-            ("pass", format!("player page connected ({})", self.player.state()))
-        } else if waiting {
-            ("warn", "player page not connected — songs are waiting (web source `youtube` → /web/player.html)".to_string())
-        } else {
-            ("warn", "player page not connected (web source `youtube` → /web/player.html)".to_string())
-        };
-        self.health("health.player", st, detail);
         self.dirty = true;
+    }
+
+    fn player_health(&mut self) {
+        let now = Instant::now();
+        let (status, detail) = if self.player.account_verified(now) {
+            ("pass", format!("embedded YouTube channel {} verified ({})", self.settings.youtube_channel, self.player.state()))
+        } else {
+            ("warn", self.player.account_error().to_string())
+        };
+        self.health("health.player", status, detail);
     }
 
     // ---- actions --------------------------------------------------------------------------
@@ -667,14 +769,38 @@ impl Songs {
                 | "queue.seek"
                 | "queue.policy.set"
                 | "queue.policy.reset"
+                | "queue.theme.set"
         ) || name.starts_with("youtube.")
             || name.starts_with("relay.");
         if modonly && !Self::is_mod(&c) {
             self.hub.log("warn", "songs", format!("{name}: not permitted for {}", c.actor.as_ref().map(|a| a.name.as_str()).unwrap_or("?")));
             return;
         }
+        if matches!(name.as_str(), "queue.open" | "queue.resume") && !self.player.account_verified(Instant::now()) {
+            self.hub.log("warn", "songs", format!("{name} blocked: {}", self.player.account_error()));
+            return;
+        }
         match name.as_str() {
             "queue.request" => self.request(&c, &args),
+            "queue.theme.set" => {
+                let theme = match args.get_path("theme").or_else(|| positional(&args, 0)).and_then(Value::as_str) {
+                    Some("win31") => "win31",
+                    Some("modern") => "modern",
+                    _ => {
+                        self.hub.log("error", "songs", "queue.theme.set: theme must be win31 or modern");
+                        return;
+                    }
+                };
+                if theme != self.theme {
+                    match self.store.kv_set("theme", &Value::from(theme)) {
+                        Ok(()) => {
+                            self.theme = theme;
+                            self.dirty = true;
+                        }
+                        Err(e) => self.hub.log("error", "songs", format!("queue.theme.set: could not save theme: {e:#}")),
+                    }
+                }
+            }
             "queue.skip" => self.skip(Status::Skipped, "skipped", causal),
             "queue.voteskip" => self.voteskip(&c, &args),
             "queue.remove" => self.remove(&c, &args),
@@ -767,6 +893,9 @@ impl Songs {
                     _ => Value::Null,
                 };
                 match self.policy.patch(&changes) {
+                    Ok((p, _)) if p.open && !self.policy.open && !self.player.account_verified(Instant::now()) => {
+                        self.hub.log("warn", "songs", format!("queue.policy.set open blocked: {}", self.player.account_error()));
+                    }
                     Ok((p, changed)) => {
                         if !changed.is_empty() {
                             self.policy = p;
@@ -870,6 +999,9 @@ impl Songs {
     }
 
     fn set_paused(&mut self, paused: bool) {
+        if !paused && !self.player.account_verified(Instant::now()) {
+            return;
+        }
         if self.paused == paused {
             return;
         }
@@ -912,6 +1044,9 @@ impl Songs {
         let req = self.requester(c, args);
         let text = request_text(args);
         let p = Pending { req, text, chat: chat_origin(c) || c.actor.is_some(), causal: c.id };
+        if !self.player.account_verified(Instant::now()) {
+            return self.rejected(&p, Reject::Lookup(self.player.account_error().to_string()));
+        }
         if p.text.trim().is_empty() {
             return self.rejected(&p, Reject::Empty);
         }
@@ -943,6 +1078,9 @@ impl Songs {
     }
 
     fn gate_and_lookup(&mut self, p: Pending) {
+        if !self.player.account_verified(Instant::now()) {
+            return self.rejected(&p, Reject::Lookup(self.player.account_error().to_string()));
+        }
         if let Err(r) = self.policy.gate_requester(&p.req, &self.facts(&p.req.login), now_ms()) {
             return self.rejected(&p, r);
         }
@@ -982,6 +1120,9 @@ impl Songs {
             if *n == 0 {
                 self.inflight.remove(&p.req.login);
             }
+        }
+        if !self.player.account_verified(Instant::now()) {
+            return self.rejected(&p, Reject::Lookup(self.player.account_error().to_string()));
         }
         let found = match r {
             Ok(f) => {
@@ -1063,11 +1204,12 @@ impl Songs {
                 return self.rejected(&p, Reject::Lookup("queue storage failed".into()));
             }
         }
+        self.ensure_meta(&v.id, &v.title, &v.channel);
         let dur = fmt_duration(e.duration_s);
         let id_s = e.id.to_string();
         self.emit(
             "queue.song_requested",
-            e.to_value(None)
+            self.entry_value(&e, None)
                 .with("pending", approval)
                 .with("source", found.source.as_str())
                 .with("user_id", e.user_id.clone().map(Value::from).unwrap_or(Value::Null)),
@@ -1096,6 +1238,11 @@ impl Songs {
 
     /// Make the next upcoming entry current (or go idle).
     fn advance(&mut self, causal: Option<u64>) {
+        if !self.player.account_verified(Instant::now()) {
+            self.player.stop();
+            self.sync_preload();
+            return;
+        }
         self.votes.clear();
         match self.queue.pop_next() {
             Some(mut e) => {
@@ -1105,6 +1252,7 @@ impl Songs {
                 let _ = self.store.record_play(&e.video);
                 self.player.play(e.id, &e.video, 0.0, self.paused);
                 let (title, user) = (e.title.clone(), e.user.clone());
+                self.ensure_meta(&e.video, &e.title, &e.channel);
                 self.queue.current = Some(e);
                 self.save_order();
                 self.reply(true, "now_playing", &[("title", &title), ("user", &user)], causal);
@@ -1139,7 +1287,7 @@ impl Songs {
                 let _ = self.store.update_entry(cur);
             }
         }
-        self.emit("queue.song_started", snapshot.to_value(None), None);
+        self.emit("queue.song_started", self.entry_value(&snapshot, None), None);
     }
 
     /// End the current entry with `status` and move on.
@@ -1157,7 +1305,7 @@ impl Songs {
         }
         let _ = self.store.update_entry(&e);
         let pos = self.player.position(Instant::now());
-        self.emit("queue.song_ended", e.to_value(None).with("reason", reason).with("position", (pos * 10.0).round() / 10.0), causal);
+        self.emit("queue.song_ended", self.entry_value(&e, None).with("reason", reason).with("position", (pos * 10.0).round() / 10.0), causal);
         self.advance(causal);
         Some(e)
     }
@@ -1199,7 +1347,7 @@ impl Songs {
                 let Some(cur) = self.queue.current.clone().filter(|c| c.id == entry) else { return };
                 let why = player_error(code);
                 self.unplayable(&cur, code, why);
-                self.emit("queue.song_error", cur.to_value(None).with("code", code).with("reason", why), None);
+                self.emit("queue.song_error", self.entry_value(&cur, None).with("code", code).with("reason", why), None);
                 self.announce("error_skip", &[("title", &cur.title), ("reason", why), ("user", &cur.user)]);
                 self.finish_current(Status::Error, why, None);
             }
@@ -1208,7 +1356,7 @@ impl Songs {
                 if let Some(mut e) = self.queue.take(entry) {
                     self.unplayable(&e, code, why);
                     self.twitch_redemption(&e, false);
-                    self.emit("queue.song_error", e.to_value(None).with("code", code).with("reason", why), None);
+                    self.emit("queue.song_error", self.entry_value(&e, None).with("code", code).with("reason", why), None);
                     self.announce("error_skip", &[("title", &e.title), ("reason", why), ("user", &e.user)]);
                     e.status = Status::Error;
                     e.note = Some(why.to_string());
@@ -1226,6 +1374,50 @@ impl Songs {
         self.hub.log("warn", "songs", format!("\"{}\" can't be played ({why}, error {code}) — skipped", e.title));
         if matches!(code, 100 | 101 | 150) {
             let _ = self.store.mark_unplayable(&e.video, why);
+        }
+    }
+
+    // ---- song metadata --------------------------------------------------------------------
+
+    /// Make sure a queued/current song has metadata: the cached match (or the title read
+    /// from the video), plus a background MusicBrainz lookup when the cache has nothing
+    /// current. Never touches the player or the queue.
+    fn ensure_meta(&mut self, video: &str, title: &str, channel: &str) {
+        if self.meta_pending.contains(video) {
+            return;
+        }
+        // the library has the untruncated title
+        let (title, channel) = self.store.video(video).map(|c| (c.video.title, c.video.channel)).unwrap_or_else(|| (title.to_string(), channel.to_string()));
+        let row = self.store.song_meta(video);
+        let info = row.as_ref().and_then(|r| r.info.clone()).unwrap_or_else(|| SongInfo::parsed(&title, &channel));
+        self.prune_meta();
+        self.meta.insert(video.to_string(), info);
+        if self.settings.metadata && row.is_none_or(|r| r.due(now_ms() / 1000)) {
+            self.meta_pending.insert(video.to_string());
+            self.meta_worker.submit(metadata::Job { video: video.to_string(), title, channel });
+        }
+        self.dirty = true;
+    }
+
+    /// Keep the metadata map to songs still in the queue once it grows.
+    fn prune_meta(&mut self) {
+        if self.meta.len() < 256 {
+            return;
+        }
+        let live: HashSet<&str> = self.queue.current.iter().chain(&self.queue.upcoming).chain(&self.queue.pending).map(|e| e.video.as_str()).collect();
+        self.meta.retain(|v, _| live.contains(v.as_str()));
+    }
+
+    /// An entry as published in events/queries, with `artist`, `genres` and `year`.
+    fn entry_value(&self, e: &Entry, pos: Option<usize>) -> Value {
+        match self.meta.get(&e.video) {
+            Some(info) => info.with_fields(e.to_value(pos)),
+            None => self
+                .store
+                .song_meta(&e.video)
+                .and_then(|r| r.info)
+                .unwrap_or_else(|| SongInfo::parsed(&e.title, &e.channel))
+                .with_fields(e.to_value(pos)),
         }
     }
 
@@ -1378,12 +1570,13 @@ impl Songs {
             }
             "queue.history" => {
                 let n = args.get_path("n").and_then(Value::as_i64).unwrap_or(50).clamp(1, 1000) as usize;
-                Ok(Value::List(self.store.history(n).iter().map(|e| e.to_value(None)).collect()))
+                Ok(Value::List(self.store.history(n).iter().map(|e| self.entry_value(e, None)).collect()))
             }
             "youtube.status" => Ok(Value::map()
                 .with("key_set", self.key.is_some())
                 .with("lookup", self.lookup_mode(now))
                 .with("quota", self.quota_value(now))
+                .with("account", self.player.account(Instant::now()))
                 .with("last_error", self.last_api_error.as_ref().map(|e| Value::from(e.to_string())).unwrap_or(Value::Null))
                 .with(
                     "days",
@@ -1414,22 +1607,24 @@ impl Songs {
     fn ui_snapshot(&self, now: Timestamp) -> Value {
         let inow = Instant::now();
         let current = self.queue.current.as_ref().map(|c| {
-            c.to_value(None)
+            self.entry_value(c, None)
                 .with("position", (self.player.position(inow) * 10.0).round() / 10.0)
                 .with("state", self.player.state())
                 .with("votes", self.votes.len())
                 .with("votes_needed", self.policy.voteskip_votes)
         });
         Value::map()
-            .with("open", self.policy.open)
-            .with("paused", self.paused)
+            .with("theme", self.theme)
+            .with("open", self.policy.open && self.player.account_verified(inow))
+            .with("paused", self.paused || !self.player.account_verified(inow))
+            .with("account", self.player.account(inow))
             .with("lookup", self.lookup_mode(now))
             .with("url", self.settings.queue_url.clone().unwrap_or_default())
             .with("quota", self.quota_value(now))
             .with("now", current.unwrap_or(Value::Null))
-            .with("upcoming", self.queue.upcoming.iter().enumerate().map(|(i, e)| e.to_value(Some(i + 1))).collect::<Vec<_>>())
-            .with("pending", self.queue.pending.iter().map(|e| e.to_value(None)).collect::<Vec<_>>())
-            .with("history", self.store.history(20).iter().map(|e| e.to_value(None)).collect::<Vec<_>>())
+            .with("upcoming", self.queue.upcoming.iter().enumerate().map(|(i, e)| self.entry_value(e, Some(i + 1))).collect::<Vec<_>>())
+            .with("pending", self.queue.pending.iter().map(|e| self.entry_value(e, None)).collect::<Vec<_>>())
+            .with("history", self.store.history(20).iter().map(|e| self.entry_value(e, None)).collect::<Vec<_>>())
     }
 }
 

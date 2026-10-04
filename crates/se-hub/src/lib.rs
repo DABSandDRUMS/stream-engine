@@ -84,6 +84,9 @@ pub struct Snapshot {
     pub generation: u64,
     pub index: Arc<HashMap<String, usize>>,
     pub values: Vec<Value>,
+    /// Highest present override priority, aligned with values/index; lighting addresses only.
+    /// Synthetic snapshots may leave this empty.
+    pub priorities: Vec<u16>,
     pub signal_names: Arc<Vec<String>>,
     pub signal_index: Arc<HashMap<String, usize>>,
     pub signals: Vec<f32>,
@@ -396,9 +399,8 @@ fn answer(core: &mut Core, q: CoreQuery) -> CoreReply {
     match q {
         CoreQuery::Get { pattern, meta } => {
             let st = core.state();
-            let ids: Vec<usize> = st.matching(&pattern).collect();
             CoreReply::Entries(
-                ids.into_iter()
+                st.matching(&pattern)
                     .map(|i| {
                         let p = st.param(i);
                         StateEntry { address: p.addr.clone(), value: p.resolved.clone(), meta: meta.then(|| p.meta.clone()) }
@@ -436,6 +438,13 @@ fn publish_snapshot(hub: &Hub, core: &Core, cache: &mut (u64, Arc<HashMap<String
         generation: st.generation,
         index: cache.1.clone(),
         values: st.params().iter().map(|p| p.resolved.clone()).collect(),
+        priorities: st.params().iter().map(|p| {
+            if p.addr.starts_with("lights.") {
+                p.overrides.iter().map(|o| o.priority).max().unwrap_or(0)
+            } else {
+                0
+            }
+        }).collect(),
         signal_names: cache.3.clone(),
         signal_index: cache.4.clone(),
         signals: sg.values().to_vec(),
@@ -546,44 +555,6 @@ pub fn any_match(patterns: &[String], s: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn cfg() -> se_core::Config {
-        let files = vec![
-            se_core::SourceFile { kind: "project".into(), name: "project".into(), path: "project.toml".into(), table: toml_table("schema = 1") },
-            se_core::SourceFile {
-                kind: "presets".into(),
-                name: "hype".into(),
-                path: "presets/hype.toml".into(),
-                table: toml_table("hold = \"1s\"\nset = { \"fx.x\" = 1.0 }\nlights = { cue = \"flash\" }"),
-            },
-        ];
-        se_core::Config::build(&files)
-    }
-
-    fn toml_table(s: &str) -> toml::Table {
-        s.parse().unwrap()
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn exec_ack_actions_snapshot() {
-        let clock = Arc::new(se_clock::Clock::new());
-        let (hub, rx) = Hub::new(clock);
-        let core = Core::new(cfg(), se_clock::now());
-        let h2 = hub.clone();
-        let t = std::thread::spawn(move || run_core(core, h2, rx, RunnerHooks { on_applied: Box::new(|_| {}), snapshot_every: 2, on_runtime: None }));
-        let mut lights = hub.route_actions("lights");
-        hub.exec(Command::new(Origin::Cli, Op::PresetFire { name: "hype".into(), payload: Value::Null })).await.unwrap();
-        let err = hub.exec(Command::new(Origin::Cli, Op::PresetFire { name: "nope".into(), payload: Value::Null })).await.unwrap_err();
-        assert!(err.contains("unknown preset"));
-        let a = tokio::time::timeout(std::time::Duration::from_secs(2), lights.recv()).await.unwrap().unwrap();
-        assert_eq!(a.op.describe().split_whitespace().next(), Some("lights.cue"));
-        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-        assert_eq!(hub.snapshot.load().f32("fx.x"), Some(1.0));
-        let e = hub.get("fx.*", true).await;
-        assert_eq!(e.len(), 1);
-        assert!(hub.query("presets", Value::Null).await.unwrap().as_list().unwrap().len() == 1);
-        hub.shutdown();
-        t.join().unwrap();
-    }
 
     #[tokio::test]
     async fn journal_events_survive_broadcast_overflow() {

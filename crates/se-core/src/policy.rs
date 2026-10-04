@@ -590,6 +590,8 @@ pub struct RewardDef {
     pub filter: bool,
     /// Modes in which redemptions run (default: the policy's effect modes).
     pub modes: Option<Vec<String>>,
+    /// `fx = true`: the reward fires effects, so it is paused on Twitch while `fx.enabled` is off.
+    pub fx: bool,
 }
 
 #[derive(Deserialize)]
@@ -620,6 +622,7 @@ struct RewardFile {
     fulfill: String,
     filter: bool,
     modes: Option<Vec<String>>,
+    fx: bool,
 }
 
 impl Default for RewardFile {
@@ -643,6 +646,7 @@ impl Default for RewardFile {
             fulfill: "auto".into(),
             filter: true,
             modes: None,
+            fx: false,
         }
     }
 }
@@ -725,6 +729,7 @@ impl RewardDef {
             manual_fulfill,
             filter: f.filter,
             modes: f.modes,
+            fx: f.fx,
         })
     }
 

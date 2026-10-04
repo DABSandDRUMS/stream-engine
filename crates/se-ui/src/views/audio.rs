@@ -1,25 +1,23 @@
-//! Sound → Mix (§8, §15.6). One strip per sound channel (level, meter, mute, whether it's on
-//! stream, whether it's being lowered while you talk); the selected channel's effects as cards
-//! and the sounds that play into it; "lowered while you talk" (ducking) and tempo; a sounds pad
-//! grid and drum triggers; and an Advanced sub-view with the audio system internals (PipeWire
-//! state and links, buffer/latency, real-time scheduling, dropouts, analysis).
-//! Client of the se-audio `audio.mix` query, `audio.*` state/signals, and `audio.*` actions.
+//! Sound → Mix: actual capture sources and running app producers with source-level controls.
+//! Internal routing buses, bus effects, ducking and diagnostics live under Advanced.
+//! Client of `project.audio.inputs`, `audio.mix`, and `audio.*` state/signals/actions.
 
 use crate::app::{App, ViewId};
+use crate::views::audio_inputs;
 use crate::views::live::nice;
-use crate::views::mix::{bus_label, bus_rank, db_text};
+use crate::views::mix::{bus_rank, db_text};
 use egui::{Align, Align2, CornerRadius, Layout, Pos2, Rect, Response, RichText, Sense, Stroke, StrokeKind, Ui, UiBuilder, Vec2};
 use se_proto::{Op, Value, ValueType};
 use se_ui_kit::Theme;
 use se_ui_kit::theme::{font, font_bold, font_medium, font_mono, font_semibold, mix as blend, radius, spacing, type_scale};
-use se_ui_kit::widgets::{self, Kind, LedState, Size, Tone, icon};
+use se_ui_kit::widgets::{self, Kind, LedState, Size, icon};
 use std::time::{Duration, Instant};
 
 const MIX_EVERY: Duration = Duration::from_millis(250);
 const META_EVERY: Duration = Duration::from_secs(3);
 const DB_MIN: f64 = -60.0;
 const DB_MAX: f64 = 12.0;
-const VIEWS: [&str; 3] = ["Channels", "Sounds & drums", "Advanced"];
+const VIEWS: [&str; 3] = ["Sources", "Sounds & drums", "Advanced"];
 /// Strip height besides the fader: name, "on stream", level, mute, status line, margins.
 const STRIP_EXTRA: f32 = 172.0;
 
@@ -30,6 +28,7 @@ struct AudioState {
     view: usize,
     /// Bus whose effects and sources are shown.
     selected: Option<String>,
+    inputs: audio_inputs::State,
 }
 
 fn db_to_fader(db: f64) -> f32 {
@@ -81,6 +80,32 @@ fn fixed_label(ui: &mut Ui, w: f32, text: RichText) {
 
 // ---- who hears what ----------------------------------------------------------------------------
 
+fn bus_label(name: &str) -> String {
+    if name == "program" { "Program mix".into() } else { crate::views::mix::bus_label(name) }
+}
+
+/// Runtime buses are infrastructure, not evidence that a capture device was configured.
+fn visible_mix(data: Value, configured: &Value) -> Value {
+    let Value::Map(mut mix) = data else { return data };
+    if let Some((key, mut value)) = mix.remove_entry("buses") {
+        if let Value::List(buses) = &mut value {
+            let slots = mix.get("slots").and_then(Value::as_list).unwrap_or(&[]);
+            buses.retain(|bus| {
+                let name = s(bus, "name");
+                name == "program"
+                    || list(configured, "buses").iter().any(|saved| s(saved, "name") == name && saved.get_path("configured").is_some_and(Value::truthy))
+                    || list(configured, "inputs").iter().any(|input| s(input, "bus") == name)
+                    || slots.iter().any(|slot| s(slot, "bus") == name)
+            });
+        }
+        mix.insert(key, value);
+    }
+    if let Some(Value::List(inputs)) = mix.get_mut("inputs") {
+        inputs.retain(|input| list(configured, "inputs").iter().any(|saved| s(saved, "name") == s(input, "name")));
+    }
+    Value::Map(mix)
+}
+
 fn bus_list(data: &Value) -> Vec<&Value> {
     let mut v: Vec<&Value> = list(data, "buses").iter().collect();
     v.sort_by_key(|b| (bus_rank(s(b, "name")), s(b, "name").to_string()));
@@ -91,20 +116,6 @@ fn consumers<'a>(data: &'a Value, node: &str) -> &'a [Value] {
     data.get_path("consumers").and_then(|c| c.get_path(node)).and_then(Value::as_list).unwrap_or(&[])
 }
 
-fn program_bus(data: &Value) -> Option<&Value> {
-    list(data, "buses").iter().find(|b| s(b, "name") == "program")
-}
-
-/// Something (normally OBS) is capturing the "Everything" channel.
-fn program_heard(data: &Value) -> bool {
-    program_bus(data).is_some_and(|p| !consumers(data, s(p, "node")).is_empty())
-}
-
-/// This channel reaches the stream: captured itself, or mixed into a captured "Everything".
-fn heard(data: &Value, b: &Value) -> bool {
-    !consumers(data, s(b, "node")).is_empty() || (b.get_path("to_program").is_some_and(Value::truthy) && program_heard(data))
-}
-
 // ---- page ---------------------------------------------------------------------------------------
 
 pub fn ui(app: &mut App, ui: &mut Ui) {
@@ -112,6 +123,7 @@ pub fn ui(app: &mut App, ui: &mut Ui) {
     let id = ui.id().with("audio_view");
     let mut st: AudioState = ui.data_mut(|d| d.get_temp::<AudioState>(id).unwrap_or_default());
     let now = Instant::now();
+    st.inputs.refresh(app);
     if app.m.connected {
         if st.mix_at.is_none_or(|x| now.duration_since(x) >= MIX_EVERY) {
             st.mix_at = Some(now);
@@ -123,31 +135,39 @@ pub fn ui(app: &mut App, ui: &mut Ui) {
         }
     }
     ui.ctx().request_repaint_after(Duration::from_millis(33));
-    let data = app.m.q("audio.mix").cloned().unwrap_or_default();
+    let configured = app.m.q("project.audio.inputs").cloned().unwrap_or_default();
+    let data = visible_mix(app.m.q("audio.mix").cloned().unwrap_or_default(), &configured);
 
     top_bar(app, ui, &t, &data, &mut st);
     ui.add_space(spacing::L);
     let body_h = ui.available_height();
-    if data.is_null() {
-        widgets::panel(ui, &t, |ui| {
-            ui.set_width(ui.available_width());
-            let connected = app.m.connected;
-            let (title, body) = if connected {
-                ("Sound isn't running", "The sound part of Stream Engine hasn't started. Troubleshooting shows why.")
-            } else {
-                ("Waiting for the engine…", "Your sound channels show up here as soon as Stream Engine is running.")
-            };
-            if widgets::empty_state(ui, &t, icon::VOLUME, title, body, connected.then_some("Open troubleshooting")) {
-                app.open_view(ViewId::Troubleshoot);
+    egui::ScrollArea::vertical().id_salt("audio").auto_shrink([false, false]).show(ui, |ui| {
+        st.inputs.ui(app, ui, &t);
+        ui.add_space(spacing::L);
+        if data.is_null() {
+            widgets::panel(ui, &t, |ui| {
+                ui.set_width(ui.available_width());
+                let connected = app.m.connected;
+                let (title, body) = if connected {
+                    ("Sound isn't running", "You can manage saved capture inputs above. Troubleshooting explains why live faders and meters are unavailable.")
+                } else {
+                    ("Waiting for the engine…", "Saved inputs and live meters load when Stream Engine connects. Your unsaved draft stays here.")
+                };
+                if widgets::empty_state(ui, &t, icon::VOLUME, title, body, connected.then_some("Open troubleshooting")) {
+                    app.open_view(ViewId::Troubleshoot);
+                }
+            });
+        } else {
+            match st.view {
+                0 => source_channels(app, ui, &t, &data, &mut st.inputs),
+                1 => sounds(app, ui, &t, &data),
+                _ => {
+                    routing_buses(app, ui, &t, &data, &mut st, body_h);
+                    advanced(app, ui, &t, &data, &mut st.inputs);
+                }
             }
-        });
-    } else {
-        egui::ScrollArea::vertical().id_salt("audio").auto_shrink([false, false]).show(ui, |ui| match st.view {
-            0 => channels(app, ui, &t, &data, &mut st, body_h),
-            1 => sounds(app, ui, &t, &data),
-            _ => advanced(app, ui, &t, &data),
-        });
-    }
+        }
+    });
     ui.data_mut(|d| d.insert_temp(id, st));
 }
 
@@ -173,36 +193,67 @@ fn top_bar(app: &mut App, ui: &mut Ui, t: &Theme, data: &Value, st: &mut AudioSt
             {
                 st.view = 2;
             }
-            // on Channels a missing capture gets its own banner with the fix
-            let heard = program_heard(data);
-            if heard {
-                widgets::pill(ui, t, icon::VOLUME, "OBS hears your sound", LedState::Healthy);
-            } else if st.view != 0
-                && widgets::pill(ui, t, icon::VOLUME, "OBS can't hear your sound yet", LedState::Armed).on_hover_text("Show me how to fix it").clicked()
-            {
-                st.view = 0;
-            }
         });
     });
 }
 
 // ---- channels -----------------------------------------------------------------------------------
 
-fn channels(app: &mut App, ui: &mut Ui, t: &Theme, data: &Value, st: &mut AudioState, body_h: f32) {
+fn source_channels(app: &mut App, ui: &mut Ui, t: &Theme, data: &Value, inputs: &mut audio_inputs::State) {
+    let configured = app.m.q("project.audio.inputs").cloned().unwrap_or_default();
+    let mut srcs: Vec<Source> =
+        sources(data, &configured, app.m.q("audio.devices").unwrap_or(&Value::Null), None).into_iter().filter(|source| source.input.is_some()).collect();
+    srcs.extend(crate::views::mix::app_audio_groups(data).into_iter().map(|(bus, group)| {
+        let producers: Vec<String> =
+            list(data, "slots").iter().filter(|slot| s(slot, "bus") == bus).map(|slot| crate::views::mix::app_audio_label(s(slot, "name"))).collect();
+        Source { label: group.label, detail: producers.join(", "), addr: group.address, meter: group.meter, delay: false, input: None }
+    }));
+    for (title, capture) in [("Input sources", true), ("App audio", false)] {
+        widgets::titled(
+            ui,
+            t,
+            title,
+            if capture {
+                "The devices and source channels selected for capture."
+            } else {
+                "Sound the app plays, one control per kind. Individual layers are under Advanced."
+            },
+            |_| {},
+            |ui| {
+                let mut shown = false;
+                for source in srcs.iter().filter(|source| source.input.is_some() == capture) {
+                    shown = true;
+                    ui.push_id(&source.addr, |ui| {
+                        source_row(app, ui, t, source, inputs);
+                        if let Some(runtime) = list(data, "inputs").iter().find(|input| s(input, "address") == source.addr) {
+                            let effects: Vec<_> = list(runtime, "fx").iter().map(|effect| (String::new(), effect)).collect();
+                            if !effects.is_empty() {
+                                fx_grid(app, ui, t, data, &effects);
+                            }
+                        }
+                    });
+                }
+                if !shown {
+                    widgets::hint(ui, t, if capture { "No capture sources. Choose Add input above." } else { "No app audio is running." });
+                }
+            },
+        );
+        ui.add_space(spacing::L);
+    }
+    widgets::hint(ui, t, "Combined outputs, internal routing buses and bus effects are under Advanced.");
+}
+
+fn routing_buses(app: &mut App, ui: &mut Ui, t: &Theme, data: &Value, st: &mut AudioState, body_h: f32) {
     let buses = bus_list(data);
     if buses.is_empty() {
         widgets::panel(ui, t, |ui| {
             ui.set_width(ui.available_width());
-            widgets::empty_state(ui, t, icon::MIX, "No sound channels yet", "Channels like Mic, Music and Game come from your project's sound setup.", None);
+            widgets::empty_state(ui, t, icon::MIX, "No mix buses in use", "Add a capture input above or play sound from an app feature.", None);
         });
         return;
     }
     if !st.selected.as_deref().is_some_and(|sel| buses.iter().any(|b| s(b, "name") == sel)) {
         st.selected = buses.iter().find(|b| s(b, "name") != "program").or(buses.first()).map(|b| s(b, "name").to_string());
-    }
-    if !program_heard(data) {
-        obs_callout(app, ui, t, data);
-        ui.add_space(spacing::L);
     }
     let w = ui.available_width();
     let gap = spacing::L;
@@ -223,7 +274,7 @@ fn channels(app: &mut App, ui: &mut Ui, t: &Theme, data: &Value, st: &mut AudioS
                     space(ui);
                     ui.allocate_ui_with_layout(Vec2::new(ui.available_width(), 0.0), Layout::top_down(Align::Min), |ui| {
                         if let Some(b) = selected {
-                            channel_card(app, ui, t, data, b);
+                            channel_card(app, ui, t, data, b, &mut st.inputs);
                         }
                     });
                 });
@@ -231,7 +282,7 @@ fn channels(app: &mut App, ui: &mut Ui, t: &Theme, data: &Value, st: &mut AudioS
                 strips_card(app, ui, t, data, &buses, st, fader_h);
                 if let Some(b) = selected {
                     ui.add_space(gap);
-                    channel_card(app, ui, t, data, b);
+                    channel_card(app, ui, t, data, b, &mut st.inputs);
                 }
             }
         });
@@ -245,50 +296,12 @@ fn channels(app: &mut App, ui: &mut Ui, t: &Theme, data: &Value, st: &mut AudioS
     ui.add_space(spacing::XL);
 }
 
-fn obs_callout(app: &mut App, ui: &mut Ui, t: &Theme, data: &Value) {
-    let obs_open = app.m.b("obs.link");
-    let open = widgets::callout(
-        ui,
-        t,
-        Tone::Warn,
-        icon::VOLUME,
-        "OBS can't hear your sound yet",
-        if obs_open {
-            "Your viewers won't hear anything on this page until OBS picks it up. One click adds it; nothing in OBS is removed."
-        } else {
-            "Your viewers won't hear anything on this page until OBS picks it up. Open OBS first."
-        },
-        Some(if obs_open { "Add our sound to OBS" } else { "Open OBS" }),
-    );
-    if open {
-        if obs_open {
-            app.m.command(Op::Action { name: "obs.setup".into(), args: Value::Null });
-        } else {
-            crate::views::status::open_obs(app);
-        }
-    }
-    let name = program_bus(data).map(|p| s(p, "name")).unwrap_or("program");
-    widgets::details(ui, t, "obs-sound-howto", "Or do it by hand in OBS", |ui| {
-        for (i, step) in [
-            "In OBS, click the + button under Sources.".to_string(),
-            "Choose “Audio Input Capture (PipeWire)” and press OK.".to_string(),
-            format!("Under Device, pick “stream-engine {name}” and press OK."),
-            "Mute any other microphone or desktop sound in OBS, so nothing plays twice.".to_string(),
-        ]
-        .iter()
-        .enumerate()
-        {
-            ui.label(RichText::new(format!("{}.  {step}", i + 1)).color(t.fg));
-        }
-    });
-}
-
 fn strips_card(app: &mut App, ui: &mut Ui, t: &Theme, data: &Value, buses: &[&Value], st: &mut AudioState, fader_h: f32) {
     widgets::titled(
         ui,
         t,
-        "Channels",
-        "Drag a fader to set the level. Click a channel to see its effects.",
+        "Mix buses",
+        "These combine sounds; they are not installed devices. Select a bus for its inputs and effects.",
         |_| {},
         |ui| {
             ui.set_width(ui.available_width());
@@ -349,17 +362,16 @@ fn strip(app: &mut App, ui: &mut Ui, t: &Theme, data: &Value, b: &Value, size: V
 
     p.text(Pos2::new(cx, y + 10.0), Align2::CENTER_CENTER, &label, font_semibold(type_scale::BODY + 0.5), if muted { t.text_dim } else { t.fg });
     y += 26.0;
-    // Only "Everything" talks about OBS; the others say whether they reach it (the banner above
-    // already explains a missing OBS capture, so they stay calm then).
     let captured = !consumers(data, s(b, "node")).is_empty();
     let into_program = b.get_path("to_program").is_some_and(Value::truthy);
-    let (ic, cap, cap_c) = match (name == "program", heard(data, b)) {
-        (true, true) => (icon::CHECK, "OBS hears this", t.green),
-        (true, false) => (icon::WARN, "OBS can't hear this", t.yellow),
-        (false, true) if captured && !into_program => (icon::CHECK, "Captured on its own", t.text_dim),
-        (false, true) => (icon::CHECK, "On stream", t.text_dim),
-        (false, false) if into_program => (icon::RIGHT, "Into Everything", t.text_dim),
-        (false, false) => (icon::WARN, "Not on stream", t.yellow),
+    let (ic, cap, cap_c) = if captured {
+        (icon::CHECK, "Captured by an app", t.green)
+    } else if name == "program" {
+        (icon::MIX, "Combined mix output", t.text_dim)
+    } else if into_program {
+        (icon::RIGHT, "Into program mix", t.text_dim)
+    } else {
+        (icon::MIX, "Separate mix output", t.text_dim)
     };
     p.text(Pos2::new(cx, y + 8.0), Align2::CENTER_CENTER, format!("{ic}  {cap}"), font(type_scale::SMALL), cap_c);
     y += 28.0;
@@ -412,12 +424,12 @@ fn strip(app: &mut App, ui: &mut Ui, t: &Theme, data: &Value, b: &Value, size: V
 
 // ---- selected channel -----------------------------------------------------------------------------
 
-fn channel_card(app: &mut App, ui: &mut Ui, t: &Theme, data: &Value, b: &Value) {
+fn channel_card(app: &mut App, ui: &mut Ui, t: &Theme, data: &Value, b: &Value, inputs: &mut audio_inputs::State) {
     let name = s(b, "name").to_string();
     let addr = s(b, "address").to_string();
     let program = name == "program";
     let blurb = if program {
-        "Everything your viewers hear, after all the other channels are mixed together."
+        "The combined output of buses routed into the program mix. Capture it in the app of your choice."
     } else {
         "Its effects, and the sounds that play into it."
     };
@@ -438,7 +450,9 @@ fn channel_card(app: &mut App, ui: &mut Ui, t: &Theme, data: &Value, b: &Value) 
 
             let mut fx: Vec<(String, &Value)> = list(b, "fx").iter().map(|f| (String::new(), f)).collect();
             for i in list(data, "inputs").iter().filter(|i| s(i, "bus") == name) {
-                fx.extend(list(i, "fx").iter().map(|f| (source_label(s(i, "name")), f)));
+                let configured = app.m.q("project.audio.inputs").unwrap_or(&Value::Null);
+                let label = crate::views::mix::saved_input_label(configured, app.m.q("audio.devices").unwrap_or(&Value::Null), s(i, "name"));
+                fx.extend(list(i, "fx").iter().map(|f| (label.clone(), f)));
             }
             widgets::section(ui, t, "", &if fx.is_empty() { "Effects".to_string() } else { format!("Effects ({})", fx.len()) });
             if fx.is_empty() {
@@ -456,21 +470,29 @@ fn channel_card(app: &mut App, ui: &mut Ui, t: &Theme, data: &Value, b: &Value) 
             ui.add_space(spacing::M);
 
             widgets::section(ui, t, "", "What plays here");
-            let srcs = sources(data, Some(&name));
+            let configured = app.m.q("project.audio.inputs").cloned().unwrap_or_default();
+            let srcs = sources(data, &configured, app.m.q("audio.devices").unwrap_or(&Value::Null), Some(&name));
             if program {
-                widgets::hint(ui, t, "Every other channel that's on stream plays into this one.");
+                widgets::hint(ui, t, "Buses routed into the program mix play here.");
             } else if srcs.is_empty() {
                 widgets::hint(ui, t, "Nothing plays into this channel yet.");
             }
             for src in &srcs {
-                source_row(app, ui, t, src);
+                source_row(app, ui, t, src, inputs);
+            }
+            if srcs.iter().any(|src| src.input.is_none()) {
+                widgets::hint(
+                    ui,
+                    t,
+                    "App audio producers are not capture devices. Manage them in Song requests, Text to speech, or the feature that plays them.",
+                );
             }
             ui.add_space(spacing::S);
             widgets::details(ui, t, ("bus", &name), "Details", |ui| {
                 let node = s(b, "node");
                 let caps = consumers(data, node).iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ");
                 widgets::fact(ui, t, "Sound system name", &format!("stream-engine {name} ({node})"));
-                widgets::fact(ui, t, "Goes into Everything", if b.get_path("to_program").is_some_and(Value::truthy) { "yes" } else { "no" });
+                widgets::fact(ui, t, "Goes into program mix", if b.get_path("to_program").is_some_and(Value::truthy) { "yes" } else { "no" });
                 widgets::fact(ui, t, "Captured by", if caps.is_empty() { "nothing" } else { &caps });
                 widgets::fact(ui, t, "Address", &addr);
             });
@@ -819,17 +841,13 @@ fn param_control(app: &mut App, ui: &mut Ui, t: &Theme, addr: &str) {
 struct Source {
     label: String,
     detail: String,
+    /// Gain/mute address prefix.
     addr: String,
-}
-
-/// `patch.alertbox` → "Alertbox", `tts` → "Voice (TTS)".
-fn source_label(name: &str) -> String {
-    match name {
-        "tts" => "Read-out voice".into(),
-        "youtube" => "YouTube songs".into(),
-        n if n.starts_with("timecode") => "Show sync signal".into(),
-        n => nice(&n.strip_prefix("patch.").unwrap_or(n).replace('.', " ")),
-    }
+    /// Level signal prefix.
+    meter: String,
+    /// Has its own A/V delay (inputs and producers; groups do not).
+    delay: bool,
+    input: Option<Value>,
 }
 
 fn slot_kind(name: &str) -> &'static str {
@@ -853,33 +871,48 @@ fn channels_text(v: Option<&Value>) -> String {
     }
 }
 
-/// Inputs and app sounds that play into `bus` (`None`: the ones on no channel).
-fn sources(data: &Value, bus: Option<&str>) -> Vec<Source> {
-    let wanted = |b: &str| match bus {
-        Some(x) => b == x,
-        None => b.is_empty(),
-    };
+/// Actual capture inputs and running app producers, optionally filtered by routing bus.
+fn sources(data: &Value, configured: &Value, devices: &Value, bus: Option<&str>) -> Vec<Source> {
+    let wanted = |b: &str| bus.is_none_or(|bus| b == bus);
     let mut v = Vec::new();
-    for i in list(data, "inputs").iter().filter(|i| wanted(s(i, "bus"))) {
+    for i in list(configured, "inputs").iter().filter(|i| wanted(s(i, "bus"))) {
         let ch = channels_text(i.get_path("channels"));
         let target = s(i, "target");
         v.push(Source {
-            label: source_label(s(i, "name")),
-            detail: if ch.is_empty() { format!("From {target}") } else { format!("From {target}, {ch}") },
-            addr: s(i, "address").to_string(),
+            label: crate::views::mix::input_label(i, devices),
+            detail: if ch.is_empty() { format!("Capture input · {target}") } else { format!("Capture input · {target}, {ch}") },
+            addr: list(data, "inputs").iter().find(|runtime| s(runtime, "name") == s(i, "name")).map(|runtime| s(runtime, "address")).unwrap_or("").to_string(),
+            meter: list(data, "inputs")
+                .iter()
+                .find(|runtime| s(runtime, "name") == s(i, "name"))
+                .map(|runtime| s(runtime, "address"))
+                .unwrap_or("")
+                .to_string(),
+            delay: true,
+            input: Some(i.clone()),
         });
     }
     for sl in list(data, "slots").iter().filter(|sl| wanted(s(sl, "bus"))) {
-        v.push(Source { label: source_label(s(sl, "name")), detail: slot_kind(s(sl, "name")).to_string(), addr: s(sl, "address").to_string() });
+        v.push(Source {
+            label: crate::views::mix::app_audio_label(s(sl, "name")),
+            detail: format!("App audio · {} · managed in its originating feature", slot_kind(s(sl, "name"))),
+            addr: s(sl, "address").to_string(),
+            meter: s(sl, "address").to_string(),
+            delay: true,
+            input: None,
+        });
     }
     v
 }
 
-fn source_row(app: &mut App, ui: &mut Ui, t: &Theme, src: &Source) {
-    let lvl = app.m.sig(&format!("{}.level", src.addr)).unwrap_or(0.0);
+fn source_row(app: &mut App, ui: &mut Ui, t: &Theme, src: &Source, inputs: &mut audio_inputs::State) {
+    let lvl = app.m.sig(&format!("{}.level", src.meter)).unwrap_or(0.0);
     let mute_a = format!("{}.mute", src.addr);
     let muted = app.m.b(&mute_a);
     egui::Frame::new().fill(t.surface_hi).corner_radius(CornerRadius::same(radius::CONTROL)).inner_margin(egui::Margin::symmetric(12, 8)).show(ui, |ui| {
+        if let Some(input) = &src.input {
+            ui.horizontal_wrapped(|ui| inputs.row_actions(ui, t, input));
+        }
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
@@ -888,30 +921,38 @@ fn source_row(app: &mut App, ui: &mut Ui, t: &Theme, src: &Source) {
                 ui.add(egui::Label::new(RichText::new(&src.detail).size(type_scale::SMALL).color(t.text_dim)).truncate());
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if src.addr.is_empty() {
+                    widgets::hint(ui, t, "Saved input; waiting for the audio graph.");
+                    return;
+                }
                 let (ic, kind, tip) = if muted { (icon::MUTE, Kind::Danger, "Unmute") } else { (icon::VOLUME, Kind::Ghost, "Mute") };
-                if widgets::button_ex(ui, t, Some(ic), "", kind, Size::Small, 28.0, true).on_hover_text(tip).clicked() {
+                let response = widgets::button_ex(ui, t, Some(ic), tip, kind, Size::Small, 0.0, true);
+                response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("{tip} {}", src.label)));
+                if response.clicked() {
                     set(app, &mute_a, Value::Bool(!muted));
                 }
-                let delay = format!("{}.delay_ms", src.addr);
-                let mut d = app.m.f(&delay) as f32;
-                if ui
-                    .add(
-                        egui::DragValue::new(&mut d)
-                            .range(0.0..=2000.0)
-                            .speed(1.0)
-                            .custom_formatter(|v, _| if v < 0.5 { "In sync".into() } else { format!("{:.2} s later", v / 1000.0) })
-                            .custom_parser(|s| {
-                                let n: f64 = s.trim().trim_end_matches("s later").trim_end_matches('s').trim().parse().ok()?;
-                                Some(n * 1000.0)
-                            }),
-                    )
-                    .on_hover_text("Play this sound a little later so it lines up with your video. Drag, or type seconds.")
-                    .changed()
-                {
-                    set(app, &delay, Value::Float(d as f64));
+                if src.delay {
+                    let delay = format!("{}.delay_ms", src.addr);
+                    let mut d = app.m.f(&delay) as f32;
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut d)
+                                .range(0.0..=2000.0)
+                                .speed(1.0)
+                                .custom_formatter(|v, _| if v < 0.5 { "In sync".into() } else { format!("{:.2} s later", v / 1000.0) })
+                                .custom_parser(|s| {
+                                    let n: f64 = s.trim().trim_end_matches("s later").trim_end_matches('s').trim().parse().ok()?;
+                                    Some(n * 1000.0)
+                                }),
+                        )
+                        .on_hover_text("Play this sound a little later so it lines up with your video. Drag, or type seconds.")
+                        .changed()
+                    {
+                        set(app, &delay, Value::Float(d as f64));
+                    }
+                    ui.label(RichText::new("Line up with video").size(type_scale::SMALL).color(t.text_dim));
+                    ui.add_space(spacing::S);
                 }
-                ui.label(RichText::new("Line up with video").size(type_scale::SMALL).color(t.text_dim));
-                ui.add_space(spacing::S);
                 let gain = format!("{}.gain", src.addr);
                 let mut g = app.m.f(&gain) as f32;
                 if ui
@@ -1058,7 +1099,7 @@ fn tempo_card(app: &mut App, ui: &mut Ui, t: &Theme, data: &Value) {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if bpm > 0.0
                         && widgets::button_ex(ui, t, None, "Reset", Kind::Secondary, Size::Small, 0.0, true)
-                            .on_hover_text("Forget the tapped tempo and follow the music again")
+                            .on_hover_text("Clear the tempo override and reacquire live audio")
                             .clicked()
                     {
                         app.m.action("audio.tap.clear", Value::Null);
@@ -1072,12 +1113,22 @@ fn tempo_card(app: &mut App, ui: &mut Ui, t: &Theme, data: &Value) {
                 });
             });
             let src = data.get_path("analysis.beat.source").and_then(Value::as_str).unwrap_or("");
+            let status = data.get_path("analysis.beat.status").and_then(Value::as_str).unwrap_or("");
+            let bus = data.get_path("analysis.beat.bus").and_then(Value::as_str).unwrap_or("");
             let line = if bpm <= 0.0 {
                 "Play some music, or tap along with the beat.".to_string()
-            } else if src.is_empty() {
-                "Tap along to set it by hand.".to_string()
+            } else if status == "stopped" {
+                "Audio clock stopped; lighting freewheels at the last tempo.".to_string()
+            } else if src == "fallback" {
+                "Freewheeling: no confident live beat lock. Tap along to set the tempo.".to_string()
+            } else if src == "manual" {
+                "Explicit BPM override. Reset to reacquire live audio.".to_string()
+            } else if src == "tap" {
+                "Tapped tempo override. Reset to reacquire live audio.".to_string()
+            } else if src == "live" {
+                format!("Locked to {}. Tap along to override.", bus_label(bus))
             } else {
-                format!("Following {}. Tap along to set it by hand.", bus_label(src))
+                "Waiting for clock status. Tap along to set it by hand.".to_string()
             };
             widgets::hint(ui, t, &line);
         },
@@ -1182,7 +1233,7 @@ fn drum_pad(app: &mut App, ui: &mut Ui, t: &Theme, n: &str) {
 
 // ---- advanced -------------------------------------------------------------------------------------
 
-fn advanced(app: &mut App, ui: &mut Ui, t: &Theme, data: &Value) {
+fn advanced(app: &mut App, ui: &mut Ui, t: &Theme, data: &Value, inputs: &mut audio_inputs::State) {
     widgets::hint(ui, t, "How the sound system is running, for fixing problems. Nothing here needs changing for a normal stream.");
     ui.add_space(spacing::M);
     ui.columns(2, |cols| {
@@ -1201,12 +1252,13 @@ fn advanced(app: &mut App, ui: &mut Ui, t: &Theme, data: &Value) {
             |_| {},
             |ui| {
                 ui.set_width(ui.available_width());
-                let srcs = sources(data, None);
+                let configured = app.m.q("project.audio.inputs").cloned().unwrap_or_default();
+                let srcs = sources(data, &configured, app.m.q("audio.devices").unwrap_or(&Value::Null), Some(""));
                 if srcs.is_empty() {
                     widgets::hint(ui, t, "Every source plays into a channel.");
                 }
                 for src in &srcs {
-                    source_row(app, ui, t, src);
+                    source_row(app, ui, t, src, inputs);
                 }
             },
         );
@@ -1297,7 +1349,12 @@ fn system_card(app: &mut App, ui: &mut Ui, t: &Theme, data: &Value) {
                 app.m.under("health.audio.input").map(|(a, v)| (a.rsplit('.').next().unwrap_or(a).to_string(), v.clone())).collect();
             for (name, h) in &inputs {
                 let detail = s(h, "detail");
-                status_row(ui, t, health_led(Some(h)), &format!("Input: {}", source_label(name)), detail, "");
+                let label = crate::views::mix::saved_input_label(
+                    app.m.q("project.audio.inputs").unwrap_or(&Value::Null),
+                    app.m.q("audio.devices").unwrap_or(&Value::Null),
+                    name,
+                );
+                status_row(ui, t, health_led(Some(h)), &format!("Input: {label}"), detail, "");
             }
             for e in list(data, "errors") {
                 status_row(ui, t, LedState::Error, "Problem", e.as_str().unwrap_or(""), "");
@@ -1318,7 +1375,7 @@ fn outputs_card(ui: &mut Ui, t: &Theme, data: &Value) {
             for b in bus_list(data) {
                 let node = s(b, "node");
                 let caps = consumers(data, node).iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ");
-                let into = if b.get_path("to_program").is_some_and(Value::truthy) { " · into Everything" } else { "" };
+                let into = if b.get_path("to_program").is_some_and(Value::truthy) { " · into program mix" } else { "" };
                 let led = if caps.is_empty() { LedState::Idle } else { LedState::Healthy };
                 status_row(ui, t, led, &bus_label(s(b, "name")), &format!("{node}{into} → {}", if caps.is_empty() { "not captured" } else { &caps }), "");
             }
@@ -1441,5 +1498,26 @@ mod tests {
         }
         assert_eq!(db_to_fader(DB_MIN - 10.0), 0.0);
         assert_eq!(db_to_fader(DB_MAX + 5.0), 1.0);
+    }
+
+    #[test]
+    fn mixer_only_shows_configured_or_used_buses_and_saved_capture_inputs() {
+        let data = Value::map()
+            .with("buses", Value::List(["band", "game", "mic", "music", "custom", "program"].iter().map(|name| Value::map().with("name", *name)).collect()))
+            .with(
+                "inputs",
+                Value::List(vec![Value::map().with("name", "legacy_default").with("bus", "band"), Value::map().with("name", "desk").with("bus", "mic")]),
+            )
+            .with("slots", Value::List(vec![Value::map().with("name", "youtube").with("bus", "music")]));
+        let configured = Value::map()
+            .with(
+                "buses",
+                Value::List(vec![Value::map().with("name", "game").with("configured", false), Value::map().with("name", "custom").with("configured", true)]),
+            )
+            .with("inputs", Value::List(vec![Value::map().with("name", "desk").with("bus", "mic")]));
+        let shown = visible_mix(data, &configured);
+        assert_eq!(list(&shown, "buses").iter().map(|bus| s(bus, "name")).collect::<Vec<_>>(), ["mic", "music", "custom", "program"]);
+        assert_eq!(list(&shown, "inputs").iter().map(|input| s(input, "name")).collect::<Vec<_>>(), ["desk"]);
+        assert!(visible_mix(Value::Null, &configured).is_null());
     }
 }

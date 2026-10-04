@@ -1,0 +1,78 @@
+{
+  "id": "a1b2c3d4-0000-4000-8000-000000000002",
+  "title": "A Night at the Opera",
+  "primary-type": "Album",
+  "primary-type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+  "secondary-types": [],
+  "secondary-type-ids": [],
+  "first-release-date": "1975-11-21",
+  "disambiguation": "",
+  "genres": [
+    {
+      "id": "g1",
+      "name": "progressive rock",
+      "count": 6,
+      "disambiguation": ""
+    },
+    {
+      "id": "g2",
+      "name": "hard rock",
+      "count": 5,
+      "disambiguation": ""
+    },
+    {
+      "id": "g3",
+      "name": "art rock",
+      "count": 4,
+      "disambiguation": ""
+    },
+    {
+      "id": "g4",
+      "name": "pop rock",
+      "count": 3,
+      "disambiguation": ""
+    },
+    {
+      "id": "g5",
+      "name": "rock",
+      "count": 2,
+      "disambiguation": ""
+    },
+    {
+      "id": "g6",
+      "name": "glam rock",
+      "count": 1,
+      "disambiguation": ""
+    }
+  ],
+  "tags": [
+    {
+      "name": "progressive rock",
+      "count": 6
+    },
+    {
+      "name": "hard rock",
+      "count": 5
+    },
+    {
+      "name": "classic rock",
+      "count": 4
+    },
+    {
+      "name": "art rock",
+      "count": 4
+    },
+    {
+      "name": "pop rock",
+      "count": 3
+    },
+    {
+      "name": "rock",
+      "count": 2
+    },
+    {
+      "name": "glam rock",
+      "count": 1
+    }
+  ]
+}

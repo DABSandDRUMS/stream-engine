@@ -1,0 +1,17 @@
+# Song end flourish: the final-hit moment as a little movie ending with a Win 3.1 thank-you box.
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "effect"
+label       = "Song End Flourish"
+description = "Final-hit moment: a slow push-in with film grain, letterbox bars and softened colour while a Windows 3.1 Thank you! dialog pops up, all easing back out on release"
+params.amount   = { type = "float", default = 1.0, range = [0.0, 1.0], description = "Overall strength of the grade, grain, zoom and bars" }
+params.zoom     = { type = "float", default = 0.12, range = [0.0, 0.3], description = "How far the slow push-in goes (fraction of the frame)" }
+params.focus    = { type = "vec2", default = [0.5, 0.48], range = [0.0, 1.0], description = "Point the push-in moves toward (0-1 of the node)" }
+params.bars     = { type = "float", default = 0.1, range = [0.0, 0.25], description = "Letterbox bar height (fraction of the frame, each)" }
+params.grain    = { type = "float", default = 0.07, range = [0.0, 0.2], description = "Film grain strength" }
+params.desaturate = { type = "float", default = 0.35, range = [0.0, 1.0], description = "How much colour drains out" }
+params.dialog   = { type = "bool", default = true, description = "Pop up the Thank you! dialog" }
+params.position = { type = "vec2", default = [0.5, 0.7], range = [0.0, 1.0], description = "Dialog center (0-1 of the frame); low by default to keep faces clear" }
+params.scale    = { type = "float", default = 1.0, range = [0.5, 3.0], description = "Dialog size; pixels snap to whole multiples" }
+trigger = { attack = "400ms", hold = "5s", release = "1.2s", retrigger = "replace" }
+budget = { gpu_ms = 0.2 }

@@ -15,6 +15,13 @@ quantum = 256
 fx = [{ name = "stutter", kind = "stutter", trigger = true, division = "1/8" }]
 "#;
 
+const BAND_CAPTURE: &str = r#"
+quantum = 256
+[inputs.band]
+target = "test-capture"
+channels = [1, 2]
+"#;
+
 fn bus(r: &Rig, name: &str) -> u8 {
     r.cfg.bus_index(name).unwrap() as u8
 }
@@ -31,7 +38,7 @@ fn attach_slot(r: &mut Rig, name: &str, index: u16, channels: u16) -> rtrb::Prod
 
 #[test]
 fn band_input_reaches_band_and_program_nodes_and_follows_the_fader() {
-    let mut r = Rig::new("quantum = 256");
+    let mut r = Rig::new(BAND_CAPTURE);
     let (il, ir) = (r.in_port("in_band_1"), r.in_port("in_band_2"));
     let band = r.out_port("out_band_L");
     let out = r.run(60, &[il, ir], sine(1000.0, 0.25), band);
@@ -51,7 +58,7 @@ fn band_input_reaches_band_and_program_nodes_and_follows_the_fader() {
 
 #[test]
 fn motherboard_playback_keeps_the_24c_capture_out_and_follows_the_music_fader() {
-    let mut r = Rig::new("quantum = 256\n[playback]\ntarget = \"Motherboard Audio Speakers\"\nbuses = [\"music\", \"sfx\", \"tts\", \"game\"]");
+    let mut r = Rig::new(&format!("{BAND_CAPTURE}\n[playback]\ntarget = \"Motherboard Audio Speakers\"\nbuses = [\"music\", \"sfx\", \"tts\", \"game\"]"));
     for (port, channel) in [("play_1", 1), ("play_2", 2)] {
         assert!(
             r.built.links.iter().any(|link| { link.port == port && link.to == LinkTarget::Sink { target: "Motherboard Audio Speakers".into(), channel } }),
@@ -88,7 +95,7 @@ fn motherboard_playback_keeps_the_24c_capture_out_and_follows_the_music_fader() 
 
 #[test]
 fn mute_ramps_without_clicks() {
-    let mut r = Rig::new("quantum = 128");
+    let mut r = Rig::new("quantum = 128\n[inputs.band]\ntarget = \"test-capture\"\nchannels = [1, 2]");
     let (il, ir) = (r.in_port("in_band_1"), r.in_port("in_band_2"));
     let band = r.out_port("out_band_L");
     r.run(20, &[il, ir], |_| 0.5, band);
@@ -102,7 +109,7 @@ fn mute_ramps_without_clicks() {
 
 #[test]
 fn program_limiter_never_exceeds_the_ceiling() {
-    let mut r = Rig::new("quantum = 256\n[buses.program]\nceiling = -1.0");
+    let mut r = Rig::new(&format!("{BAND_CAPTURE}\n[buses.program]\nceiling = -1.0"));
     let (il, ir) = (r.in_port("in_band_1"), r.in_port("in_band_2"));
     let prog = r.out_port("out_program_L");
     let out = r.run(200, &[il, ir], sine(220.0, 2.0), prog);
@@ -202,7 +209,7 @@ bus = "music"
 
 #[test]
 fn input_av_delay_shifts_audio() {
-    let mut r = Rig::new("quantum = 256");
+    let mut r = Rig::new(BAND_CAPTURE);
     let (il, ir) = (r.in_port("in_band_1"), r.in_port("in_band_2"));
     let band = r.out_port("out_band_L");
     r.param(Target::InputDelay(0), 10.0);
@@ -272,12 +279,12 @@ fn stutter_on_the_music_bus_is_tempo_synced_and_click_free() {
 
 #[test]
 fn graph_swap_crossfades_without_clicks() {
-    let mut r = Rig::new("quantum = 256");
+    let mut r = Rig::new(BAND_CAPTURE);
     let (il, ir) = (r.in_port("in_band_1"), r.in_port("in_band_2"));
     let band = r.out_port("out_band_L");
     let mut out = r.run(20, &[il, ir], sine(200.0, 0.5), band);
     // generation 2 with the band bus at -12 dB
-    let cfg2 = cfg("quantum = 256\n[buses.band]\ngain = -12.0");
+    let cfg2 = cfg(&format!("{BAND_CAPTURE}\n[buses.band]\ngain = -12.0"));
     let (bank, _) = se_audio::sounds::build_bank(&cfg2, std::path::Path::new("/nonexistent"), &mut se_audio::sounds::SoundCache::default());
     let mut built = se_audio::builder::build(&cfg2, 2, &mut r.ports, bank, &se_audio::wasmfx::DspPatches::new(1000));
     r.send(RtMsg::Swap(built.graph.take().unwrap()));
@@ -297,7 +304,7 @@ fn graph_swap_crossfades_without_clicks() {
 
 #[test]
 fn taps_deliver_bus_input_with_block_stamps() {
-    let mut r = Rig::new("quantum = 256");
+    let mut r = Rig::new(BAND_CAPTURE);
     let (sp, mut sc) = rtrb::RingBuffer::new(48000);
     let (cp, mut cc) = rtrb::RingBuffer::new(64);
     let producer = TapProducer { name: "bus.band.0".into(), samples: sp, clock: cp, written: 0, dropped: 0 };

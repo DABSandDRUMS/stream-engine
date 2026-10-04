@@ -1,0 +1,13 @@
+# Solitaire victory: the Windows Solitaire win cascade as a trigger-driven overlay.
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "overlay"
+label       = "Solitaire Victory"
+description = "Classic Solitaire win cascade: cards leap off the foundations and bounce away, stamping trails"
+params.cards   = { type = "float", default = 14.0, range = [4.0, 52.0], description = "Cards per cascade (bigger trigger amounts add more)" }
+params.gravity = { type = "float", default = 3.2, range = [0.5, 8.0], description = "Fall acceleration (screen heights per second squared)" }
+params.bounce  = { type = "float", default = 0.72, range = [0.3, 0.92], description = "Share of speed kept on each bounce" }
+params.size    = { type = "float", default = 0.17, range = [0.06, 0.35], description = "Card height (fraction of the screen, snapped to whole pixels)" }
+params.trail   = { type = "float", default = 18.0, range = [4.0, 40.0], description = "Trail stamps per second (Win 3.1 ticked about 18)" }
+trigger = { attack = "100ms", hold = "5s", release = "1200ms", retrigger = "replace" }
+budget  = { gpu_ms = 0.5 }

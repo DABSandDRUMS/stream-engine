@@ -24,11 +24,17 @@ IPC thread ◀─ events + memfds (SCM_RIGHTS) ───── on_paint → seal
   `Bgra8` (**premultiplied alpha**, upper-left origin, `stride = width × 4`) stamped with the paint
   time on the master clock, then hands the slot back. Pages without a background are
   transparent.
+  Per-frame IPC notifications reuse a bounded thread-local serialization buffer; packet
+  format and file-descriptor ownership are unchanged.
 - **Audio:** CEF is asked for 48 kHz stereo; packets are interleaved into a shared-memory
   single-producer/single-consumer ring and moved into the `hub.audio` slot (interleaved `f32`,
   2 ch, 48 kHz, 0.5 s buffer). With an audio handler Chromium plays nothing to the speakers.
 - **Chromium setup:** `--ozone-platform=headless` (no display server needed), WebGL and
-  compositing on the RTX 3070 through ANGLE on Vulkan (`--use-angle=vulkan`), `--no-sandbox`,
+  compositing on the RTX 3070 through ANGLE on Vulkan (`--use-angle=vulkan`), with
+  `--enable-features=Vulkan,VulkanFromANGLE` so the compositor and ANGLE share Vulkan.
+  ANGLE alone fails to import decoded native video buffers (`MailboxVideoFrameConverter`),
+  resetting the GPU process and stopping video; WebGL-only smoke checks miss this failure.
+  Acceleration stays enabled. Other switches: `--no-sandbox`,
   `--autoplay-policy=no-user-gesture-required`, background throttling off, no media-key/MPRIS
   integration, `--password-store=basic` (cookies never depend on an unlocked keyring).
 - **Isolation:** a renderer crash is reported and the page reloads (0.25 s, doubling up to 30 s
@@ -36,6 +42,11 @@ IPC thread ◀─ events + memfds (SCM_RIGHTS) ───── on_paint → seal
   (after 0.25 s, doubling up to 30 s; reset after 30 s of stable running). Video slots keep their last
   frame meanwhile; the engine is unaffected. Shared memory is sealed against shrinking and
   validated before mapping, so a broken host cannot fault the engine.
+- **Process launch and teardown:** the control socket is mapped to standard input through
+  standard spawn file actions (`--se-ipc-fd=0`), without a `pre_exec` closure or engine-side
+  fork. The host marks it close-on-exec before Chromium subprocesses start. Engine socket
+  hangup closes the browsers and exits the host; stderr diagnostics are best-effort and
+  cannot panic inside CEF callbacks when the engine's log reader has already disappeared.
 
 ## Install
 
@@ -60,7 +71,8 @@ it) and starts it with `LD_LIBRARY_PATH` set to that directory (the binary also 
 4. `~/.local/share/stream-engine/cef/bin/stream-engine-web`
 
 The host is started when the first web source appears and stopped 30 s after the last one goes
-away. Installing while the engine runs is picked up automatically.
+away. A newly installed runtime is detected while the engine runs. Replacing a running
+host binary takes effect on its next launch; activate an upgrade only during an off-air window.
 
 ## Sources
 
@@ -163,6 +175,15 @@ The profile directory contains the signed-in Google session: treat it like a bro
 - **No sound from a page** — web audio never reaches the speakers directly; it goes to the
   `patch.<id>` / `youtube` audio slots and from there through the audio graph (`music` bus for
   the player).
+
+## Real-host verification
+
+`cargo test -p se-web --test cef_host -- --ignored --nocapture --test-threads=1`
+uses private profiles and requires an installed CEF runtime. It verifies rendered
+pixels, renderer/host crash recovery, WebAudio, decoded-video playback across loops
+(`ffmpeg` with `libvpx-vp9` required), and browser teardown after both the engine IPC
+socket and stderr reader disappear. The teardown must exit cleanly before the
+shutdown watchdog; a page rendering successfully is not proof of a clean host exit.
 
 ## Future: shared-texture (zero-copy) path
 

@@ -1,0 +1,21 @@
+# Chat bubbles: every chat message (one patch trigger each) pops a small pixel speech bubble in the
+# chatter's colour near the left or right screen edge, tail pointing at that edge. No text: it shows
+# animated typing dots or a tiny emote (heart, smiley, star, note, "!", laughing face), and the
+# choice comes from user_hash, so each regular always gets the same glyph. Bubbles pop in with a
+# stepped overshoot, jelly-wobble (re-kicked by the kick drum), hop on kicks, float up and dither
+# out. A ring caps how many are up at once (the oldest is reused). No manifest trigger: the layer
+# is always drawn and messages are counted via se.trigger_count (up to 3 per frame).
+# Rule idea: do = ["patch.chat_bubbles.trigger"] on `twitch.chat` (the user/colour come from the event).
+kind        = "particles"
+layer       = "overlay"
+label       = "Chat bubbles"
+description = "Each chat message pops a wobbly pixel speech bubble with typing dots or a tiny emote in the chatter's colour along the screen edges"
+particles   = { count = 64, sim = "sim.wgsl", draw = "draw.wgsl" }
+params.max_bubbles = { type = "int",   default = 10, range = [1, 62], description = "Most bubbles on screen at once (the oldest is replaced)" }
+params.pixel       = { type = "float", default = 0.005, range = [0.002, 0.012], description = "Size of one bubble pixel (fraction of layer height)" }
+params.life        = { type = "float", default = 3.2, range = [1.0, 8.0], unit = "s", description = "How long a bubble stays up" }
+params.rise        = { type = "float", default = 0.08, range = [0.0, 0.3], description = "Upward float speed (layer heights per second)" }
+params.inset       = { type = "float", default = 0.1, range = [0.0, 0.35], description = "How far in from the left/right edge bubbles may appear" }
+params.band        = { type = "vec2",  default = [0.45, 0.88], range = [0.0, 1.0], description = "Vertical range bubbles spawn in (top, bottom; 0-1, y down)" }
+params.wobble      = { type = "float", default = 1.0, range = [0.0, 2.0], description = "Jelly wobble and kick hop strength" }
+budget      = { gpu_ms = 0.1 }

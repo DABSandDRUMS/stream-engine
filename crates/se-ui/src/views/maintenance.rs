@@ -211,7 +211,7 @@ fn recordings(app: &mut App, ui: &mut Ui, t: &Theme, r: &Value) {
         ui,
         t,
         "Space for recordings",
-        "OBS recordings of your streams, kept for making clips.",
+        "App recordings of your selected sources, kept for making clips.",
         |_| {},
         |ui| {
             ui.set_width(ui.available_width());

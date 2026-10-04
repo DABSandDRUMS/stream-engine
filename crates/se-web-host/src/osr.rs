@@ -51,6 +51,7 @@ pub struct Shared {
     url: Mutex<String>,
     crashes: Mutex<VecDeque<Instant>>,
     console: Mutex<(Instant, u32)>,
+    youtube_account: Option<protocol::YoutubeAccount>,
 }
 
 impl Shared {
@@ -301,6 +302,10 @@ wrap_load_handler! {
         }
 
         fn on_load_end(&self, _browser: Option<&mut Browser>, frame: Option<&mut Frame>, http_status_code: c_int) {
+            let mut frame = frame;
+            if let (Some(policy), Some(frame)) = (&self.s.youtube_account, frame.as_deref_mut()) {
+                crate::youtube::inject(frame, policy);
+            }
             if is_main(frame) {
                 ipc::send(&FromHost::Loaded { id: self.s.id, status: http_status_code }, None);
             }
@@ -323,12 +328,49 @@ wrap_load_handler! {
     }
 }
 
-wrap_request_handler! {
-    struct OsrRequests {
+wrap_resource_request_handler! {
+    struct YoutubeResources {
         s: Arc<Shared>,
     }
 
+    impl ResourceRequestHandler {
+        fn on_before_resource_load(
+            &self,
+            _browser: Option<&mut Browser>,
+            _frame: Option<&mut Frame>,
+            request: Option<&mut Request>,
+            _callback: Option<&mut Callback>,
+        ) -> ReturnValue {
+            match (request, &self.s.youtube_account) {
+                (Some(request), Some(policy)) => {
+                    if crate::youtube::allow(request, policy) { ReturnValue::CONTINUE } else { ReturnValue::CANCEL }
+                }
+                _ => ReturnValue::CANCEL,
+            }
+        }
+    }
+}
+
+wrap_request_handler! {
+    struct OsrRequests {
+        s: Arc<Shared>,
+        resources: Option<ResourceRequestHandler>,
+    }
+
     impl RequestHandler {
+        fn resource_request_handler(
+            &self,
+            _browser: Option<&mut Browser>,
+            _frame: Option<&mut Frame>,
+            _request: Option<&mut Request>,
+            _is_navigation: c_int,
+            _is_download: c_int,
+            _request_initiator: Option<&CefString>,
+            _disable_default_handling: Option<&mut c_int>,
+        ) -> Option<ResourceRequestHandler> {
+            self.resources.clone()
+        }
+
         fn on_render_process_terminated(
             &self,
             _browser: Option<&mut Browser>,
@@ -493,7 +535,7 @@ pub fn frame_done(id: u32, surface: u32, slot: u32) {
 /// Execute an engine command (UI thread).
 pub fn command(msg: ToHost) {
     match msg {
-        ToHost::Open { id, url, width, height, fps } => open(id, url, width, height, fps),
+        ToHost::Open { id, url, width, height, fps, youtube_account } => open(id, url, width, height, fps, youtube_account),
         ToHost::Close { id } => with_browser(id, |b| {
             if let Some(h) = b.host() {
                 h.close_browser(1);
@@ -533,7 +575,7 @@ pub fn command(msg: ToHost) {
     }
 }
 
-fn open(id: u32, url: String, width: u32, height: u32, fps: u32) {
+fn open(id: u32, url: String, width: u32, height: u32, fps: u32, youtube_account: Option<protocol::YoutubeAccount>) {
     if shared(id).is_some() || SHUTTING_DOWN.get() {
         return;
     }
@@ -546,14 +588,16 @@ fn open(id: u32, url: String, width: u32, height: u32, fps: u32) {
         url: Mutex::new(url.clone()),
         crashes: Mutex::new(VecDeque::new()),
         console: Mutex::new((Instant::now(), 0)),
+        youtube_account,
     });
     s.set_size(width, height);
     SHARED.lock().insert(id, s.clone());
+    let resources = s.youtube_account.as_ref().map(|_| YoutubeResources::new(s.clone()));
     let mut client = OsrClient::new(
         OsrRender::new(s.clone()),
         OsrAudio::new(s.clone()),
         OsrLoad::new(s.clone()),
-        OsrRequests::new(s.clone()),
+        OsrRequests::new(s.clone(), resources),
         OsrLifeSpan::new(s.clone()),
         OsrDialogs::new(),
         OsrDisplay::new(s.clone()),

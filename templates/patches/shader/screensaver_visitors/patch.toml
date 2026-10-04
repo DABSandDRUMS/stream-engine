@@ -1,0 +1,20 @@
+# Screensaver visitors: occasional retro screensaver guests crossing the picture — flying
+# toasters flapping on the beat, pixel fish, and an optional bouncing disc logo that changes
+# colour on every wall hit. Sparse on purpose (a rare visitor is funnier). Firing
+# `patch.screensaver_visitors.trigger` sends a whole flock (bigger tier = bigger flock).
+# Always-on effect: attach it (`fx = [{ name = "patch.screensaver_visitors" }]`) to the camera
+# source/node or the canvas; no manifest trigger, so ambient visitors never hide.
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "effect"
+label       = "Screensaver visitors"
+description = "Now and then a flying toaster or pixel fish drifts across; a trigger sends a whole flock"
+params.amount   = { type = "float", default = 1.0, range = [0.0, 1.0], description = "Overall opacity" }
+params.visitor  = { type = "enum", options = ["toasters", "fish", "mixed"], default = "toasters", description = "Who visits" }
+params.ghost    = { type = "bool", default = false, description = "Faint see-through visitors (behind-the-subject feel)" }
+params.logo     = { type = "bool", default = false, description = "Also bounce a disc logo around the frame" }
+params.size     = { type = "float", default = 4.0, range = [1.0, 8.0], description = "Art pixel size (screen pixels at 720p)" }
+params.speed    = { type = "float", default = 1.0, range = [0.25, 3.0], description = "Travel speed" }
+params.interval = { type = "float", default = 24.0, range = [5.0, 300.0], description = "Seconds between visit chances per lane (3 lanes)" }
+params.chance   = { type = "float", default = 0.5, range = [0.0, 1.0], description = "Chance that a lane cycle brings a visitor" }
+budget = { gpu_ms = 0.4 }

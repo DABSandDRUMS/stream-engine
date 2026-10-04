@@ -1,10 +1,9 @@
 //! Text edits for the Scenes editor, made to `scenes/<name>.toml`: add, remove, reorder and
-//! duplicate layers; swap what a layer shows; a layer's effects (and their settings), blend,
-//! mask, enter/exit animation and when it shows; the scene's effects, number key, lights,
-//! what it does coming on and going off, its background color and transition speed; new and
-//! duplicated scenes. Pure text → text with `toml_edit`, so comments and formatting the owner
-//! wrote survive; the page sends the result with `project.write {path, text}` and the engine
-//! hot-reloads it. Also the engine's effect library in plain words ([`EFFECTS`]).
+//! duplicate layers; swap what a layer shows; blend, mask, enter/exit animation and conditions;
+//! number key, lights, enter/exit actions, background color, transition speed, and new scenes.
+//! Pure text → text with `toml_edit`, preserving the owner's comments and formatting, sent
+//! through `project.write`. Video FX authoring uses the shared action-based `fx_rack` editor.
+//! Also the effect catalog in plain words ([`EFFECTS`]) and normalized slot query decoding.
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, TableLike, Value, value};
@@ -162,112 +161,68 @@ pub fn effect_name(id: &str) -> String {
     }
 }
 
-/// One plain line about a built-in effect; empty for custom ones.
-pub fn effect_about(id: &str) -> &'static str {
-    effect_def(id).map_or("", |e| e.about)
-}
-
-/// A setting written in an effect entry.
-#[derive(Clone, Debug, PartialEq)]
-pub enum FxValue {
-    Num(f64),
-    Text(String),
-}
-
-impl FxValue {
-    fn toml(&self) -> Value {
-        match self {
-            FxValue::Num(x) => ((x * 10000.0).round() / 10000.0).into(),
-            FxValue::Text(s) => s.as_str().into(),
-        }
-    }
-}
-
-/// What a new entry of the built-in `id` writes: its strength and every setting at the default,
-/// so each is this layer's own setting from the start (switchable, followable), not the shared
-/// one. Custom effects: nothing (the page adds their numeric settings).
-pub fn fx_defaults(id: &str) -> Vec<(String, FxValue)> {
-    let Some(e) = effect_def(id) else { return Vec::new() };
-    std::iter::once(&STRENGTH).chain(e.params).map(|p| (p.name.to_string(), FxValue::Num(p.default))).collect()
-}
-
 /// One effect entry as written in a file.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FxEntry {
+    pub id: String,
     pub name: String,
-    /// `enabled = false` in the file: a layer's effect is off; a scene's shows only while
-    /// something fires it.
+    /// True bypass gate, independent of the effect-kind trigger envelope.
     pub enabled: bool,
-    /// Numeric settings written in the entry.
-    pub nums: Vec<(String, f64)>,
-    /// Text settings written in the entry (the `file` of a color look).
-    pub texts: Vec<(String, String)>,
-    pub when: Option<String>,
-    /// Written as just its name (`fx = ["blur"]`): the engine can't save a switch into it.
-    pub bare: bool,
+    pub triggered: bool,
+    /// Authored settings, retaining their types (including colors, booleans and files).
+    pub params: std::collections::BTreeMap<String, se_proto::Value>,
 }
 
 impl FxEntry {
     pub fn num(&self, key: &str) -> Option<f64> {
-        self.nums.iter().find(|(k, _)| k == key).map(|(_, v)| *v)
+        self.params.get(key).and_then(se_proto::Value::as_f64)
     }
     pub fn text(&self, key: &str) -> Option<&str> {
-        self.texts.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+        self.params.get(key).and_then(se_proto::Value::as_str)
     }
 }
 
-/// Keys of an effect entry that aren't the effect's settings.
-const FX_KEYS: [&str; 5] = ["name", "when", "group", "hold", "enabled"];
-
-fn fx_entry(v: &Value) -> Option<FxEntry> {
-    match v {
-        Value::String(s) => Some(FxEntry { name: s.value().clone(), enabled: true, bare: true, ..FxEntry::default() }),
-        Value::InlineTable(t) => {
-            let mut e = FxEntry {
-                name: t.get("name")?.as_str()?.to_string(),
-                enabled: t.get("enabled").and_then(Value::as_bool).unwrap_or(true),
-                when: t.get("when").and_then(Value::as_str).map(String::from),
-                ..FxEntry::default()
-            };
-            for (k, v) in t.iter().filter(|(k, _)| !FX_KEYS.contains(k)) {
-                match v {
-                    Value::Float(f) => e.nums.push((k.to_string(), *f.value())),
-                    Value::Integer(i) => e.nums.push((k.to_string(), *i.value() as f64)),
-                    Value::String(s) => e.texts.push((k.to_string(), s.value().clone())),
-                    _ => {}
+/// Decode either raw TOML query entries or the normalized scene attachment shape.
+/// Legacy names receive the same deterministic identity as the core config loader.
+pub fn fx_values(values: &[se_proto::Value]) -> Vec<FxEntry> {
+    use se_proto::Value as V;
+    let mut used: std::collections::BTreeSet<String> = values.iter()
+        .filter_map(|v| v.get_path("id").and_then(V::as_str).filter(|id| !id.is_empty()).map(String::from)).collect();
+    let mut out = Vec::new();
+    for value in values {
+        let Some(name) = value.as_str().or_else(|| value.get_path("name").and_then(V::as_str)) else { continue };
+        let explicit = value.get_path("id").and_then(V::as_str).filter(|id| !id.is_empty());
+        let id = match explicit {
+            Some(id) => id.to_string(),
+            None => {
+                let mut id = name.to_string();
+                let mut suffix = 2;
+                while used.contains(&id) {
+                    id = format!("{name}_{suffix}");
+                    suffix += 1;
                 }
+                used.insert(id.clone());
+                id
             }
-            Some(e)
+        };
+        let mut e = FxEntry {
+            id,
+            name: name.to_string(),
+            enabled: value.get_path("enabled").and_then(|v| if let V::Bool(b) = v { Some(*b) } else { None }).unwrap_or(true),
+            triggered: value.get_path("triggered").and_then(|v| if let V::Bool(b) = v { Some(*b) } else { None }).unwrap_or(false),
+            ..FxEntry::default()
+        };
+        if let Some(params) = value.get_path("params").and_then(V::as_map).or_else(|| value.as_map()) {
+            for (key, v) in params {
+                if ["id", "name", "enabled", "triggered", "when", "group", "hold"].contains(&key.as_str()) { continue; }
+                e.params.insert(key.clone(), v.clone());
+            }
         }
-        _ => None,
+        out.push(e);
     }
+    out
 }
 
-fn fx_entries(a: &Array) -> Vec<FxEntry> {
-    a.iter().filter_map(fx_entry).collect()
-}
-
-fn fx_index(a: &Array, fx: &str) -> Option<usize> {
-    a.iter().position(|v| fx_entry(v).is_some_and(|e| e.name == fx))
-}
-
-/// The entry for `fx` as an inline table (a bare `"name"` entry becomes `{ name = "…" }`).
-fn fx_table<'a>(a: &'a mut Array, fx: &str) -> Option<&'a mut InlineTable> {
-    let i = fx_index(a, fx)?;
-    if a.get(i)?.is_str() {
-        let mut t = InlineTable::new();
-        t.insert("name", fx.into());
-        a.replace(i, t);
-    }
-    a.get_mut(i)?.as_inline_table_mut()
-}
-
-/// Where effects are attached: one layer of the scene (every canvas) or the whole scene.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FxHost<'a> {
-    Layer(&'a str),
-    Scene,
-}
 
 fn parse(text: &str) -> Result<DocumentMut> {
     text.parse::<DocumentMut>().context("the scene file isn't valid TOML")
@@ -616,131 +571,6 @@ pub fn set_layer_prop(text: &str, node: &str, key: &str, v: Option<&str>) -> Res
     if n == 0 {
         bail!("this scene has no layer `{node}`");
     }
-    Ok(doc.to_string())
-}
-
-// ---- effects on a layer or the scene --------------------------------------------------------
-
-/// Run `f` on each effect list of `host` (a layer's on every canvas, or the scene's top-level
-/// `fx`); `create` adds a missing list first. Lists left empty are removed.
-fn each_fx_list(doc: &mut DocumentMut, host: FxHost, create: bool, mut f: impl FnMut(&mut Array)) -> Result<usize> {
-    match host {
-        FxHost::Layer(node) => {
-            let mut bad = false;
-            let n = each_node(doc, node, |t| {
-                if create && !t.contains_key("fx") {
-                    t.insert("fx", value(Array::new()));
-                }
-                let empty = match t.get_mut("fx") {
-                    Some(Item::Value(Value::Array(a))) => {
-                        f(a);
-                        a.is_empty()
-                    }
-                    Some(_) => {
-                        bad = true;
-                        false
-                    }
-                    None => false,
-                };
-                if empty {
-                    t.remove("fx");
-                }
-                Ok(())
-            })?;
-            if bad {
-                bail!("the layer's effects aren't a list");
-            }
-            if n == 0 {
-                bail!("this scene has no layer `{node}`");
-            }
-            Ok(n)
-        }
-        FxHost::Scene => {
-            if create && !doc.contains_key("fx") {
-                doc.insert("fx", value(Array::new()));
-            }
-            let Some(item) = doc.get_mut("fx") else { return Ok(0) };
-            let a = item.as_array_mut().ok_or_else(|| anyhow!("the scene's effects are written as tables; change them in the file"))?;
-            f(a);
-            let empty = a.is_empty();
-            if empty {
-                doc.remove("fx");
-            }
-            Ok(1)
-        }
-    }
-}
-
-/// The effects of `host` (a layer: the main canvas's entry first).
-pub fn fx_list(text: &str, host: FxHost) -> Vec<FxEntry> {
-    let Ok(doc) = parse(text) else { return Vec::new() };
-    let a = match host {
-        FxHost::Layer(node) => first_node(&doc, node).and_then(|t| t.get("fx")).and_then(Item::as_array),
-        FxHost::Scene => doc.get("fx").and_then(Item::as_array),
-    };
-    a.map(fx_entries).unwrap_or_default()
-}
-
-/// Attach the effect `fx` to `host` with `params` written in its entry (no change when it's
-/// already there).
-pub fn add_fx(text: &str, host: FxHost, fx: &str, params: &[(String, FxValue)]) -> Result<String> {
-    let mut doc = parse(text)?;
-    each_fx_list(&mut doc, host, true, |a| {
-        if fx_index(a, fx).is_some() {
-            return;
-        }
-        let mut e = InlineTable::new();
-        e.insert("name", fx.into());
-        for (k, v) in params {
-            e.insert(k, v.toml());
-        }
-        a.push(Value::InlineTable(e));
-    })?;
-    Ok(doc.to_string())
-}
-
-/// Take the effect `fx` off `host`.
-pub fn remove_fx(text: &str, host: FxHost, fx: &str) -> Result<String> {
-    let mut doc = parse(text)?;
-    each_fx_list(&mut doc, host, false, |a| {
-        a.retain(|v| fx_entry(v).is_none_or(|e| e.name != fx));
-    })?;
-    Ok(doc.to_string())
-}
-
-/// Switch the effect `fx` of `host` on (no `enabled` key) or off (`enabled = false`).
-pub fn set_fx_enabled(text: &str, host: FxHost, fx: &str, on: bool) -> Result<String> {
-    let mut doc = parse(text)?;
-    each_fx_list(&mut doc, host, false, |a| {
-        if let Some(t) = fx_table(a, fx) {
-            if on {
-                t.remove("enabled");
-            } else {
-                t.insert("enabled", false.into());
-            }
-        }
-    })?;
-    Ok(doc.to_string())
-}
-
-/// Write (or with `None` remove) the setting `key` in the entry of the effect `fx` of `host`.
-pub fn set_fx_param(text: &str, host: FxHost, fx: &str, key: &str, v: Option<&FxValue>) -> Result<String> {
-    if FX_KEYS.contains(&key) {
-        bail!("`{key}` isn't a setting");
-    }
-    let mut doc = parse(text)?;
-    each_fx_list(&mut doc, host, false, |a| {
-        if let Some(t) = fx_table(a, fx) {
-            match v {
-                Some(v) => {
-                    t.insert(key, v.toml());
-                }
-                None => {
-                    t.remove(key);
-                }
-            }
-        }
-    })?;
     Ok(doc.to_string())
 }
 
@@ -1250,71 +1080,40 @@ ms = [500, 900]
     }
 
     #[test]
-    fn layer_effects_with_settings_round_trip_through_the_engine() {
-        assert_eq!(fx_list(DUO, FxHost::Layer("cam_wide")).iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["vhs"]);
-        let out = add_fx(DUO, FxHost::Layer("cam_kit"), "blur", &fx_defaults("blur")).unwrap();
-        let again = add_fx(&out, FxHost::Layer("cam_kit"), "blur", &fx_defaults("blur")).unwrap();
-        assert_eq!(fx_list(&again, FxHost::Layer("cam_kit")).len(), 1, "no duplicates");
-        let blur = &fx_list(&out, FxHost::Layer("cam_kit"))[0];
-        assert!(blur.enabled);
-        assert_eq!((blur.num("amount"), blur.num("radius")), (Some(1.0), Some(16.0)));
-        // the engine reads every written setting as this layer's own (both canvases)
-        let def = engine_reads(&out);
-        for c in ["wide", "tall"] {
-            let fx = &def.nodes(c)[0].fx[0];
-            assert_eq!(fx.name, "blur", "{c}");
-            assert_eq!(fx.params.get("radius").and_then(|v| v.as_f64()), Some(16.0), "{c}");
-            assert_eq!(fx.enabled, None, "{c}");
-        }
-        // off, a changed setting, on again
-        let off = set_fx_enabled(&out, FxHost::Layer("cam_kit"), "blur", false).unwrap();
-        assert!(!fx_list(&off, FxHost::Layer("cam_kit"))[0].enabled);
-        assert_eq!(engine_reads(&off).nodes("tall")[0].fx[0].enabled, Some(false));
-        let tuned = set_fx_param(&off, FxHost::Layer("cam_kit"), "blur", "radius", Some(&FxValue::Num(40.123456))).unwrap();
-        assert_eq!(fx_list(&tuned, FxHost::Layer("cam_kit"))[0].num("radius"), Some(40.1235));
-        let on = set_fx_enabled(&tuned, FxHost::Layer("cam_kit"), "blur", true).unwrap();
-        assert!(fx_list(&on, FxHost::Layer("cam_kit"))[0].enabled);
-        assert!(!on.contains("enabled"), "{on}");
-        // a bare name entry becomes a table when it gets a setting
-        let bare = DUO.replace("fx = [{ name = \"vhs\", when = \"mode == 'chill'\" }]", "fx = [\"vhs\"]");
-        let lut = set_fx_param(&bare, FxHost::Layer("cam_wide"), "vhs", "noise", Some(&FxValue::Num(0.2))).unwrap();
-        assert_eq!(fx_list(&lut, FxHost::Layer("cam_wide"))[0].num("noise"), Some(0.2));
-        engine_reads(&lut);
-        assert!(set_fx_param(&out, FxHost::Layer("cam_kit"), "blur", "enabled", Some(&FxValue::Num(1.0))).is_err());
-        // removing keeps the other layer's effect and its show condition
-        let gone = remove_fx(&on, FxHost::Layer("cam_kit"), "blur").unwrap();
-        assert!(fx_list(&gone, FxHost::Layer("cam_kit")).is_empty());
-        assert_eq!(fx_list(&gone, FxHost::Layer("cam_wide"))[0].when.as_deref(), Some("mode == 'chill'"));
-        assert!(add_fx(DUO, FxHost::Layer("nope"), "blur", &[]).is_err());
+    fn layer_effects_keep_independent_identity_and_settings() {
+        use se_proto::Value as V;
+        let values = vec![
+            V::map().with("id", "soft").with("name", "blur").with("enabled", false).with("triggered", true).with("params", V::map().with("radius", 8.0)),
+            V::map().with("id", "strong").with("name", "blur").with("enabled", true).with("triggered", false).with("params", V::map().with("radius", 40.0)),
+        ];
+        let entries = fx_values(&values);
+        assert_eq!((entries[0].id.as_str(), entries[1].id.as_str()), ("soft", "strong"));
+        assert_eq!((entries[0].num("radius"), entries[1].num("radius")), (Some(8.0), Some(40.0)));
+        assert!(!entries[0].enabled && entries[0].triggered);
+        assert!(entries[1].enabled && !entries[1].triggered);
+        let reversed = fx_values(&[values[1].clone(), values[0].clone()]);
+        assert_eq!((reversed[0].id.as_str(), reversed[1].id.as_str()), ("strong", "soft"));
     }
 
     #[test]
-    fn scene_effects_round_trip() {
-        let s = add_fx(DUO, FxHost::Scene, "lut", &[("file".into(), FxValue::Text("assets/luts/warm.cube".into()))]).unwrap();
-        let fx = fx_list(&s, FxHost::Scene);
-        assert_eq!((fx[0].name.as_str(), fx[0].text("file")), ("lut", Some("assets/luts/warm.cube")));
-        let def = engine_reads(&s);
-        assert_eq!(def.fx[0].params.get("file").and_then(|v| v.as_str()), Some("assets/luts/warm.cube"));
-        let fired = set_fx_enabled(&s, FxHost::Scene, "lut", false).unwrap();
-        assert_eq!(engine_reads(&fired).fx[0].enabled, Some(false));
-        assert!(fx_list(&remove_fx(&s, FxHost::Scene, "lut").unwrap(), FxHost::Scene).is_empty());
-        let gone: DocumentMut = remove_fx(&s, FxHost::Scene, "lut").unwrap().parse().unwrap();
-        assert!(gone.get("fx").is_none(), "an empty list goes away");
+    fn scene_effects_preserve_legacy_addresses_and_typed_settings() {
+        use se_proto::Value as V;
+        let values = vec![
+            V::from("patch.win31_video"),
+            V::map().with("name", "patch.win31_video").with("id", "patch.win31_video_2").with("file", "assets/effect.png")
+                .with("invert", true).with("color", V::List(vec![0.2.into(), 0.4.into(), 0.8.into(), 1.0.into()])),
+            V::map().with("name", "patch.win31_video"),
+            V::map().with("name", "lut").with("file", "assets/luts/warm.cube").with("enabled", false),
+        ];
+        let entries = fx_values(&values);
+        assert_eq!(entries.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), ["patch.win31_video", "patch.win31_video_2", "patch.win31_video_3", "lut"]);
+        assert_eq!(entries[1].text("file"), Some("assets/effect.png"));
+        assert_eq!(entries[1].params.get("invert"), Some(&V::Bool(true)));
+        assert_eq!(crate::views::patches::rgba(entries[1].params.get("color").unwrap()).unwrap().to_srgba_unmultiplied(), [51, 102, 204, 255]);
+        assert_eq!(entries[3].text("file"), Some("assets/luts/warm.cube"));
+        assert!(!entries[3].enabled && !entries[3].triggered);
     }
 
-    #[test]
-    fn the_effect_table_matches_the_engine_library_shape() {
-        for e in EFFECTS {
-            assert!(!e.about.is_empty() && !e.label.is_empty(), "{}", e.id);
-            for p in e.params {
-                assert!(p.min < p.max && (p.min..=p.max).contains(&p.default), "{}.{}", e.id, p.name);
-            }
-        }
-        assert!(effect_def("chroma_key").is_some_and(|e| e.on_layers));
-        assert!(effect_def("fade_to_black").is_some_and(|e| !e.on_layers));
-        assert_eq!(effect_name("patch.aurora"), "Aurora");
-        assert_eq!(effect_about("patch.aurora"), "");
-    }
 
     #[test]
     fn blend_mask_enter_and_exit_are_written_on_every_canvas() {

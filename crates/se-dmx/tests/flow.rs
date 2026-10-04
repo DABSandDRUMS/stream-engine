@@ -40,7 +40,7 @@ const PROJECT: &str = "schema = 1\n[safety]\nchat_caps = { \"lights.*.intensity\
 
 fn rig(extra: &str) -> String {
     format!(
-        "[fixtures.p1]\nprofile = \"generic_rgb\"\nmode = \"3ch\"\naddress = 1\nposition = [0.2, 0.2]\n[fixtures.p2]\nprofile = \"generic_rgb\"\nmode = \"3ch\"\naddress = 4\nposition = [0.8, 0.2]\n[groups]\nfront = [\"p1\"]\n{extra}"
+        "[fixtures.p1]\nprofile = \"generic_rgb\"\nmode = \"3ch\"\naddress = 1\nposition = [0.2, 0.2]\nlayout_verified = true\n[fixtures.p2]\nprofile = \"generic_rgb\"\nmode = \"3ch\"\naddress = 4\nposition = [0.8, 0.2]\nlayout_verified = true\n[groups]\nfront = [\"p1\"]\n{extra}"
     )
 }
 
@@ -90,6 +90,17 @@ impl H {
         let v = self.hub.query("lights.output", Value::Null).await.unwrap();
         v.get_path("universes.1").and_then(Value::as_list).unwrap().iter().map(|x| x.as_i64().unwrap()).collect()
     }
+    async fn wait_dmx(&self, expected: &[i64]) {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let bytes = self.dmx().await;
+            if bytes.starts_with(expected) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "DMX expected {expected:?}, got {:?}", &bytes[..expected.len()]);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
     fn reload(&mut self, kind: &str, name: &str, src: &str) {
         self.files.retain(|f| !(f.kind == kind && f.name == name));
         self.files.push(file(kind, name, src));
@@ -103,7 +114,7 @@ impl H {
         self.hub.submit(Input::Config { config: Box::new(cfg.clone()) });
         self.tx.send(Arc::new(cfg)).unwrap();
     }
-    /// `lights.cue` / `lights.release` for a look, shaped as the core emits them for a preset.
+    /// Advanced manual `lights.cue` / `lights.release` look playback, separate from authored layers.
     fn look(&self, action: &str, look: &str, priority: Option<u16>) {
         let mut args = Value::map().with("cue", "").with("cuelist", "").with("look", look);
         if let Some(p) = priority {
@@ -203,7 +214,7 @@ async fn beat_synced_chase_follows_synthetic_beat_phase_on_the_wire() {
     let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
     sock.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
     let port = sock.local_addr().unwrap().port();
-    let out = format!("[outputs.net]\nkind = \"sacn\"\nuniverses = [1]\ndestination = \"127.0.0.1\"\nport = {port}\n");
+    let out = format!("[output]\narmed = true\n[outputs.net]\nkind = \"sacn\"\nuniverses = [1]\ndestination = \"127.0.0.1\"\nport = {port}\n");
     let h = harness(vec![
         file("project", "project", PROJECT),
         file("lights", "rig", &rig(&out)),
@@ -340,7 +351,7 @@ async fn flash_spam_is_limited_to_three_flashes_per_second_on_the_wire() {
     let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
     sock.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
     let port = sock.local_addr().unwrap().port();
-    let out = format!("[outputs.net]\nkind = \"sacn\"\nuniverses = [1]\ndestination = \"127.0.0.1\"\nport = {port}\n");
+    let out = format!("[output]\narmed = true\n[outputs.net]\nkind = \"sacn\"\nuniverses = [1]\ndestination = \"127.0.0.1\"\nport = {port}\n");
     let h = harness(vec![file("project", "project", PROJECT), file("lights", "rig", &rig(&out))]).await;
     // a rule/patch spamming `lights.flash` at 10 Hz (the event form patches emit)
     let hub = h.hub.clone();
@@ -401,6 +412,98 @@ async fn running_playbacks_are_restored_after_a_restart() {
     }
     let h = harness_with_db(files(), db).await;
     wait_for("restored at cue 2", 2.0, || h.s("lights.cuelist.main.cue") == "2" && near(h.f("lights.p1.intensity"), 0.9, 1e-6)).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn released_playback_is_not_restored_during_its_outgoing_fade() {
+    let files = || vec![
+        file("project", "project", PROJECT),
+        file("lights", "rig", &rig("")),
+        file("lights/cuelists", "main", "[[cue]]\n[cue.set]\np1 = { intensity = 0.9 }"),
+    ];
+    let db = se_store::Db::memory().unwrap();
+    {
+        let h = harness_with_db(files(), db.clone()).await;
+        h.act(Origin::Deck, "lights.goto main 1");
+        wait_for("manual playback", 1.0, || h.s("lights.cuelist.main.cue") == "1" && near(h.f("lights.p1.intensity"), 0.9, 1e-6)).await;
+        h.act(Origin::Deck, "lights.release cuelist=main fade=5s");
+        wait_for("release intention", 1.0, || h.s("lights.cuelist.main.cue").is_empty()).await;
+        assert!(h.f("lights.p1.intensity") > 0.0, "restart happens before the outgoing fade finishes");
+    }
+    let h = harness_with_db(files(), db).await;
+    assert_eq!(h.s("lights.cuelist.main.cue"), "");
+    assert_eq!(h.f("lights.p1.intensity"), 0.0);
+    assert!(!h.layer("lights.p1.intensity", "cuelist:main").await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn preset_navigation_does_not_inherit_operator_restart_intention() {
+    let files = || vec![
+        file("project", "project", PROJECT),
+        file("lights", "rig", &rig("")),
+        file("lights/cuelists", "main", "[[cue]]\n[cue.set]\np1 = { intensity = 0.3 }\n[[cue]]\n[cue.set]\np1 = { intensity = 0.9 }"),
+        file("presets", "automated", "do = ['lights.goto main 1']\nuntil_released = true"),
+    ];
+    let db = se_store::Db::memory().unwrap();
+    {
+        let h = harness_with_db(files(), db.clone()).await;
+        h.act(Origin::Deck, "lights.goto main 2");
+        wait_for("operator cue", 1.0, || near(h.f("lights.p1.intensity"), 0.9, 1e-6)).await;
+        h.act(Origin::Deck, "preset.fire automated");
+        wait_for("automation cue", 1.0, || h.s("lights.cuelist.main.cue") == "1" && near(h.f("lights.p1.intensity"), 0.3, 1e-6)).await;
+    }
+    let h = harness_with_db(files(), db).await;
+    assert_eq!(h.s("lights.cuelist.main.cue"), "");
+    assert_eq!(h.f("lights.p1.intensity"), 0.0);
+    assert!(!h.layer("lights.p1.intensity", "cuelist:main").await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn legacy_playback_generations_are_not_reconstructed() {
+    let db = se_store::Db::memory().unwrap();
+    db.kv_set("lights", "playbacks", &Value::map().with("main",
+        Value::map().with("cue", "2").with("origin", "deck").with("priority", 300_i64)
+            .with("key", "layer:color:41").with("epoch", 41_i64)
+            .with("applied", Value::map().with("lights.p1.intensity", 0.9_f64))))
+        .unwrap();
+    let h = harness_with_db(vec![
+        file("project", "project", PROJECT),
+        file("lights", "rig", &rig("")),
+        file("lights/cuelists", "main", "[[cue]]\n[cue.set]\np1 = { intensity = 0.3 }\n[[cue]]\n[cue.set]\np1 = { intensity = 0.9 }"),
+    ], db).await;
+    assert_eq!(h.s("lights.cuelist.main.cue"), "");
+    assert_eq!(h.f("lights.p1.intensity"), 0.0);
+    assert!(!h.layer("lights.p1.intensity", "cuelist:main").await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restart_intention_tracks_reload_cue_ids_and_drops_deleted_cues() {
+    let original = "[[cue]]\nid='low'\n[cue.set]\np1={intensity=0.3}\n[[cue]]\nid='held'\n[cue.set]\np1={intensity=0.9}";
+    let reordered = "[[cue]]\nid='held'\n[cue.set]\np1={intensity=0.7}\n[[cue]]\nid='low'\n[cue.set]\np1={intensity=0.3}";
+    let removed = "[[cue]]\nid='low'\n[cue.set]\np1={intensity=0.3}";
+    let files = |main: &str| vec![
+        file("project", "project", PROJECT),
+        file("lights", "rig", &rig("")),
+        file("lights/cuelists", "main", main),
+    ];
+    let db = se_store::Db::memory().unwrap();
+    {
+        let mut h = harness_with_db(files(original), db.clone()).await;
+        h.act(Origin::Deck, "lights.goto main held");
+        wait_for("held cue", 1.0, || h.s("lights.cuelist.main.cue") == "held" && near(h.f("lights.p1.intensity"), 0.9, 1e-6)).await;
+        h.reload("lights/cuelists", "main", reordered);
+        wait_for("held cue follows reorder and edit", 2.0, || h.s("lights.cuelist.main.cue") == "held" && near(h.f("lights.p1.intensity"), 0.7, 1e-6)).await;
+    }
+    {
+        let mut h = harness_with_db(files(reordered), db.clone()).await;
+        assert_eq!(h.s("lights.cuelist.main.cue"), "held");
+        assert!(near(h.f("lights.p1.intensity"), 0.7, 1e-6));
+        h.reload("lights/cuelists", "main", removed);
+        wait_for("deleted cue stops", 1.0, || h.s("lights.cuelist.main.cue").is_empty() && h.f("lights.p1.intensity") == 0.0).await;
+    }
+    let h = harness_with_db(files(removed), db).await;
+    assert_eq!(h.s("lights.cuelist.main.cue"), "");
+    assert_eq!(h.f("lights.p1.intensity"), 0.0);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -621,4 +724,399 @@ async fn knobs_move_running_looks_and_cue_lists_and_the_saved_value_fires_next_t
     assert_eq!(logs, ["lights.knob: knob “Color” can't take `orange`", "lights.knob: look `warm` has no knob for `set.all.nope`"]);
     assert_eq!(rgb(h.color("lights.p1.color"))[..3], [0, 255, 0], "chat moved no knob");
     assert!(h.disk("lights/palettes/warm.toml").contains("#00ff00"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn layer_replacement_expiry_and_coverage_restore_underlying_playback() {
+    let h = harness(vec![
+        file("project", "project", PROJECT),
+        file("lights", "rig", &rig("")),
+        file("lights/palettes", "red", "[set]\nall = { color = \"#ff0000\", intensity = 0.6 }"),
+        file("lights/palettes", "green", "[set]\nall = { color = \"#00ff00\" }"),
+        file("lights/palettes", "blue", "[set]\nall = { color = \"#0000ff\" }"),
+    ]).await;
+    let is_color = |head: &str, channel: usize| {
+        let color = h.color(&format!("lights.{head}.color"));
+        color[channel] > 0.99 && color[(channel + 1) % 3] < 0.01 && color[(channel + 2) % 3] < 0.01
+    };
+    h.act(Origin::Ui, "lights.layer.select layer=base palette=red fade=0 owner=base");
+    wait_for("red base", 1.0, || is_color("p1", 0) && is_color("p2", 0)).await;
+    h.act(Origin::Ui, "lights.layer.select layer=rhythm palette=green coverage=p1 fade=0 owner=rhythm");
+    wait_for("green rhythm with red uncovered head", 1.0, || is_color("p1", 1) && is_color("p2", 0)).await;
+    h.act(Origin::Ui, "lights.layer.select layer=accent palette=blue coverage=p1 duration=250ms release=0 fade=0 owner=old");
+    wait_for("blue accent", 1.0, || is_color("p1", 2)).await;
+    h.act(Origin::Ui, "lights.layer.select layer=accent palette=red coverage=p1 duration=600ms release=0 fade=0 owner=new");
+    wait_for("replacement accent", 1.0, || is_color("p1", 0)).await;
+    tokio::time::sleep(Duration::from_millis(320)).await;
+    assert!(is_color("p1", 0), "old accent expiry must not release its replacement");
+    h.act(Origin::Ui, "lights.layer.release layer=accent owner=old fade=0");
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    assert!(is_color("p1", 0), "stale explicit release must not release its replacement");
+    wait_for("accent expiry restores rhythm", 1.0, || is_color("p1", 1) && is_color("p2", 0)).await;
+    h.act(Origin::Ui, "lights.layer.set layer=rhythm coverage=p2 fade=0");
+    wait_for("coverage moves without old channels sticking", 1.0, || is_color("p1", 0) && is_color("p2", 1)).await;
+    h.act(Origin::Ui, "lights.layer.release layer=rhythm fade=0");
+    wait_for("rhythm release restores base", 1.0, || is_color("p1", 0) && is_color("p2", 0)).await;
+    h.wait_dmx(&[153, 0, 0, 153, 0, 0]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn preset_expiry_does_not_release_a_newer_base_selection() {
+    let h = harness(vec![
+        file("project", "project", PROJECT),
+        file("lights", "rig", &rig("")),
+        file("lights/palettes", "red", "[set]\nall = { color = \"#ff0000\", intensity = 0.4 }"),
+        file("lights/palettes", "blue", "[set]\nall = { color = \"#0000ff\", intensity = 0.4 }"),
+        file("presets", "old", "hold = \"300ms\"\nlights = { look = \"red\" }"),
+        file("presets", "new", "toggle = true\nlights = { look = \"blue\" }"),
+    ]).await;
+    h.act(Origin::Deck, "preset.fire old");
+    wait_for("preset red", 1.0, || h.color("lights.p1.color")[0] > 0.99).await;
+    h.act(Origin::Deck, "preset.fire new");
+    wait_for("preset blue", 1.0, || h.color("lights.p1.color")[2] > 0.99 && h.color("lights.p1.color")[0] < 0.01).await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(h.color("lights.p1.color")[2] > 0.99, "expired old preset must not release new base");
+    h.act(Origin::Deck, "preset.fire new");
+    wait_for("new preset toggles off", 1.0, || h.f("lights.p1.intensity") == 0.0).await;
+    h.wait_dmx(&[0; 6]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scene_release_cleans_failed_scene_selection_but_preserves_preset_owner() {
+    let h = harness(vec![
+        file("project", "project", PROJECT),
+        file("lights", "rig", &rig("")),
+        file("lights/palettes", "red", "[set]\nall = { color = \"#ff0000\", intensity = 0.4 }"),
+        file("lights/palettes", "blue", "[set]\nall = { color = \"#0000ff\", intensity = 0.4 }"),
+        file("scenes", "a_start", ""),
+        file("scenes", "lit", "lights = { look = \"red\" }"),
+        file("scenes", "bad", "lights = { look = \"missing\" }"),
+        file("scenes", "unlit", ""),
+        file("presets", "blue", "toggle = true\nlights = { look = \"blue\" }"),
+    ]).await;
+    let cut = |scene: &str| h.hub.command(Command::new(Origin::Ui, Op::SceneCut {
+        scene: scene.into(), transition: Some("cut".into()),
+    }));
+    cut("lit");
+    wait_for("scene lights on", 1.0, || near(h.f("lights.p1.intensity"), 0.4, 1e-6) && h.color("lights.p1.color")[0] > 0.99).await;
+    cut("bad");
+    wait_for("bad scene taken", 1.0, || h.s("show.scene.program") == "bad").await;
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    assert!(h.color("lights.p1.color")[0] > 0.99 && h.f("lights.p1.intensity") > 0.39, "failed content leaves last successful scene look");
+    cut("unlit");
+    wait_for("unlit scene releases last successful scene owner", 1.0, || h.f("lights.p1.intensity") == 0.0).await;
+    h.act(Origin::Deck, "preset.fire blue");
+    wait_for("preset takes base", 1.0, || h.color("lights.p1.color")[2] > 0.99 && h.f("lights.p1.intensity") > 0.39).await;
+    cut("bad");
+    wait_for("bad scene retaken", 1.0, || h.s("show.scene.program") == "bad").await;
+    cut("unlit");
+    wait_for("unlit scene retaken", 1.0, || h.s("show.scene.program") == "unlit").await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let bytes = h.dmx().await;
+    assert_eq!(&bytes[..6], &[0, 0, 102, 0, 0, 102], "scene release must not clear the newer preset owner");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn effects_preserve_programmer_color_and_safety_caps() {
+    let mut h = harness(vec![
+        file("project", "project", &format!("{PROJECT}caps = {{ \"lights.*.intensity\" = [0.0, 0.45] }}\n")),
+        file("lights", "rig", &rig("")),
+        file("lights/palettes", "red", "[set]\nall = { color = \"#ff0000\", intensity = 0.8 }"),
+        file("lights/effects", "chase", "kind = \"color_chase\"\nunit = \"hz\"\nrate = 8\ncolors = [\"#ff0000\", \"#0000ff\"]"),
+        file("lights/effects", "sparkle", "kind = \"sparkle\"\nunit = \"hz\"\nrate = 10000\nsize = 1\nspread = 0"),
+    ]).await;
+    h.act(Origin::Ui, "lights.layer.select layer=base palette=red effects=sparkle fade=0");
+    wait_for("sparkle running", 1.0, || h.hub.snapshot.load().bool("lights.effect.sparkle.active")).await;
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    let bytes = h.dmx().await;
+    assert_eq!(bytes[0], 115, "dim-only sparkle preserves the global 45% intensity cap");
+    h.act(Origin::Ui, "lights.layer.select layer=rhythm effects=chase fade=0");
+    h.act(Origin::Ui, "lights.programmer.select p1");
+    h.act(Origin::Ui, "lights.programmer.set attr=color value='#00ff00'");
+    wait_for("programmer green", 1.0, || h.color("lights.p1.color")[1] > 0.99).await;
+    h.wait_dmx(&[0, 115, 0]).await;
+    for _ in 0..12 {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        let bytes = h.dmx().await;
+        assert_eq!(&bytes[..3], &[0, 115, 0], "lower-priority color effect must not overwrite programmer green");
+    }
+    h.act(Origin::Ui, "lights.release all");
+    h.hub.command(Command::new(Origin::Ui, Op::Action { name: "lights.programmer.release".into(), args: Value::Null }));
+    wait_for("all layers released", 1.0, || h.f("lights.p1.intensity") == 0.0).await;
+    h.reload("project", "project", PROJECT);
+    h.act(Origin::Ui, "mode.set live");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    h.act(Origin::Chat, "lights.layer.select layer=base palette=red effects=sparkle fade=0");
+    wait_for("chat sparkle running", 1.0, || h.hub.snapshot.load().bool("lights.effect.sparkle.active") && near(h.f("lights.p1.intensity"), 0.5, 1e-6)).await;
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    let bytes = h.dmx().await;
+    assert_eq!(bytes[0], 128, "dim-only sparkle preserves the 50% chat intensity cap");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn quantized_accent_uses_published_signals_and_starts_lifetime_at_boundary() {
+    let h = harness(vec![
+        file("project", "project", PROJECT),
+        file("lights", "rig", &rig("")),
+        file("lights/palettes", "red", "[set]\nall = { color = \"#ff0000\", intensity = 0.6 }"),
+        file("lights/palettes", "blue", "[set]\nall = { color = \"#0000ff\" }"),
+    ]).await;
+    h.act(Origin::Ui, "lights.layer.select layer=base palette=red fade=0");
+    h.wait_dmx(&[153, 0, 0, 153, 0, 0]).await;
+    h.hub.signals(vec![
+        ("beat.position".into(), 100.25), ("beat.phase".into(), 0.25),
+        ("beat.bpm".into(), 60.0), ("beat.confidence".into(), 1.0),
+    ]);
+    wait_for("shared beat publication", 1.0, || h.hub.snapshot.load().signal("beat.position") == Some(100.25)).await;
+    h.act(Origin::Ui, "lights.layer.select layer=accent palette=blue quantize=4 duration=250ms fade=0 release=0");
+    wait_for("accent queued on shared boundary", 1.0, || {
+        h.hub.snapshot.load().get("lights.layer.accent.state")
+            .and_then(|v| v.get_path("pending.beat")).and_then(Value::as_f64) == Some(104.0)
+    }).await;
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    let state = h.hub.snapshot.load();
+    assert_eq!(state.get("lights.layer.accent.state").and_then(|v| v.get_path("active")), Some(&Value::Bool(false)));
+    assert_eq!(state.get("lights.layer.accent.state").and_then(|v| v.get_path("pending.beat")).and_then(Value::as_f64), Some(104.0), "queued lifetime has not started");
+    drop(state);
+    h.wait_dmx(&[153, 0, 0, 153, 0, 0]).await;
+    h.hub.signals(vec![("beat.position".into(), 104.1), ("beat.phase".into(), 0.1)]);
+    h.wait_dmx(&[0, 0, 153, 0, 0, 153]).await;
+    h.wait_dmx(&[153, 0, 0, 153, 0, 0]).await;
+}
+
+#[tokio::test]
+async fn blackout_and_panic_override_rehearsal_on_the_wire() {
+    async fn wire(sock: &tokio::net::UdpSocket, expected: [u8; 6], stage: &str) {
+        let mut bytes = [0; 1024];
+        let mut last = [0; 6];
+        while sock.try_recv(&mut bytes).is_ok() {}
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let n = sock.recv(&mut bytes).await.unwrap();
+                if n == 638 {
+                    last.copy_from_slice(&bytes[126..132]);
+                    if last == expected { return; }
+                }
+            }
+        }).await.unwrap_or_else(|_| panic!("{stage}: physical output expected {expected:?}, last {last:?}"));
+    }
+    let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let port = sock.local_addr().unwrap().port();
+    let out = format!("[output]\narmed = true\n[outputs.net]\nkind = \"sacn\"\nuniverses = [1]\ndestination = \"127.0.0.1\"\nport = {port}\n[safety]\nsafe_look = {{ intensity = 0.0 }}\n");
+    let h = harness(vec![file("project", "project", PROJECT), file("lights", "rig", &rig(&out))]).await;
+    h.act(Origin::Cli, "set lights.p1.color #ff0000");
+    h.act(Origin::Cli, "set lights.p1.intensity 0.8");
+    wire(&sock, [204, 0, 0, 0, 0, 0], "live red").await;
+    h.act(Origin::Cli, "mode.set rehearsal");
+    wait_for("rehearsal hold", 1.0, || h.lights.shared.rehearsal.load(std::sync::atomic::Ordering::Acquire)).await;
+    h.act(Origin::Cli, "set lights.p1.color #0000ff");
+    h.wait_dmx(&[0, 0, 204, 0, 0, 0]).await;
+    wire(&sock, [204, 0, 0, 0, 0, 0], "held red while preview blue").await;
+    h.act(Origin::Cli, "set lights.blackout true");
+    wire(&sock, [0; 6], "blackout bypasses hold").await;
+    h.act(Origin::Cli, "set lights.blackout false");
+    h.wait_dmx(&[0, 0, 204, 0, 0, 0]).await;
+    wire(&sock, [0; 6], "clearing blackout preserves held darkness").await;
+    h.act(Origin::Cli, "mode.set live");
+    wire(&sock, [0, 0, 204, 0, 0, 0], "live blue after leaving rehearsal").await;
+    h.act(Origin::Cli, "mode.set rehearsal");
+    wait_for("second rehearsal hold", 1.0, || h.lights.shared.rehearsal.load(std::sync::atomic::Ordering::Acquire)).await;
+    h.act(Origin::Cli, "panic");
+    wire(&sock, [0; 6], "panic bypasses held blue").await;
+}
+
+fn layer_state(h: &H, slot: &str) -> Value {
+    h.hub.snapshot.load().get(&format!("lights.layer.{slot}.state")).cloned().unwrap_or(Value::Null)
+}
+
+/// Send `lights.layer.pick` and return the picked palette or cue list once the layer changed.
+async fn pick(h: &H, origin: Origin, slot: &str, args: &str) -> String {
+    let generation = |h: &H| layer_state(h, slot).get_path("generation").and_then(Value::as_i64);
+    let before = generation(h);
+    h.act(origin, &format!("lights.layer.pick layer={slot} {args}"));
+    wait_for(&format!("pick {slot} {args}"), 1.0, || generation(h) != before).await;
+    let sel = layer_state(h, slot).get_path("selection").cloned().unwrap();
+    sel.get_path("palette").and_then(Value::as_str).or_else(|| sel.get_path("cuelist").and_then(Value::as_str)).unwrap().to_string()
+}
+
+async fn next_lights_log(bus: &mut tokio::sync::broadcast::Receiver<Arc<se_hub::Bus>>, prefix: &str) -> (String, String) {
+    let end = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < end {
+        let Ok(Ok(m)) = tokio::time::timeout(Duration::from_millis(100), bus.recv()).await else { continue };
+        if let se_hub::Bus::Log { level, msg, target, .. } = &*m
+            && target == "lights"
+            && msg.starts_with(prefix)
+        {
+            return (level.clone(), msg.clone());
+        }
+    }
+    panic!("no lights log starting with {prefix:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn layer_pick_chooses_tagged_content_and_applies_it_like_select() {
+    let h = harness(vec![
+        file("project", "project", PROJECT),
+        file("lights", "rig", &rig("")),
+        file("lights/palettes", "red", "tags = [\"heavy\", \"warm\", \"red\"]\n[set]\nall = { color = \"#ff0000\", intensity = 0.6 }"),
+        file("lights/palettes", "blue", "tags = [\"heavy\", \"cool\"]\n[set]\nall = { color = \"#0000ff\", intensity = 0.6 }"),
+        file("lights/palettes", "green", "tags = [\"chill\", \"cool\"]\n[set]\nall = { color = \"#00ff00\", intensity = 0.6 }"),
+        file("lights/palettes", "plain", "[set]\nall = { color = \"#ffffff\" }"),
+        file("lights/cuelists", "strobe", "tags = [\"heavy\", \"hit\"]\n[[cue]]\nset = { all = { color = \"#ffffff\", intensity = 1.0 } }"),
+        file("lights/effects", "chase", "tags = [\"Hype\", \"heavy\"]\nkind = \"color_chase\"\nrate = 2\ncolors = [\"#ff0000\", \"#0000ff\"]"),
+    ]).await;
+    let tags = h.hub.query("lights.tags", Value::Null).await.unwrap();
+    let names = |t: &str| tags.get_path(t).and_then(Value::as_list).unwrap().iter().filter_map(Value::as_str).map(String::from).collect::<Vec<_>>();
+    assert_eq!(names("heavy"), ["blue", "chase", "red", "strobe"]);
+    assert_eq!(names("hype"), ["chase"], "tags are lowercased");
+    assert_eq!(names("cool"), ["blue", "green"]);
+
+    // Required tags: only `green` is chill.
+    assert_eq!(pick(&h, Origin::Ui, "base", "tags=chill fade=0").await, "green");
+    // Preferred tags win (history off): red is the only heavy palette that is also red.
+    for _ in 0..5 {
+        assert_eq!(pick(&h, Origin::Ui, "base", "tags=heavy any=red kind=palette avoid_repeat=0 fade=0").await, "red");
+    }
+    // Avoid repeats (default 2) on a fresh layer: red first, then both other heavy items, then red.
+    let mut seq = Vec::new();
+    for _ in 0..4 {
+        seq.push(pick(&h, Origin::Ui, "rhythm", "tags=heavy any=red fade=0").await);
+    }
+    assert_eq!(seq[0], "red");
+    let mut middle = vec![seq[1].clone(), seq[2].clone()];
+    middle.sort();
+    assert_eq!(middle, ["blue", "strobe"], "{seq:?}");
+    assert_eq!(seq[3], "red", "{seq:?}");
+
+    // No candidate: Ok no-op with an info line; the layer is untouched.
+    let mut bus = h.hub.subscribe();
+    let before = layer_state(&h, "base");
+    h.act(Origin::Rule, "lights.layer.pick layer=base tags=missing");
+    let (level, msg) = next_lights_log(&mut bus, "lights.layer.pick base:").await;
+    assert_eq!(level, "info", "{msg}");
+    assert!(msg.contains("no usable"), "{msg}");
+    assert_eq!(layer_state(&h, "base"), before);
+
+    // Applied like select: owner token, explicit priority, release by owner.
+    assert_eq!(pick(&h, Origin::Rule, "accent", "tags=hit duration=5s release=0 fade=0 owner=context priority=230").await, "strobe");
+    let accent = layer_state(&h, "accent");
+    assert_eq!(accent.get_path("source_owner").and_then(Value::as_str), Some("context"));
+    assert_eq!(accent.get_path("priority").and_then(Value::as_i64), Some(230));
+    h.act(Origin::Rule, "lights.layer.release layer=accent owner=context priority=230 fade=0");
+    wait_for("accent released by owner", 1.0, || layer_state(&h, "accent").get_path("active") == Some(&Value::Bool(false))).await;
+
+    // Ownership: chat cannot pick over the operator's base layer.
+    h.act(Origin::Ui, "lights.layer.select layer=base palette=blue fade=0 owner=operator");
+    wait_for("operator blue", 1.0, || layer_state(&h, "base").get_path("selection.palette").and_then(Value::as_str) == Some("blue")).await;
+    h.act(Origin::Ui, "mode.set live");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let mut bus = h.hub.subscribe();
+    h.act(Origin::Chat, "lights.layer.pick layer=base tags=chill fade=0");
+    let (level, msg) = next_lights_log(&mut bus, "lights.layer.pick:").await;
+    assert_eq!(level, "warn");
+    assert!(msg.contains("belongs to"), "{msg}");
+    assert_eq!(layer_state(&h, "base").get_path("selection.palette").and_then(Value::as_str), Some("blue"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_idle_restores_main_after_restart_show_release_and_blackout() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use serde_json::json;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // An isolated real TCP EP10 protocol peer starts off, as after a show/crash.
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let on = Arc::new(AtomicBool::new(false));
+    let relay = on.clone();
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            loop {
+                let mut header = [0; 4];
+                if stream.read_exact(&mut header).await.is_err() { break; }
+                let len = u32::from_be_bytes(header) as usize;
+                assert!(len <= 64 * 1024);
+                let mut payload = vec![0; len];
+                stream.read_exact(&mut payload).await.unwrap();
+                let mut key = 0xab;
+                for byte in &mut payload {
+                    let encrypted = *byte;
+                    *byte ^= key;
+                    key = encrypted;
+                }
+                let request: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+                let response = if let Some(state) = request.pointer("/system/set_relay_state/state").and_then(serde_json::Value::as_u64) {
+                    relay.store(state != 0, Ordering::Release);
+                    json!({"system":{"set_relay_state":{"err_code":0}}})
+                } else {
+                    assert!(request.pointer("/system/get_sysinfo").is_some());
+                    json!({"system":{"get_sysinfo":{
+                        "err_code":0, "mac":"B4:B0:24:69:F2:7B", "alias":"Main", "model":"EP10(US)",
+                        "relay_state":u8::from(relay.load(Ordering::Acquire))
+                    }}})
+                };
+                let payload = serde_json::to_vec(&response).unwrap();
+                let mut frame = Vec::with_capacity(4 + payload.len());
+                frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+                let mut key = 0xab;
+                for byte in payload { key ^= byte; frame.push(key); }
+                stream.write_all(&frame).await.unwrap();
+            }
+        }
+    });
+    let socket = tokio::net::UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
+    let dmx_port = socket.local_addr().unwrap().port();
+    let extra = format!(r##"
+[output]
+armed = false
+[outputs.net]
+kind = "sacn"
+enabled = true
+destination = "127.0.0.1"
+port = {dmx_port}
+universes = [1]
+[main_light]
+enabled = true
+host = "127.0.0.1"
+port = {port}
+mac = "B4:B0:24:69:F2:7B"
+idle_on = true
+[idle]
+target = "p1"
+color = "#ff69b4"
+intensity = 0.3
+[safety]
+max_intensity = 0.35
+safe_look = {{ intensity = 0.0 }}
+strobe = "block"
+"##);
+    let mut h = harness(vec![
+        file("project", "", PROJECT),
+        file("lights", "rig", &rig(&extra)),
+        file("lights/cuelists", "show", "[[cue]]\nfade = 0\n[cue.set]\np2 = { intensity = 0.3, color = \"#0000ff\" }"),
+    ]).await;
+    h.wait_dmx(&[77, 32, 54, 0, 0, 0]).await;
+    assert!(!on.load(Ordering::Acquire), "disarmed preview must not switch the plug");
+    h.reload("lights", "rig", &rig(&extra.replace("armed = false", "armed = true")));
+    wait_for("Main restored from off at startup", 2.0, || on.load(Ordering::Acquire)).await;
+    let mut wire = [0; 1024];
+    let len = tokio::time::timeout(Duration::from_secs(1), socket.recv(&mut wire)).await.unwrap().unwrap();
+    assert!(len >= 132);
+    assert_eq!(&wire[126..132], &[77, 32, 54, 0, 0, 0]);
+    h.act(Origin::Ui, "lights.layer.select layer=base cuelist=show fade=0");
+    h.wait_dmx(&[0, 0, 0, 0, 0, 77]).await;
+    wait_for("Main off for authored show", 2.0, || !on.load(Ordering::Acquire)).await;
+    h.act(Origin::Ui, "lights.layer.release layer=base fade=0");
+    h.wait_dmx(&[77, 32, 54, 0, 0, 0]).await;
+    wait_for("Main on after release", 2.0, || on.load(Ordering::Acquire)).await;
+    h.act(Origin::Ui, "set lights.blackout true");
+    h.wait_dmx(&[0; 6]).await;
+    h.act(Origin::Ui, "set lights.blackout false");
+    h.wait_dmx(&[77, 32, 54, 0, 0, 0]).await;
+    h.act(Origin::Ui, "lights.panic");
+    h.wait_dmx(&[0; 6]).await;
+    assert!(on.load(Ordering::Acquire));
+    drop(h);
+    server.abort();
 }

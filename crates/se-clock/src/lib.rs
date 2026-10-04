@@ -1,8 +1,9 @@
 //! Master clock (§3.2): one monotonic nanosecond clock that timestamps everything, plus
-//! mappings to wall time, OBS stream/record time, Twitch stream delay, and the audio clock.
+//! mappings to wall time, OBS stream time, Twitch stream delay, and the audio clock.
 //! Timecode sources and generators live in [`timecode`].
 
 pub mod timecode;
+pub mod musical;
 
 use parking_lot::RwLock;
 use se_proto::Ts;
@@ -78,7 +79,6 @@ impl Mapping {
 pub struct Mappings {
     pub wall: Mapping,
     pub obs_stream: Mapping,
-    pub obs_record: Mapping,
     pub audio: Mapping,
     /// Measured Twitch stream delay (chat is shifted back by this much).
     pub twitch_delay_ms: u32,

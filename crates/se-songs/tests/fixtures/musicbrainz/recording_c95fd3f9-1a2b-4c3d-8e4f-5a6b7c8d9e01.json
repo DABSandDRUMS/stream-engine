@@ -1,0 +1,46 @@
+{
+  "id": "c95fd3f9-1a2b-4c3d-8e4f-5a6b7c8d9e01",
+  "title": "Never Gonna Give You Up",
+  "length": 213573,
+  "disambiguation": "",
+  "video": false,
+  "first-release-date": "1987-07-27",
+  "genres": [
+    {
+      "id": "9dcdbbc3-7b1b-4a9b-9a8e-34b3b5d1e9a6",
+      "name": "dance-pop",
+      "count": 3,
+      "disambiguation": ""
+    },
+    {
+      "id": "1b50083b-1afa-4778-82c8-548b309af783",
+      "name": "synth-pop",
+      "count": 2,
+      "disambiguation": ""
+    },
+    {
+      "id": "911c7bbb-172d-4df8-9478-dbff4296e791",
+      "name": "pop",
+      "count": 1,
+      "disambiguation": ""
+    }
+  ],
+  "tags": [
+    {
+      "name": "dance-pop",
+      "count": 3
+    },
+    {
+      "name": "synth-pop",
+      "count": 2
+    },
+    {
+      "name": "pop",
+      "count": 1
+    },
+    {
+      "name": "80s",
+      "count": 1
+    }
+  ]
+}

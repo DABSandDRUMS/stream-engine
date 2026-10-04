@@ -53,6 +53,13 @@ if(SE_OBS_BUILD_TESTS)
   target_link_libraries(test-control PRIVATE se-obs-proto)
   add_test(NAME control-client COMMAND test-control)
   set_tests_properties(control-client PROPERTIES TIMEOUT 60)
+
+  if(SE_OBS_BUILD_PLUGIN)
+    add_executable(test-gpu-lifetime tests/test-gpu-lifetime.c)
+    target_link_libraries(test-gpu-lifetime PRIVATE se-obs-proto OBS::libobs PkgConfig::EGL)
+    add_test(NAME gpu-lifetime COMMAND test-gpu-lifetime)
+    set_tests_properties(gpu-lifetime PROPERTIES TIMEOUT 60)
+  endif()
 endif()
 
 if(SE_OBS_BUILD_TOOLS)

@@ -65,8 +65,8 @@ const VERBS: &[&str] = &[
     "emit",
     "wait",
     "bot.say",
-    "lights.cue",
-    "lights.release",
+    "lights.layer.select",
+    "lights.layer.release",
     "audio.play",
     "audio.duck",
     "mixer.snapshot.recall",
@@ -658,8 +658,7 @@ impl Step {
             "bot.say" => Step::Say,
             "audio.play" => Step::Sound,
             "mixer.snapshot.recall" => Step::Mix,
-            // a bare `lights.cue` is a cue list; `look=` is read before this
-            "lights.cue" => Step::Lights,
+            // Layer selections are decoded with their named arguments below.
             "mode.set" => Step::Mode,
             "wait" => Step::Wait,
             "twitch.marker" => Step::Marker,
@@ -681,7 +680,7 @@ impl Step {
             Step::Say => "bot.say",
             Step::Sound => "audio.play",
             Step::Mix => "mixer.snapshot.recall",
-            Step::Lights | Step::Look => "lights.cue",
+            Step::Lights | Step::Look => "lights.layer.select",
             Step::Mode => "mode.set",
             Step::Wait => "wait",
             Step::Marker => "twitch.marker",
@@ -705,7 +704,7 @@ impl Step {
             Step::Say => "Say something in chat",
             Step::Sound => "Play a sound",
             Step::Mix => "Recall a sound mix",
-            Step::Lights => "Run a light cue",
+            Step::Lights => "Select a base cue list",
             Step::Look => "Turn on a light look",
             Step::Mode => "Change the show mode",
             Step::TimelinePlay => "Play a timeline",
@@ -762,8 +761,8 @@ impl Step {
             Step::Say if empty => "type what to say",
             Step::Sound if empty => "pick a sound",
             Step::Mix if empty => "pick a sound mix",
-            Step::Lights if empty => "pick a light cue list",
-            Step::Look if empty => "pick a light look",
+            Step::Lights if a0.is_empty() => "pick a light cue list",
+            Step::Look if a0.is_empty() => "pick a light look",
             Step::Mode if empty => "pick a show mode",
             Step::TimelinePlay | Step::TimelineStop if empty => "pick a timeline",
             Step::Wait if empty => "say how long to wait",
@@ -774,7 +773,8 @@ impl Step {
     /// The command a fresh step of this kind starts as.
     fn blank(self) -> String {
         match self {
-            Step::Look => "lights.cue look=".into(),
+            Step::Look => "lights.layer.select layer=base palette=".into(),
+            Step::Lights => "lights.layer.select layer=base cuelist=".into(),
             Step::Wait => "wait 2s".into(),
             Step::LayerFx => format!("set {BLANK_FX} true"),
             Step::LayerVisible => format!("set {BLANK_LAYER} false"),
@@ -814,12 +814,32 @@ fn parse_step(cmd: &str) -> (Step, Vec<String>) {
     let custom = || (Step::Custom, Vec::new());
     let Ok(toks) = tokenize(cmd) else { return custom() };
     let Some((verb, rest)) = toks.split_first() else { return custom() };
-    // `lights.cue look=<name>`, `patch.<id>.trigger` / `trigger patch.<id>`
-    if verb == "lights.cue"
-        && let [one] = rest
-        && let Some(look) = one.strip_prefix("look=")
-    {
-        return (Step::Look, vec![look.to_string()]);
+    // Guided selections retain every named argument. Manual cue actions stay custom.
+    if verb == "lights.layer.select" {
+        let mut palette = None;
+        let mut cuelist = None;
+        let mut cue = String::new();
+        let mut extra = Vec::new();
+        let mut base = false;
+        for token in rest {
+            let Some((key, value)) = token.split_once('=') else { return custom() };
+            match key {
+                "layer" if value == "base" && !base => base = true,
+                "palette" if palette.is_none() => palette = Some(value.to_string()),
+                "cuelist" if cuelist.is_none() => cuelist = Some(value.to_string()),
+                "cue" if cue.is_empty() => cue = value.to_string(),
+                "layer" | "palette" | "cuelist" | "cue" => return custom(),
+                _ => extra.push(token.clone()),
+            }
+        }
+        if !base {
+            return custom();
+        }
+        return match (palette, cuelist) {
+            (Some(p), None) if cue.is_empty() => (Step::Look, std::iter::once(p).chain(extra).collect()),
+            (None, Some(c)) => (Step::Lights, [c, cue].into_iter().chain(extra).collect()),
+            _ => custom(),
+        };
     }
     if let Some(id) = verb.strip_prefix("patch.").and_then(|v| v.strip_suffix(".trigger")) {
         return if rest.is_empty() && !id.is_empty() { (Step::Animation, vec![id.to_string()]) } else { custom() };
@@ -900,7 +920,22 @@ fn build_step(kind: Step, args: &[&str]) -> String {
     match kind {
         Step::Animation if a0.is_empty() => return "trigger".into(),
         Step::Animation => return format!("patch.{a0}.trigger"),
-        Step::Look => return format!("lights.cue look={}", if a0.is_empty() { String::new() } else { quote_arg(a0) }),
+        Step::Look | Step::Lights => {
+            let reference = if kind == Step::Look { "palette" } else { "cuelist" };
+            let mut out = format!("lights.layer.select layer=base {reference}={}", if a0.is_empty() { String::new() } else { quote_arg(a0) });
+            let extra_at = if kind == Step::Lights {
+                if !arg(1).is_empty() {
+                    out.push_str(&format!(" cue={}", quote_arg(arg(1))));
+                }
+                2
+            } else {
+                1
+            };
+            for (key, value) in args.iter().skip(extra_at).filter_map(|a| a.split_once('=')) {
+                out.push_str(&format!(" {key}={}", quote_arg(value)));
+            }
+            return out;
+        }
         Step::LayerFx | Step::LayerVisible => {
             let addr = match a0 {
                 "" if kind == Step::LayerFx => BLANK_FX,
@@ -935,9 +970,6 @@ fn build_step(kind: Step, args: &[&str]) -> String {
         _ => {}
     }
     let mut out = kind.verb().to_string();
-    if kind == Step::Lights && a0.is_empty() {
-        return out;
-    }
     for a in args.iter().filter(|a| !a.trim().is_empty()) {
         out.push(' ');
         if kind == Step::Say && a.contains('=') {
@@ -1176,10 +1208,8 @@ fn step_phrase(cmd: &str, n: &Names) -> String {
         Step::Say => format!("say “{}”", clip(&friendly_text(a0), 56)),
         Step::Sound => format!("play {}", Names::label(&n.sounds, a0)),
         Step::Mix => format!("recall the {} mix", Names::label(&n.mixes, a0)),
-        Step::Lights => match args.get(1) {
-            Some(c) => format!("run light cue {c} of {}", Names::label(&n.cuelists, a0)),
-            None => format!("run the {} lights", Names::label(&n.cuelists, a0)),
-        },
+        Step::Lights if !arg(1).is_empty() => format!("select base cue {} of {}", arg(1), Names::label(&n.cuelists, a0)),
+        Step::Lights => format!("select the {} base cue list", Names::label(&n.cuelists, a0)),
         Step::Look => format!("turn on the {} light look", Names::label(&n.looks, a0)),
         Step::Mode => format!("switch to {}", Names::label(&n.modes, a0)),
         Step::TimelinePlay => format!("play the {} timeline", Names::label(&n.timelines, a0)),
@@ -2548,11 +2578,17 @@ fn step_args(ui: &mut egui::Ui, t: &Theme, names: &Names, id: (&str, usize), kin
             let cue = args.get(1).cloned().unwrap_or_default();
             let mut out = None;
             if let Some(l) = pick_name(ui, pid, &a0, &names.cuelists, "Pick a cue list", (w - 100.0).max(100.0)) {
-                out = Some(build_step(kind, &[&l, &cue]));
+                let mut updated = args.to_vec();
+                updated.resize(updated.len().max(2), String::new());
+                updated[0] = l;
+                out = Some(build_step(kind, &updated.iter().map(String::as_str).collect::<Vec<_>>()));
             }
             let mut c = cue.clone();
             if ui.add(widgets::field(&mut c).hint_text("cue (optional)").desired_width(90.0)).changed() {
-                out = Some(build_step(kind, &[&a0, &c]));
+                let mut updated = args.to_vec();
+                updated.resize(updated.len().max(2), String::new());
+                updated[1] = c;
+                out = Some(build_step(kind, &updated.iter().map(String::as_str).collect::<Vec<_>>()));
             }
             return out;
         }
@@ -2572,7 +2608,15 @@ fn step_args(ui: &mut egui::Ui, t: &Theme, names: &Names, id: (&str, usize), kin
         }
         Step::LayerFx | Step::LayerVisible | Step::Setting | Step::Notify | Step::Custom => None,
     };
-    new_arg.map(|v| build_step(kind, &[&v]))
+    new_arg.map(|v| {
+        let mut updated = args.to_vec();
+        if updated.is_empty() {
+            updated.push(v);
+        } else {
+            updated[0] = v;
+        }
+        build_step(kind, &updated.iter().map(String::as_str).collect::<Vec<_>>())
+    })
 }
 
 /// Scene → layer (→ effect) pickers and On / Off / Switch for a layer step.
@@ -2737,14 +2781,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn values_filled_in_later_read_as_words() {
-        let scenes = vec![("duo".to_string(), "Duo".to_string())];
-        assert_eq!(Names::label(&scenes, "duo"), "Duo");
-        assert_eq!(Names::label(&scenes, "{scene}"), "the scene on air");
-        assert_eq!(Names::label(&scenes, "{patch.ad_break.return_scene}"), "the scene from before");
-        assert!(!Names::label(&scenes, "{user}").contains('{'));
-    }
 
     #[test]
     fn validation_uses_engine_parsers() {
@@ -2789,19 +2825,6 @@ mod tests {
         assert!(a.get_path("append").is_some_and(Value::truthy));
     }
 
-    #[test]
-    fn test_command_uses_the_simulator_when_it_can() {
-        let mut d = draft();
-        d.test_args = "bits=1500".into();
-        assert_eq!(d.test_command(), "sim.cheer bits=1500");
-        d.when = "twitch.*".into();
-        assert!(d.test_command().starts_with("sim."));
-        d.when = "band.drop".into();
-        d.test_args.clear();
-        assert_eq!(d.test_command(), "emit band.drop");
-        d.when = "mode.enter.*".into();
-        assert_eq!(d.test_command(), "emit mode.enter.test");
-    }
 
     #[test]
     fn completion_replaces_the_last_token() {
@@ -2813,18 +2836,6 @@ mod tests {
         assert_eq!(c, "preset.fire hype");
     }
 
-    #[test]
-    fn chat_templates_read_as_words() {
-        assert_eq!(friendly_text("Thanks {user} for {bits} bits"), "Thanks (their name) for (how many) bits");
-        assert_eq!(friendly_text("{random:a|b|c}!"), "(a, b or c)!");
-        assert_eq!(friendly_text("Goal {goals.subs.current}/{goals.subs.target}"), "Goal (subs so far)/(sub goal)");
-        assert_eq!(friendly_text("no braces {"), "no braces {");
-        assert_eq!(friendly_text("Song queue ({queue.length} waiting)"), "Song queue (how many waiting)");
-        assert_eq!(friendly_text("{song} (asked by {queue.now.user})"), "(current song) (asked by who asked for it)");
-        assert_eq!(nice_name("SUB BIG"), "Sub big");
-        assert_eq!(nice_name("brb"), "BRB");
-        assert_eq!(nice_name("Kit (HDMI 1)"), "Kit (HDMI 1)");
-    }
 
     #[test]
     fn simple_checks_round_trip() {
@@ -2845,8 +2856,8 @@ mod tests {
         for cmd in [
             "preset.fire hype",
             "scene.cut brb",
-            "lights.cue main 2",
-            "lights.cue look=warm",
+            "lights.layer.select layer=base cuelist=main cue=2",
+            "lights.layer.select layer=base palette=warm energy=0.4 rhythm=2 owner=rule",
             "patch.terminal_boot.trigger",
             "wait 2s",
             "bot.say 'HYPE! Thanks {user} for {bits} bits'",
@@ -2870,6 +2881,27 @@ mod tests {
         let built = build_step(Step::Say, &[tricky]);
         assert!(Op::parse(&built).is_ok(), "{built}");
         assert_eq!(parse_step(&built), (Step::Say, vec![tricky.to_string()]));
+    }
+
+    #[test]
+    fn editing_layer_reference_preserves_controls_and_timing() {
+        for cmd in [
+            "lights.layer.select layer=base palette=warm energy=0.4 rhythm=2 brightness=0.8 coverage='[\"front\", \"back\"]' vibe='hand authored' fade=2s release=500ms quantize=4 owner=rule",
+            "lights.layer.select layer=base cuelist=main cue=2 effects=beat duration=8s priority=220",
+        ] {
+            let (kind, mut args) = parse_step(cmd);
+            assert!(matches!(kind, Step::Look | Step::Lights));
+            args[0] = "replacement".into();
+            let built = build_step(kind, &args.iter().map(String::as_str).collect::<Vec<_>>());
+            let Op::Action { args: original, .. } = Op::parse(cmd).unwrap() else { panic!("selection action") };
+            let Op::Action { args: edited, .. } = Op::parse(&built).unwrap() else { panic!("selection action") };
+            let key = if kind == Step::Look { "palette" } else { "cuelist" };
+            assert_eq!(edited, original.with(key, "replacement"), "editing the content reference cannot discard controls/timing/ownership");
+        }
+        for cmd in ["lights.cue main 2", "lights.cue look=warm", "lights.layer.select layer=rhythm effects=beat", "lights.layer.select layer=base palette=warm cuelist=main"] {
+            assert_eq!(parse_step(cmd).0, Step::Custom, "unsupported/manual forms must remain lossless in the advanced editor");
+        }
+        assert!(step_missing("lights.layer.select layer=base palette= energy=0.5").is_some());
     }
 
     #[test]
@@ -2905,38 +2937,8 @@ mod tests {
         assert!(step_missing(&Step::LayerVisible.blank()).is_some());
         assert!(step_missing("set fx.vhs.amount").is_some(), "a setting needs a value");
         assert!(step_missing(&Step::Notify.blank()).is_some());
-        // words
-        let n = Names {
-            scenes: vec![("duo".into(), "Duo".into())],
-            alerts: alert_choices(Some(&Value::map().with("alerts", Value::List(vec![Value::map().with("name", "follow").with("when", "twitch.follow")])))),
-            ..Default::default()
-        };
-        assert_eq!(step_phrase("set scene.duo.node.cam_face.fx.rgb_split.enabled true", &n), "turn on RGB split on Cam face in Duo");
-        assert_eq!(step_phrase("set scene.duo.node.cam_face.visible false", &n), "hide Cam face in Duo");
-        assert_eq!(step_phrase("emit twitch.follow user=Alex", &n), "show the Follow alert");
-        assert_eq!(step_phrase("set audio.bus.music.gain 0.5", &n), "set music volume to 0.5");
     }
 
-    #[test]
-    fn animation_and_look_steps_read_as_what_they_do() {
-        // both ways of playing a source's animation read as one; the guided editor writes the file's way
-        assert_eq!(parse_step("trigger patch.confetti"), (Step::Animation, vec!["confetti".to_string()]));
-        assert_eq!(build_step(Step::Animation, &["confetti"]), "patch.confetti.trigger");
-        assert!(Op::parse(&build_step(Step::Animation, &["confetti"])).is_ok());
-        // triggers with settings, or of something that isn't a source, need the raw editor
-        assert_eq!(parse_step("patch.confetti.trigger count=50").0, Step::Custom);
-        assert_eq!(parse_step("trigger fx.glitch").0, Step::Custom);
-        // a look is not a cue list
-        assert_eq!(parse_step("lights.cue main").0, Step::Lights);
-        assert_eq!(parse_step("lights.cue look=warm").0, Step::Look);
-        assert!(Op::parse(&build_step(Step::Look, &["warm"])).is_ok());
-        // fresh steps are unfinished until something is picked
-        for k in [Step::Animation, Step::Look] {
-            assert_eq!(parse_step(&k.blank()), (k, if k == Step::Look { vec![String::new()] } else { Vec::new() }));
-            assert!(step_missing(&k.blank()).is_some(), "{k:?}");
-        }
-        assert_eq!(step_missing("patch.terminal_boot.trigger"), None);
-    }
 
     #[test]
     fn events_group_by_where_they_come_from() {

@@ -35,6 +35,73 @@ New projects contain no patch instances. Reusable effects are available on deman
 only in the current project. For example:
 `streamctl do patch.new id=ringmod kind=dsp template=ringmod`.
 
+Video effect library (none is applied until you create and attach it):
+
+| Kind | Always on (attach to a layer/scene/master; a trigger adds an accent) | Trigger bursts |
+|---|---|---|
+| Polish | `shader/breathing_bloom`, `shader/light_leaks`, `shader/highlight_glitter`, `shader/color_atmosphere`, `shader/pocket_bounce`, `shader/groove_ripple` | |
+| Win 3.1 | `shader/window_boing`, `shader/minesweeper_margin` (overlay), `shader/paintbrush_mischief`, `shader/tiny_crowd`, `shader/screensaver_visitors` | `shader/solitaire_victory` (overlay), `shader/fill_dialog` (overlay), `shader/desktop_wormhole` |
+| Pixel toys | `particles/emoji_percussion`, `particles/cymbal_fireflies`, `shader/beat_garden` | `particles/pixel_confetti`, `shader/sticker_pops` |
+| Big moments | `shader/crt_overload`, `shader/drum_portal` | `shader/pixel_gravity` |
+| Tempo | `shader/bar_counter`, `shader/metronome_pendulum`, `shader/bpm_meter`, `shader/polyrhythm_dots` (overlays), `shader/beat_cuts`, `shader/phrase_push` | `shader/kaleidoscope_fill`, `shader/count_in` (overlay) |
+| Audio | `shader/kit_glow_map`, `shader/loudness_heat`, `shader/bass_shockwave`, `shader/groove_meter` (overlay), `shader/talk_mode`, `particles/fill_stamp` | |
+| Chat | `particles/chat_rain`, `particles/chat_bubbles`, `shader/hype_thermometer` (overlay), `shader/viewer_claim` — fire them per chat message / cheer with the message's `color` | |
+| Show | | `shader/song_intro_card`, `shader/clip_flash` (overlays), `shader/song_end_flourish`, `shader/blue_screen`, `shader/drum_explosion`, `shader/window_cascade` |
+| Frame history (`feedback`/`history`) | `shader/afterglow_trails`, `shader/echo_ghosts`, `shader/time_slice` | `shader/freeze_frame` |
+
+The drum project includes `patch.musical_atmosphere`, `patch.musical_bloom`,
+`patch.musical_sheen`, and `patch.musical_leaks` in its project-local `patches/` library.
+These are not shipped `patch.new` templates. Attach project patches normally; the director
+only selects presets explicitly carrying `auto_fx` metadata ([context.md](context.md)).
+They are not notification or viewer-effect replacements.
+
+Emitter/target positions (`*_pos`, `emitter_*`, `center`, `target`) default to the drum-kit
+camera framing; adjust them per scene.
+
+### Longer drum-project moments
+
+These burst holds give viewers time to enjoy each effect without changing its shader or
+visual parameters. Project attack/release values stay unchanged; reusable templates share
+the longer holds while retaining their snappier existing attacks/releases where present.
+CRT and portal templates now declare a finite trigger instead of inheriting the 2s default.
+
+| Patch | Hold | Project attack / release | Project full envelope | Template full envelope |
+|---|---|---|---|---|
+| `blue_screen` | 8s | 400ms / 1600ms | 10s | 9.65s (50ms / 1600ms) |
+| `crt_overload` | 12s | 600ms / 2s | 14.6s | 14.6s |
+| `drum_explosion` | 6s | 300ms / 1200ms | 7.5s | 6.95s (50ms / 900ms) |
+| `desktop_wormhole` | 9s | 400ms / 1200ms | 10.6s | 9.9s (100ms / 800ms) |
+| `drum_portal` | 10s | 500ms / 1500ms | 12s | 12s |
+| `kaleidoscope_fill` | 12s | 600ms / 1500ms | 14.1s | 13.25s (350ms / 900ms) |
+
+The drum project's existing `fx_crt` preset intentionally holds the overload for **15s**,
+longer than the manifest default; this is preserved, with a **17.6s** full moment-lane
+reservation. Its other five extended presets reserve the project full envelope above.
+`fx_freeze` retains its 2.5s frozen hold and reserves 3.8s (300ms attack + 1s release).
+
+A preset's top-level `hold` is its active lifetime and also becomes the patch's hold unless
+the `fx` entry specifies its own `hold`. Set **both** when reserving a lane for the complete
+envelope; otherwise the longer reservation would lengthen the plateau, or an inherited 2s
+trigger default could shorten it. For example, the real blue-screen preset uses:
+
+```toml
+lane = "moment"
+quantize = "bar"
+hold = "10s"                                  # lane lifetime: attack + hold + release
+fx = [{ name = "patch.blue_screen", hold = "8s" }] # crash-screen plateau only
+```
+
+Manual/deck, rewards and automatic firings using these presets share the same durations.
+Deck Effects pages invoke the presets rather than bypassing their lanes; see
+[controllers.md](controllers.md) for the complete two-page button map.
+
+Preview any shader or particles patch offline (real GPU renderer, synthetic 120 BPM groove,
+a trigger every 4 s; no engine or cameras needed):
+`cargo run --release -p se-render --example fx_preview -- --video clip.mp4 templates/patches/shader/drum_portal`
+writes `target/fx-previews/<id>.mp4` and an `index.html` gallery. `--trigger-every 0.4`
+simulates chat messages (one trigger per message, varying viewer colours, with
+`twitch.chat_rate` ramping 10 → 120); `--talk` stops the band from 5 to 8 s with the mic up.
+
 Other actions: `patch.reload [id]` (re-read from disk; no id = all), `patch.disable <id>`,
 `patch.enable <id>` (also resumes a suspended script), `patch.open <id>` (editor),
 `patch.remove <id>` (unloads it and moves its folder to `patches/.removed/<id>-<unix time>/`,
@@ -60,7 +127,7 @@ params to signals.
 |---|---|---|
 | `source` | placeable in scenes | scene node `{ src = "patch.<id>", rect = [...] }` |
 | `overlay` | global layer above the scene on every canvas | drawn while `patch.<id>.active` or `env > 0`; always if the patch has no trigger |
-| `effect` | takes an input texture (`se_input`) | `fx = [{ name = "patch.<id>", amount = 0.8 }]` on a source, scene node, scene, `[render.canvas_fx.<canvas>]`, or `[render.output_fx.<canvas>]`; with a trigger it also runs canvas-wide while `env > 0` (so presets can `fx = [{ name = "patch.<id>" }]`). Also usable as a morph enter/exit style (`enter = "patch.<id>"`: the node in `se_input`, its box in `se.region`, presence in `se.progress`; docs/render.md) |
+| `effect` | takes an input texture (`se_input`) | attach `{ id = "look", name = "patch.<id>" }` in a source, node, scene, layout, composited group, or master canvas/output chain. Slots have independent typed manifest settings, `enabled` bypass, and explicit `triggered` mode using `patch.<id>.env`; manifest `amount` retains its shader-defined meaning. With a trigger, the implicit global instance also runs canvas-wide while `env > 0` — unless a non-bypassed slot sets `triggered = true` in config, which scopes the patch to its attachments (docs/render.md). Also usable as a morph enter/exit style (`enter = "patch.<id>"`: node input, box in `se.region`, presence in `se.progress`; docs/render.md). |
 | `transition` | takes A (`se_input`), B (`se_input_b`), `se.progress` | `scene.take transition=patch.<id>`, a scene's `transitions.pool = [{ name = "patch.<id>" }]`, or `transitions/<name>.toml` with `kind = "shader"`, `shader = "patch.<id>"`, `ms = 700` |
 | `audio-effect` | insert on a bus/input (`dsp` only) | audio chains `{ patch = "<id>" }` |
 | `audio-source` | generates audio (`dsp` only) | `[audio.sources."patch.<id>"] bus = "sfx"` |
@@ -85,6 +152,32 @@ fps     = 60                      # web pages: CEF frame rate 1–120 (default 6
 grants  = ["lights.*", "source.cam1"]   # web pages: extra things the page may control (see §8)
 particles = { count = 4096, sim = "sim.wgsl", draw = "draw.wgsl" }   # particles only
 ```
+
+### Live shader palette aliases
+
+A shader manifest may give named stream palette slots read-only live color aliases:
+
+```toml
+[palette]
+accent = "lx.color.a"
+background = "lx.color.b"
+foreground = "lx.color.c"
+red = "lx.color.d"
+yellow = "lx.color.e"
+green = "lx.color.f"
+```
+
+Valid keys are `accent`, `background`, `foreground`, `red`, `yellow`, `green`, `cyan`,
+`magenta`; values are engine addresses. `palette(slot)` keeps the standard slot order.
+Aliases are resolved afresh from the frame snapshot at source, node, group, scene,
+layout, canvas/output and implicit-global effect passes. A missing, malformed, non-finite,
+out-of-range or transparent color falls back to that slot's ordinary stream palette color.
+Other slots and other patches retain their own colors. No state, theme or lighting output
+is written. This is separate from authored FX **parameter** references such as
+`palette.accent`; those retain their existing one-way theme-link behavior.
+
+
+### Manifest fields
 
 - The folder name is the id: one address segment (`a-z`, `0-9`, `_`, `-`), no dots.
 - Param types: `float` (default), `int`, `bool`, `color` (`"#rrggbb[aa]"` or `[r,g,b,a]`), `vec2`, `vec4`, `enum` (`options`), `string`, `texture`. Reserved names: `env`, `active`, `error`, `trigger`.
@@ -179,6 +272,35 @@ end
 Commands issued inside an event handler carry that event as their cause, so `streamctl trace`
 shows the chain.
 
+### Adjustable camera motion
+
+A transparent, always-running script overlay can publish motion signals consumed
+by scene bindings. This keeps one controller for wide/tall layouts and all camera
+shots instead of copying timers into each scene. Its typed manifest parameters
+appear under **Sources → Sources → Camera motion → Settings** when the project
+names the patch “Camera motion”; normal parameter edits save through `set_base`.
+
+Integrate the live speed each frame (`phase = (phase + dt * speed / period) % 1`),
+rather than computing `time * speed`, which jumps position when speed changes.
+The raised-cosine signal `0.5 - 0.5 * cos(2 * pi * phase)` eases to zero velocity
+at both ends, accelerates through the middle, then smoothly reverses. Bind that
+0–1 signal to zoom scale or horizontal offset with the existing binding `range`.
+Publish phase as a patch-owned signal and initialize it with `get()` on load to
+retain position across patch reloads. An empty draw list leaves the picture alone.
+
+The drum project's Camera motion settings use speed multipliers from **0.25x
+to 4x**: **Zoom speed** at 1x has a 50-second full in/out cycle; **Dolly speed**
+at 1x has a 125-second full left/right cycle. Both halves include the endpoint
+slowdown. Zoom controls Side zoom and Overhead zoom; Dolly controls Front dolly,
+Room dolly, and Ceiling pan. The separate Side + YouTube and Overhead + YouTube
+scenes are static camera shots with the existing player box, not motion scenes.
+
+Front dolly uses a fixed, centered **1.15x** scale rather than 1.25x to preserve
+seated headroom and show more drums without extra upward crop bias. Its pan is
+limited to **±130 px** wide / **±70 px** tall, inside the available overscan;
+reducing the zoom requires keeping these limits inside the image.
+
+
 ### Drawing (`draw.*`)
 
 Coordinates are 0–1 of the layer ((0,0) top-left, (1,1) bottom-right); sizes, radii, stroke
@@ -237,11 +359,14 @@ The header (see `crates/se-patch/src/wgsl.rs`):
 
 | Binding / item | |
 |---|---|
-| `se: SeInputs` (`@group(0) @binding(0)`, uniform) | `time`, `dt`, `frame: u32`, `env`, `resolution: vec2<f32>`, `progress` (transitions, enter/exit styles), `trigger_count: u32`, `beat_phase`, `bpm`, `region: vec4<f32>` (uv `x0, y0, x1, y1` of the node an effect or enter/exit style runs for; `0, 0, 1, 1` otherwise), `trigger: SeTrigger`, `palette: array<vec4<f32>, 8>`, `params`, `signals` |
+| `se: SeInputs` (`@group(0) @binding(0)`, uniform) | `time`, `dt`, `frame: u32`, `env`, `resolution: vec2<f32>`, `progress` (transitions, enter/exit styles), `trigger_count: u32`, `trigger_age` (seconds since the last trigger, counted from the first frame that drew the patch after it; 1e6 before any trigger — drive one-shot animations with it), `beat_phase`, `bpm`, `region: vec4<f32>` (uv `x0, y0, x1, y1` of the node an effect or enter/exit style runs for; `0, 0, 1, 1` otherwise), `trigger: SeTrigger`, `palette: array<vec4<f32>, 8>`, `params`, `signals` |
 | `se.trigger` (`SeTrigger`) | payload of the last trigger: `amount`, `bits`, `tier`, `months`, `viewers`, `count`, `user_hash` (0–1), `user_color: vec4<f32>` — see §4 |
 | `se_sampler` (`binding(1)`) | linear, clamp |
 | `se_input` (`binding(2)`) | effect input / transition A (outgoing) |
 | `se_input_b` (`binding(3)`) | transition B (incoming) |
+| `se_prev` (`binding(5)`, `texture_2d<f32>`; manifest `feedback = true`, effect shaders only) | this attachment instance's own previous output (same size as its target, premultiplied). Every slot, the global instance, and each canvas/source context keep separate state; it starts transparent on (re)creation, on resize, and whenever the instance did not run on the previous frame (bypassed, envelope down). Costs one target-sized RGBA8 texture plus one copy per pass |
+| `SeOut { @location(0) color, @location(1) state }` (manifest `feedback = "state"`) | the entry returns `SeOut`; `color` is the visible output and `se_prev` is last frame's `state` instead of the output — keep a frozen frame, a glow layer or any per-pixel memory apart from the picture. Same lifetime rules; costs two target-sized RGBA8 textures (ping-pong, no copy). Not usable as an enter/exit style |
+| `se_history` (`binding(6)`, `texture_2d_array<f32>`; manifest `history = N`, 1–8, effect shaders only), `se.history_len: u32`, `se.history_head: u32`, `SE_HISTORY`, `se_history_at(uv, age: u32) -> vec4<f32>` | ring of the last N **input** frames of this instance. `se_history_at(uv, k)` = the input `k` frames ago, clamped to the `history_len` frames recorded so far (`k = 0` or nothing recorded: the current `se_input`); layer of age `k` is `(history_head + SE_HISTORY - k) % SE_HISTORY`. Restarts empty like `se_prev`. Costs N target-sized RGBA8 layers plus one copy per pass |
 | `p_<param>()` | one accessor per param: `f32` (float), `i32` (int, enum index), `bool`, `vec2<f32>`, `vec4<f32>` (color, vec4); string/texture params have none |
 | `s_<signal>()` | every standard signal plus the manifest's `signals`, dots → `_` (`s_band_kick()`, `s_twitch_chat_rate()`) |
 | `palette(i)` with `PAL_ACCENT`, `PAL_BACKGROUND`, `PAL_FOREGROUND`, `PAL_RED`, `PAL_YELLOW`, `PAL_GREEN`, `PAL_CYAN`, `PAL_MAGENTA` | stream palette |

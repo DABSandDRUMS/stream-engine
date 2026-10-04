@@ -1,0 +1,15 @@
+# Freedom Par Tri-6 UM Rev. 1 pp. 14–15. No calibrated hardware-strobe Hz mapping.
+name = "Chauvet Freedom Par Tri-6"
+manufacturer = "Chauvet"
+kind = "par"
+beam = 15.0
+notes = "9CH direct RGB. Color macro/program/speed disabled; dimmer response explicitly off (52). Strobe stays blocked without a calibrated Hz mapping."
+[modes.9ch]
+channels = [
+  "dimmer", "red", "green", "blue",
+  { role = "fixed", value = 0, label = "Manual color / color-temperature macro", restriction = "Disabled for predictable direct RGB; macro/RGB precedence undocumented." },
+  { role = "strobe", range = [11, 255], open = 0, label = "Hardware strobe", restriction = "Blocked without calibrated Hz mapping; steady byte 0." },
+  { role = "fixed", value = 0, label = "Auto / sound-active program selector", restriction = "Autonomous programs disabled; engine sequences use direct RGB." },
+  { role = "fixed", value = 0, label = "Auto-program speed", restriction = "Neutralized with program selector disabled; not engine sequence speed." },
+  { role = "fixed", value = 52, label = "Dimmer response mode", restriction = "52 explicitly disables hardware dimmer smoothing; 0 would inherit menu settings." },
+]

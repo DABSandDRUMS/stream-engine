@@ -104,6 +104,9 @@ impl Show {
     /// Every address this show declares, with metadata.
     pub fn declarations(&self) -> Vec<(String, Meta)> {
         let mut out = Vec::new();
+        for slot in ['a', 'b', 'c', 'd', 'e', 'f'] {
+            out.push((format!("lx.color.{slot}"), Meta { ty: ValueType::Color, default: Value::Null, ..Default::default() }.owner("lights").describe("live show color slot")));
+        }
         let rig = &self.rig;
         for h in &rig.heads {
             for a in &h.attrs {
@@ -130,6 +133,13 @@ impl Show {
         }
         out.push(("lights.master".into(), Meta::float(1.0, [0.0, 1.0]).owner("lights").describe("grand master")));
         out.push(("lights.blackout".into(), Meta::boolean(false).owner("lights").describe("blackout (grand master off)")));
+        out.push(("lights.panic_latched".into(), Meta::boolean(false).readonly().owner("lights").describe("safe look latched after panic")));
+        for slot in crate::foundation::Slot::ALL {
+            out.push((format!("lights.layer.{}.state", slot.name()), Meta { ty: ValueType::Map, default: Value::map(), readonly: true, ..Default::default() }.owner("lights").describe("layer selection, ownership, controls and pending start")));
+            for (control, range) in [("energy", [0.0, 1.0]), ("brightness", [0.0, 1.0]), ("rhythm", [0.125, 8.0])] {
+                out.push((format!("lights.layer.{}.{control}", slot.name()), Meta::float(1.0, range).owner("lights").describe("live control of the current layer owner")));
+            }
+        }
         for (name, l) in &self.lists {
             let p = format!("lights.cuelist.{name}");
             out.push((format!("{p}.cue"), Meta::string("").readonly().owner("lights").describe(&format!("{}: current cue", l.label))));
@@ -143,6 +153,11 @@ impl Show {
             let unit = if e.unit == crate::effects::Unit::Beats { "beats/cycle" } else { "Hz" };
             out.push((format!("{p}.rate"), Meta::float(e.rate as f64, [0.01, 64.0]).unit(unit).owner("lights").describe(&format!("effect {} rate", e.label))));
             out.push((format!("{p}.size"), Meta::float(e.size as f64, [0.0, 1.0]).owner("lights").describe(&format!("effect {} size", e.label))));
+            if let Ok(heads) = e.layout(rig) {
+                for (h, _) in heads {
+                    out.push((format!("{p}.coverage.{}", rig.heads[h].id), Meta::boolean(true).owner("lights").describe("effect participates on this head")));
+                }
+            }
         }
         out.push((
             "lights.programmer.selection".into(),

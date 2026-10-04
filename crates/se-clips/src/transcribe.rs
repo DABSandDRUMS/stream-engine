@@ -215,7 +215,20 @@ impl Transcriber {
         if !self.cfg.prompt.is_empty() {
             p.set_initial_prompt(&self.cfg.prompt);
         }
-        state.full(p, pcm).map_err(|e| format!("whisper: {e}"))?;
+        // Post-show work stops when the show goes live (crate::live).
+        let halt = crate::live::current();
+        if let Some(h) = &halt {
+            if h.stop_now() {
+                return Err(h.error());
+            }
+            let h = h.clone();
+            p.set_abort_callback_safe(move || h.stop_now());
+        }
+        let res = state.full(p, pcm);
+        if let Some(h) = halt.filter(|h| h.stop_now()) {
+            return Err(h.error());
+        }
+        res.map_err(|e| format!("whisper: {e}"))?;
         let eot = self.ctx.token_eot();
         let mut out: Vec<Word> = Vec::new();
         // last aligned token time per word, for its end

@@ -383,6 +383,7 @@ impl Control {
             for (k, (_, src, _)) in sources_src.iter().enumerate() {
                 self.push(RtMsg::TapRoute { generation: self.generation, index: k as u16, source: Some(*src) });
             }
+            let _ = self.ana.tx.send(ana::Msg::ResetSources);
             return;
         }
         let rate = self.cfg.rate;
@@ -705,7 +706,15 @@ impl Control {
             "audio.tap" => {
                 let _ = self.ana.tx.send(ana::Msg::Tap(if cmd.ts > 0 { cmd.ts } else { now_ns() }));
             }
-            "audio.tap.clear" => {
+            "audio.bpm" => {
+                match arg("bpm").or_else(|| pos(0)).and_then(|v| v.as_f32()) {
+                    Some(bpm) if se_clock::musical::MusicalClock::valid_bpm(bpm) => {
+                        let _ = self.ana.tx.send(ana::Msg::Bpm(bpm));
+                    }
+                    _ => self.hub.log("warn", "audio", "audio.bpm needs a finite bpm between 20 and 400"),
+                }
+            }
+            "audio.tap.clear" | "audio.bpm.clear" => {
                 let _ = self.ana.tx.send(ana::Msg::ClearTap);
             }
             "audio.reload" => {
@@ -909,13 +918,13 @@ impl Control {
             };
             self.publish_if(&format!("health.audio.input.{}", inp.name), v, 0.0);
         }
-        let prog = pw.consumers.get("se-program").cloned().unwrap_or_default();
-        let obs = if prog.is_empty() {
-            h("warn", "nothing is capturing se-program (run `streamctl do obs.setup`, or add it as an audio source in OBS)".into())
-        } else {
-            h("pass", format!("se-program → {}", prog.join(", ")))
-        };
-        self.publish_if("health.audio.obs", obs, 0.0);
+        // A consumer of an engine bus does not prove that OBS's selected streaming inputs
+        // are configured correctly. App recording has its own health and input settings.
+        self.publish_if(
+            "health.audio.obs",
+            h("warn", "Confirm your selected streaming audio inputs in OBS; app recording is configured independently in Settings".into()),
+            0.0,
+        );
         if let Some(mic) = self.cfg.analysis.mic.clone() {
             let level = self.ana.latest.lock().get("mic").and_then(|v| v.get_path("peak")).and_then(Value::as_f64).unwrap_or(0.0);
             let now = std::time::Instant::now();

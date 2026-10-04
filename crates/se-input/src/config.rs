@@ -10,6 +10,8 @@ use crate::midi::controls::{ControlDef, Kind, Out, RelEnc, RingMode, SwitchMode}
 use crate::midi::mcu;
 use se_proto::parse_duration_ms;
 use std::collections::BTreeMap;
+use std::path::Path;
+use std::sync::Arc;
 
 /// What a key or button does.
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -158,6 +160,50 @@ impl Behavior {
 pub struct KeyDef {
     pub action: Action,
     pub b: Behavior,
+    pub image: Option<Arc<crate::deck::render::Artwork>>,
+    /// Display-only local time; never an action.
+    pub clock: bool,
+    /// Unavailable controls keep their presentation but cannot run actions.
+    pub disabled: bool,
+}
+
+impl KeyDef {
+    pub fn available(&self) -> bool {
+        !self.disabled && !self.clock
+    }
+
+    pub fn from_table(t: &toml::Table, root: &Path) -> Result<Self, String> {
+        Self::from_table_cached(t, root, &mut BTreeMap::new())
+    }
+
+    fn from_table_cached(t: &toml::Table, root: &Path, artwork: &mut BTreeMap<String, Arc<crate::deck::render::Artwork>>) -> Result<Self, String> {
+        let action = Action::from_table(t)?;
+        let b = Behavior::from_table(t)?;
+        let boolean = |key: &str| match t.get(key) {
+            None => Ok(false),
+            Some(toml::Value::Boolean(value)) => Ok(*value),
+            Some(_) => Err(format!("`{key}` must be a boolean")),
+        };
+        let clock = boolean("clock")?;
+        let disabled = boolean("disabled")?;
+        if clock && action != Action::None {
+            return Err("`clock = true` is display-only; remove the key's action".into());
+        }
+        let image = match t.get("image") {
+            None => None,
+            Some(toml::Value::String(path)) => {
+                if let Some(image) = artwork.get(path) {
+                    Some(image.clone())
+                } else {
+                    let image = Arc::new(crate::deck::render::Artwork::load(root, path)?);
+                    artwork.insert(path.clone(), image.clone());
+                    Some(image)
+                }
+            }
+            Some(_) => return Err("`image` must be a project-relative PNG path".into()),
+        };
+        Ok(Self { action, b, image, clock, disabled })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -356,6 +402,7 @@ pub struct Controllers {
 pub fn parse_all(
     files: &BTreeMap<String, toml::Table>,
     paths: &BTreeMap<String, String>,
+    root: &Path,
     last_good: &mut BTreeMap<String, Parsed>,
 ) -> (Controllers, Vec<(String, String)>) {
     let mut errors = Vec::new();
@@ -363,7 +410,7 @@ pub fn parse_all(
     last_good.retain(|name, _| files.contains_key(name));
     for (name, t) in files {
         let file = paths.get(&format!("controllers/{name}")).cloned().unwrap_or_else(|| format!("controllers/{name}.toml"));
-        match parse_file(name, &file, t) {
+        match parse_file_at(name, &file, t, root) {
             Ok(p) => {
                 last_good.insert(name.clone(), p.clone());
                 parsed.push(p);
@@ -408,25 +455,31 @@ pub enum Parsed {
 const RESERVED: &[&str] = &["page", "midi", "learn", "voice"];
 
 pub fn parse_file(name: &str, file: &str, t: &toml::Table) -> Result<Parsed, String> {
+    let root = Path::new(file).parent().and_then(Path::parent).unwrap_or_else(|| Path::new("."));
+    parse_file_at(name, file, t, root)
+}
+
+fn parse_file_at(name: &str, file: &str, t: &toml::Table, root: &Path) -> Result<Parsed, String> {
     let kind = t.get("kind").and_then(|v| v.as_str());
     match kind {
-        Some("deck") => parse_deck(name, file, t).map(Parsed::Deck),
+        Some("deck") => parse_deck(name, file, t, root).map(Parsed::Deck),
         Some("midi") => parse_midi(name, file, t).map(|m| Parsed::Midi(Box::new(m))),
         Some(k) => Err(format!("unknown controllers kind `{k}` (deck | midi)")),
-        None if t.contains_key("page") => parse_deck(name, file, t).map(Parsed::Deck),
+        None if t.contains_key("page") => parse_deck(name, file, t, root).map(Parsed::Deck),
         None if t.contains_key("match") => parse_midi(name, file, t).map(|m| Parsed::Midi(Box::new(m))),
         None if t.contains_key("binding") => Ok(Parsed::BindingsOnly),
         None => Err("set `kind = \"deck\"` or `kind = \"midi\"`".into()),
     }
 }
 
-fn parse_deck(name: &str, file: &str, t: &toml::Table) -> Result<DeckCfg, String> {
+fn parse_deck(name: &str, file: &str, t: &toml::Table, root: &Path) -> Result<DeckCfg, String> {
     let id = t.get("id").and_then(|v| v.as_str()).unwrap_or(name).to_string();
     if RESERVED.contains(&id.as_str()) || !se_proto::address::is_valid(&id, false) || id.contains('.') {
         return Err(format!("deck id `{id}` is reserved or invalid (rename the file or set `id = \"…\"`)"));
     }
     let brightness = t.get("brightness").and_then(|v| v.as_integer()).unwrap_or(70).clamp(0, 100) as u8;
     let mut pages = Vec::new();
+    let mut artwork = BTreeMap::<String, Arc<crate::deck::render::Artwork>>::new();
     if let Some(pt) = t.get("page").and_then(|v| v.as_table()) {
         for (pname, pv) in pt {
             let ptab = pv.as_table().ok_or_else(|| format!("page `{pname}` must be a table"))?;
@@ -438,9 +491,8 @@ fn parse_deck(name: &str, file: &str, t: &toml::Table) -> Result<DeckCfg, String
                         return Err(format!("page `{pname}`: key {idx} out of range"));
                     }
                     let ktab = kv.as_table().ok_or_else(|| format!("page `{pname}` key {idx} must be a table"))?;
-                    let action = Action::from_table(ktab).map_err(|e| format!("page `{pname}` key {idx}: {e}"))?;
-                    let b = Behavior::from_table(ktab).map_err(|e| format!("page `{pname}` key {idx}: {e}"))?;
-                    keys.insert(idx, KeyDef { action, b });
+                    let kd = KeyDef::from_table_cached(ktab, root, &mut artwork).map_err(|e| format!("page `{pname}` key {idx}: {e}"))?;
+                    keys.insert(idx, kd);
                 }
             }
             let label = ptab.get("label").and_then(|v| v.as_str()).map(String::from).unwrap_or_else(|| pname.to_uppercase());

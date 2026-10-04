@@ -1,8 +1,5 @@
 # Neutral bus gains. Add inserts and trigger effects explicitly in the Sound view.
 
-[buses.band]
-gain = 0.0
-
 [buses.music]
 gain = 0.0
 

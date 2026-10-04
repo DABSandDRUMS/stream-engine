@@ -1,8 +1,8 @@
 //! PipeWire host: one `pw_filter` node (`se-engine`) whose real-time process callback runs
-//! the [`Engine`], one virtual source node per bus (`se-band`, `se-music`, … — what OBS
-//! captures), and the links between them and the hardware (Studio 24c / 16R capture, monitor
-//! and direct outputs). Runs its own thread with a PipeWire main loop; reconnects if the
-//! PipeWire daemon restarts. Hardware hotplug is handled by re-linking from the registry.
+//! the [`Engine`], one virtual source node per bus (`se-band`, `se-music`, …), and links
+//! to explicitly configured hardware or virtual capture, playback and monitor endpoints.
+//! Runs its own thread with a PipeWire main loop; reconnects if the PipeWire daemon restarts.
+//! Hardware hotplug is handled by re-linking from the registry.
 
 use crate::builder::{BusNode, LinkSpec, LinkTarget};
 use crate::graph::{Cycle, Engine, PortIo, RtStats};
@@ -551,13 +551,13 @@ impl Session {
         let mut devs: Vec<DeviceInfo> = g
             .nodes
             .iter()
-            .filter(|(_, n)| n.class == "Audio/Source" || n.class == "Audio/Sink")
+            .filter(|(_, n)| !n.name.starts_with("se-") && (n.class.starts_with("Audio/Source") || n.class.starts_with("Audio/Sink")))
             .map(|(id, n)| DeviceInfo {
                 id: *id,
                 name: n.name.clone(),
                 description: n.description.clone(),
                 class: n.class.clone(),
-                ports: g.ports.values().filter(|p| p.node == *id && !p.monitor && p.input == (n.class == "Audio/Sink")).count(),
+                ports: g.ports.values().filter(|p| p.node == *id && !p.monitor && p.input == n.class.starts_with("Audio/Sink")).count(),
             })
             .collect();
         devs.sort_by(|a, b| a.name.cmp(&b.name));

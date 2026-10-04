@@ -61,7 +61,6 @@ async fn engine() -> Engine {
         http: "127.0.0.1:0".parse().unwrap(),
         dev: true,
     };
-    hub.register_query("recording.prepare", Arc::new(|_, _| Box::pin(async { Ok(Value::Str("/tmp/stream-engine-show".into())) })));
     se_obs::start(ctx).await.unwrap();
     Engine { hub, cfg_tx, sock, session, bus, _dir: dir, core: Some(core) }
 }
@@ -203,10 +202,10 @@ impl Plugin {
 fn status(extra: serde_json::Value) -> serde_json::Value {
     let now = se_clock::now();
     let mut s = serde_json::json!({
-        "t": "status", "streaming": false, "recording": false, "kbps": 0.0, "dropped": 0, "total": 0,
+        "t": "status", "streaming": false, "kbps": 0.0, "dropped": 0, "total": 0,
         "lag_ms": 0.0, "fps": 60.0, "obs_ns": now + 5_000, "mono_ns": now,
         "stale": {"wide": false, "tall": false}, "sources": {"wide": 1, "tall": 1},
-        "scene": "Scene", "record_dir": "/home/u/Videos", "outputs": []
+        "scene": "Scene", "outputs": []
     });
     for (k, v) in extra.as_object().unwrap() {
         s[k] = v.clone();
@@ -243,7 +242,6 @@ async fn hello_status_health_and_disconnect() {
     e.state("obs.stale.wide", false).await;
     e.state("obs.stale.tall", true).await;
     e.state("obs.fps", 60.0).await;
-    e.state("obs.record.dir", "/home/u/Videos").await;
     e.state("obs.output.aitum_vertical_stream.active", true).await;
     e.state("obs.output.aitum_vertical_stream.canvas", "tall").await;
     e.state("obs.output.aitum_vertical_stream.label", "Aitum Vertical Stream").await;
@@ -269,22 +267,19 @@ async fn hello_status_health_and_disconnect() {
 async fn actions_reach_obs_and_replies_are_reported() {
     let mut e = engine().await;
     // no plugin: the action fails loudly
-    e.action("obs.record.start");
-    let m = e.log_containing("obs.record.start failed").await;
+    e.action("obs.stream.start");
+    let m = e.log_containing("obs.stream.start failed").await;
     assert!(m.contains("not connected"), "{m}");
 
     let mut p = Plugin::connect(&e.sock).await;
     p.hello().await;
     e.state("obs.link", true).await;
 
-    for (action, op) in [("obs.record.start", "record.start"), ("obs.stream.stop", "stream.stop"), ("obs.fallback.on", "fallback.on"), ("obs.setup", "setup")] {
+    for (action, op) in [("obs.stream.start", "stream.start"), ("obs.stream.stop", "stream.stop"), ("obs.fallback.on", "fallback.on"), ("obs.setup", "setup")] {
         e.action(action);
         let cmd = p.recv().await;
         assert_eq!(cmd["t"], "cmd");
         assert_eq!(cmd["op"], op);
-        if op == "record.start" {
-            assert_eq!(cmd["dir"], "/tmp/stream-engine-show", "record.start must configure OBS's output folder");
-        }
         let id = cmd["id"].as_u64().unwrap();
         if op == "fallback.on" {
             p.send(serde_json::json!({"t":"reply","id":id,"ok":false,"error":"no canvas program shows a stream-engine source"})).await;
@@ -304,15 +299,15 @@ async fn actions_reach_obs_and_replies_are_reported() {
     assert!(m.contains("did not answer"), "{m}");
 
     // disconnect while a command is pending
-    e.action("obs.record.stop");
+    e.action("obs.stream.stop");
     let _ = p.recv().await;
     drop(p);
-    let m = e.log_containing("obs.record.stop failed").await;
+    let m = e.log_containing("obs.stream.stop failed").await;
     assert!(m.contains("disconnected"), "{m}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn events_recordings_session_meta_and_clock() {
+async fn stream_events_session_meta_and_clock() {
     let mut e = engine().await;
     let mut p = Plugin::connect(&e.sock).await;
     p.hello().await;
@@ -320,50 +315,20 @@ async fn events_recordings_session_meta_and_clock() {
 
     let now = se_clock::now();
     let off: u64 = 7_000; // OBS clock runs 7 µs ahead of CLOCK_MONOTONIC in this fake
-    p.send(serde_json::json!({"t":"record_path","path":"/v/2026-09-25 20-00-00.mkv","canvas":"wide","output":"simple_file_output",
-        "start_obs_ns": now - 2_000_000_000 + off, "obs_ns": now + off, "mono_ns": now,
-        "tracks":[{"index":0,"mixer":1,"name":"Track 1","sources":["se-program"],"devices":["se-program"]}]}))
-        .await;
-    let recs = e.meta("recordings").await;
-    let r = &recs.as_list().unwrap()[0];
-    assert_eq!(r.get_path("canvas").unwrap().as_str(), Some("wide"));
-    assert_eq!(r.get_path("path").unwrap().as_str(), Some("/v/2026-09-25 20-00-00.mkv"));
-    assert_eq!(r.get_path("start_ns").unwrap().as_i64(), Some((now - 2_000_000_000) as i64));
-    assert!(r.get_path("end_ns").is_none());
-    assert_eq!(r.get_path("tracks").unwrap().as_list().unwrap()[0].get_path("mixer").unwrap().as_i64(), Some(1));
-    e.state("obs.record.path", "/v/2026-09-25 20-00-00.mkv").await;
-
-    // the tall recording of Aitum's vertical canvas joins the list
-    p.send(serde_json::json!({"t":"record_path","path":"/v/vertical.mkv","canvas":"tall","output":"aitum_vertical_record",
-        "start_obs_ns": now - 1_000_000_000 + off, "obs_ns": now + off, "mono_ns": now, "tracks": []}))
-        .await;
-    let recs = e.meta("recordings").await;
-    assert_eq!(recs.as_list().unwrap().len(), 2);
-
-    // status carries the recording start → obs_record mapping; stream start → obs_stream
-    p.send(status(serde_json::json!({"recording": true, "record_start_ns": now - 2_000_000_000 + off, "stream_start_ns": now - 500_000_000 + off,
+    p.send(status(serde_json::json!({"stream_start_ns": now - 500_000_000 + off,
         "streaming": true, "obs_ns": now + off, "mono_ns": now})))
         .await;
     let clock = e.meta("clock").await;
-    assert!(clock.get_path("obs_record.valid").unwrap().truthy());
+    assert!(clock.get_path("obs_stream.valid").unwrap().truthy());
     let maps = e.hub.clock.mappings();
-    assert_eq!(maps.obs_record.to_other(now - 2_000_000_000), Some(0));
-    assert_eq!(maps.obs_record.to_other(now), Some(2_000_000_000));
+    assert_eq!(maps.obs_stream.to_other(now), Some(500_000_000));
     assert_eq!(maps.obs_stream.to_master(0), Some(now - 500_000_000));
 
     // events → engine events with master-clock timestamps
-    p.send(serde_json::json!({"t":"event","name":"record_stopped","path":"/v/2026-09-25 20-00-00.mkv","obs_ns": now + off + 1_000, "mono_ns": now + 1_000}))
-        .await;
-    let ev = e.event("obs.record_stopped").await;
+    p.send(serde_json::json!({"t":"event","name":"stream_stopped","obs_ns": now + off + 1_000, "mono_ns": now + 1_000})).await;
+    let ev = e.event("obs.stream_stopped").await;
     assert_eq!(ev.ts, now + 1_000);
-    assert_eq!(ev.payload.get_path("path").unwrap().as_str(), Some("/v/2026-09-25 20-00-00.mkv"));
-    e.state("obs.record.active", false).await;
-    p.send(serde_json::json!({"t":"record_end","path":"/v/2026-09-25 20-00-00.mkv","canvas":"wide","output":"simple_file_output",
-        "end_obs_ns": now + off + 1_000, "obs_ns": now + off + 2_000, "mono_ns": now + 2_000}))
-        .await;
-    let recs = e.meta("recordings").await;
-    let wide = recs.as_list().unwrap().iter().find(|r| r.get_path("canvas").and_then(Value::as_str) == Some("wide")).unwrap().clone();
-    assert_eq!(wide.get_path("end_ns").unwrap().as_i64(), Some((now + 1_000) as i64));
+    e.state("obs.stream.active", false).await;
 
     p.send(serde_json::json!({"t":"event","name":"scene_fallback","canvas":"Main","scene":"BRB Tech","from":"Scene","canvases":["wide"],"reason":"stale","obs_ns": now + off, "mono_ns": now})).await;
     let ev = e.event("obs.fallback").await;
@@ -373,12 +338,13 @@ async fn events_recordings_session_meta_and_clock() {
     p.send(serde_json::json!({"t":"event","name":"stream_started","obs_ns": now + off, "mono_ns": now})).await;
     e.event("obs.stream_started").await;
 
-    // a new session keeps only the recording still being written
+    // A new session carries only the stream clock; OBS never owns recording metadata.
     e.hub.emit(se_proto::Event::new("session.closed", Origin::System, Value::map()));
-    let recs = e.meta("recordings").await;
-    let list = recs.as_list().unwrap();
-    assert_eq!(list.len(), 1);
-    assert_eq!(list[0].get_path("canvas").unwrap().as_str(), Some("tall"));
+    let c = tokio::time::timeout(Duration::from_secs(5), e.session.recv()).await.unwrap().unwrap();
+    let Op::Action { name, args } = c.op else { panic!("not a session action") };
+    assert_eq!(name, "session.meta");
+    assert_eq!(args.get_path("key").and_then(Value::as_str), Some("clock"));
+    assert!(args.get_path("value.obs_stream.valid").unwrap().truthy());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -425,11 +391,9 @@ async fn rehearsal_never_starts_the_stream() {
     e.action("obs.stream.start");
     let ev = e.event("obs.dry_run").await;
     assert_eq!(ev.payload.get_path("action").and_then(Value::as_str), Some("obs.stream.start"));
-    // recording is a test output: it still reaches OBS (and is the first command OBS sees)
-    e.action("obs.record.start");
-    let cmd = p.recv().await;
-    assert_eq!(cmd["op"], "record.start");
-    assert_eq!(cmd["dir"], "/tmp/stream-engine-show");
+    // Fallback remains available off-air and is the first command OBS receives.
+    e.action("obs.fallback.on");
+    assert_eq!(p.recv().await["op"], "fallback.on");
 
     // "Go live" from rehearsal: the mode change sent just before stream.start counts
     e.hub.command(Command::new(Origin::Cli, Op::ModeSet { mode: "preshow".into() }));

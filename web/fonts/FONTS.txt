@@ -1,0 +1,6 @@
+FSEX302.ttf
+  "Fixedsys Excelsior" 3.02 by Darien Valentine (formerly fixedsysexcelsior.com).
+  Released by its author into the public domain ("free for any use"); where a public-domain
+  dedication is not possible it is distributed under CC0 1.0
+  (https://creativecommons.org/publicdomain/zero/1.0/).
+  The font file is unmodified.

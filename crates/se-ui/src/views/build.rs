@@ -18,6 +18,8 @@ pub struct BuildState {
     /// (scene, node id) → source.
     node_src: HashMap<(String, String), String>,
     scenes_seq: u64,
+    /// Native canvas nodes need the web service's current texture dimensions.
+    pub native_sources: bool,
     pub canvas: canvas::CanvasState,
     pub inspector: inspector::InspectorState,
     pub modulate: modulate::ModulateState,
@@ -48,6 +50,11 @@ pub fn sync(app: &mut App) {
     app.build.scenes_seq = seq;
     let Some(Value::Map(scenes)) = app.m.q("config.scenes").cloned() else { return };
     app.build.node_src.clear();
+    app.build.native_sources = scenes.values().any(|s| {
+        let Some(Value::Map(canvases)) = s.get_path("canvas") else { return false };
+        canvases.values().any(|c| c.get_path("nodes").and_then(Value::as_list).unwrap_or(&[]).iter()
+            .any(|n| n.get_path("fit").and_then(Value::as_str) == Some("native")))
+    });
     for (name, s) in &scenes {
         if let Some(Value::Map(canvases)) = s.get_path("canvas") {
             for c in canvases.values() {
@@ -66,6 +73,7 @@ pub fn sync(app: &mut App) {
 const KINDS: &[(&str, &str, &str, &str)] = &[
     ("lights", icon::LIGHT, "Lights", "lights"),
     ("timelines", icon::TIMELINE, "Timelines", "timelines"),
+    ("autoseq", icon::SHUFFLE, "Auto sequences", "autoseq"),
     ("mixes", icon::MIX, "Mixes", "mixes"),
     ("controllers", icon::CONTROLLER, "Controllers", "controllers"),
     ("commands", icon::BOT, "Chatbot", "commands"),
@@ -88,6 +96,7 @@ pub fn view_for_kind(kind: &str) -> Option<ViewId> {
         "presets" => ViewId::Actions,
         "bindings" => ViewId::Modulation,
         "timelines" => ViewId::Timeline,
+        "autoseq" => ViewId::AutoSequence,
         "mixes" => ViewId::Mixer,
         "lights" => ViewId::Lights,
         "rewards" => ViewId::Twitch,

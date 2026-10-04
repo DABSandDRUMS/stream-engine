@@ -1,12 +1,14 @@
 //! Video sources → GPU textures (§4.2). CPU frames from `hub.video` slots are copied into
-//! persistently mapped staging buffers (reused, never created per frame), uploaded with
-//! `copy_buffer_to_texture`, and converted in one fragment pass (YUYV/NV12 → RGB, straight →
+//! persistently mapped system-RAM staging buffers (reused, never created per frame), uploaded
+//! with `copy_buffer_to_texture`, and converted in one fragment pass (YUYV/NV12 → RGB, straight →
 //! premultiplied alpha, per-source color correction and 3D LUT) into a premultiplied RGBA
 //! texture that every placement samples. Sources nobody shows are not uploaded.
 
 use crate::addr::Resolved;
+use crate::gpu::Gpu;
 use crate::plan::ColorAddrs;
-use crate::resources::{Arena, BindCache, Layouts, MappedRing, Tex};
+use crate::resources::{Arena, BindCache, Layouts, Tex};
+use crate::upload::UploadRing;
 use se_hub::Snapshot;
 use se_hub::media::{PixelFormat, VideoFrame};
 
@@ -128,7 +130,7 @@ impl Layout {
     }
 }
 
-/// Destination of staging copies: plain memory (tests) or a write-mapped GPU buffer.
+/// Destination of staging copies: plain memory (tests) or a persistently mapped system buffer.
 pub trait Sink {
     fn put(&mut self, offset: usize, src: &[u8]);
 }
@@ -136,12 +138,6 @@ pub trait Sink {
 impl Sink for [u8] {
     fn put(&mut self, offset: usize, src: &[u8]) {
         self[offset..offset + src.len()].copy_from_slice(src);
-    }
-}
-
-impl Sink for wgpu::BufferViewMut {
-    fn put(&mut self, offset: usize, src: &[u8]) {
-        self.slice(offset..offset + src.len()).copy_from_slice(src);
     }
 }
 
@@ -194,7 +190,7 @@ pub fn color_settings(snap: &Snapshot, res: &Resolved, a: &ColorAddrs, format: P
 pub struct VideoGpu {
     pub layout: Option<Layout>,
     planes: [Option<Tex>; 2],
-    staging: Option<MappedRing>,
+    staging: Option<UploadRing>,
     /// Converted, premultiplied RGBA at the source size.
     pub out: Option<Tex>,
     pub has_frame: bool,
@@ -209,10 +205,11 @@ pub struct VideoGpu {
 }
 
 impl VideoGpu {
-    fn ensure(&mut self, device: &wgpu::Device, binds: &mut BindCache, name: &str, layout: Layout) {
+    fn ensure(&mut self, device: &wgpu::Device, binds: &mut BindCache, name: &str, layout: Layout) -> anyhow::Result<()> {
         if self.layout == Some(layout) {
-            return;
+            return Ok(());
         }
+        let staging = UploadRing::new(device, &format!("{name} staging"), layout.staging_size)?;
         for t in self.planes.iter().chain(std::iter::once(&self.out)).flatten() {
             binds.forget(t.id);
         }
@@ -220,17 +217,18 @@ impl VideoGpu {
         let usage = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
         self.planes[0] = Some(Tex::new(device, &format!("{name} plane0"), layout.plane[0], fmts[0], usage));
         self.planes[1] = (layout.plane[1][0] > 0).then(|| Tex::new(device, &format!("{name} plane1"), layout.plane[1], fmts[1], usage));
-        self.staging = Some(MappedRing::new(device, &format!("{name} staging"), 3, layout.staging_size, true));
+        self.staging = Some(staging);
         self.out = Some(Tex::target(device, name, [layout.width, layout.height]));
         self.bytes = layout.staging_size * 4 + self.out.as_ref().map_or(0, Tex::bytes);
         self.layout = Some(layout);
         self.has_frame = false;
         self.last_settings = None;
+        Ok(())
     }
 
     /// Upload the newest frame (if any) into the plane textures. Returns true if a new frame
     /// was uploaded.
-    pub fn upload(&mut self, device: &wgpu::Device, enc: &mut wgpu::CommandEncoder, binds: &mut BindCache, name: &str, frame: Option<&VideoFrame>) -> bool {
+    pub fn upload(&mut self, gpu: &Gpu, enc: &mut wgpu::CommandEncoder, binds: &mut BindCache, name: &str, frame: Option<&VideoFrame>) -> bool {
         let Some(f) = frame else { return false };
         if f.seq == self.last_seq || f.width == 0 || f.height == 0 {
             return false;
@@ -238,30 +236,28 @@ impl VideoGpu {
         let layout = Layout::new(f.format, f.width, f.height);
         if self.layout != Some(layout) {
             let _p = se_alloc::Pause::new();
-            self.ensure(device, binds, name, layout);
+            if let Err(error) = self.ensure(&gpu.device, binds, name, layout) {
+                *gpu.lost_reason.lock() = format!("source {name} upload allocation failed: {error:#}");
+                gpu.lost.store(true, std::sync::atomic::Ordering::Release);
+                tracing::error!(target: "render", "source {name} upload allocation failed: {error:#}; recovering GPU resources");
+                return false;
+            }
         }
         let ring = self.staging.as_mut().expect("ensured");
-        // mapping, unmapping and copy recording allocate inside wgpu (GPU API, excluded)
+        // queue completion callbacks allocate inside wgpu (GPU API, excluded).
         let _p = se_alloc::Pause::new();
-        let Some(i) = ring.acquire_write() else {
+        let Some(i) = ring.acquire() else {
             // all staging buffers still in flight: keep the previous frame this time
             self.skipped += 1;
             return false;
         };
-        let ok = {
-            let buf = &ring.buffers[i];
-            match buf.slice(..).get_mapped_range_mut() {
-                Ok(mut view) => layout.fill(f, &mut view),
-                Err(_) => false,
-            }
-        };
-        ring.buffers[i].unmap();
+        let ok = layout.fill(f, ring.write(i));
         if !ok {
-            // short frame: the (now unmapped) buffer is re-mapped after this frame's submit
+            // The slot is returned after submission even if this malformed frame wasn't copied.
             self.skipped += 1;
             return false;
         }
-        let buf = &ring.buffers[i];
+        let buf = ring.buffer(i);
         for p in 0..2 {
             let Some(tex) = &self.planes[p] else { continue };
             enc.copy_buffer_to_texture(
@@ -341,9 +337,9 @@ impl VideoGpu {
         self.last_lut = lut_id;
     }
 
-    pub fn after_submit(&mut self) {
+    pub fn after_submit(&mut self, queue: &wgpu::Queue) {
         if let Some(r) = &mut self.staging {
-            r.after_submit();
+            r.after_submit(queue);
         }
     }
 }

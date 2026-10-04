@@ -1,6 +1,6 @@
 [package]
 name = "se-obs"
-description = "OBS link: obs.sock server for the stream-engine OBS plugin (status, events, recording paths, clock mapping, start/stop, fallback)"
+description = "OBS streaming link: obs.sock server for plugin health, events, stream clock mapping, streaming controls and fallback"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

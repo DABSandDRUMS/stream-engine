@@ -46,6 +46,8 @@ pub struct Spec {
     pub generation: u64,
     /// Manifest `grants`: what the page's token may write besides its own namespace.
     pub grants: Vec<String>,
+    /// `Some` for the queue browser, including an unconfigured (closed) account policy.
+    pub youtube_account: Option<crate::protocol::YoutubeAccount>,
 }
 
 impl Spec {
@@ -211,6 +213,7 @@ pub fn desired(config: &Config, patches: &PatchSet, base: &str, share_dir: &Path
             generation: p.generation,
             grants: m.grants.clone(),
             slot: slot.clone(),
+            youtube_account: None,
         };
         out.insert(slot, spec);
     }
@@ -231,6 +234,10 @@ pub fn desired(config: &Config, patches: &PatchSet, base: &str, share_dir: &Path
             size: yt.size.or_else(|| node_size(config, YOUTUBE_SLOT)).unwrap_or(DEFAULT_SIZE),
             generation: 0,
             grants: Vec::new(),
+            youtube_account: Some(crate::protocol::YoutubeAccount {
+                channel: config.project.extra.get("songs").and_then(|s| s.get("youtube_channel")).and_then(toml::Value::as_str).unwrap_or("").into(),
+                delegate: config.project.extra.get("songs").and_then(|s| s.get("youtube_delegate")).and_then(toml::Value::as_str).unwrap_or("").into(),
+            }),
         };
         out.insert(YOUTUBE_SLOT.into(), spec);
     }

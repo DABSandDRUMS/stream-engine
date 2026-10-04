@@ -4,9 +4,9 @@
 
 use crate::addr::{AddrId, AddrTable, WhenPlan};
 use crate::effects::{self, LIBRARY, MAX_PARAMS, Point};
-use se_core::config::{Config, FxRef, NodeDef, TransitionDef};
+use se_core::config::{Config, FxRef, NodeDef, NodeFit, TransitionDef};
 use se_patch::{Kind, Layer, Manifest};
-use se_proto::{Ease, Value};
+use se_proto::{Ease, Value, palette::SLOTS};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -21,9 +21,6 @@ pub const CANVAS_NAMES: [&str; CANVASES] = ["wide", "tall", "preview", "atlas"];
 /// Scene layouts (scene `[canvas.<name>]` tables) the renderer composes.
 pub const LAYOUTS: usize = 2;
 pub const LAYOUT_NAMES: [&str; LAYOUTS] = ["wide", "tall"];
-
-/// Palette slot names, in `se_patch::wgsl::PALETTE` order.
-pub const PALETTE_SLOTS: [&str; 8] = ["accent", "background", "foreground", "red", "yellow", "green", "cyan", "magenta"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModifierPref {
@@ -159,7 +156,7 @@ impl Settings {
                         None => bad(errors),
                     },
                     // attachment lists, parsed with the canvases
-                    "canvas_fx" | "output_fx" => {}
+                    "canvas_fx" | "output_fx" | "canvas_fx_enabled" | "output_fx_enabled" => {}
                     _ => errors.push(format!("[render] unknown key `{k}`")),
                 }
             }
@@ -180,7 +177,7 @@ impl Settings {
                     _ => errors.push(format!("[palette] mode `{m}` (expected fixed | follow_theme)")),
                 }
             }
-            for (i, slot) in PALETTE_SLOTS.iter().enumerate() {
+            for (i, slot) in SLOTS.iter().enumerate() {
                 if let Some(v) = t.get(*slot) {
                     match color_of(v) {
                         Some(c) => s.palette[i] = c,
@@ -203,6 +200,8 @@ pub struct CanvasPlan {
     pub layout: usize,
     pub fx: Vec<Attach>,
     pub output_fx: Vec<Attach>,
+    pub fx_gate: (AddrId, bool),
+    pub output_fx_gate: (AddrId, bool),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -256,12 +255,15 @@ pub enum ParamSrc {
     Global(AddrId),
     /// Attachment-local address with its configured value as fallback.
     Local(AddrId, f32),
+    Inherited(AddrId, AddrId),
     Const(f32),
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum StrSrc {
     Addr(AddrId),
+    Local(AddrId, String),
+    Inherited(AddrId, AddrId),
     Const(String),
 }
 
@@ -272,13 +274,32 @@ pub struct Attach {
     pub when: Option<u32>,
     pub group: Option<u32>,
     pub enabled: Option<AddrId>,
-    /// `enabled = false`: only while triggered.
-    pub triggered_only: bool,
+    pub enabled_default: bool,
+    pub triggered: Option<AddrId>,
+    pub triggered_default: bool,
+    pub chain: Option<(AddrId, bool)>,
     /// The implicit global instance: `max(amount, level × env)`.
     pub global: bool,
     pub params: [ParamSrc; MAX_PARAMS],
     pub nparams: usize,
     pub file: Option<StrSrc>,
+    pub patch_slot: Option<usize>,
+    /// `feedback`/`history` patch effects: this attachment's frame-state instance within its
+    /// patch ([`PatchPlan::instances`]); `None` for everything else.
+    pub frame_state: Option<u32>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PatchSlotParam {
+    pub local: AddrId,
+    pub global: Option<AddrId>,
+    pub default: Value,
+    pub spec: se_patch::ParamSpec,
+}
+
+#[derive(Clone, Debug)]
+pub struct PatchSlotPlan {
+    pub params: Vec<PatchSlotParam>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -301,6 +322,12 @@ pub struct EffectPlan {
     pub has_trigger: bool,
     pub file: Option<AddrId>,
     pub identity: Option<&'static [f32]>,
+    /// Frame-state instance of the implicit global instance (triggered `feedback`/`history`
+    /// patch effects).
+    pub global_frame_state: Option<u32>,
+    /// Some attachment sets `triggered = true` in config: the triggered patch effect runs only
+    /// in its attachments, with no implicit global instance (static config value).
+    pub scoped: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -332,6 +359,8 @@ pub enum Style {
     None,
     Fade,
     Scale,
+    /// Travel to/from the nearest canvas edge, just far enough to clear the rotated node.
+    Slide,
     SlideLeft,
     SlideRight,
     SlideUp,
@@ -348,6 +377,7 @@ impl Style {
             "none" | "cut" => Style::None,
             "fade" => Style::Fade,
             "scale" => Style::Scale,
+            "slide" => Style::Slide,
             "slide_left" => Style::SlideLeft,
             "slide_right" => Style::SlideRight,
             "slide_up" => Style::SlideUp,
@@ -376,6 +406,7 @@ pub struct NodePlan {
     pub source: u32,
     pub rect: AddrId,
     pub crop: AddrId,
+    pub fit: NodeFit,
     pub radius: AddrId,
     pub z: AddrId,
     pub opacity: AddrId,
@@ -389,6 +420,7 @@ pub struct NodePlan {
     pub mask: Option<String>,
     pub when: Option<u32>,
     pub fx: Vec<Attach>,
+    pub group: Option<u32>,
     pub enter: Option<Style>,
     pub exit: Option<Style>,
 }
@@ -397,7 +429,19 @@ pub struct NodePlan {
 pub struct LayoutPlan {
     pub nodes: Vec<NodePlan>,
     pub fx: Vec<Attach>,
+    pub groups: Vec<CompositeGroup>,
     pub background: Option<[f32; 4]>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CompositeGroup {
+    pub id: String,
+    pub fx: Vec<Attach>,
+    pub z: i64,
+    pub blend: Blend,
+    pub opacity: f32,
+    pub visible: bool,
+    pub when: Option<u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -410,6 +454,9 @@ pub struct ScenePlan {
 pub enum TrKind {
     Cut,
     Morph,
+    /// Morph geometry, but each scene keeps its own identity and stacking on its own layer;
+    /// the two layers crossfade without a brightness dip (`scene::eval_glide`, `glide_pass`).
+    Glide,
     Shader,
     Combined,
 }
@@ -429,6 +476,9 @@ pub struct TransitionPlan {
     pub ease: Ease,
     pub enter: Style,
     pub exit: Style,
+    pub enter_window: [f32; 2],
+    pub exit_window: [f32; 2],
+    pub fade_window: [f32; 2],
     /// Float/vec params exposed to the shader header (`p_<name>()`).
     pub params: Vec<(String, se_patch::ParamSpec)>,
 }
@@ -454,7 +504,12 @@ pub struct PatchPlan {
     pub params: Vec<AddrId>,
     pub defaults: Vec<[f32; 4]>,
     pub signals: Vec<AddrId>,
+    /// Per-patch live palette aliases, interned once; `None` retains the stream palette slot.
+    pub palette: [Option<AddrId>; 8],
     pub env: AddrId,
+    /// Frame-state instances (`feedback`/`history` effects): one per attachment plus the global
+    /// instance. The renderer keeps their textures per instance and render context.
+    pub instances: u32,
 }
 
 /// State addresses of the show (core).
@@ -485,6 +540,7 @@ pub struct Plan {
     pub transition_index: HashMap<String, usize>,
     pub overlays: Vec<OverlayPlan>,
     pub patches: Vec<PatchPlan>,
+    pub patch_slots: Vec<PatchSlotPlan>,
     pub patch_index: HashMap<String, usize>,
     pub whens: Vec<WhenPlan>,
     pub groups: Vec<String>,
@@ -518,6 +574,9 @@ struct Builder<'a> {
     sources: Vec<SourcePlan>,
     source_index: HashMap<String, u32>,
     styles: Vec<ShaderSource>,
+    patch_slots: Vec<PatchSlotPlan>,
+    /// Frame-state instances handed out so far, per patch id.
+    frame_states: HashMap<String, u32>,
     errors: Vec<String>,
 }
 
@@ -621,6 +680,8 @@ impl Builder<'_> {
             has_trigger: m.has_trigger,
             file: None,
             identity: None,
+            global_frame_state: None,
+            scoped: false,
         };
         self.effects.push(e);
         let i = self.effects.len() - 1;
@@ -628,12 +689,15 @@ impl Builder<'_> {
         Some(i)
     }
 
-    /// `local`: address prefix of attachment-local params declared by the core (node fx).
-    fn attach(&mut self, r: &FxRef, local: Option<&str>, ctx: &str) -> Option<Attach> {
+    /// `local`: slot-local state prefix, for every attachment host.
+    fn attach(&mut self, r: &FxRef, local: Option<&str>, chain: Option<(AddrId, bool)>, ctx: &str) -> Option<Attach> {
         let Some(effect) = self.effect(&r.name) else {
             self.errors.push(format!("{ctx}: unknown effect `{}`", r.name));
             return None;
         };
+        if r.triggered && r.enabled != Some(false) {
+            self.effects[effect].scoped = true;
+        }
         let e = self.effects[effect].clone();
         let mut params = [ParamSrc::Const(0.0); MAX_PARAMS];
         let names: Vec<String> = match &e.kind {
@@ -641,46 +705,78 @@ impl Builder<'_> {
             EffectKind::Patch(id) => self.manifests[id].param_slots().iter().map(|(n, _, _)| n.to_string()).collect(),
         };
         for (i, n) in names.iter().enumerate().take(MAX_PARAMS) {
-            params[i] = match r.params.get(n) {
-                Some(v) => {
-                    let val = f32_of(v).unwrap_or(e.defaults[i]);
-                    match local {
-                        Some(pre) => ParamSrc::Local(self.state.intern(&format!("{pre}.{n}")), val),
-                        None => ParamSrc::Const(val),
-                    }
-                }
-                // Attached without an explicit amount: on at full strength.
-                None if n == "amount" && matches!(e.kind, EffectKind::Builtin(_)) => ParamSrc::Const(1.0),
-                None => ParamSrc::Global(e.params[i]),
+            let fallback = r.params.get(n).and_then(f32_of);
+            params[i] = match (local, fallback) {
+                (Some(pre), Some(v)) => ParamSrc::Local(self.state.intern(&format!("{pre}.{n}")), v),
+                (Some(pre), None) if n == "amount" => ParamSrc::Local(self.state.intern(&format!("{pre}.{n}")), 1.0),
+                (Some(pre), None) => ParamSrc::Inherited(self.state.intern(&format!("{pre}.{n}")), e.params[i]),
+                (None, Some(v)) => ParamSrc::Const(v),
+                (None, None) if n == "amount" => ParamSrc::Const(1.0),
+                (None, None) => ParamSrc::Global(e.params[i]),
             };
         }
-        let file = match r.params.get("file") {
-            Some(Value::Str(s)) => Some(StrSrc::Const(s.clone())),
-            _ => e.file.map(StrSrc::Addr),
+        let file = match (local, r.params.get("file"), e.file) {
+            (Some(pre), Some(Value::Str(s)), _) => Some(StrSrc::Local(self.state.intern(&format!("{pre}.file")), s.clone())),
+            (Some(pre), _, Some(global)) => Some(StrSrc::Inherited(self.state.intern(&format!("{pre}.file")), global)),
+            (_, Some(Value::Str(s)), _) => Some(StrSrc::Const(s.clone())),
+            (_, _, global) => global.map(StrSrc::Addr),
         };
         for k in r.params.keys() {
             if k != "file" && !names.iter().any(|n| n == k) {
                 self.errors.push(format!("{ctx}: effect `{}` has no param `{k}`", r.name));
             }
         }
+        let patch_slot = match (&e.kind, local) {
+            (EffectKind::Patch(id), Some(pre)) => {
+                let manifest = self.manifests[id].clone();
+                let params = manifest.param_slots().iter().map(|(name, spec, _)| {
+                    PatchSlotParam {
+                        local: self.state.intern(&format!("{pre}.{name}")),
+                        global: (!r.params.contains_key(*name)).then(|| self.state.intern(&format!("patch.{id}.{name}"))),
+                        default: r.params.get(*name).cloned().unwrap_or_else(|| spec.default_value()),
+                        spec: (*spec).clone(),
+                    }
+                }).collect();
+                let index = self.patch_slots.len();
+                self.patch_slots.push(PatchSlotPlan { params });
+                Some(index)
+            }
+            _ => None,
+        };
+        let frame_state = match &e.kind {
+            EffectKind::Patch(id) if self.manifests[id].frame_state() => Some(self.next_frame_state(id)),
+            _ => None,
+        };
         Some(Attach {
             effect,
             when: self.when(&r.when, ctx),
             group: self.group(&r.group),
             enabled: local.map(|pre| self.state.intern(&format!("{pre}.enabled"))),
-            triggered_only: r.enabled == Some(false),
+            enabled_default: r.enabled.unwrap_or(true),
+            triggered: local.map(|pre| self.state.intern(&format!("{pre}.triggered"))),
+            triggered_default: r.triggered,
+            chain,
             global: false,
             params,
             nparams: names.len().min(MAX_PARAMS),
             file,
+            patch_slot,
+            frame_state,
         })
     }
 
-    fn attaches(&mut self, list: &[FxRef], local_prefix: Option<&str>, ctx: &str) -> Vec<Attach> {
+    fn next_frame_state(&mut self, patch: &str) -> u32 {
+        let n = self.frame_states.entry(patch.to_string()).or_insert(0);
+        *n += 1;
+        *n - 1
+    }
+
+    fn attaches(&mut self, list: &[FxRef], host: &str, enabled: bool, ctx: &str) -> Vec<Attach> {
+        let gate = self.state.intern(&format!("{host}.fx_enabled"));
         list.iter()
             .filter_map(|r| {
-                let local = local_prefix.map(|p| format!("{p}.fx.{}", r.name));
-                self.attach(r, local.as_deref(), ctx)
+                let local = format!("{host}.fx.{}", r.slot_id());
+                self.attach(r, Some(&local), Some((gate, enabled)), ctx)
             })
             .collect()
     }
@@ -721,7 +817,10 @@ impl Builder<'_> {
         };
         let fx = match self.cfg.other.get("sources").and_then(|m| m.get(name)).and_then(|t| t.get("fx")) {
             Some(v) => match toml::Value::try_into::<Vec<FxRef>>(v.clone()) {
-                Ok(list) => self.attaches(&list, None, &format!("sources/{name}.toml")),
+                Ok(list) => {
+                    let enabled = self.cfg.other.get("sources").and_then(|m| m.get(name)).and_then(|t| t.get("fx_enabled")).and_then(toml::Value::as_bool).unwrap_or(true);
+                    self.attaches(&list, &format!("source.{name}"), enabled, &format!("sources/{name}.toml"))
+                }
                 Err(e) => {
                     self.errors.push(format!("sources/{name}.toml fx: {}", e.message()));
                     Vec::new()
@@ -747,10 +846,11 @@ fn node_plan(b: &mut Builder, scene: &str, layout: &str, n: &NodeDef) -> NodePla
     });
     let enter = n.enter.as_deref().and_then(|s| b.style(s, &format!("{ctx} enter")));
     let exit = n.exit.as_deref().and_then(|s| b.style(s, &format!("{ctx} exit")));
-    let fx = b.attaches(&n.fx, Some(&p), &ctx);
+    let fx = b.attaches(&n.fx, &p, n.fx_enabled, &ctx);
     NodePlan {
         id: n.id.clone(),
         source,
+        fit: n.fit,
         rect: b.state.intern(&format!("{p}.rect.{layout}")),
         crop: b.state.intern(&format!("{p}.crop.{layout}")),
         radius: b.state.intern(&format!("{p}.radius.{layout}")),
@@ -776,6 +876,7 @@ fn node_plan(b: &mut Builder, scene: &str, layout: &str, n: &NodeDef) -> NodePla
         mask: n.mask.clone(),
         when: b.when(&n.when, &ctx),
         fx,
+        group: None,
         enter,
         exit,
     }
@@ -786,6 +887,7 @@ fn transition_plan(b: &mut Builder, t: &TransitionDef) -> TransitionPlan {
     let kind = match t.kind.as_str() {
         "cut" => TrKind::Cut,
         "morph" => TrKind::Morph,
+        "glide" => TrKind::Glide,
         "shader" => TrKind::Shader,
         "combined" => TrKind::Combined,
         k => {
@@ -857,7 +959,20 @@ fn transition_plan(b: &mut Builder, t: &TransitionDef) -> TransitionPlan {
     let ctx = format!("transitions/{}.toml", t.name);
     let enter = b.style(&t.enter, &format!("{ctx} enter")).unwrap_or(Style::Fade);
     let exit = b.style(&t.exit, &format!("{ctx} exit")).unwrap_or(Style::Fade);
-    TransitionPlan { name: t.name.clone(), kind, shader, ease: t.ease, enter, exit, params }
+    let mut window = |name: &str, value: Option<[f32; 2]>, default: [f32; 2]| {
+        let Some([a, z]) = value else { return default };
+        if a.is_finite() && z.is_finite() && a >= 0.0 && z <= 1.0 && a < z {
+            [a, z]
+        } else {
+            b.errors.push(format!("{ctx}: {name} must be finite 0 <= start < end <= 1; using {default:?}"));
+            default
+        }
+    };
+    let enter_window = window("enter_window", t.enter_window, [0.3, 1.0]);
+    let exit_window = window("exit_window", t.exit_window, [0.0, 0.5]);
+    let fade_window = window("fade_window", t.fade_window, [0.15, 0.75]);
+    let ease = t.ease.unwrap_or(if kind == TrKind::Glide { Ease::Standard } else { Ease::InOutCubic });
+    TransitionPlan { name: t.name.clone(), kind, shader, ease, enter, exit, enter_window, exit_window, fade_window, params }
 }
 
 /// Built-in transitions when the project has no file for them (§4.4; core `BUILTIN_TRANSITIONS`).
@@ -868,7 +983,7 @@ fn builtin_transition(name: &str) -> Option<TransitionPlan> {
         "fade" => (TrKind::Shader, Some(ShaderSource::Builtin("fade"))),
         _ => return None,
     };
-    Some(TransitionPlan { name: name.into(), kind, shader, ease: Ease::InOutCubic, enter: Style::Fade, exit: Style::Fade, params: Vec::new() })
+    Some(TransitionPlan { name: name.into(), kind, shader, ease: Ease::InOutCubic, enter: Style::Fade, exit: Style::Fade, enter_window: [0.3, 1.0], exit_window: [0.0, 0.5], fade_window: [0.15, 0.75], params: Vec::new() })
 }
 
 fn overlay_settings(cfg: &Config, id: &str) -> Option<toml::Table> {
@@ -891,6 +1006,8 @@ impl Plan {
             groups: Vec::new(),
             effects: Vec::new(),
             effect_index: HashMap::new(),
+            patch_slots: Vec::new(),
+            frame_states: HashMap::new(),
             sources: Vec::new(),
             source_index: HashMap::new(),
             styles: Vec::new(),
@@ -915,6 +1032,8 @@ impl Plan {
                 has_trigger: true,
                 file,
                 identity: e.identity,
+                global_frame_state: None,
+                scoped: false,
             });
             b.effect_index.insert(e.name.into(), i);
         }
@@ -931,7 +1050,7 @@ impl Plan {
             bass: b.signals.intern("band.bass"),
             level: b.signals.intern("band.level"),
         };
-        let palette = PALETTE_SLOTS.map(|s| b.state.intern(&format!("palette.{s}")));
+        let palette = SLOTS.map(|s| b.state.intern(&format!("palette.{s}")));
         let std_signals = se_patch::wgsl::STANDARD_SIGNALS.iter().map(|s| b.signals.intern(s)).collect();
 
         // canvases
@@ -945,7 +1064,11 @@ impl Plan {
         let canvas_fx = |b: &mut Builder, name: &str, key: &str| -> Vec<Attach> {
             match cfg.project.extra.get("render").and_then(|r| r.get(key)).and_then(|t| t.get(name)) {
                 Some(v) => match toml::Value::try_into::<Vec<FxRef>>(v.clone()) {
-                    Ok(l) => b.attaches(&l, None, &format!("[render.{key}.{name}]")),
+                    Ok(l) => {
+                        let point = if key == "canvas_fx" { "canvas" } else { "output" };
+                        let enabled = cfg.project.extra.get("render").and_then(|r| r.get(&format!("{key}_enabled"))).and_then(|t| t.get(name)).and_then(toml::Value::as_bool).unwrap_or(true);
+                        b.attaches(&l, &format!("render.{point}.{name}"), enabled, &format!("[render.{key}.{name}]"))
+                    }
                     Err(e) => {
                         b.errors.push(format!("[render.{key}.{name}]: {}", e.message()));
                         Vec::new()
@@ -960,6 +1083,8 @@ impl Plan {
             height: even(h),
             fps: fps.clamp(1, 240),
             layout,
+            fx_gate: (b.state.intern(&format!("render.canvas.{name}.fx_enabled")), cfg.project.extra.get("render").and_then(|r| r.get("canvas_fx_enabled")).and_then(|t| t.get(name)).and_then(toml::Value::as_bool).unwrap_or(true)),
+            output_fx_gate: (b.state.intern(&format!("render.output.{name}.fx_enabled")), cfg.project.extra.get("render").and_then(|r| r.get("output_fx_enabled")).and_then(|t| t.get(name)).and_then(toml::Value::as_bool).unwrap_or(true)),
             fx: canvas_fx(b, name, "canvas_fx"),
             output_fx: canvas_fx(b, name, "output_fx"),
         };
@@ -979,10 +1104,30 @@ impl Plan {
             let mut layouts: [LayoutPlan; LAYOUTS] = Default::default();
             for (li, lname) in LAYOUT_NAMES.iter().enumerate() {
                 let Some(c) = s.canvas.get(*lname) else { continue };
-                let nodes: Vec<NodePlan> = c.nodes.iter().map(|n| node_plan(&mut b, &s.name, lname, n)).collect();
+                let mut nodes: Vec<NodePlan> = c.nodes.iter().map(|n| node_plan(&mut b, &s.name, lname, n)).collect();
                 let ctx = format!("scenes/{}.toml", s.name);
-                let mut fx = b.attaches(&s.fx, None, &ctx);
-                fx.extend(b.attaches(&c.fx, None, &ctx));
+                let mut fx = b.attaches(&s.fx, &format!("scene.{}", s.name), s.fx_enabled, &ctx);
+                let layout_host = format!("scene.{}.canvas.{lname}", s.name);
+                fx.extend(b.attaches(&c.fx, &layout_host, c.fx_enabled, &ctx));
+                let groups = c.groups.iter().enumerate().map(|(gi, group)| {
+                    for node in &mut nodes {
+                        if group.nodes.contains(&node.id) {
+                            node.group = Some(gi as u32);
+                        }
+                    }
+                    CompositeGroup {
+                        id: group.id.clone(),
+                        fx: b.attaches(&group.fx, &format!("{layout_host}.group.{}", group.id), group.fx_enabled, &ctx),
+                        z: group.z as i64,
+                        blend: Blend::parse(&group.blend).unwrap_or_else(|| {
+                            b.errors.push(format!("{ctx}: group `{}` has unknown blend `{}`", group.id, group.blend));
+                            Blend::Normal
+                        }),
+                        opacity: group.opacity,
+                        visible: group.visible,
+                        when: b.when(&group.when, &ctx),
+                    }
+                }).collect();
                 let background = c.background.as_ref().and_then(|v| {
                     v.as_color().or_else(|| {
                         b.errors.push(format!("{ctx}: [canvas.{lname}] background is not a color"));
@@ -999,7 +1144,7 @@ impl Plan {
                     sz[0] = sz[0].max(w);
                     sz[1] = sz[1].max(h);
                 }
-                layouts[li] = LayoutPlan { nodes, fx, background };
+                layouts[li] = LayoutPlan { nodes, fx, groups, background };
             }
             scene_index.insert(s.name.clone(), scenes.len());
             scenes.push(ScenePlan { name: s.name.clone(), layouts });
@@ -1037,7 +1182,16 @@ impl Plan {
                 }
                 let signals = layout.signals.iter().map(|s| b.signals.intern(s)).collect();
                 patch_index.insert(m.id.clone(), patches.len());
-                patches.push(PatchPlan { manifest: m.clone(), layout, params, defaults, signals, env: b.state.intern(&format!("{base}.env")) });
+                patches.push(PatchPlan {
+                    manifest: m.clone(),
+                    layout,
+                    params,
+                    defaults,
+                    signals,
+                    palette: SLOTS.map(|slot| m.palette.get(slot).map(|address| b.state.intern(address))),
+                    env: b.state.intern(&format!("{base}.env")),
+                    instances: 0,
+                });
             }
             if m.kind == Kind::Shader && m.layer == Layer::Transition {
                 let name = m.address();
@@ -1050,6 +1204,9 @@ impl Plan {
                         ease: Ease::InOutCubic,
                         enter: Style::Fade,
                         exit: Style::Fade,
+                        enter_window: [0.3, 1.0],
+                        exit_window: [0.0, 0.5],
+                        fade_window: [0.15, 0.75],
                         params: Vec::new(),
                     });
                 }
@@ -1126,6 +1283,20 @@ impl Plan {
             }
         }
 
+        // frame-state instances: global instances of triggered feedback/history effects, then
+        // the per-patch totals
+        for i in 0..b.effects.len() {
+            if let EffectKind::Patch(id) = b.effects[i].kind.clone()
+                && b.effects[i].has_trigger
+                && !b.effects[i].scoped
+                && b.manifests.get(&id).is_some_and(|m| m.frame_state())
+            {
+                b.effects[i].global_frame_state = Some(b.next_frame_state(&id));
+            }
+        }
+        for p in &mut patches {
+            p.instances = b.frame_states.get(&p.manifest.id).copied().unwrap_or(0);
+        }
         let errors = std::mem::take(&mut b.errors);
         let styles = std::mem::take(&mut b.styles);
         Plan {
@@ -1142,6 +1313,7 @@ impl Plan {
             overlays,
             patches,
             patch_index,
+            patch_slots: b.patch_slots,
             whens: b.whens,
             groups: b.groups,
             palette,
@@ -1172,7 +1344,10 @@ impl Plan {
             .enumerate()
             .filter(|(_, e)| {
                 e.point == point && matches!(e.kind, EffectKind::Builtin(_))
-                    || (point == Point::Canvas && matches!(e.kind, EffectKind::Patch(_)) && e.has_trigger)
+                    || (point == Point::Canvas
+                        && matches!(e.kind, EffectKind::Patch(_))
+                        && e.has_trigger
+                        && !e.scoped)
             })
             .map(|(i, e)| {
                 let mut params = [ParamSrc::Const(0.0); MAX_PARAMS];
@@ -1184,11 +1359,16 @@ impl Plan {
                     when: None,
                     group: None,
                     enabled: None,
-                    triggered_only: matches!(e.kind, EffectKind::Patch(_)),
+                    enabled_default: true,
+                    triggered: None,
+                    triggered_default: matches!(e.kind, EffectKind::Patch(_)),
+                    chain: None,
                     global: matches!(e.kind, EffectKind::Builtin(_)),
                     params,
                     nparams: e.params.len().min(MAX_PARAMS),
                     file: e.file.map(StrSrc::Addr),
+                    patch_slot: None,
+                    frame_state: e.global_frame_state,
                 }
             })
             .collect()
@@ -1234,11 +1414,17 @@ pub fn atlas_tiles(n: usize, size: [u32; 2]) -> Vec<[f32; 4]> {
 
 /// A param's default as 4 floats (colors/vectors fill all components).
 pub fn param_default4(p: &se_patch::ParamSpec) -> [f32; 4] {
+    if p.value_type() == se_proto::ValueType::Enum {
+        let default = p.default_value();
+        let index = default.as_str().and_then(|d| p.options.iter().position(|o| o == d)).unwrap_or(0);
+        return [index as f32, 0.0, 0.0, 0.0];
+    }
     value4(&p.default_value())
 }
 
 pub fn value4(v: &Value) -> [f32; 4] {
     match v {
+        Value::Bool(v) => [f32::from(u8::from(*v)), 0.0, 0.0, 0.0],
         Value::List(l) => {
             let mut o = [0.0, 0.0, 0.0, 1.0];
             for (i, x) in l.iter().take(4).enumerate() {
@@ -1424,7 +1610,7 @@ pub(crate) mod tests {
         let warp = p.effect_index["patch.warp"];
         assert_eq!(p.effects[warp].kind, EffectKind::Patch("warp".into()));
         let g = p.global_attaches(Point::Canvas);
-        assert!(g.iter().any(|a| a.effect == warp && a.triggered_only));
+        assert!(g.iter().any(|a| a.effect == warp && a.triggered_default));
         assert!(p.global_attaches(Point::Output).iter().all(|a| p.effects[a.effect].name == "fade_to_black"));
     }
 }

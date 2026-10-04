@@ -1,0 +1,20 @@
+# Loudness Heat — a film grade that follows the band's energy. As band.level builds across a
+# phrase the picture warms, gains saturation, lifts its shadows a touch and grows a gentle warm
+# highlight glow; after the phrase turns over it relaxes again. Quiet passages and talking
+# (band down, mic up) cool and slightly desaturate it. Kept subtle: at full heat it reads like a
+# warmer film stock, never a filter. A trigger (alert) adds a short warm swell.
+# Always-on effect, so no manifest trigger: the swell is timed from se.trigger_age.
+# Attach: fx = [{ name = "patch.loudness_heat" }] on a camera source, scene, or the master canvas.
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "effect"
+label       = "Loudness Heat"
+description = "Grade that warms, saturates and softly glows as the band builds, and cools when it is quiet"
+params.amount  = { type = "float", default = 1.0, range = [0.0, 2.0], description = "Overall strength of the grade" }
+params.quiet   = { type = "float", default = 0.2, range = [0.0, 1.0], description = "band.level that counts as quiet (no heat)" }
+params.loud    = { type = "float", default = 0.7, range = [0.0, 1.0], description = "band.level that counts as full heat" }
+params.warmth  = { type = "float", default = 1.0, range = [0.0, 2.0], description = "How far heat shifts the colour towards amber" }
+params.glow    = { type = "float", default = 0.5, range = [0.0, 1.5], description = "Warm highlight glow at full heat" }
+params.cool    = { type = "float", default = 0.6, range = [0.0, 1.5], description = "How much quiet parts and talking cool and desaturate" }
+params.phrase  = { type = "int", default = 4, range = [1, 16], description = "Bars per phrase: heat builds over this many bars" }
+budget = { gpu_ms = 0.25 }

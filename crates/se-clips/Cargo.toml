@@ -10,6 +10,7 @@ se-proto.workspace = true
 se-clock.workspace = true
 se-core.workspace = true
 se-hub.workspace = true
+se-frames.workspace = true
 se-store.workspace = true
 anyhow.workspace = true
 serde.workspace = true

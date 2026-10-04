@@ -1,0 +1,15 @@
+# Pixel gravity: on the trigger the picture cracks into chunky square blocks; loose blocks hop
+# and drop away under gravity one after another, revealing a dark, blurred copy of the live
+# picture underneath, then fly back into place with a small bounce on release.
+# Burst-only: it runs canvas-wide while `patch.<id>.env` > 0 (fire `patch.pixel_gravity`).
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "effect"
+label       = "Pixel gravity"
+description = "The picture breaks into square blocks that fall away under gravity and snap back on release"
+params.amount = { type = "float", default = 1.0, range = [0.0, 2.0], description = "Share of blocks that fall (a bigger trigger amount adds more)" }
+params.block  = { type = "float", default = 48.0, range = [16.0, 160.0], unit = "px", description = "Block size in pixels at 720p" }
+params.speed  = { type = "float", default = 1.0, range = [0.3, 3.0], unit = "x", description = "Gravity / fall speed" }
+params.depth  = { type = "float", default = 0.7, range = [0.0, 1.0], description = "How dark and blurred the revealed picture underneath is" }
+trigger = { attack = "100ms", hold = "1200ms", release = "800ms" }
+budget = { gpu_ms = 0.4 }

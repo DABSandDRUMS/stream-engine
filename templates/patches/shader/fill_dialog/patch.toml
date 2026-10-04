@@ -1,0 +1,12 @@
+# Fill dialog: a Windows 3.1 message box that zooms open on the trigger and closes on release.
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "overlay"
+label       = "Fill Dialog"
+description = "A crisp Windows 3.1 message box zooms open with a fill joke and an OK button, then closes"
+params.message  = { type = "enum", options = ["excellent_fill", "groove_overflow", "too_much_cowbell", "sick_beat"], default = "excellent_fill", description = "Message text and icon" }
+params.position = { type = "vec2", default = [0.5, 0.36], range = [0.0, 1.0], description = "Window center (0-1 of the frame)" }
+params.scale    = { type = "float", default = 1.0, range = [0.5, 3.0], description = "Window size; pixels snap to whole multiples" }
+params.flash    = { type = "bool", default = true, description = "Title bar blinks like FlashWindow on hard snare hits" }
+trigger = { attack = "150ms", hold = "2.5s", release = "500ms" }
+budget = { gpu_ms = 0.3 }

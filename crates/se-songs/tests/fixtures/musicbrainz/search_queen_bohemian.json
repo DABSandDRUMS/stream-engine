@@ -1,0 +1,248 @@
+{
+  "created": "2026-09-30T18:05:40.000Z",
+  "count": 225,
+  "offset": 0,
+  "recordings": [
+    {
+      "id": "5d1a2a3b-0000-4000-8000-0000000b0979",
+      "score": 100,
+      "title": "Bohemian Rhapsody",
+      "length": 344000,
+      "video": null,
+      "disambiguation": "live, 1979",
+      "artist-credit": [
+        {
+          "name": "Queen",
+          "artist": {
+            "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+            "name": "Queen",
+            "sort-name": "Queen",
+            "disambiguation": "UK rock group"
+          }
+        }
+      ],
+      "first-release-date": "1979-06-22",
+      "releases": [
+        {
+          "id": "e0e0e0e0-0000-4000-8000-00000000b005",
+          "status-id": "4e304316-386d-3409-af2e-78857eec5cfe",
+          "count": 1,
+          "title": "Live Killers",
+          "status": "Official",
+          "release-group": {
+            "id": "a1b2c3d4-0000-4000-8000-000000000024",
+            "type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+            "primary-type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+            "title": "Live Killers",
+            "primary-type": "Album",
+            "secondary-types": [
+              "Live"
+            ],
+            "secondary-type-ids": [
+              "dd2a21e1-0c00-3729-a7a0-de60b84eb5d1"
+            ]
+          },
+          "date": "1979-06-22",
+          "country": "GB",
+          "release-events": [
+            {
+              "date": "1979-06-22",
+              "area": {
+                "id": "8a754a16-0027-3a29-b6d7-2b40ea0481ed",
+                "name": "United Kingdom",
+                "sort-name": "United Kingdom",
+                "iso-3166-1-codes": [
+                  "GB"
+                ]
+              }
+            }
+          ],
+          "track-count": 22,
+          "media": [
+            {
+              "position": 1,
+              "format": "12\" Vinyl",
+              "track": [
+                {
+                  "id": "e0e0e0e0-0000-4000-8000-000000007a7a",
+                  "number": "C3",
+                  "title": "Bohemian Rhapsody",
+                  "length": 344000
+                }
+              ],
+              "track-count": 22,
+              "track-offset": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "b1a9c0e9-d987-4042-ae91-78d6a3267d70",
+      "score": 99,
+      "title": "Bohemian Rhapsody",
+      "length": 362000,
+      "video": null,
+      "disambiguation": "live, 1985-07-13: Wembley Stadium, London, UK",
+      "artist-credit": [
+        {
+          "name": "Queen",
+          "artist": {
+            "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+            "name": "Queen",
+            "sort-name": "Queen",
+            "disambiguation": "UK rock group"
+          }
+        }
+      ],
+      "first-release-date": "2004-12-06",
+      "releases": [
+        {
+          "id": "e0e0e0e0-0000-4000-8000-00000000b003",
+          "status-id": "4e304316-386d-3409-af2e-78857eec5cfe",
+          "count": 1,
+          "title": "Live Aid",
+          "status": "Official",
+          "release-group": {
+            "id": "a1b2c3d4-0000-4000-8000-000000000022",
+            "type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+            "primary-type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+            "title": "Live Aid",
+            "primary-type": "Album",
+            "secondary-types": [
+              "Live"
+            ],
+            "secondary-type-ids": [
+              "dd2a21e1-0c00-3729-a7a0-de60b84eb5d1"
+            ]
+          },
+          "date": "2004-12-06",
+          "country": "XW",
+          "release-events": [
+            {
+              "date": "2004-12-06",
+              "area": {
+                "id": "525d4e18-3d00-31b9-a58b-a146a916de8f",
+                "name": "[Worldwide]",
+                "sort-name": "[Worldwide]",
+                "iso-3166-1-codes": [
+                  "XW"
+                ]
+              }
+            }
+          ],
+          "track-count": 4,
+          "media": [
+            {
+              "position": 1,
+              "format": "DVD-Video",
+              "track": [
+                {
+                  "id": "e0e0e0e0-0000-4000-8000-000000007a7a",
+                  "number": "1",
+                  "title": "Bohemian Rhapsody",
+                  "length": 362000
+                }
+              ],
+              "track-count": 4,
+              "track-offset": 0
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "b1a9c0e9-d987-4042-ae91-78d6a3267d71",
+      "score": 93,
+      "title": "Bohemian Rhapsody",
+      "length": 358000,
+      "video": null,
+      "artist-credit": [
+        {
+          "name": "Queen Tribute Orchestra",
+          "artist": {
+            "id": "77777777-2a4e-4d10-a46a-e9e041da8eb3",
+            "name": "Queen Tribute Orchestra",
+            "sort-name": "Queen Tribute Orchestra"
+          }
+        }
+      ],
+      "first-release-date": "2011-03-01",
+      "releases": []
+    },
+    {
+      "id": "9b52909a-3889-468f-bf2a-362cdf3cf6ca",
+      "score": 100,
+      "title": "Bohemian Rhapsody",
+      "length": 343000,
+      "video": null,
+      "disambiguation": "live, 1977-05-12: Broendby Hall, Copenhagen, Denmark",
+      "artist-credit": [
+        {
+          "name": "Queen",
+          "artist": {
+            "id": "0383dadf-2a4e-4d10-a46a-e9e041da8eb3",
+            "name": "Queen",
+            "sort-name": "Queen",
+            "disambiguation": "UK rock group"
+          }
+        }
+      ],
+      "first-release-date": "1977",
+      "releases": [
+        {
+          "id": "e0e0e0e0-0000-4000-8000-00000000b004",
+          "status-id": "1156806e-d06a-38bd-83f0-cf2284a808b9",
+          "count": 1,
+          "title": "Copenhagen 1977",
+          "status": "Bootleg",
+          "release-group": {
+            "id": "a1b2c3d4-0000-4000-8000-000000000023",
+            "type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+            "primary-type-id": "f529b476-6e62-324f-b0aa-1f3e33d313fc",
+            "title": "Copenhagen 1977",
+            "primary-type": "Album",
+            "secondary-types": [
+              "Live"
+            ],
+            "secondary-type-ids": [
+              "dd2a21e1-0c00-3729-a7a0-de60b84eb5d1"
+            ]
+          },
+          "date": "1977",
+          "country": "DK",
+          "release-events": [
+            {
+              "date": "1977",
+              "area": {
+                "id": "4757b525-2a60-324a-b060-578765d2c993",
+                "name": "Denmark",
+                "sort-name": "Denmark",
+                "iso-3166-1-codes": [
+                  "DK"
+                ]
+              }
+            }
+          ],
+          "track-count": 21,
+          "media": [
+            {
+              "position": 1,
+              "format": "CD",
+              "track": [
+                {
+                  "id": "e0e0e0e0-0000-4000-8000-000000007a7a",
+                  "number": "7",
+                  "title": "Bohemian Rhapsody",
+                  "length": 343000
+                }
+              ],
+              "track-count": 21,
+              "track-offset": 0
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

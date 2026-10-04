@@ -1,4 +1,4 @@
-//! UI queries (`lights.rig`, `lights.cuelists`, `lights.palettes`, `lights.effects`,
+//! UI queries (`lights.rig`, `lights.cuelists`, `lights.palettes`, `lights.effects`, `lights.tags`,
 //! `lights.programmer`, `lights.output`, `lights.rdm`) — shapes documented in `docs/lights.md`.
 
 use crate::control::View;
@@ -36,7 +36,8 @@ pub fn rig(show: &Show, plan_errors: &[String], shared: &Shared) -> Value {
     let fixtures: Vec<Value> = r
         .fixtures
         .iter()
-        .map(|f| {
+        .enumerate()
+        .map(|(fixture, f)| {
             let root = &r.heads[f.root];
             Value::map()
                 .with("id", f.id.clone())
@@ -51,8 +52,30 @@ pub fn rig(show: &Show, plan_errors: &[String], shared: &Shared) -> Value {
                 .with("position", pos(f.position))
                 .with("rotation", f.rotation as f64)
                 .with("beam", f.beam as f64)
+                .with("layout_verified", f.layout_verified)
+                .with("notes", f.notes.clone().map(Value::Str).unwrap_or(Value::Null))
                 .with("heads", strs(f.leaves.iter().map(|h| r.heads[*h].id.clone())))
                 .with("attrs", strs(root.attrs.iter().map(|a| a.name.clone())))
+                .with("channel_map", Value::List(r.fixture_channels(fixture).map(|cap| {
+                    let c = cap.channel;
+                    let head = &r.heads[cap.head];
+                    let attribute = if c.role == crate::profile::Role::Raw { Some(c.name.as_str()) } else { c.role.attr() };
+                    Value::map()
+                        .with("channel", cap.local_channel as i64)
+                        .with("address", cap.address as i64)
+                        .with("head", head.id.clone())
+                        .with("role", c.role.as_str())
+                        .with("label", c.label.as_deref().unwrap_or(&c.name))
+                        .with("control", cap.control.as_str())
+                        .with("state_address", attribute.map(|a| Value::from(format!("lights.{}.{a}", head.id))).unwrap_or(Value::Null))
+                        .with("restriction", c.restriction.clone().map(Value::Str).unwrap_or(Value::Null))
+                        .with("default", c.default as i64)
+                        .with("range", c.range.map(|(lo, hi)| Value::List(vec![Value::Int(lo as i64), Value::Int(hi as i64)])).unwrap_or(Value::Null))
+                        .with("strobe_available", cap.strobe_available)
+                        .with("steady_open", c.open as i64)
+                        .with("blackout", c.closed.map(|v| Value::Int(v as i64)).unwrap_or(Value::Null))
+                        .with("slots", Value::List(c.slots.iter().enumerate().map(|(index, slot)| Value::map().with("index", index as i64).with("name", slot.name.clone()).with("value", slot.value as i64)).collect()))
+                }).collect()))
         })
         .collect();
     let heads: Vec<Value> = r
@@ -105,6 +128,7 @@ pub fn rig(show: &Show, plan_errors: &[String], shared: &Shared) -> Value {
                 .with("id", o.id.clone())
                 .with("kind", o.kind_name())
                 .with("enabled", o.enabled)
+                .with("armed", r.output_armed)
                 .with("universes", Value::List(o.universes().into_iter().map(|u| Value::Int(u as i64)).collect()))
                 .with("status", st.map(|s| s.state.clone()).unwrap_or_else(|| if o.enabled { "fail".into() } else { "off".into() }))
                 .with("detail", st.map(|s| s.detail.clone()).unwrap_or_default())
@@ -122,6 +146,7 @@ pub fn rig(show: &Show, plan_errors: &[String], shared: &Shared) -> Value {
         .with("groups", Value::Map(groups))
         .with("profiles", Value::List(profiles))
         .with("outputs", Value::List(outputs))
+        .with("output_armed", r.output_armed)
         .with("universes", Value::List(r.universes.iter().map(|u| Value::Int(*u as i64)).collect()))
         .with("errors", strs(errors))
         .with("has_rig", show.has_rig)
@@ -173,6 +198,7 @@ pub fn cuelists(v: &View) -> Value {
                             .with("delay_ms", c.delay_ms as i64)
                             .with("follow_ms", c.follow_ms.map(|x| Value::Int(x as i64)).unwrap_or(Value::Null))
                             .with("wait_ms", c.wait_ms.map(|x| Value::Int(x as i64)).unwrap_or(Value::Null))
+                            .with("wait_beats", c.wait_beats.map(Value::Float).unwrap_or(Value::Null))
                             .with("block", c.block)
                             .with("duration_ms", c.duration() as i64)
                             .with("targets", strs(c.set.iter().map(|(t, _, _)| t.clone())))
@@ -183,6 +209,7 @@ pub fn cuelists(v: &View) -> Value {
                 Value::map()
                     .with("name", name.clone())
                     .with("label", l.label.clone())
+                    .with("tags", strs(l.tags.clone()))
                     .with("priority", pb.map(|p| p.priority as i64).unwrap_or(l.priority.unwrap_or(se_proto::PRIORITY_PRESET) as i64))
                     .with("master", pb.map(|p| p.master as f64).unwrap_or(1.0))
                     .with("playing", pb.is_some())
@@ -200,6 +227,18 @@ pub fn cuelists(v: &View) -> Value {
     )
 }
 
+pub fn layers(v: &View) -> Value {
+    let mut status = v.layers.clone();
+    if let Value::Map(states) = &mut status {
+        for (slot, expires) in &v.layer_expiry {
+            if let Some(Value::Map(state)) = states.get_mut(slot.name()) {
+                state.insert("remaining_ms".into(), Value::Int(expires.saturating_duration_since(Instant::now()).as_millis().min(i64::MAX as u128) as i64));
+            }
+        }
+    }
+    status
+}
+
 pub fn palettes(v: &View) -> Value {
     let show = &v.show;
     Value::List(
@@ -212,9 +251,11 @@ pub fn palettes(v: &View) -> Value {
                     .with("name", p.name.clone())
                     .with("label", p.label.clone())
                     .with("kind", p.kind.clone())
+                    .with("tags", strs(p.tags.clone()))
                     .with("set", Value::Map(set))
                     .with("used_by", strs(show.palette_users(&p.name)))
-                    .with("look_active", v.looks.contains_key(&p.name))
+                    .with("look_active", v.looks.contains_key(&p.name) || crate::foundation::Slot::ALL.iter().any(|slot| v.layers.get_path(&format!("{}.selection.palette", slot.name())).and_then(Value::as_str) == Some(p.name.as_str())))
+                    .with("active_layers", strs(crate::foundation::Slot::ALL.iter().filter(|slot| v.layers.get_path(&format!("{}.selection.palette", slot.name())).and_then(Value::as_str) == Some(p.name.as_str())).map(|slot| slot.name())))
                     .with("knobs", knobs(&p.knobs, |at| crate::knobs::look_value(p, at)))
             })
             .collect(),
@@ -232,11 +273,22 @@ pub fn effects(show: &Show, hub: &Hub) -> Value {
                     .with("name", e.name.clone())
                     .with("label", e.label.clone())
                     .with("kind", e.kind.as_str())
+                    .with("tags", strs(e.tags.clone()))
                     .with("targets", strs(e.targets.clone()))
                     .with("unit", if e.unit == crate::effects::Unit::Beats { "beats" } else { "hz" })
                     .with("rate", snap.f32(&p("rate")).unwrap_or(e.rate) as f64)
                     .with("size", snap.f32(&p("size")).unwrap_or(e.size) as f64)
                     .with("spread", e.spread as f64)
+                    .with("order", match e.order { crate::effects::Order::X => "x", crate::effects::Order::Y => "y", crate::effects::Order::Index => "index", crate::effects::Order::Radial => "radial" })
+                    .with("colors", Value::List(e.colors.iter().map(spec_value).collect()))
+                    .with("duty", e.duty as f64)
+                    .with("decay_s", e.decay_s as f64)
+                    .with("signal", e.signal.clone().map(Value::Str).unwrap_or(Value::Null))
+                    .with("gain", e.gain as f64)
+                    .with("gate", e.gate as f64)
+                    .with("attack_s", e.attack_s as f64)
+                    .with("release_s", e.release_s as f64)
+                    .with("invert", e.invert)
                     .with("active", snap.bool(&p("active")))
             })
             .collect(),
@@ -376,9 +428,12 @@ pub fn register(hub: &Arc<Hub>, view: Arc<RwLock<View>>, shared: Arc<Shared>) {
                     "lights.cuelists" => cuelists(&v),
                     "lights.palettes" => palettes(&v),
                     "lights.effects" => effects(&v.show, &hub),
+                    "lights.tags" => crate::tags::index(&v.show),
+                    "lights.layers" => layers(&v),
                     "lights.programmer" => programmer(&v),
                     "lights.output" => output(&v, &shared),
                     "lights.rdm" => rdm(&shared),
+                    "lights.main_light" => hub.snapshot.load().get("lights.main_light.state").cloned().unwrap_or(Value::Null),
                     other => return Err(format!("unknown query `{other}`")),
                 })
             })

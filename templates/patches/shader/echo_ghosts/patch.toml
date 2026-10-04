@@ -1,0 +1,23 @@
+# Echo ghosts: during snare fills and right after a trigger, faint copies of the last frames
+# trail out from the picture, each one a little bigger, shifted and fainter than the last (video
+# feedback echo). Between fills the effect is fully invisible: the output is the input.
+# Uses frame feedback in state mode: the echo buffer (rgb) is kept running in the instance's
+# state, so ghosts are ready the moment a fill starts, and the echo level rides in state alpha
+# for a smooth release. Fills are detected from the snare envelope (hits off the 2/4 backbeat,
+# see main.wgsl). Always-on: attach it (`fx = [{ name = "patch.echo_ghosts" }]`) to the kit
+# camera source, its node or the canvas. No manifest trigger: the burst is timed from
+# se.trigger_age.
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "effect"
+label       = "Echo Ghosts"
+description = "Faint scaled, drifting ghost copies of the last frames trail out of the picture on fills and alerts, invisible otherwise"
+feedback    = "state"
+params.amount   = { type = "float", default = 0.5, range = [0.0, 1.0], description = "Ghost opacity at full echo" }
+params.zoom     = { type = "float", default = 0.04, range = [0.0, 0.1], description = "How much bigger each older copy is" }
+params.drift    = { type = "float", default = 0.01, range = [0.0, 0.03], description = "Sideways shift per copy (fraction of the frame); rotates with the bar" }
+params.echoes   = { type = "float", default = 0.72, range = [0.3, 0.92], description = "How much of each copy carries into the next (more = longer chains)" }
+params.release  = { type = "float", default = 0.35, range = [0.05, 2.0], unit = "s", description = "How fast the ghosts fade after the fill ends (half-life)" }
+params.color    = { type = "color", default = "#9fd8ff", description = "Ghost tint" }
+params.triggers = { type = "bool", default = true, description = "Also echo for a few seconds after a trigger (alert)" }
+budget = { gpu_ms = 0.2 }

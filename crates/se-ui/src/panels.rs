@@ -183,7 +183,6 @@ impl Panel {
     pub fn rail_tab(self) -> Option<RailTab> {
         match self {
             Panel::Events => Some(RailTab::Events),
-            Panel::Chat => Some(RailTab::Chat),
             Panel::Queue => Some(RailTab::Queue),
             Panel::Mod => Some(RailTab::Mod),
             _ => None,

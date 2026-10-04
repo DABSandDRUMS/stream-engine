@@ -126,6 +126,22 @@ only stops fades and enforces caps (health warns until it exists).
   on the console, the adapter follows whatever the console reports (parameter updates or a
   full state resend).
 
+### This workstation: hardware effects stay operator-owned
+
+`~/stream-project/project.toml` restricts `[mixer] writable` to ordinary channel/return,
+talkback, main, and non-FX aux controls. FX buses, FX sends, FX returns, and FX-return aux
+sends are read-only to Stream Engine. Never broaden this project's permissions to `["**"]`:
+the owner's 16R reverb must not be muted, lowered, reset, or automated by the engine.
+The X-Touch channel fader still works; UC Surface/the console retain direct FX control.
+
+A `writable`-only change hot-updates permissions without reconnecting the console or
+changing hardware levels. While live, obtain approval for that exact permissions change
+first. Verify with `streamctl query mixer.coverage` (FX rows must have `writable: false`),
+`streamctl get 'mixer.16r.fx.**'`, `streamctl get 'mixer.16r.fxret.**'`, and stream health.
+Do not test protection by muting reverb during a live show. If it turns off while protected,
+inspect console scene/project recalls and other UCNET clients; engine protection does not
+prevent another client from changing the desk.
+
 ## Firmware
 
 Pin the firmware. After an update, re-record the fixtures (see `crates/se-mixer/README.md`)

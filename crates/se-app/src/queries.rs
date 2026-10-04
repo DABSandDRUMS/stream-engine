@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 pub fn register(ctx: &Ctx) {
     let db = ctx.db.clone();
-    // master-clock mappings (§3.2): wall, OBS stream/record, audio device, Twitch delay
+    // Master-clock mappings (§3.2): wall, OBS stream, audio device, Twitch delay.
     let clock = ctx.hub.clock.clone();
     ctx.hub.register_query(
         "clock",
@@ -38,16 +38,21 @@ pub fn register(ctx: &Ctx) {
     );
     let hub = ctx.hub.clone();
     let project = ctx.project.root().display().to_string();
+    // The share/repo root the engine serves `web/` from (`STREAM_ENGINE_SHARE` or the install
+    // prefix); absolute so the UI can launch tools in it. Empty when it does not exist.
+    let share = std::fs::canonicalize(&ctx.engine.share_dir).map(|p| p.display().to_string()).unwrap_or_default();
     ctx.hub.register_query(
         "engine.info",
         Arc::new(move |_, _| {
             let info = hub.info.read().clone();
             let project = project.clone();
+            let share = share.clone();
             Box::pin(async move {
                 Ok(Value::map()
                     .with("version", info.version)
                     .with("session", info.session)
                     .with("project", project)
+                    .with("share", share)
                     .with("pid", std::process::id() as i64)
                     .with("started", info.started_wall))
             })

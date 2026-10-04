@@ -1,40 +1,129 @@
-//! Automatic OBS recording and per-session show folders. The OBS adapter asks
-//! `recording.prepare` before *every* record start, including a manual one.
+//! App-owned recording lifecycle and durable per-session show metadata.
+//!
+//! Auto-record follows `show.mode`; a manual stop (or `recording.finalize`) inhibits it until
+//! the next mode change or an explicit start. Failures never inhibit it: encoder children are
+//! restarted by the capture supervisor, and a recording that cannot start is retried with
+//! bounded backoff while the show stays in an auto mode.
 
-use crate::show::{RecordingConfig, show_dir_from_meta};
+use crate::{
+    capture::{self, policy::Backoff},
+    show::{RecordingConfig, Role, SourceKind, show_dir_from_meta},
+};
 use parking_lot::Mutex;
 use se_hub::EngineCtx;
-use se_proto::{Command, Op, Origin, Value};
+use se_proto::{Meta, Op, Value};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::time::{Duration, Instant};
+use tokio::sync::{mpsc, oneshot};
 
 const TARGET: &str = "recording";
 
 struct State {
     config: RecordingConfig,
+    config_error: Option<String>,
+    selected: Option<RecordingConfig>,
     session: String,
     show_dir: Option<PathBuf>,
-    requested: Option<Instant>,
-    owned: bool,
+    /// Why the recording folder could not be used (the master records to the fallback).
+    fallback: Option<String>,
+    previous: Vec<Value>,
+    /// Files of the running recording (every segment of every input).
+    files: Vec<capture::Recording>,
+    feeds: Option<capture::Status>,
+    /// `begin` is preparing folders.
+    preparing: bool,
+    /// The capture supervisor is alive.
+    running: bool,
+    master_started: bool,
+    stopping: bool,
+    stop: Option<Arc<AtomicBool>>,
     error: Option<String>,
+    retry: Backoff,
+    retry_at: Option<Instant>,
+    pending_meta: Option<Value>,
+}
+
+impl State {
+    fn new(config: RecordingConfig) -> Self {
+        Self {
+            config,
+            config_error: None,
+            selected: None,
+            session: String::new(),
+            show_dir: None,
+            fallback: None,
+            previous: Vec::new(),
+            files: Vec::new(),
+            feeds: None,
+            preparing: false,
+            running: false,
+            master_started: false,
+            stopping: false,
+            stop: None,
+            error: None,
+            retry: Backoff::default(),
+            retry_at: None,
+            pending_meta: None,
+        }
+    }
+    fn busy(&self) -> bool {
+        self.preparing || self.running || self.stopping
+    }
+    fn starting(&self) -> bool {
+        self.preparing || (self.running && !self.master_started && !self.stopping)
+    }
+    fn active(&self) -> bool {
+        self.running && self.master_started && !self.stopping
+    }
+    fn recordings(&self) -> Value {
+        Value::List(self.previous.iter().cloned().chain(self.files.iter().map(capture::Recording::value)).collect())
+    }
+    fn meta(&self) -> Value {
+        Value::map().with("recordings", self.recordings())
+    }
+}
+
+#[derive(Default)]
+struct AutoGate {
+    mode: String,
+    armed: bool,
+    inhibited: bool,
+}
+impl AutoGate {
+    fn mode(&mut self, mode: &str) -> bool {
+        let offline = self.mode != mode && mode == "offline";
+        if self.mode != mode {
+            self.mode = mode.into();
+            self.inhibited = false;
+            if offline { self.armed = false; }
+        }
+        offline
+    }
+    fn wants(&self, config: &RecordingConfig) -> bool {
+        config.auto && !self.inhibited && self.mode != "offline" && (self.armed || config.modes.contains(&self.mode))
+    }
+    /// Manual stop / finalize only. Failures are retried, never inhibit.
+    fn stop(&mut self) { self.inhibited = true; self.armed = false; }
 }
 
 fn config(ctx: &EngineCtx) -> Result<RecordingConfig, String> {
-    let cfg = RecordingConfig::from_section(ctx.project_section("recording").as_ref())?;
+    let mut cfg = RecordingConfig::from_section(ctx.project_section("recording").as_ref())?;
     if !cfg.dir_path().is_absolute() {
         return Err(format!("[recording] dir must be absolute (or start with ~/): {}", cfg.dir));
+    }
+    if !cfg.fallback_path().is_absolute() {
+        return Err(format!("[recording] fallback_dir must be absolute (or start with ~/): {}", cfg.fallback_dir));
     }
     for mode in &cfg.modes {
         if !ctx.config.borrow().project.modes.contains(mode) || mode == "offline" {
             return Err(format!("[recording] modes contains `{mode}`; choose an on-air show mode"));
         }
     }
+    if cfg.frames_socket.is_empty() {
+        cfg.frames_socket = ctx.project_section("render").and_then(|v| v.get("frames_socket").and_then(toml::Value::as_str).map(str::to_owned)).unwrap_or_default();
+    }
     Ok(cfg)
-}
-
-fn wants_recording(config: &RecordingConfig, mode: &str, armed: bool) -> bool {
-    config.auto && mode != "offline" && (armed || config.modes.iter().any(|start| start == mode))
 }
 
 fn show_name(id: &str) -> String {
@@ -128,203 +217,509 @@ fn snapshot_project(root: &Path, show: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn prepare(ctx: &EngineCtx, state: &Mutex<State>) -> Result<PathBuf, String> {
-    let session = ctx.hub.info.read().session.clone();
-    if session.is_empty() {
-        return Err("no active session".into());
-    }
-    let mut s = state.lock();
-    if s.session != session {
-        s.session = session.clone();
-        s.show_dir = None;
-        s.owned = false;
-        s.requested = None;
-    }
-    if let Some(dir) = &s.show_dir {
-        return Ok(dir.clone());
-    }
-    let session_dir = ctx.project_root.join("sessions").join(&session);
-    if let Some(dir) = show_dir_from_meta(&session_dir) {
-        s.show_dir = Some(dir.clone());
-        return Ok(dir);
-    }
-    let root = s.config.dir_path();
+/// Where a recording writes, checked at start.
+#[derive(Debug, PartialEq)]
+struct Target {
+    /// The show folder (`data/`, clips, the master).
+    show_dir: PathBuf,
+    /// ISOs' folder; None in fallback mode (master only).
+    iso_dir: Option<PathBuf>,
+    /// Why `[recording] dir` could not be used.
+    fallback: Option<String>,
+    /// Non-fatal problems to log (project snapshot).
+    notes: Vec<String>,
+}
+
+/// A recordings root usable for a show folder named `name`: present (or creatable when its
+/// parent exists or it lies inside the home folder; a missing external drive is never
+/// recreated on the system disk), writable, and with at least `min_free_gb` free.
+fn ready(root: &Path, name: &str, may_create: bool, min_free_gb: f64) -> Result<PathBuf, String> {
     if !root.is_absolute() {
-        return Err(format!("[recording] dir must be an absolute path: {}", root.display()));
+        return Err(format!("recording folder {} must be an absolute path", root.display()));
     }
-    std::fs::create_dir_all(&root).map_err(|e| format!("cannot create recordings directory {}: {e}", root.display()))?;
-    let root = root.canonicalize().map_err(|e| format!("cannot resolve recordings directory {}: {e}", root.display()))?;
-    let name = show_name(&session);
-    let dir = root.join(&name);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create show directory {}: {e}", dir.display()))?;
-    if s.config.snapshot_project {
-        snapshot_project(&ctx.project_root, &dir)?;
+    if !root.is_dir() {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let creatable = may_create || root.parent().is_some_and(Path::is_dir) || home.is_some_and(|h| h.is_dir() && root.starts_with(&h));
+        if !creatable {
+            return Err(format!("recording folder {} is missing (is the drive connected?)", root.display()));
+        }
+        std::fs::create_dir_all(root).map_err(|e| format!("cannot create recording folder {}: {e}", root.display()))?;
     }
-    // The session writer serializes metadata writes with its own event stream.
-    ctx.hub.command(Command::new(
-        Origin::System,
-        Op::Action {
-            name: "session.meta".into(),
-            args: Value::map().with("key", "show").with("value", Value::map().with("dir", dir.display().to_string()).with("name", name)),
+    let root = root.canonicalize().map_err(|e| format!("cannot resolve recording folder {}: {e}", root.display()))?;
+    let show = root.join(name);
+    let unwritable = |e: std::io::Error| format!("recording folder {} is not writable: {e}", root.display());
+    std::fs::create_dir_all(&show).map_err(unwritable)?;
+    let probe = show.join(".write-test");
+    std::fs::write(&probe, b"ok").map_err(unwritable)?;
+    let _ = std::fs::remove_file(&probe);
+    if let Some(free) = capture::free_gb(&show)
+        && free < min_free_gb
+    {
+        return Err(format!("only {free:.0} GB free in {} (minimum {min_free_gb:.0} GB)", root.display()));
+    }
+    Ok(show)
+}
+
+fn prepare(root: &Path, session: &str, cfg: &RecordingConfig) -> Result<Target, String> {
+    if session.is_empty() { return Err("no active session".into()); }
+    let session_dir = root.join("sessions").join(session);
+    let previous = show_dir_from_meta(&session_dir);
+    let name = previous.as_ref().and_then(|d| d.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| show_name(session));
+    let fallback_root = cfg.fallback_path();
+    // Preserve the show's name, not its old drive: saved settings apply at each start.
+    let primary_root = cfg.dir_path();
+    let mut target = match ready(&primary_root, &name, false, cfg.min_free_gb) {
+        Ok(show) => Target { show_dir: show.clone(), iso_dir: Some(show), fallback: None, notes: Vec::new() },
+        Err(primary) => match ready(&fallback_root, &name, true, cfg.min_free_gb) {
+            Ok(show) => Target { show_dir: show, iso_dir: None, fallback: Some(primary), notes: Vec::new() },
+            Err(fallback) => return Err(format!("{primary}; the fallback folder cannot be used either: {fallback}")),
         },
-    ));
-    s.show_dir = Some(dir.clone());
-    Ok(dir)
-}
-
-fn free_gb(path: &Path) -> Option<f64> {
-    use std::os::unix::ffi::OsStrExt;
-    let path = path.ancestors().find(|p| p.exists())?;
-    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
-    let mut st = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-    // SAFETY: statvfs writes the struct on success, path is NUL-terminated.
-    if unsafe { libc::statvfs(path.as_ptr(), st.as_mut_ptr()) } != 0 {
-        return None;
+    };
+    // The project snapshot is a convenience; it never prevents recording.
+    if cfg.snapshot_project && let Err(e) = snapshot_project(root, &target.show_dir) {
+        target.notes.push(e);
     }
-    let st = unsafe { st.assume_init() };
-    Some(st.f_bavail as f64 * st.f_frsize as f64 / 1_000_000_000.0)
+    Ok(target)
 }
 
-async fn status(ctx: &EngineCtx, state: &Mutex<State>) -> Value {
-    let snap = ctx.hub.snapshot.load();
-    let (dir, show_dir, error, expected, requested) = {
-        let s = state.lock();
-        let expected = snap.str("show.mode").is_some_and(|mode| wants_recording(&s.config, mode, s.owned));
-        (s.config.dir_path(), s.show_dir.clone(), s.error.clone(), expected, s.requested.is_some())
-    };
-    let active = snap.bool("obs.record.active");
-    let connected = snap.bool("obs.link");
-    let path = snap.str("obs.record.path").unwrap_or("").to_string();
-    let actual_dir = snap.str("obs.record.dir").unwrap_or("").to_string();
-    let paused = snap.bool("obs.record.paused");
-    drop(snap);
-    let show = show_dir.as_ref().map(|d| d.display().to_string()).unwrap_or_default();
-    let mismatch = active && !show.is_empty() && !path.is_empty() && !Path::new(&path).starts_with(&show);
-    let dir_mismatch = active && !show.is_empty() && !actual_dir.is_empty() && Path::new(&actual_dir) != Path::new(&show);
-    let (level, detail) = if let Some(e) = error {
-        ("fail", e)
-    } else if !connected {
-        ("fail", "OBS is not connected".to_string())
-    } else if mismatch {
-        ("fail", format!("OBS is writing outside the show folder: {path}"))
-    } else if dir_mismatch {
-        ("fail", format!("OBS profile points outside the show folder: {actual_dir}"))
-    } else if active && path.is_empty() {
-        ("warn", "OBS is starting but has not reported a recording file".into())
-    } else if active && !Path::new(&path).is_file() {
-        ("warn", format!("OBS reports {path}, but the file has not appeared on disk"))
-    } else if paused {
-        ("warn", "OBS recording is paused".into())
-    } else if active {
-        ("pass", format!("Recording to {path}"))
-    } else if expected && requested {
-        ("warn", "Waiting for OBS to start recording".into())
-    } else if expected {
-        ("fail", "OBS is not recording in the current show mode".into())
+fn is_camera(cfg: &RecordingConfig, name: &str) -> bool {
+    cfg.video.iter().any(|v| v.name == name && matches!(v.kind(), SourceKind::Camera(_)))
+}
+
+/// "main + 2 cameras + tall": what is being recorded right now.
+fn tiers(cfg: &RecordingConfig, feeds: &[capture::FeedStatus]) -> String {
+    let recording = |f: &&capture::FeedStatus| f.state == "recording";
+    let mut parts: Vec<String> = feeds.iter().filter(|f| f.role == Role::Master).filter(recording).map(|f| f.name.clone()).collect();
+    let cameras = feeds.iter().filter(|f| f.role == Role::Iso && is_camera(cfg, &f.name)).filter(recording).count();
+    if cameras > 0 {
+        parts.push(format!("{cameras} camera{}", if cameras == 1 { "" } else { "s" }));
+    }
+    parts.extend(feeds.iter().filter(|f| f.role == Role::Iso && !is_camera(cfg, &f.name)).filter(recording).map(|f| f.name.clone()));
+    parts.join(" + ")
+}
+
+fn health(s: &State, selected: &RecordingConfig) -> (&'static str, String) {
+    if let Some(error) = &s.config_error {
+        return ("fail", error.clone());
+    }
+    if s.stopping {
+        return ("warn", "Finalizing recording files and session metadata".into());
+    }
+    if s.running {
+        let feeds = s.feeds.as_ref().map(|f| f.feeds.as_slice()).unwrap_or(&[]);
+        let master = feeds.iter().find(|f| f.role == Role::Master);
+        if let Some(m) = master.filter(|m| matches!(m.state, "retrying" | "low_disk")) {
+            return ("fail", format!("Master recording {} is not recording: {}", m.name, m.detail));
+        }
+        if !s.master_started {
+            return ("warn", "Opening selected capture sources and encoder".into());
+        }
+        let mut problems: Vec<String> = feeds
+            .iter()
+            .filter(|f| f.role == Role::Iso && f.state != "recording")
+            .map(|f| {
+                let kind = if is_camera(selected, &f.name) { "camera " } else { "" };
+                format!("{kind}{} {}", f.name, if f.detail.is_empty() { f.state.replace('_', " ") } else { f.detail.clone() })
+            })
+            .collect();
+        if let Some(reason) = &s.fallback {
+            let dir = s.show_dir.as_ref().map(|d| d.display().to_string()).unwrap_or_default();
+            problems.insert(0, format!("{reason}: recording the master only, to the fallback folder {dir}"));
+        }
+        if let Some(note) = master.filter(|m| m.state == "recording").map(|m| m.detail.as_str()).filter(|d| !d.is_empty()) {
+            problems.push(note.to_string());
+        }
+        let what = format!("Recording {}", tiers(selected, feeds));
+        return if problems.is_empty() {
+            ("pass", format!("{what} ({} audio track{})", selected.audio.len(), if selected.audio.len() == 1 { "" } else { "s" }))
+        } else {
+            ("warn", format!("{what}; {}", problems.join("; ")))
+        };
+    }
+    if s.preparing {
+        return ("warn", "Opening selected capture sources and encoder".into());
+    }
+    if let Some(error) = &s.error {
+        let wait = s.retry_at.map(|at| format!("; retrying in {} s", at.saturating_duration_since(Instant::now()).as_secs() + 1)).unwrap_or_default();
+        return ("fail", format!("Cannot record: {error}{wait}"));
+    }
+    if s.config.auto && s.config.master_index().is_none() {
+        return ("warn", "Auto-record is on but no video input is selected; choose a master video in Settings → Recording".into());
+    }
+    ("pass", "Not recording".into())
+}
+
+fn status(ctx: &EngineCtx, state: &Mutex<State>) -> Value {
+    let s = state.lock();
+    let dir = s.config.dir_path();
+    let selected = s.selected.as_ref().filter(|_| s.busy()).unwrap_or(&s.config);
+    let inputs = |items: &[crate::show::RecordingInput]| Value::List(items.iter().map(|i| capture::input_value(&i.name, &i.source, &i.format)).collect());
+    let (level, detail) = health(&s, selected);
+    let feeds = s.feeds.as_ref().filter(|_| s.running).map(|f| f.feeds.as_slice()).unwrap_or(&[]);
+    let master = feeds.iter().find(|f| f.role == Role::Master);
+    let free = if s.busy() {
+        s.feeds.as_ref().filter(|_| s.running).and_then(|f| f.dir_free_gb).or_else(|| capture::free_gb(s.show_dir.as_deref().unwrap_or(&dir)))
     } else {
-        ("pass", "Not recording".into())
+        capture::free_gb(&dir)
     };
-    let recordings = ctx.hub.query("obs", Value::Null).await.unwrap_or_default();
-    let tracks = recordings
-        .get_path("recordings")
-        .and_then(Value::as_list)
-        .and_then(|items| items.iter().rev().find(|r| r.get_path("path").and_then(Value::as_str) == Some(path.as_str())))
-        .and_then(|r| r.get_path("tracks"))
-        .cloned()
-        .unwrap_or_else(|| Value::List(vec![]));
     Value::map()
         .with("dir", dir.display().to_string())
-        .with("active", active)
-        .with("path", if active { path } else { String::new() })
+        .with("active", s.active())
+        .with("starting", s.starting())
+        .with("stopping", s.stopping)
+        .with("path", master.map(|m| m.path.clone()).unwrap_or_default())
+        .with(
+            "paths",
+            Value::List(
+                feeds
+                    .iter()
+                    .filter(|f| !f.path.is_empty())
+                    .map(|f| Value::map().with("canvas", f.name.clone()).with("role", f.role.as_str()).with("path", f.path.clone()))
+                    .collect(),
+            ),
+        )
         .with("health", Value::map().with("status", level).with("detail", detail))
-        .with("tracks", tracks)
-        .with("free_gb", free_gb(show_dir.as_deref().unwrap_or(&dir)).map(Value::Float).unwrap_or_default())
-        .with("session", ctx.hub.info.read().session.clone())
-        .with("show_dir", show)
-        .with("obs_dir", actual_dir)
+        .with("tracks", capture::tracks(&selected.audio))
+        .with("video", inputs(&selected.video))
+        .with("audio", inputs(&selected.audio))
+        .with("free_gb", free.map(Value::Float).unwrap_or_default())
+        .with("dir_free_gb", free.map(Value::Float).unwrap_or_default())
+        .with("fallback", s.running && s.fallback.is_some())
+        .with("fallback_reason", s.fallback.clone().filter(|_| s.running).unwrap_or_default())
+        .with("segment", master.map(|m| m.segments.saturating_sub(1) as i64).unwrap_or(0))
+        .with("feeds", Value::List(feeds.iter().map(capture::FeedStatus::value).collect()))
+        .with("session", if s.session.is_empty() { ctx.hub.info.read().session.clone() } else { s.session.clone() })
+        .with("show_dir", s.show_dir.as_ref().map(|d| d.display().to_string()).unwrap_or_default())
 }
 
-/// Register the status and prepare queries, then follow show mode and configuration.
-pub async fn start(ctx: EngineCtx) -> anyhow::Result<()> {
-    let initial = config(&ctx).unwrap_or_else(|e| {
-        ctx.hub.log("error", TARGET, format!("{e}; using defaults"));
-        RecordingConfig::default()
-    });
-    let state = Arc::new(Mutex::new(State { config: initial, session: String::new(), show_dir: None, requested: None, owned: false, error: None }));
-    {
-        let (ctx, state) = (ctx.clone(), state.clone());
-        let hub = ctx.hub.clone();
-        hub.register_query(
-            "recording",
-            Arc::new(move |name, _args| {
-                let (ctx, state) = (ctx.clone(), state.clone());
-                Box::pin(async move {
-                    match name.as_str() {
-                        "recording.prepare" => {
-                            let result = prepare(&ctx, &state);
-                            state.lock().error = result.as_ref().err().cloned();
-                            result.map(|dir| Value::Str(dir.display().to_string()))
-                        }
-                        "recording.status" => Ok(status(&ctx, &state).await),
-                        _ => Err(format!("unknown recording query {name}")),
-                    }
-                })
-            }),
-        );
+fn publish(ctx: &EngineCtx, state: &Mutex<State>) {
+    let value = status(ctx, state);
+    for key in ["active", "starting", "stopping", "path", "dir_free_gb"] {
+        ctx.hub.publish(&format!("recording.{key}"), value.get_path(key).cloned().unwrap_or_default());
     }
+    ctx.hub.publish("health.recording", value.get_path("health").cloned().unwrap_or_default());
+}
+
+async fn persist(ctx: &EngineCtx, session: &str, values: Value) -> Result<(), String> {
+    ctx.hub.query("session.persist", Value::map().with("session", session).with("values", values)).await.map(|_| ())
+}
+
+/// Persist the file list now; on failure keep it pending and retry on the next tick, so the
+/// recording itself never stops because metadata could not be written yet.
+async fn persist_files(ctx: &EngineCtx, state: &Mutex<State>) {
+    let (session, values) = {
+        let mut s = state.lock();
+        let meta = s.meta();
+        s.pending_meta = Some(meta.clone());
+        (s.session.clone(), meta)
+    };
+    match persist(ctx, &session, values).await {
+        Ok(()) => state.lock().pending_meta = None,
+        Err(error) => ctx.hub.log("warn", TARGET, format!("cannot persist recording metadata yet ({error}); retrying")),
+    }
+}
+
+fn request_stop(ctx: &EngineCtx, state: &Mutex<State>) {
+    {
+        let mut s = state.lock();
+        if let Some(stop) = &s.stop {
+            stop.store(true, Ordering::Relaxed);
+            s.stopping = true;
+        }
+    }
+    publish(ctx, state);
+}
+
+async fn begin(ctx: &EngineCtx, state: &Arc<Mutex<State>>, events: &mpsc::UnboundedSender<capture::Event>) -> Result<(), String> {
+    let (cfg, session) = {
+        let mut s = state.lock();
+        if s.busy() { return Ok(()); }
+        if let Some(error) = &s.config_error { return Err(error.clone()); }
+        if s.pending_meta.is_some() { return Err("previous recording metadata has not been persisted yet".into()); }
+        if s.config.master_index().is_none() { return Err("no video input is selected; choose a master video in Settings → Recording".into()); }
+        s.preparing = true;
+        s.error = None;
+        s.selected = Some(s.config.clone());
+        (s.config.clone(), ctx.hub.info.read().session.clone())
+    };
+    publish(ctx, state);
+    let root = ctx.project_root.clone();
+    let (prepare_cfg, prepare_session) = (cfg.clone(), session.clone());
+    let target = tokio::task::spawn_blocking(move || prepare(&root, &prepare_session, &prepare_cfg)).await.map_err(|e| e.to_string())??;
+    for note in &target.notes {
+        ctx.hub.log("warn", TARGET, note);
+    }
+    if let Some(reason) = &target.fallback {
+        ctx.hub.log("warn", TARGET, format!("{reason}; recording the master only to {}", target.show_dir.display()));
+    }
+    let dir = target.show_dir.clone();
+    let show = Value::map().with("dir", dir.display().to_string()).with("name", dir.file_name().unwrap_or_default().to_string_lossy().to_string());
+    persist(ctx, &session, Value::map().with("show", show)).await?;
+    let previous = std::fs::read_to_string(ctx.project_root.join("sessions").join(&session).join("meta.toml"))
+        .ok().and_then(|text| toml::from_str::<toml::Value>(&text).ok()).and_then(|v| v.get("recordings").cloned()).map(Value::from)
+        .and_then(|v| v.as_list().map(<[Value]>::to_vec)).unwrap_or_default();
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let mut s = state.lock();
+        s.session = session;
+        s.show_dir = Some(dir.clone());
+        s.fallback = target.fallback.clone();
+        s.previous = previous;
+        s.files.clear();
+        s.feeds = None;
+        s.master_started = false;
+        s.stop = Some(stop.clone());
+        s.preparing = false;
+        s.running = true;
+    }
+    let plan = capture::Plan { config: cfg, master_dir: dir, iso_dir: target.iso_dir };
+    let (events, failures, hub) = (events.clone(), events.clone(), ctx.hub.clone());
+    let log = ctx.hub.clone();
+    tokio::spawn(async move {
+        let observe: Box<dyn capture::Observe> = Box::new(hub.clone());
+        if let Err(error) = tokio::task::spawn_blocking(move || capture::run(plan, Some(hub), observe, stop, events)).await {
+            // A supervisor bug: its children die with it (PDEATHSIG is per thread group, so
+            // they are reaped by their Process guards). The lifecycle retries the recording.
+            log.log("error", TARGET, format!("recording supervisor failed: {error}"));
+            let _ = failures.send(capture::Event::Finished);
+        }
+    });
+    Ok(())
+}
+
+async fn flush_pending(ctx: &EngineCtx, state: &Mutex<State>) -> Result<(), String> {
+    let (session, pending) = { let s = state.lock(); (s.session.clone(), s.pending_meta.clone()) };
+    if let Some(values) = pending {
+        persist(ctx, &session, values).await?;
+        state.lock().pending_meta = None;
+    }
+    Ok(())
+}
+
+/// Engine camera sources (`sources/<id>.toml` with a `device`) as `camera:<id>` video inputs.
+fn camera_sources(root: &Path) -> Vec<Value> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(root.join("sources")) else { return out };
+    let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "toml")).collect();
+    paths.sort();
+    for path in paths {
+        let Some(id) = path.file_stem().map(|s| s.to_string_lossy().into_owned()) else { continue };
+        let Some(doc) = std::fs::read_to_string(&path).ok().and_then(|t| toml::from_str::<toml::Table>(&t).ok()) else { continue };
+        if doc.get("device").and_then(toml::Value::as_str).is_none() {
+            continue;
+        }
+        let label = doc.get("label").and_then(toml::Value::as_str).unwrap_or(&id).to_string();
+        out.push(capture::input_value(&label, &format!("camera:{id}"), ""));
+    }
+    out
+}
+
+/// Actions: recording.start / recording.stop. Queries: recording.status,
+/// recording.sources, recording.finalize. Finalize returns only after child reaping
+/// and the session writer has acknowledged durable metadata, including empty capture.
+pub async fn start(ctx: EngineCtx) -> anyhow::Result<()> {
+    let initial = config(&ctx);
+    let mut initial_state = State::new(initial.clone().unwrap_or_default());
+    initial_state.config_error = initial.err();
+    let state = Arc::new(Mutex::new(initial_state));
+    for key in ["active", "starting", "stopping"] {
+        ctx.hub.declare(&format!("recording.{key}"), Meta::boolean(false).readonly().owner(TARGET));
+    }
+    ctx.hub.declare("recording.path", Meta::string("").readonly().owner(TARGET));
+    ctx.hub.declare("recording.dir_free_gb", Meta::float(0.0, [0.0, 1e6]).unit("GB").readonly().owner(TARGET));
+    let mut actions = ctx.hub.route_actions("recording");
+    let (control, mut controls) = mpsc::unbounded_channel::<oneshot::Sender<Result<Value, String>>>();
+    let (event_tx, mut events) = mpsc::unbounded_channel();
+    {
+        let (query_ctx, query_state) = (ctx.clone(), state.clone());
+        ctx.hub.register_query("recording", Arc::new(move |name, _| {
+            let (ctx, state, control) = (query_ctx.clone(), query_state.clone(), control.clone());
+            Box::pin(async move {
+                match name.as_str() {
+                    "recording.status" => Ok(status(&ctx, &state)),
+                    "recording.sources" => {
+                        let root = ctx.project_root.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let all = capture::sources();
+                            let mut video = all.get_path("video").and_then(Value::as_list).map(<[Value]>::to_vec).unwrap_or_default();
+                            let at = video.len().min(2);
+                            video.splice(at..at, camera_sources(&root));
+                            all.with("video", Value::List(video))
+                        })
+                        .await
+                        .map_err(|e| e.to_string())
+                    }
+                    "recording.finalize" => {
+                        let (tx, rx) = oneshot::channel();
+                        control.send(tx).map_err(|_| "recording service stopped".to_string())?;
+                        rx.await.map_err(|_| "recording finalization worker stopped".to_string())?
+                    }
+                    _ => Err(format!("unknown recording query {name}")),
+                }
+            })
+        }));
+    }
+    publish(&ctx, &state);
     tokio::spawn(async move {
         let mut cfg_rx = ctx.config.clone();
-        let mut tick = tokio::time::interval(Duration::from_millis(500));
+        let mut tick = tokio::time::interval(Duration::from_millis(250));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut gate = AutoGate::default();
+        gate.mode(ctx.hub.snapshot.load().str("show.mode").unwrap_or("offline"));
+        let mut waiters: Vec<oneshot::Sender<Result<Value, String>>> = Vec::new();
+        let mut next_publish = Instant::now();
         loop {
+            let mut start_requested = false;
             tokio::select! {
-                r = cfg_rx.changed() => {
-                    if r.is_err() { break; }
-                    match config(&ctx) {
-                        Ok(cfg) => state.lock().config = cfg,
-                        Err(e) => ctx.hub.log("error", TARGET, format!("{e}; keeping previous [recording] settings")),
+                Some(done) = controls.recv() => {
+                    gate.stop();
+                    request_stop(&ctx, &state);
+                    if state.lock().stop.is_some() { waiters.push(done); }
+                    else {
+                        let result = flush_pending(&ctx, &state).await;
+                        if result.is_ok() { state.lock().stopping = false; }
+                        publish(&ctx, &state);
+                        let _ = done.send(result.map(|_| status(&ctx, &state)));
                     }
+                }
+                Some(command) = actions.recv() => {
+                    if let Op::Action { name, .. } = command.op {
+                        match name.as_str() {
+                            "recording.start" => {
+                                gate.inhibited = false;
+                                state.lock().retry_at = None;
+                                start_requested = true;
+                            }
+                            "recording.stop" => { gate.stop(); request_stop(&ctx, &state); }
+                            _ => {}
+                        }
+                    }
+                }
+                Some(event) = events.recv() => {
+                    match event {
+                        capture::Event::Started(record) => {
+                            {
+                                let mut s = state.lock();
+                                if record.role == Role::Master {
+                                    s.master_started = true;
+                                    s.retry = Backoff::default();
+                                }
+                                s.files.push(record);
+                            }
+                            persist_files(&ctx, &state).await;
+                        }
+                        capture::Event::Ended { path, recording, error } => {
+                            let master = {
+                                let mut s = state.lock();
+                                let master = recording.as_ref().map(|r| r.role == Role::Master)
+                                    .or_else(|| s.files.iter().find(|f| f.path == path).map(|f| f.role == Role::Master))
+                                    .unwrap_or(false);
+                                match recording {
+                                    Some(done) => match s.files.iter_mut().find(|f| f.path == path) {
+                                        Some(file) => *file = done,
+                                        None => s.files.push(done),
+                                    },
+                                    None => s.files.retain(|f| f.path != path),
+                                }
+                                master
+                            };
+                            if let Some(error) = error {
+                                ctx.hub.log(if master { "error" } else { "warn" }, TARGET, format!("{}: {error}", path.display()));
+                            }
+                            persist_files(&ctx, &state).await;
+                        }
+                        capture::Event::Status(feeds) => {
+                            state.lock().feeds = Some(feeds);
+                        }
+                        capture::Event::Finished => {
+                            {
+                                let mut s = state.lock();
+                                s.running = false;
+                                s.stopping = true;
+                                s.stop = None;
+                                s.pending_meta = Some(s.meta());
+                            }
+                            publish(&ctx, &state);
+                            let result = flush_pending(&ctx, &state).await;
+                            {
+                                let mut s = state.lock();
+                                s.stopping = result.is_err();
+                                if let Err(error) = &result {
+                                    let error = format!("cannot finalize recording metadata: {error}");
+                                    ctx.hub.log("error", TARGET, &error);
+                                    s.error = Some(error);
+                                }
+                            }
+                            for done in waiters.drain(..) { let _ = done.send(result.clone().map(|_| status(&ctx, &state))); }
+                        }
+                    }
+                    publish(&ctx, &state);
+                }
+                result = cfg_rx.changed() => {
+                    if result.is_err() {
+                        gate.stop();
+                        request_stop(&ctx, &state);
+                        // Keep processing the worker's final event; shutdown callers
+                        // use recording.finalize before dropping the runtime.
+                        if !state.lock().busy() { break; }
+                    } else {
+                        match config(&ctx) {
+                            Ok(cfg) => {
+                                let mut s = state.lock();
+                                if cfg.auto && !s.config.auto { gate.inhibited = false; }
+                                if cfg != s.config { s.retry_at = None; }
+                                s.config = cfg;
+                                s.config_error = None;
+                            }
+                            Err(error) => { state.lock().config_error = Some(error); }
+                        }
+                    }
+                    publish(&ctx, &state);
                 }
                 _ = tick.tick() => {
-                    let snap = ctx.hub.snapshot.load();
-                    let mode = snap.str("show.mode").unwrap_or("offline").to_owned();
-                    let connected = snap.bool("obs.link");
-                    let active = snap.bool("obs.record.active");
-                    drop(snap);
+                    let mode = ctx.hub.snapshot.load().str("show.mode").unwrap_or("offline").to_owned();
+                    if gate.mode(&mode) {
+                        request_stop(&ctx, &state);
+                        let mut s = state.lock();
+                        s.retry_at = None;
+                        if !s.busy() { s.error = None; }
+                    }
                     let current_session = ctx.hub.info.read().session.clone();
-                    let mut s = state.lock();
-                    if s.session != current_session {
-                        s.session = current_session;
-                        s.show_dir = show_dir_from_meta(&ctx.project_root.join("sessions").join(&s.session));
-                        s.requested = None;
-                        s.owned = false;
-                        s.error = None;
-                    }
-                    // `modes` chooses where a recording begins; once armed it carries
-                    // through BRB, ad breaks, and outro until offline.
-                    let wants = wants_recording(&s.config, &mode, s.owned);
-                    if active {
-                        s.requested = None;
-                        s.error = None;
-                    } else if !connected {
-                        s.requested = None;
-                    } else if wants && s.requested.is_none() {
-                        s.requested = Some(Instant::now());
-                        s.owned = true;
-                        ctx.hub.command(Command::new(Origin::System, Op::Action { name: "obs.record.start".into(), args: Value::map().with("auto", true) }));
-                    } else if let Some(at) = s.requested && at.elapsed() > Duration::from_secs(15) {
-                        s.error = Some("OBS did not confirm a recording file within 15 seconds".into());
-                        s.requested = None;
-                        // Keep the show armed: retry even if the mode is now BRB.
-                    }
-                    if !wants && s.owned {
-                        if active || s.requested.is_some() {
-                            ctx.hub.command(Command::new(Origin::System, Op::Action { name: "obs.record.stop".into(), args: Value::Null }));
+                    let (flush, now) = {
+                        let mut s = state.lock();
+                        if !s.busy() && s.pending_meta.is_none() && s.session != current_session {
+                            s.session = current_session;
+                            s.show_dir = show_dir_from_meta(&ctx.project_root.join("sessions").join(&s.session));
+                            s.previous.clear(); s.files.clear(); s.feeds = None; s.error = None; s.fallback = None;
                         }
-                        s.owned = false;
-                        s.requested = None;
+                        let now = Instant::now();
+                        start_requested = !s.busy() && s.config_error.is_none() && s.pending_meta.is_none()
+                            && s.config.master_index().is_some() && gate.wants(&s.config)
+                            && s.retry_at.is_none_or(|at| at <= now);
+                        (s.pending_meta.is_some() && !s.stopping, now)
+                    };
+                    if flush && flush_pending(&ctx, &state).await.is_ok() {
+                        ctx.hub.log("info", TARGET, "recording metadata persisted after a retry");
+                    }
+                    if now >= next_publish {
+                        next_publish = now + Duration::from_secs(5);
+                        publish(&ctx, &state);
                     }
                 }
+            }
+            if start_requested {
+                if let Err(error) = begin(&ctx, &state, &event_tx).await {
+                    {
+                        let mut s = state.lock();
+                        s.preparing = false;
+                        s.running = false;
+                        let delay = s.retry.fail(Duration::ZERO);
+                        s.retry_at = Some(Instant::now() + delay);
+                        s.error = Some(error.clone());
+                    }
+                    ctx.hub.log("error", TARGET, format!("cannot start recording: {error}; retrying"));
+                } else { gate.armed = true; }
+                publish(&ctx, &state);
             }
         }
     });
@@ -342,16 +737,29 @@ mod tests {
     }
 
     #[test]
-    fn on_air_recording_carries_through_breaks_until_offline() {
-        let mut cfg = RecordingConfig::default();
-        assert!(!wants_recording(&cfg, "brb", false));
-        assert!(wants_recording(&cfg, "preshow", false));
+    fn manual_stop_inhibits_auto_until_mode_change_or_rearm() {
+        let config = RecordingConfig::default();
+        let mut gate = AutoGate::default();
+        gate.mode("brb");
+        assert!(!gate.wants(&config));
+        gate.mode("preshow");
+        assert!(gate.wants(&config));
+        gate.armed = true;
         for mode in ["live", "brb", "ad_break", "outro"] {
-            assert!(wants_recording(&cfg, mode, true), "recording stopped during {mode}");
+            gate.mode(mode);
+            assert!(gate.wants(&config));
         }
-        assert!(!wants_recording(&cfg, "offline", true));
-        cfg.auto = false;
-        assert!(!wants_recording(&cfg, "live", true));
+        gate.mode("live");
+        gate.stop();
+        gate.mode("live");
+        assert!(!gate.wants(&config));
+        gate.inhibited = false;
+        assert!(gate.wants(&config));
+        gate.stop();
+        gate.mode("preshow");
+        assert!(gate.wants(&config));
+        assert!(gate.mode("offline"));
+        assert!(!gate.wants(&config));
     }
 
     #[test]
@@ -387,26 +795,116 @@ mod tests {
     #[test]
     fn preparing_session_creates_single_show_folder() {
         let d = tempfile::tempdir().unwrap();
-        let cfg = RecordingConfig { dir: d.path().join("recordings").to_string_lossy().into_owned(), ..RecordingConfig::default() };
-        let (hub, _rx) = se_hub::Hub::new(Arc::new(se_clock::Clock::new()));
-        hub.info.write().session = "20260926-123456".into();
-        let (_tx, config_rx) = tokio::sync::watch::channel(Arc::new(se_core::Config::default()));
-        let ctx = EngineCtx {
-            hub,
-            db: se_store::Db::memory().unwrap(),
-            project_root: d.path().to_path_buf(),
-            data_dir: d.path().to_path_buf(),
-            share_dir: d.path().to_path_buf(),
-            config: config_rx,
-            http: "127.0.0.1:0".parse().unwrap(),
-            dev: true,
-        };
+        let cfg = RecordingConfig { dir: d.path().join("recordings").to_string_lossy().into_owned(), min_free_gb: 0.0, ..RecordingConfig::default() };
+        let session = "20260926-123456";
         std::fs::write(d.path().join("project.toml"), "title = \"before\"\n").unwrap();
-        let state = Mutex::new(State { config: cfg, session: String::new(), show_dir: None, requested: None, owned: false, error: None });
-        let path = prepare(&ctx, &state).unwrap();
+        let target = prepare(d.path(), session, &cfg).unwrap();
+        let path = target.show_dir.clone();
         assert!(path.is_dir());
+        assert_eq!((target.iso_dir.as_ref(), target.fallback.as_ref()), (Some(&path), None));
         assert!(path.join("data/project/project.toml").is_file());
         assert!(path.to_string_lossy().ends_with("(20260926-123456)"));
-        assert_eq!(prepare(&ctx, &state).unwrap(), path);
+        assert!(!path.join(".write-test").exists());
+        let session_dir = d.path().join("sessions").join(session);
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::write(session_dir.join("meta.toml"), format!("[show]\ndir = {:?}\n", path.display().to_string())).unwrap();
+        assert_eq!(prepare(d.path(), session, &cfg).unwrap().show_dir, path);
+    }
+
+    #[test]
+    fn saved_destination_applies_to_next_recording_in_same_session() {
+        let project = tempfile::tempdir().unwrap();
+        let session = "20260926-123456";
+        let old_root = project.path().join("old-drive");
+        let new_root = project.path().join("selected-drive");
+        std::fs::create_dir_all(&new_root).unwrap();
+        let fallback = project.path().join("fallback");
+        let cfg = RecordingConfig {
+            dir: old_root.to_string_lossy().into_owned(),
+            fallback_dir: fallback.to_string_lossy().into_owned(),
+            min_free_gb: 0.0,
+            snapshot_project: false,
+            ..RecordingConfig::default()
+        };
+        let old_show = prepare(project.path(), session, &cfg).unwrap().show_dir;
+        let old_recording = old_show.join("main-original.mkv");
+        std::fs::write(&old_recording, b"existing recording").unwrap();
+        let session_dir = project.path().join("sessions").join(session);
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let meta = format!("show = {{ dir = {:?} }}\nrecordings = [{{ path = {:?} }}]\n", old_show.display().to_string(), old_recording.display().to_string());
+        std::fs::write(session_dir.join("meta.toml"), &meta).unwrap();
+
+        let saved = RecordingConfig { dir: new_root.to_string_lossy().into_owned(), ..cfg };
+        let next = prepare(project.path(), session, &saved).unwrap();
+        assert_eq!(next.show_dir.parent(), Some(new_root.canonicalize().unwrap().as_path()));
+        assert_eq!(next.show_dir.file_name(), old_show.file_name());
+        assert_eq!(next.iso_dir.as_ref(), Some(&next.show_dir));
+        assert_eq!(next.fallback, None);
+        assert_eq!(std::fs::read(&old_recording).unwrap(), b"existing recording");
+        assert_eq!(std::fs::read_to_string(session_dir.join("meta.toml")).unwrap(), meta);
+    }
+
+    #[test]
+    fn missing_or_full_recording_folder_records_master_only_to_fallback() {
+        let d = tempfile::tempdir().unwrap();
+        let fallback = d.path().join("fallback");
+        let missing_drive = d.path().join("mnt/drive/Stream Engine");
+        let cfg = RecordingConfig {
+            dir: missing_drive.to_string_lossy().into_owned(),
+            fallback_dir: fallback.to_string_lossy().into_owned(),
+            min_free_gb: 0.0,
+            snapshot_project: false,
+            ..RecordingConfig::default()
+        };
+        let target = prepare(d.path(), "20260926-123456", &cfg).unwrap();
+        assert!(target.show_dir.starts_with(fallback.canonicalize().unwrap()));
+        assert_eq!(target.iso_dir, None, "cameras are not recorded in fallback mode");
+        assert!(target.fallback.as_deref().is_some_and(|r| r.contains("is missing (is the drive connected?)")), "{target:?}");
+        assert!(!missing_drive.exists(), "a missing drive's folder is never recreated on the system disk");
+        // Not enough free space anywhere: refuse with both reasons (the lifecycle retries).
+        let full = RecordingConfig { dir: d.path().join("rec").to_string_lossy().into_owned(), min_free_gb: 1e9, ..cfg };
+        let error = prepare(d.path(), "20260926-123456", &full).unwrap_err();
+        assert!(error.contains("GB free") && error.contains("fallback folder cannot be used either"), "{error}");
+    }
+
+    #[test]
+    fn health_names_tiers_and_fails_only_when_the_master_is_down() {
+        let cfg: RecordingConfig = toml::from_str(
+            r#"video = [{ name = "main", source = "canvas:wide" }, { name = "kit", source = "camera:cam_kit", height = 1080 }, { name = "kick", source = "camera:cam_kick", height = 720 }]
+               audio = [{ name = "Mix", source = "se-band", format = "pulse" }]"#,
+        )
+        .unwrap();
+        let feed = |name: &str, role: Role, state: &'static str, detail: &str| capture::FeedStatus {
+            name: name.into(),
+            role,
+            source: String::new(),
+            state,
+            path: String::new(),
+            bytes: 0,
+            dropped: 0,
+            segments: 1,
+            detail: detail.into(),
+        };
+        let mut s = State::new(cfg.clone());
+        s.running = true;
+        s.master_started = true;
+        s.feeds = Some(capture::Status {
+            feeds: vec![feed("main", Role::Master, "recording", ""), feed("kit", Role::Iso, "recording", ""), feed("kick", Role::Iso, "recording", "")],
+            dir_free_gb: Some(500.0),
+        });
+        assert_eq!(health(&s, &cfg), ("pass", "Recording main + 2 cameras (1 audio track)".to_string()));
+        s.feeds.as_mut().unwrap().feeds[2] = feed("kick", Role::Iso, "shed", "dropped: encoder busy; retrying in 30 s");
+        assert_eq!(health(&s, &cfg), ("warn", "Recording main + 1 camera; camera kick dropped: encoder busy; retrying in 30 s".to_string()));
+        s.feeds.as_mut().unwrap().feeds[0] = feed("main", Role::Master, "retrying", "encoder exited; retrying in 4 s");
+        let (level, detail) = health(&s, &cfg);
+        assert_eq!(level, "fail");
+        assert!(detail.contains("Master recording main is not recording: encoder exited"), "{detail}");
+        s.feeds.as_mut().unwrap().feeds[0] = feed("main", Role::Master, "recording", "");
+        s.fallback = Some("recording folder /mnt/x is missing (is the drive connected?)".into());
+        assert!(health(&s, &cfg).1.contains("recording the master only, to the fallback folder"));
+        let idle = State { error: Some("only 3 GB free".into()), retry_at: Some(Instant::now() + Duration::from_secs(8)), ..State::new(cfg.clone()) };
+        let (level, detail) = health(&idle, &cfg);
+        assert_eq!(level, "fail");
+        assert!(detail.starts_with("Cannot record: only 3 GB free; retrying in "), "{detail}");
     }
 }

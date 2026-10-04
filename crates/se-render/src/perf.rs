@@ -54,6 +54,8 @@ pub struct Stats {
     /// Effect passes in the last frame, and effects that ran inside fused passes.
     fx_passes: AtomicU32,
     fx_fused: AtomicU32,
+    /// Freeze-photo worker state, also available to offline renderer embedders.
+    pub freeze_photos: std::sync::Arc<crate::resources::FreezePhotoStatus>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -181,7 +183,7 @@ impl Timestamps {
         Timestamps {
             sets,
             resolve,
-            readback: MappedRing::new(device, "timestamps", 4, size, false),
+            readback: MappedRing::new(device, "timestamps", 4, size),
             masks: [0; 4],
             slot: 0,
             written: [false; PASSES.len()],

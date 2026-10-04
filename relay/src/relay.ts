@@ -38,7 +38,7 @@ interface Attachment {
 
 interface PendingCall {
   resolve: (r: CallResult) => void;
-  timer: number;
+  timer: number | NodeJS.Timeout;
 }
 
 export class Relay extends DurableObject<Env> {

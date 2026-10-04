@@ -74,10 +74,15 @@ pub struct Instance {
     pub released_at: Option<Ts>,
     /// Level when release began (release ramps from here).
     pub release_from: f64,
+    /// Plateau amplitude, fixed at creation (musical patches use conservative strength).
+    #[serde(default = "full_strength")]
+    pub strength: f64,
     /// Owner key (preset/actor) so `release` only ends its own instances.
     pub key: String,
     pub payload: Value,
 }
+
+fn full_strength() -> f64 { 1.0 }
 
 impl Instance {
     pub fn level(&self, t: Ts) -> f64 {
@@ -89,7 +94,7 @@ impl Instance {
             return (self.release_from * (1.0 - p)).max(0.0);
         }
         let el = t.saturating_sub(self.start);
-        if el < self.attack { el as f64 / self.attack as f64 } else { 1.0 }
+        self.strength * if el < self.attack { el as f64 / self.attack as f64 } else { 1.0 }
     }
 
     /// Enter release automatically once attack+hold elapses.
@@ -99,7 +104,7 @@ impl Instance {
         {
             let end = self.start + self.attack + h;
             if t >= end {
-                self.release_from = 1.0;
+                self.release_from = self.strength;
                 self.released_at = Some(end);
             }
         }
@@ -279,6 +284,7 @@ mod tests {
             release: 500 * MS,
             released_at: None,
             release_from: 0.0,
+            strength: 1.0,
             key: "k".into(),
             payload: Value::Null,
         }
@@ -292,6 +298,34 @@ mod tests {
         assert_eq!(t.tick(500 * MS), (1.0, true));
         assert!((t.tick(1350 * MS).0 - 0.5).abs() < 1e-9);
         assert_eq!(t.tick(1700 * MS), (0.0, false));
+    }
+
+    #[test]
+    fn restrained_amplitude_fades_from_peak_or_early_release_without_jumping() {
+        let mut natural = TriggerRt::default();
+        natural.fire(Instance { strength: 0.3, ..inst(0) });
+        assert!((natural.tick(50 * MS).0 - 0.15).abs() < 1e-9);
+        assert!((natural.tick(500 * MS).0 - 0.3).abs() < 1e-9);
+        assert!((natural.tick(1350 * MS).0 - 0.15).abs() < 1e-9);
+        assert_eq!(natural.tick(1700 * MS), (0.0, false));
+
+        let mut early = TriggerRt::default();
+        early.fire(Instance { strength: 0.3, ..inst(0) });
+        early.release(Some("k"), 50 * MS);
+        assert!((early.tick(50 * MS).0 - 0.15).abs() < 1e-9);
+        assert!((early.tick(300 * MS).0 - 0.075).abs() < 1e-9);
+        assert_eq!(early.tick(550 * MS), (0.0, false));
+    }
+
+    #[test]
+    fn older_serialized_envelopes_keep_full_strength() {
+        let serialized = serde_json::json!({
+            "id": 1, "start": 0, "attack": 100_000_000, "hold": 1_000_000_000,
+            "release": 500_000_000, "released_at": null, "release_from": 0.0,
+            "key": "manual", "payload": null
+        });
+        let restored: Instance = serde_json::from_value(serialized).unwrap();
+        assert_eq!(restored.level(500 * MS), 1.0);
     }
 
     #[test]

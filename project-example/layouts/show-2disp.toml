@@ -31,6 +31,6 @@ size = [1360.0, 1080.0]
 
 [show]
 # Live page
-rail_tab = "chat"     # chat | events | queue | mod
+rail_tab = "queue"    # queue | events | mod; chat stays visible
 rail_width = 380.0
 multiview = false

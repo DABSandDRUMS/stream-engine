@@ -3,6 +3,7 @@
 //! (§13.3). The process exits when the last window is closed; the cookies stay in the profile.
 
 use cef::*;
+use std::io::Write;
 use std::os::raw::c_int;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -14,13 +15,13 @@ wrap_life_span_handler! {
     impl LifeSpanHandler {
         fn on_after_created(&self, _browser: Option<&mut Browser>) {
             let n = OPEN.fetch_add(1, Ordering::SeqCst) + 1;
-            eprintln!("stream-engine-web: sign-in window open ({n})");
+            let _ = writeln!(std::io::stderr(), "stream-engine-web: sign-in window open ({n})");
         }
 
         fn on_before_close(&self, _browser: Option<&mut Browser>) {
             let n = OPEN.fetch_sub(1, Ordering::SeqCst).saturating_sub(1);
             if n == 0 {
-                eprintln!("stream-engine-web: sign-in window closed");
+                let _ = writeln!(std::io::stderr(), "stream-engine-web: sign-in window closed");
                 quit_message_loop();
             }
         }
@@ -48,7 +49,7 @@ pub fn open(url: &str) {
     let settings = BrowserSettings::default();
     let ok: c_int = browser_host_create_browser(Some(&window_info), Some(&mut client), Some(&url.into()), Some(&settings), None, None);
     if ok != 1 {
-        eprintln!("stream-engine-web: could not open the sign-in window");
+        let _ = writeln!(std::io::stderr(), "stream-engine-web: could not open the sign-in window");
         quit_message_loop();
     }
 }

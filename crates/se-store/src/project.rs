@@ -193,6 +193,11 @@ impl Project {
     /// Scene node properties go to `scenes/<scene>.toml`; everything else to `project.toml [params]`.
     pub fn write_base(&self, address: &str, value: &Value) -> Result<String> {
         let segs: Vec<&str> = address.split('.').collect();
+        if let Some((target, property)) = crate::fx::address_target(address)? {
+            let rel = target.path();
+            self.edit(&rel, |doc| crate::fx::write_property(doc, &target, &property, value))?;
+            return Ok(rel);
+        }
         if segs.len() >= 5 && segs[0] == "scene" && segs[2] == "node" {
             let (scene, node, prop) = (segs[1], segs[3], &segs[4..]);
             let rel = format!("scenes/{scene}.toml");
@@ -379,24 +384,6 @@ fn write_node_prop(doc: &mut DocumentMut, node: &str, prop: &[&str], value: &Val
     let n = match prop {
         [p, canvas] if PER_CANVAS.contains(p) => for_each_node(doc, node, Some(canvas), |t| {
             set(t, p, value);
-            Ok(())
-        })?,
-        ["fx", fx, param] => for_each_node(doc, node, None, |t| {
-            let Some(Item::Value(toml_edit::Value::Array(fxs))) = t.get_mut("fx") else { return Ok(()) };
-            for e in fxs.iter_mut() {
-                if let Some(ft) = e.as_inline_table_mut()
-                    && ft.get("name").and_then(|v| v.as_str()) == Some(*fx)
-                {
-                    match to_edit_value(value) {
-                        Some(v) => {
-                            ft.insert(*param, v);
-                        }
-                        None => {
-                            ft.remove(param);
-                        }
-                    }
-                }
-            }
             Ok(())
         })?,
         [p] => for_each_node(doc, node, None, |t| {

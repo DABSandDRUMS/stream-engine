@@ -12,22 +12,16 @@ use std::time::Instant;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RailTab {
     Events,
-    Chat,
     Queue,
     Mod,
 }
 
 impl RailTab {
-    pub const ALL: [(RailTab, &'static str, &'static str); 4] = [
-        (RailTab::Chat, "Chat", icon::CHAT),
-        (RailTab::Events, "Activity", icon::ALERT),
-        (RailTab::Queue, "Songs", icon::QUEUE),
-        (RailTab::Mod, "Mod", icon::MOD),
-    ];
+    pub const ALL: [(RailTab, &'static str, &'static str); 3] =
+        [(RailTab::Queue, "Songs", icon::QUEUE), (RailTab::Events, "Activity", icon::ALERT), (RailTab::Mod, "Mod", icon::MOD)];
     pub fn id(self) -> &'static str {
         match self {
             RailTab::Events => "events",
-            RailTab::Chat => "chat",
             RailTab::Queue => "queue",
             RailTab::Mod => "mod",
         }
@@ -56,7 +50,7 @@ pub struct ShowState {
 impl Default for ShowState {
     fn default() -> Self {
         ShowState {
-            rail: RailTab::Chat,
+            rail: RailTab::Queue,
             rail_width: 360.0,
             transition: None,
             take_ms: None,

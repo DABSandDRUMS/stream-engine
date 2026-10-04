@@ -1,0 +1,21 @@
+# Bass Shockwave — hard kicks only: a brief radial push from the kick drum, a fast ring of
+# chromatic refraction (red leads, blue lags) with a faint light crest, and a small scale punch.
+# Soft kicks and fast kick runs stay quiet: hit strength is estimated against the beat grid,
+# off-beat kicks get a fraction of the wave and every wave is over within one beat, so even
+# four-on-the-floor or double-kick runs can't stack (see main.wgsl). A trigger (alert) fires one
+# big shockwave in the user's colour and makes the next few seconds of kicks hit harder.
+# Always-on effect, so no manifest trigger: the burst is timed from se.trigger_age.
+# Attach: fx = [{ name = "patch.bass_shockwave" }] on a camera source, scene node, or canvas.
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "effect"
+label       = "Bass Shockwave"
+description = "Hard kicks send a quick chromatic shockwave ring and a small punch out of the kick drum"
+params.amount    = { type = "float", default = 1.0, range = [0.0, 2.0], description = "Overall strength" }
+params.center    = { type = "vec2", default = [0.52, 0.94], range = [-0.2, 1.2], description = "Where the wave starts (uv, 0,0 = top left); default is the kick drum" }
+params.threshold = { type = "float", default = 0.75, range = [0.0, 1.0], description = "Kick strength (0-1, relative to recent kicks) that counts as hard" }
+params.push      = { type = "float", default = 1.0, range = [0.0, 3.0], description = "Chromatic refraction of the ring" }
+params.punch     = { type = "float", default = 0.018, range = [0.0, 0.06], description = "Scale punch-in per hard kick (fraction of the frame)" }
+params.ring      = { type = "float", default = 0.3, range = [0.0, 1.0], description = "Brightness of the light crest on the ring" }
+params.speed     = { type = "float", default = 1.0, range = [0.5, 2.0], unit = "x", description = "How fast the ring travels outward" }
+budget = { gpu_ms = 0.15 }

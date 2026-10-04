@@ -1,18 +1,17 @@
 //! OBS link (PLAN §5, §4.5, §15.8, §17.1, §18, §22): the engine side of `obs.sock`.
 //!
 //! The stream-engine OBS plugin connects here (`docs/frames-protocol.md`, JSON lines). This
-//! crate publishes OBS health as state (`obs.link`, `obs.stream.*`, `obs.record.*`, `obs.fps`,
-//! `obs.stale.{wide,tall}`, `obs.output.<id>.*`, `health.obs`), turns plugin events into engine
-//! events (`obs.stream_started|stopped`, `obs.record_started|stopped`, `obs.fallback`), keeps
-//! the OBS stream/record clock mappings in `hub.clock`, records recording files in the session
-//! meta (`recordings`, `clock`), and routes the `obs.*` actions to the plugin.
+//! crate publishes OBS streaming health as state (`obs.link`, `obs.stream.*`, `obs.fps`,
+//! `obs.stale.{wide,tall}`, `obs.output.<id>.*`, `health.obs`), emits stream and fallback
+//! events, keeps the OBS stream clock mapping, and routes streaming and video setup actions.
+//! Recording and its session metadata belong exclusively to the app recorder.
 
 pub mod config;
 pub mod msg;
 
 pub use config::{FallbackMode, ObsConfig};
 
-use msg::{EngineMsg, Hello, OutputStatus, PluginEvent, PluginMsg, RecordEnd, RecordPath, Reply, Status, obs_to_master};
+use msg::{EngineMsg, Hello, OutputStatus, PluginEvent, PluginMsg, Reply, Status, obs_to_master};
 use parking_lot::Mutex;
 use se_clock::Mapping;
 use se_hub::{Bus, EngineCtx};
@@ -65,31 +64,6 @@ struct Conn {
     hello: Option<Hello>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-struct Recording {
-    canvas: String,
-    path: String,
-    output: String,
-    start_ns: u64,
-    end_ns: Option<u64>,
-    tracks: Value,
-}
-
-impl Recording {
-    fn value(&self) -> Value {
-        let mut v = Value::map()
-            .with("canvas", self.canvas.clone())
-            .with("path", self.path.clone())
-            .with("output", self.output.clone())
-            .with("start_ns", self.start_ns as i64)
-            .with("tracks", self.tracks.clone());
-        if let Some(e) = self.end_ns {
-            v = v.with("end_ns", e as i64);
-        }
-        v
-    }
-}
-
 type Pending = HashMap<u64, (String, oneshot::Sender<Result<serde_json::Value, String>>)>;
 
 struct Inner {
@@ -97,12 +71,10 @@ struct Inner {
     conn: Option<Conn>,
     next_cmd: u64,
     pending: Pending,
-    recordings: Vec<Recording>,
     last: HashMap<String, Value>,
     outputs: BTreeSet<String>,
     status: Option<Status>,
     stream_start_obs: u64,
-    record_start_obs: u64,
     installed: bool,
     listen_error: Option<String>,
 }
@@ -132,12 +104,10 @@ pub async fn start(ctx: EngineCtx) -> anyhow::Result<Arc<Obs>> {
             conn: None,
             next_cmd: 1,
             pending: HashMap::new(),
-            recordings: Vec::new(),
             last: HashMap::new(),
             outputs: BTreeSet::new(),
             status: None,
             stream_start_obs: 0,
-            record_start_obs: 0,
             installed: plugin_installed(),
             listen_error: None,
         }),
@@ -190,11 +160,6 @@ impl Obs {
             ("obs.stream.total", ro(Meta::int(0, big), "stream frames sent")),
             ("obs.stream.lag_ms", ro(Meta::float(0.0, [0.0, 1e6]).unit("ms"), "video skipped by encoder lag in the last second")),
             ("obs.stream.congestion", ro(Meta::float(0.0, [0.0, 1.0]), "stream output congestion")),
-            ("obs.record.active", ro(Meta::boolean(false), "OBS main recording active")),
-            ("obs.record.paused", ro(Meta::boolean(false), "OBS main recording paused")),
-            ("obs.record.path", string_meta("current or last main recording file")),
-            ("obs.record.dir", string_meta("OBS recording directory (profile)")),
-            ("obs.record.kbps", ro(Meta::float(0.0, [0.0, 1e7]).unit("kbps"), "recording bitrate")),
             ("obs.fps", ro(Meta::float(0.0, [0.0, 1000.0]).unit("fps"), "OBS render frame rate")),
             ("obs.render.ms", ro(Meta::float(0.0, [0.0, 1000.0]).unit("ms"), "OBS average frame render time")),
             ("obs.render.lagged", ro(Meta::int(0, big), "frames missed due to rendering lag")),
@@ -230,10 +195,10 @@ impl Obs {
         self.set(g, "obs.link", false);
         let installed = g.installed;
         self.set(g, "obs.plugin.installed", installed);
-        for a in ["obs.stream.active", "obs.record.active", "obs.record.paused", "obs.fallback.active"] {
+        for a in ["obs.stream.active", "obs.fallback.active"] {
             self.set(g, a, false);
         }
-        for a in ["obs.stream.kbps", "obs.record.kbps", "obs.fps", "obs.stream.lag_ms", "obs.stream.congestion"] {
+        for a in ["obs.stream.kbps", "obs.fps", "obs.stream.lag_ms", "obs.stream.congestion"] {
             self.set(g, a, 0.0);
         }
         self.set(g, "obs.stale.wide", true);
@@ -255,10 +220,6 @@ impl Obs {
     fn meta(&self, key: &str, value: Value) {
         let args = Value::map().with("key", key).with("value", value);
         self.ctx.hub.command(Command::new(Origin::Obs, Op::Action { name: "session.meta".into(), args }));
-    }
-
-    fn write_recordings(&self, g: &Inner) {
-        self.meta("recordings", Value::List(g.recordings.iter().map(Recording::value).collect()));
     }
 
     fn write_clock(&self) {
@@ -283,11 +244,7 @@ impl Obs {
     }
 
     /// Sends a command to the plugin and waits for its reply.
-    pub async fn command(&self, op: &str) -> Result<serde_json::Value, String> {
-        self.command_with_dir(op, None).await
-    }
-
-    async fn command_with_dir(&self, op: &str, dir: Option<String>) -> Result<serde_json::Value, String> {
+    async fn command(&self, op: &str) -> Result<serde_json::Value, String> {
         let (rx, timeout) = {
             let mut g = self.inner.lock();
             if g.conn.as_ref().and_then(|c| c.hello.as_ref()).is_none() {
@@ -297,7 +254,7 @@ impl Obs {
             g.next_cmd += 1;
             let (tx, rx) = oneshot::channel();
             g.pending.insert(id, (op.to_string(), tx));
-            if !self.send(&g, &EngineMsg::Cmd { id, op: op.into(), dir }) {
+            if !self.send(&g, &EngineMsg::Cmd { id, op: op.into() }) {
                 g.pending.remove(&id);
                 return Err("OBS plugin connection closed".into());
             }
@@ -367,8 +324,6 @@ impl Obs {
             PluginMsg::Hello(h) => self.on_hello(&mut g, h),
             PluginMsg::Status(s) => self.on_status(&mut g, *s),
             PluginMsg::Event(e) => self.on_event(&mut g, e),
-            PluginMsg::RecordPath(r) => self.on_record_path(&mut g, r),
-            PluginMsg::RecordEnd(r) => self.on_record_end(&mut g, r),
             PluginMsg::Reply(r) => on_reply(&mut g, r),
         }
     }
@@ -395,16 +350,6 @@ impl Obs {
         self.set(g, "obs.stream.total", s.total);
         self.set(g, "obs.stream.lag_ms", round1(s.lag_ms));
         self.set(g, "obs.stream.congestion", (s.congestion * 1000.0).round() / 1000.0);
-        self.set(g, "obs.record.active", s.recording);
-        self.set(g, "obs.record.paused", s.rec_paused);
-        self.set(g, "obs.record.kbps", round1(s.rec_kbps));
-        self.set(g, "obs.record.dir", s.record_dir.clone());
-        if !s.record_path.is_empty() {
-            self.set(g, "obs.record.path", s.record_path.clone());
-        } else if s.recording {
-            // The previous file is not evidence that a newly starting output has opened one.
-            self.set(g, "obs.record.path", "");
-        }
         self.set(g, "obs.fps", round1(s.fps));
         self.set(g, "obs.render.ms", (s.render_ms * 100.0).round() / 100.0);
         self.set(g, "obs.render.lagged", s.lagged);
@@ -443,15 +388,14 @@ impl Obs {
         self.set(g, &format!("{p}.kind"), o.kind.clone());
     }
 
-    /// `obs_stream` / `obs_record` mappings: other clock = ns since the first frame of the
-    /// stream / current main recording file.
+    /// `obs_stream` maps master time to nanoseconds since the stream's first frame.
     fn update_clock(&self, g: &mut Inner, s: &Status) {
         if s.obs_ns == 0 || s.mono_ns == 0 {
             return;
         }
         let mut changed = false;
-        let (stream_start, record_start) = (s.stream_start_ns, s.record_start_ns);
-        let (prev_stream, prev_record) = (g.stream_start_obs, g.record_start_obs);
+        let stream_start = s.stream_start_ns;
+        let prev_stream = g.stream_start_obs;
         self.ctx.hub.clock.update(|m| {
             if stream_start != 0 {
                 if stream_start != prev_stream {
@@ -460,19 +404,9 @@ impl Obs {
                 }
                 m.obs_stream.observe(s.mono_ns, s.obs_ns as i128 - stream_start as i128);
             }
-            if record_start != 0 {
-                if record_start != prev_record {
-                    m.obs_record = Mapping::at(obs_to_master(record_start, s.obs_ns, s.mono_ns), 0);
-                    changed = true;
-                }
-                m.obs_record.observe(s.mono_ns, s.obs_ns as i128 - record_start as i128);
-            }
         });
         if stream_start != 0 {
             g.stream_start_obs = stream_start;
-        }
-        if record_start != 0 {
-            g.record_start_obs = record_start;
         }
         if changed {
             self.write_clock();
@@ -487,7 +421,6 @@ impl Obs {
 
     fn on_event(&self, g: &mut Inner, e: PluginEvent) {
         let ts = if e.mono_ns != 0 { obs_to_master(e.obs_ns, e.obs_ns, e.mono_ns) } else { 0 };
-        let path = e.path.clone().unwrap_or_default();
         match e.name.as_str() {
             "stream_started" => {
                 self.set(g, "obs.stream.active", true);
@@ -497,23 +430,6 @@ impl Obs {
                 self.set(g, "obs.stream.active", false);
                 self.emit("obs.stream_stopped", ts, Value::map());
             }
-            "record_started" => {
-                self.set(g, "obs.record.active", true);
-                if !path.is_empty() {
-                    self.set(g, "obs.record.path", path.clone());
-                }
-                self.emit("obs.record_started", ts, Value::map().with("path", path).with("canvas", "wide"));
-            }
-            "record_stopped" => {
-                self.set(g, "obs.record.active", false);
-                self.set(g, "obs.record.paused", false);
-                if !path.is_empty() {
-                    self.set(g, "obs.record.path", path.clone());
-                }
-                self.emit("obs.record_stopped", ts, Value::map().with("path", path).with("canvas", "wide"));
-            }
-            "record_paused" => self.set(g, "obs.record.paused", true),
-            "record_unpaused" => self.set(g, "obs.record.paused", false),
             "scene_fallback" | "scene_restored" => {
                 let active = e.name == "scene_fallback";
                 if active {
@@ -554,35 +470,6 @@ impl Obs {
         }
     }
 
-    fn on_record_path(&self, g: &mut Inner, r: RecordPath) {
-        let start = obs_to_master(r.start_obs_ns, r.obs_ns, r.mono_ns);
-        let tracks = Value::from(r.tracks.clone());
-        match g.recordings.iter_mut().find(|x| x.path == r.path) {
-            Some(x) => {
-                x.canvas = r.canvas.clone();
-                x.output = r.output.clone();
-                x.tracks = tracks;
-                x.end_ns = None;
-            }
-            None => {
-                g.recordings.push(Recording { canvas: r.canvas.clone(), path: r.path.clone(), output: r.output.clone(), start_ns: start, end_ns: None, tracks })
-            }
-        }
-        if r.canvas == "wide" {
-            self.set(g, "obs.record.path", r.path.clone());
-        }
-        self.ctx.hub.log("info", TARGET, format!("recording {} ({}): {}", r.canvas, r.output, r.path));
-        self.write_recordings(g);
-    }
-
-    fn on_record_end(&self, g: &mut Inner, r: RecordEnd) {
-        let end = obs_to_master(r.end_obs_ns, r.obs_ns, r.mono_ns);
-        if let Some(x) = g.recordings.iter_mut().find(|x| x.path == r.path) {
-            x.end_ns = Some(end);
-            self.write_recordings(g);
-        }
-    }
-
     // ---- config / session -----------------------------------------------------------------
 
     fn apply_config(&self, cfg: ObsConfig) {
@@ -602,12 +489,8 @@ impl Obs {
         }
     }
 
-    /// A new session starts: carry over recordings still being written.
+    /// Preserve the stream clock mapping when a new session starts.
     fn on_session_rotated(&self) {
-        let mut g = self.inner.lock();
-        g.recordings.retain(|r| r.end_ns.is_none());
-        self.write_recordings(&g);
-        drop(g);
         self.write_clock();
     }
 
@@ -621,8 +504,7 @@ impl Obs {
             .with("stale_ms", g.cfg.stale_ms as i64)
             .with("fallback_mode", g.cfg.fallback_mode.as_str())
             .with("fallback_scene", g.cfg.fallback_scene.clone())
-            .with("installed", g.installed)
-            .with("recordings", Value::List(g.recordings.iter().map(Recording::value).collect()));
+            .with("installed", g.installed);
         if let Some(h) = hello {
             v = v
                 .with("obs", h.obs.clone())
@@ -797,8 +679,6 @@ pub fn action_op(name: &str) -> Option<&'static str> {
     Some(match name {
         "obs.stream.start" => "stream.start",
         "obs.stream.stop" => "stream.stop",
-        "obs.record.start" => "record.start",
-        "obs.record.stop" => "record.stop",
         "obs.fallback.on" => "fallback.on",
         "obs.fallback.off" => "fallback.off",
         "obs.fallback.setup" => "fallback.setup",
@@ -809,48 +689,21 @@ pub fn action_op(name: &str) -> Option<&'static str> {
 
 async fn route_actions(obs: Arc<Obs>, mut rx: mpsc::UnboundedReceiver<Command>) {
     while let Some(c) = rx.recv().await {
-        let Op::Action { name, args } = &c.op else { continue };
+        let Op::Action { name, .. } = &c.op else { continue };
         let Some(op) = action_op(name) else {
             obs.ctx.hub.log("warn", TARGET, format!("unknown action `{name}`"));
             continue;
         };
-        let (obs, name, automatic) = (obs.clone(), name.clone(), args.get_path("auto").is_some_and(Value::truthy));
+        let (obs, name) = (obs.clone(), name.clone());
         tokio::spawn(async move {
             // Rehearsal never goes on air (§17.2). Ask the core rather than the snapshot: a
             // "mode, then stream.start" pair from one client is then judged after the mode change.
             if op == "stream.start" && obs.ctx.hub.with_core(|core| Value::Bool(core.mode_str() == "rehearsal")).await.truthy() {
-                obs.ctx.hub.log("info", TARGET, "rehearsal: not going on air (obs.stream.start skipped; recording still works)");
+                obs.ctx.hub.log("info", TARGET, "rehearsal: not going on air (obs.stream.start skipped)");
                 obs.ctx.hub.emit(Event::new("obs.dry_run", Origin::Obs, Value::map().with("action", name.as_str())));
                 return;
             }
-            if op == "record.start" && automatic && obs.ctx.hub.with_core(|core| Value::Bool(core.mode_str() == "offline")).await.truthy() {
-                return;
-            }
-            if op == "record.start" && !obs.ctx.hub.snapshot.load().bool("obs.link") {
-                obs.ctx.hub.log("error", TARGET, format!("{name} failed: OBS plugin not connected"));
-                return;
-            }
-            let dir = if op == "record.start" && !obs.ctx.hub.snapshot.load().bool("obs.record.active") {
-                match obs.ctx.hub.query("recording.prepare", Value::Null).await {
-                    Ok(v) => match v.as_str() {
-                        Some(path) if !path.is_empty() => Some(path.to_owned()),
-                        _ => {
-                            obs.ctx.hub.log("error", TARGET, "recording.prepare did not return a show folder");
-                            return;
-                        }
-                    },
-                    Err(e) => {
-                        obs.ctx.hub.log("error", TARGET, format!("{name} failed: {e}"));
-                        return;
-                    }
-                }
-            } else {
-                None
-            };
-            if op == "record.start" && automatic && obs.ctx.hub.with_core(|core| Value::Bool(core.mode_str() == "offline")).await.truthy() {
-                return;
-            }
-            match obs.command_with_dir(op, dir).await {
+            match obs.command(op).await {
                 Ok(v) => obs.ctx.hub.log("info", TARGET, format!("{name}: {}", if v.is_null() { "ok".to_string() } else { v.to_string() })),
                 Err(e) => obs.ctx.hub.log("error", TARGET, format!("{name} failed: {e}")),
             }
@@ -912,10 +765,4 @@ mod tests {
         assert_eq!(output_id("--"), "output");
     }
 
-    #[test]
-    fn actions_map_to_plugin_ops() {
-        assert_eq!(action_op("obs.record.start"), Some("record.start"));
-        assert_eq!(action_op("obs.fallback.off"), Some("fallback.off"));
-        assert_eq!(action_op("obs.stream"), None);
-    }
 }

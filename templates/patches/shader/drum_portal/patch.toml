@@ -1,0 +1,16 @@
+# Drum portal: a glowing ring tears open around the kit on the trigger (and flickers open on
+# big kick + cymbal hits). Inside, the picture is swirl-refracted; the rim glows in the stream
+# palette and pixel debris and stars spill out. Closed and invisible at rest. Always-on effect:
+# attach it (`fx = [{ name = "patch.drum_portal" }]`); fire `patch.drum_portal` for the big opening.
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "effect"
+label       = "Drum portal"
+description = "A palette-lit portal ring opens around the kit, swirling the picture inside and spilling pixel stars"
+params.amount = { type = "float", default = 1.0, range = [0.0, 2.0], description = "Overall strength (swirl, glow, debris)" }
+params.center = { type = "vec2", default = [0.5, 0.66], range = [0.0, 1.0], description = "Portal center (uv, 0,0 = top left); default is the kit" }
+params.radius = { type = "float", default = 0.3, range = [0.05, 0.6], description = "Open radius as a fraction of the height" }
+params.swirl  = { type = "float", default = 1.0, range = [0.0, 3.0], description = "Twist of the picture inside the ring" }
+params.hits   = { type = "float", default = 0.6, range = [0.0, 1.0], description = "How far big hits (kick with a crash) flick the portal open" }
+budget = { gpu_ms = 0.4 }
+trigger = { attack = "500ms", hold = "10s", release = "1500ms", retrigger = "replace" }

@@ -19,6 +19,14 @@ pub enum Ease {
     Smoothstep,
     OutBack,
     Step,
+    /// Cubic-bezier (0.4, 0, 0.2, 1): brisk travel with a gentle settle.
+    Standard,
+    /// Cubic-bezier (0, 0, 0.2, 1): immediate movement, then deceleration.
+    Decelerate,
+    /// Cubic-bezier (0.4, 0, 1, 1): gradual acceleration into the next scene.
+    Accelerate,
+    /// Cubic-bezier (0.2, 0, 0, 1): strongly front-loaded movement.
+    Emphasized,
 }
 
 impl Ease {
@@ -57,12 +65,64 @@ impl Ease {
                     0.0
                 }
             }
+            Ease::Standard => cubic_bezier(t, 0.4, 0.2),
+            Ease::Decelerate => cubic_bezier(t, 0.0, 0.2),
+            Ease::Accelerate => cubic_bezier(t, 0.4, 1.0),
+            Ease::Emphasized => cubic_bezier(t, 0.2, 0.0),
         }
     }
 
     pub fn parse(s: &str) -> Option<Ease> {
         serde_json::from_value(serde_json::Value::String(s.to_string())).ok()
     }
+}
+
+/// Invert the time axis before evaluating y; these curves all have y controls (0, 1).
+/// Newton stays inside a root bracket, with bounded bisection for flat derivatives.
+fn cubic_bezier(t: f64, x1: f64, x2: f64) -> f64 {
+    if t == 0.0 || t == 1.0 || t.is_nan() {
+        return t;
+    }
+    let a = 1.0 + 3.0 * x1 - 3.0 * x2;
+    let b = 3.0 * x2 - 6.0 * x1;
+    let c = 3.0 * x1;
+    let x = |u: f64| ((a * u + b) * u + c) * u;
+    let y = |u: f64| u * u * (3.0 - 2.0 * u);
+    let (mut lo, mut hi) = (0.0, 1.0);
+    let mut u = t;
+    for _ in 0..8 {
+        let error = x(u) - t;
+        if error.abs() <= 1e-14 {
+            return y(u);
+        }
+        if error < 0.0 {
+            lo = u;
+        } else {
+            hi = u;
+        }
+        let slope = (3.0 * a * u + 2.0 * b) * u + c;
+        if slope <= 1e-12 {
+            break;
+        }
+        let next = u - error / slope;
+        if next <= lo || next >= hi {
+            break;
+        }
+        u = next;
+    }
+    for _ in 0..48 {
+        u = (lo + hi) * 0.5;
+        let error = x(u) - t;
+        if error.abs() <= 1e-14 {
+            return y(u);
+        }
+        if error < 0.0 {
+            lo = u;
+        } else {
+            hi = u;
+        }
+    }
+    y((lo + hi) * 0.5)
 }
 
 /// A state mutation or action request.
@@ -84,7 +144,7 @@ pub struct Command {
     pub priority: Option<u16>,
     /// Override layer key (e.g. `cuelist:<name>`, `timeline:<name>`): overrides with the same
     /// key replace each other and are released together. Defaults from origin/actor.
-    /// Ignored for chat-priority commands (their key is always `chat:<actor>`).
+    /// Chat-priority keys are actor-qualified (`chat:<actor>:<key>`), never trusted as raw owners.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
     pub op: Op,
@@ -446,6 +506,81 @@ pub fn parse_duration_ms(s: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bezier_ease_known_values() {
+        // At curve parameters 1/4, 1/2, 3/4, y is exactly 5/32, 1/2, 27/32.
+        // Their different x coordinates ensure apply inverts x instead of using t as u.
+        for (ease, times) in [
+            (Ease::Standard, [0.2125, 0.35, 0.5625]),
+            (Ease::Decelerate, [0.04375, 0.2, 0.50625]),
+            (Ease::Accelerate, [0.325, 0.65, 0.9]),
+            (Ease::Emphasized, [0.1, 0.2, 0.45]),
+        ] {
+            for (t, expected) in times.into_iter().zip([0.15625, 0.5, 0.84375]) {
+                assert!((ease.apply(t) - expected).abs() < 1e-12, "{ease:?} at {t}");
+            }
+        }
+    }
+
+    #[test]
+    fn bezier_ease_endpoints_and_monotonicity() {
+        for ease in [Ease::Standard, Ease::Decelerate, Ease::Accelerate, Ease::Emphasized] {
+            assert_eq!(ease.apply(-1.0), 0.0);
+            assert_eq!(ease.apply(0.0), 0.0);
+            assert_eq!(ease.apply(1.0), 1.0);
+            assert_eq!(ease.apply(2.0), 1.0);
+            let mut previous = 0.0;
+            for t in [1e-12, 1e-9, 1e-6].into_iter().chain((1..1000).map(|i| i as f64 / 1000.0)).chain([1.0 - 1e-6, 1.0 - 1e-9, 1.0 - 1e-12, 1.0]) {
+                let value = ease.apply(t);
+                assert!(value >= previous && value <= 1.0, "{ease:?} at {t}: {previous} -> {value}");
+                previous = value;
+            }
+        }
+        // Standard completes most travel early and moves very little as it settles.
+        assert!(Ease::Standard.apply(0.5) > 0.75);
+        assert!(Ease::Standard.apply(1.0) - Ease::Standard.apply(0.9) < 0.01);
+    }
+
+    #[test]
+    fn ease_names_roundtrip() {
+        for (name, ease) in [
+            ("standard", Ease::Standard),
+            ("decelerate", Ease::Decelerate),
+            ("accelerate", Ease::Accelerate),
+            ("emphasized", Ease::Emphasized),
+        ] {
+            assert_eq!(Ease::parse(name), Some(ease));
+            let json = serde_json::to_string(&ease).unwrap();
+            assert_eq!(json, format!("\"{name}\""));
+            assert_eq!(serde_json::from_str::<Ease>(&json).unwrap(), ease);
+            let msgpack = rmp_serde::to_vec_named(&ease).unwrap();
+            assert_eq!(rmp_serde::from_slice::<Ease>(&msgpack).unwrap(), ease);
+        }
+        assert_eq!(Ease::parse("Standard"), None);
+        assert_eq!(Ease::parse("unknown"), None);
+    }
+
+    #[test]
+    fn existing_ease_shapes_unchanged() {
+        for (ease, expected) in [
+            (Ease::Linear, 0.25),
+            (Ease::InQuad, 0.0625),
+            (Ease::OutQuad, 0.4375),
+            (Ease::InOutQuad, 0.125),
+            (Ease::InCubic, 0.015625),
+            (Ease::OutCubic, 0.578125),
+            (Ease::InOutCubic, 0.0625),
+            (Ease::Smoothstep, 0.15625),
+            (Ease::Step, 0.0),
+        ] {
+            assert_eq!(ease.apply(0.25), expected, "{ease:?}");
+        }
+        assert_eq!(Ease::Step.apply(1.0 - f64::EPSILON), 0.0);
+        assert_eq!(Ease::Step.apply(1.0), 1.0);
+        assert!(Ease::OutBack.apply(0.75) > 1.0, "back easing must retain its overshoot");
+        assert_eq!(Ease::default(), Ease::Linear);
+    }
 
     #[test]
     fn parse_forms() {

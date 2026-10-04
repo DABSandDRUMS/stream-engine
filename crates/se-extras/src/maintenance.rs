@@ -11,7 +11,10 @@
 //!   a warning listing the oldest unprotected recordings. They are deleted only by the
 //!   operator (`retention.prune_recordings`) or, with `auto_delete = true`, after the
 //!   warning has stood for `grace_hours` — never while recording or on air, nor while
-//!   their session has unreviewed/unuploaded clips or unfinished clip jobs.
+//!   their session has unreviewed/unuploaded clips or unfinished clip jobs. With
+//!   `[recording.archive]` on, a show's master recordings are never budget candidates (the
+//!   archive pipeline deletes them after a verified archive), and archived shows (the archive
+//!   folder, any folder with `archive.json`) are neither counted nor pruned.
 //!
 //! Config: `[retention]` (`sessions_days`, `sessions_keep`, `[retention.backups]`,
 //! `[retention.recordings]`). Actions: `retention.backup_now`, `retention.prune_sessions`,
@@ -261,23 +264,28 @@ pub struct Recording {
     pub mtime: i64,
 }
 
-pub fn scan_recordings(dir: &Path, exts: &[String], depth: usize) -> Vec<Recording> {
+/// Recording files under `dir`. Archived shows are never counted or pruned: the archive root
+/// (`archive`) and any folder holding an `archive.json` are skipped.
+pub fn scan_recordings(dir: &Path, exts: &[String], depth: usize, archive: Option<&Path>) -> Vec<Recording> {
     let mut out = Vec::new();
-    fn walk(d: &Path, exts: &[String], depth: usize, out: &mut Vec<Recording>) {
+    fn walk(d: &Path, exts: &[String], depth: usize, archive: Option<&Path>, out: &mut Vec<Recording>) {
+        if Some(d) == archive || d.join("archive.json").exists() {
+            return;
+        }
         for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
             let Ok(md) = e.metadata() else { continue };
             let p = e.path();
             let name = e.file_name().to_string_lossy().to_ascii_lowercase();
             if md.is_dir() {
                 if depth > 0 && !name.starts_with('.') {
-                    walk(&p, exts, depth - 1, out);
+                    walk(&p, exts, depth - 1, archive, out);
                 }
             } else if md.is_file() && exts.iter().any(|x| name.ends_with(&format!(".{}", x.to_ascii_lowercase()))) {
                 out.push(Recording { bytes: md.len(), mtime: mtime(&p), path: p });
             }
         }
     }
-    walk(dir, exts, depth, &mut out);
+    walk(dir, exts, depth, archive, &mut out);
     out.sort_by(|a, b| a.mtime.cmp(&b.mtime).then_with(|| a.path.cmp(&b.path)));
     out
 }
@@ -302,8 +310,10 @@ pub fn deletion_candidates(recs: &[Recording], budget: u64, target: u64) -> Vec<
 }
 
 /// Recording paths still needed by the clip pipeline. A `.keep` file also protects an
-/// interrupted job before its database row is committed.
-fn protected_recordings(ctx: &EngineCtx) -> anyhow::Result<HashSet<PathBuf>> {
+/// interrupted job before its database row is committed. With the archive on (`archive`), every
+/// show's master recordings are protected too: they are the only copy until the archive pipeline
+/// (se-clips) has verified and committed the show, after which it deletes them itself.
+fn protected_recordings(ctx: &EngineCtx, archive: bool) -> anyhow::Result<HashSet<PathBuf>> {
     // Retention can start before the clips subsystem migrates its tables.
     let tables: HashSet<String> = ctx.db.with(|c| {
         let mut st = c.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('clips', 'clip_jobs')")?;
@@ -331,16 +341,20 @@ fn protected_recordings(ctx: &EngineCtx) -> anyhow::Result<HashSet<PathBuf>> {
     }
     let mut paths: HashSet<PathBuf> = clip_paths.into_iter().map(|p| std::fs::canonicalize(&p).unwrap_or_else(|_| PathBuf::from(p))).collect();
     for session in list_sessions(&ctx.project_root.join("sessions")) {
-        if !session.protected && !pending.contains(&session.id) {
+        let needed = session.protected || pending.contains(&session.id);
+        if !needed && !archive {
             continue;
         }
         let Ok(meta) = std::fs::read_to_string(session.path.join("meta.toml")) else { continue };
         let Ok(meta) = toml::from_str::<toml::Table>(&meta) else { continue };
-        if let Some(dir) = meta.get("show").and_then(|v| v.get("dir")).and_then(toml::Value::as_str) {
+        if needed && let Some(dir) = meta.get("show").and_then(|v| v.get("dir")).and_then(toml::Value::as_str) {
             paths.insert(std::fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir)));
         }
         if let Some(recs) = meta.get("recordings").and_then(toml::Value::as_array) {
             for rec in recs {
+                if !needed && !is_master(rec) {
+                    continue;
+                }
                 if let Some(path) = rec.get("path").and_then(toml::Value::as_str) {
                     paths.insert(std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path)));
                 }
@@ -348,6 +362,25 @@ fn protected_recordings(ctx: &EngineCtx) -> anyhow::Result<HashSet<PathBuf>> {
         }
     }
     Ok(paths)
+}
+
+/// A show's master recording in `meta.toml` (`role = "master"`; before roles existed, every
+/// recording but the tall canvas).
+fn is_master(rec: &toml::Value) -> bool {
+    match rec.get("role").and_then(toml::Value::as_str).unwrap_or("") {
+        "" => rec.get("canvas").and_then(toml::Value::as_str) != Some("tall"),
+        role => role == "master",
+    }
+}
+
+/// `[recording.archive]` as retention sees it: whether it's on, and the archive root (never
+/// counted or pruned here — archived shows are kept forever).
+fn archive_settings(recording: Option<&toml::Value>) -> (bool, PathBuf) {
+    let rec_dir = recording.and_then(|v| v.get("dir")).and_then(toml::Value::as_str).filter(|d| !d.trim().is_empty()).unwrap_or("~/Videos/Stream Engine");
+    let archive = recording.and_then(|v| v.get("archive"));
+    let enabled = archive.and_then(|a| a.get("enabled")).and_then(toml::Value::as_bool).unwrap_or(true);
+    let dir = archive.and_then(|a| a.get("dir")).and_then(toml::Value::as_str).unwrap_or("").trim();
+    (enabled, if dir.is_empty() { expand_home(rec_dir).join("Archive") } else { expand_home(dir) })
 }
 
 fn recording_protected(path: &Path, protected: &HashSet<PathBuf>) -> bool {
@@ -506,7 +539,10 @@ struct Env {
 
 fn env(ctx: &EngineCtx) -> Env {
     let snap = ctx.hub.snapshot.load();
-    Env { mode: snap.str("show.mode").unwrap_or("offline").to_string(), recording: snap.bool("obs.record.active") }
+    Env {
+        mode: snap.str("show.mode").unwrap_or("offline").to_string(),
+        recording: ["recording.active", "recording.starting", "recording.stopping"].iter().any(|key| snap.bool(key)),
+    }
 }
 
 async fn run(mut ctx: EngineCtx, status: Arc<Mutex<Status>>, mut actions: tokio::sync::mpsc::UnboundedReceiver<se_proto::Command>) {
@@ -675,10 +711,12 @@ async fn recordings_step(ctx: &EngineCtx, status: &Mutex<Status>, cfg: &Settings
     let budget = (rc.budget_gb.max(0.0) * GB) as u64;
     let target = (rc.budget_gb.max(0.0) * rc.warn_ratio.clamp(0.1, 1.0) * GB) as u64;
     let exts = rc.extensions.clone();
+    let (archive_on, archive_dir) = archive_settings(ctx.project_section("recording").as_ref());
+    let archive_dir = archive_dir.canonicalize().unwrap_or(archive_dir);
     let d = dir.clone();
-    let Ok((recs, free)) = tokio::task::spawn_blocking(move || (scan_recordings(&d, &exts, 3), free_bytes(&d))).await else { return };
+    let Ok((recs, free)) = tokio::task::spawn_blocking(move || (scan_recordings(&d, &exts, 3, Some(&archive_dir)), free_bytes(&d))).await else { return };
     let total: u64 = recs.iter().map(|r| r.bytes).sum();
-    let protected = match protected_recordings(ctx) {
+    let protected = match protected_recordings(ctx, archive_on) {
         Ok(paths) => paths,
         Err(err) => {
             ctx.hub.log("error", TARGET, format!("cannot verify pending clips; not pruning recordings: {err:#}"));
@@ -873,8 +911,16 @@ mod tests {
         touch(&d.path().join("vertical/2026-01-02 20-00-00.mp4"), 200, 3000);
         touch(&d.path().join("2026-01-03 20-00-00.mkv"), 100, 2000);
         touch(&d.path().join("notes.txt"), 999, 1000);
-        let recs = scan_recordings(d.path(), &exts, 3);
+        // archived shows are never counted or pruned: the archive root and archived folders
+        touch(&d.path().join("Archive/show/main.mkv"), 5000, 9000);
+        touch(&d.path().join("elsewhere/show/main.mkv"), 5000, 9000);
+        touch(&d.path().join("elsewhere/show/archive.json"), 10, 9000);
+        let recs = scan_recordings(d.path(), &exts, 3, Some(&d.path().join("Archive")));
         assert_eq!(recs.len(), 4, "only video files, subfolders included");
+        let rec: toml::Value = toml::from_str("dir = \"/v\"\n[archive]\nenabled = false\n").unwrap();
+        assert_eq!(archive_settings(Some(&rec)), (false, PathBuf::from("/v/Archive")));
+        let rec: toml::Value = toml::from_str("[archive]\ndir = \"/mnt/a\"\n").unwrap();
+        assert_eq!(archive_settings(Some(&rec)), (true, PathBuf::from("/mnt/a")));
         assert_eq!(recs.iter().map(|r| r.bytes).sum::<u64>(), 1000);
         assert!(deletion_candidates(&recs, 1000, 900).is_empty(), "at budget: nothing");
         let c = deletion_candidates(&recs, 900, 500);
@@ -939,18 +985,37 @@ mod tests {
         std::fs::create_dir_all(d.path().join("sessions/s2")).unwrap();
         std::fs::write(d.path().join("sessions/s1/meta.toml"), format!("show = {{ dir = {:?} }}\n", show.to_str().unwrap())).unwrap();
         std::fs::write(d.path().join("sessions/s2/meta.toml"), "recordings = []\n").unwrap();
-        let protected = protected_recordings(&ctx).unwrap();
+        let protected = protected_recordings(&ctx, false).unwrap();
         assert!(protected.contains(&show.join("one.mkv")));
         assert!(recording_protected(&show.join("one.mkv"), &protected));
         assert!(recording_protected(&show.join("two.mp4"), &protected));
         assert!(!recording_protected(&d.path().join("shows/another.mkv"), &protected));
         std::fs::remove_file(d.path().join("sessions/s1/meta.toml")).unwrap();
-        let direct_paths = protected_recordings(&ctx).unwrap();
+        let direct_paths = protected_recordings(&ctx, false).unwrap();
         assert!(recording_protected(&show.join("one.mkv"), &direct_paths));
         assert!(!recording_protected(&show.join("two.mp4"), &direct_paths));
         ctx.db.with(|c| c.execute("UPDATE clips SET status = 'uploaded' WHERE session = 's1'", [])).unwrap();
-        assert!(!recording_protected(&show.join("one.mkv"), &protected_recordings(&ctx).unwrap()));
+        assert!(!recording_protected(&show.join("one.mkv"), &protected_recordings(&ctx, false).unwrap()));
+        // with the archive on, un-archived masters are protected (the only copy), ISOs and a
+        // legacy tall canvas are not
+        std::fs::write(
+            d.path().join("sessions/s2/meta.toml"),
+            format!(
+                "[[recordings]]\npath = {:?}\nrole = \"master\"\n[[recordings]]\npath = {:?}\nrole = \"iso\"\n[[recordings]]\npath = {:?}\ncanvas = \"wide\"\n[[recordings]]\npath = {:?}\ncanvas = \"tall\"\n",
+                show.join("m.mkv").to_str().unwrap(),
+                show.join("kit.mkv").to_str().unwrap(),
+                show.join("old-wide.mkv").to_str().unwrap(),
+                show.join("old-tall.mkv").to_str().unwrap()
+            ),
+        )
+        .unwrap();
+        let archived = protected_recordings(&ctx, true).unwrap();
+        assert!(recording_protected(&show.join("m.mkv"), &archived));
+        assert!(recording_protected(&show.join("old-wide.mkv"), &archived));
+        assert!(!recording_protected(&show.join("kit.mkv"), &archived));
+        assert!(!recording_protected(&show.join("old-tall.mkv"), &archived));
+        assert!(!protected_recordings(&ctx, false).unwrap().contains(&show.join("m.mkv")), "archive off: budget rules as before");
         ctx.db.with(|c| c.execute_batch("DROP TABLE clips; DROP TABLE clip_jobs")).unwrap();
-        assert!(protected_recordings(&ctx).unwrap().is_empty(), "fresh runtime database has no pending clips");
+        assert!(protected_recordings(&ctx, false).unwrap().is_empty(), "fresh runtime database has no pending clips");
     }
 }

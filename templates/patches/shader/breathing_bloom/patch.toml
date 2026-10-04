@@ -1,0 +1,15 @@
+# Breathing bloom — everyday highlight glow. Attach as an effect:
+# `fx = [{ name = "patch.breathing_bloom", amount = 0.6 }]` on a camera source, node, or canvas.
+# Always on (no manifest trigger); a patch trigger adds a short glow swell timed from
+# se.trigger_age (bigger payload = a longer, slightly stronger swell).
+kind        = "shader"
+entry       = "main.wgsl"
+layer       = "effect"
+label       = "Breathing Bloom"
+description = "Soft highlight-only glow that gently opens with the band's level and bumps on kicks"
+params.amount    = { type = "float", default = 0.9,  range = [0.0, 2.0],  description = "Overall glow strength" }
+params.threshold = { type = "float", default = 0.68, range = [0.0, 1.0],  description = "Brightness where the glow starts (soft knee)" }
+params.radius    = { type = "float", default = 0.06, range = [0.01, 0.2], description = "Glow spread as a fraction of frame height" }
+params.warmth    = { type = "float", default = 0.35, range = [0.0, 1.0],  description = "Tints the glow toward warm amber" }
+params.react     = { type = "float", default = 1.0,  range = [0.0, 2.0],  description = "How much band level and kicks open the glow" }
+budget = { gpu_ms = 0.4 }

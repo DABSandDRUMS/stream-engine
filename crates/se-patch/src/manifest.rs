@@ -10,6 +10,8 @@
 //! budget  = { cpu_ms = 1.0 }
 //! signals = ["band.bass", "beat.phase"]   # extra signals exposed to shaders
 //! grants  = ["lights.*", "source.cam1"]  # web only: extra addresses/actions the page may control
+//! feedback = true                         # effect shaders: `se_prev` = this instance's previous output ("state": its own `@location(1)`)
+//! history  = 4                            # effect shaders: ring of the last N (≤ 8) input frames (`se_history`)
 //! ```
 
 use se_core::triggers::TriggerSpec;
@@ -180,6 +182,8 @@ struct Raw {
     #[serde(default)]
     signals: Vec<String>,
     #[serde(default)]
+    palette: BTreeMap<String, String>,
+    #[serde(default)]
     particles: Option<ParticlesSpec>,
     #[serde(default)]
     label: Option<String>,
@@ -194,7 +198,36 @@ struct Raw {
     /// Web pages: address/action patterns the page's token may also write (§19).
     #[serde(default)]
     grants: Vec<String>,
+    /// Effect shaders: `se_prev` (`true`/`"output"`: previous output, `"state"`: previous
+    /// `@location(1)` state).
+    #[serde(default)]
+    feedback: Option<FeedbackRaw>,
+    /// Effect shaders: keep the last N input frames as `se_history` (0 = off, at most [`MAX_HISTORY`]).
+    #[serde(default)]
+    history: u32,
 }
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum FeedbackRaw {
+    Flag(bool),
+    Mode(String),
+}
+
+/// What an effect shader reads back as `se_prev` (manifest `feedback`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Feedback {
+    #[default]
+    Off,
+    /// `feedback = true` / `"output"`: the instance's previous output.
+    Output,
+    /// `feedback = "state"`: what the shader wrote to `@location(1)` last frame (`SeOut.state`),
+    /// a target-sized RGBA8 buffer separate from the visible output.
+    State,
+}
+
+/// Most input frames a `history` effect may keep.
+pub const MAX_HISTORY: u32 = 8;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Manifest {
@@ -208,6 +241,8 @@ pub struct Manifest {
     pub has_trigger: bool,
     pub budget: Budget,
     pub signals: Vec<String>,
+    /// Shader/particles palette slot aliases to live state addresses; other slots use the stream palette.
+    pub palette: BTreeMap<String, String>,
     pub particles: Option<ParticlesSpec>,
     pub label: String,
     pub description: String,
@@ -216,6 +251,10 @@ pub struct Manifest {
     /// Web pages: extra address/action patterns (`lights.*`, `source.cam1`) the page may write
     /// besides its own `patch.<id>.*`. Validated: start with a name, `*`/`**` only after it.
     pub grants: Vec<String>,
+    /// Effect shaders: what `se_prev` holds (this attachment instance's previous output or state, §6).
+    pub feedback: Feedback,
+    /// Effect shaders: number of previous input frames kept in `se_history` (0 = none).
+    pub history: u32,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -275,6 +314,17 @@ impl Manifest {
                 return Err(ManifestError::Parse(path, format!("bad or reserved param name `{name}`")));
             }
         }
+        if !raw.palette.is_empty() && !matches!(raw.kind, Kind::Shader | Kind::Particles) {
+            return Err(ManifestError::Parse(path, "palette aliases only apply to shader and particles patches".into()));
+        }
+        for (slot, address) in &raw.palette {
+            if !se_proto::palette::SLOTS.contains(&slot.as_str()) {
+                return Err(ManifestError::Parse(path, format!("palette: unknown slot `{slot}`")));
+            }
+            if !se_proto::address::is_valid(address, false) {
+                return Err(ManifestError::Parse(path, format!("palette.{slot}: `{address}` is not a concrete state address")));
+            }
+        }
         let has_trigger = raw.trigger.is_some();
         let trigger = match &raw.trigger {
             Some(v) => TriggerSpec::from_value(&Value::from(v.clone())).map_err(|e| ManifestError::Parse(path.clone(), e))?,
@@ -308,6 +358,19 @@ impl Manifest {
                 return Err(ManifestError::Parse(path, format!("grants: `{g}` must start with a name, not a wildcard (e.g. `lights.*`)")));
             }
         }
+        let feedback = match &raw.feedback {
+            None | Some(FeedbackRaw::Flag(false)) => Feedback::Off,
+            Some(FeedbackRaw::Flag(true)) => Feedback::Output,
+            Some(FeedbackRaw::Mode(m)) if m == "output" => Feedback::Output,
+            Some(FeedbackRaw::Mode(m)) if m == "state" => Feedback::State,
+            Some(FeedbackRaw::Mode(m)) => return Err(ManifestError::Parse(path, format!("feedback = \"{m}\": use true, \"output\" or \"state\""))),
+        };
+        if (feedback != Feedback::Off || raw.history > 0) && !(raw.kind == Kind::Shader && raw.layer == Layer::Effect) {
+            return Err(ManifestError::Parse(path, "feedback and history only apply to effect shaders (kind = \"shader\", layer = \"effect\")".into()));
+        }
+        if raw.history > MAX_HISTORY {
+            return Err(ManifestError::Parse(path, format!("history = {} is more than {MAX_HISTORY} frames", raw.history)));
+        }
         Ok(Manifest {
             label: raw.label.unwrap_or_else(|| id.clone()),
             description: raw.description.unwrap_or_default(),
@@ -321,11 +384,19 @@ impl Manifest {
             has_trigger,
             budget: raw.budget,
             signals: raw.signals,
+            palette: raw.palette,
             particles: raw.particles,
             size: raw.size,
             fps: raw.fps,
             grants: raw.grants,
+            feedback,
+            history: raw.history,
         })
+    }
+
+    /// Effect shader with per-instance frame state (`feedback` and/or `history`).
+    pub fn frame_state(&self) -> bool {
+        self.feedback != Feedback::Off || self.history > 0
     }
 
     pub fn address(&self) -> String {
@@ -416,6 +487,24 @@ budget  = { cpu_ms = 1.0 }
         }
         let e = p("kind = \"script\"\ngrants = [\"lights.*\"]").unwrap_err().located();
         assert!(e.contains("only apply to web"), "{e}");
+    }
+
+    #[test]
+    fn palette_aliases_validate_slots_and_concrete_addresses() {
+        let parse = |src: &str| Manifest::parse(Path::new("/p/patches/tint"), src);
+        let m = parse("kind='shader'\npalette={accent='lx.color.a',background='lx.color.b',foreground='lx.color.e'}").unwrap();
+        assert_eq!(m.palette["accent"], "lx.color.a");
+        for table in [
+            "{unknown='lx.color.a'}",
+            "{ACCENT='lx.color.a'}",
+            "{accent=''}",
+            "{accent='lx..a'}",
+            "{accent='lx.*'}",
+            "{accent='lx.color.a '}",
+        ] {
+            assert!(parse(&format!("kind='shader'\npalette={table}")).is_err(), "{table}");
+        }
+        assert!(parse("kind='script'\npalette={accent='lx.color.a'}").is_err());
     }
 
     #[test]

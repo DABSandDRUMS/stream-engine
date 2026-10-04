@@ -518,78 +518,6 @@ static json_t *add_feed(obs_canvas_t *canvas, uint32_t kind)
 	return r;
 }
 
-/* The engine's PipeWire audio nodes (PLAN §5): the program mix feeds the stream (track 1);
- * each stem gets its own recording track so clips can leave the music out. */
-static const struct {
-	const char *node;
-	uint32_t mixers;
-} engine_audio[] = {
-	{"se-program", 1u << 0}, {"se-band", 1u << 1}, {"se-music", 1u << 2},
-	{"se-sfx", 1u << 3},     {"se-tts", 1u << 4},  {"se-game", 1u << 5},
-};
-
-static bool add_to_scene(obs_source_t *scene_src, obs_source_t *src)
-{
-	obs_scene_t *scene = obs_scene_from_source(scene_src);
-	if (!scene || obs_scene_find_source(scene, obs_source_get_name(src)))
-		return false;
-	return obs_scene_add(scene, src) != NULL;
-}
-
-/* Audio capture sources for every engine node, in the main canvas's program scene and its
- * fallback scene (so sound keeps going during technical difficulties). Existing sources with
- * the node's name are reused untouched: their tracks stay as the owner set them. */
-static json_t *add_audio(obs_canvas_t *canvas)
-{
-	json_t *out = json_array();
-	if (!obs_get_source_output_flags("pulse_input_capture")) {
-		json_array_append_new(out, json_pack("{s:s, s:s}", "source", "audio",
-						     "result", "PulseAudio capture is not available in this OBS"));
-		return out;
-	}
-	struct se_config cfg;
-	se_config_copy(&cfg);
-	obs_source_t *raw = program_raw(canvas);
-	obs_source_t *program = resolve_scene(raw);
-	obs_source_release(raw);
-	bool created_fb = false;
-	obs_source_t *fb = fallback_scene(canvas, &cfg, &created_fb);
-	for (size_t i = 0; i < sizeof(engine_audio) / sizeof(engine_audio[0]); i++) {
-		const char *node = engine_audio[i].node;
-		json_t *r = json_pack("{s:s}", "source", node);
-		obs_source_t *src = obs_get_source_by_name(node);
-		bool fresh = false;
-		if (!src) {
-			obs_data_t *st = obs_data_create();
-			obs_data_set_string(st, "device_id", node);
-			src = obs_source_create("pulse_input_capture", node, st, NULL);
-			obs_data_release(st);
-			fresh = src != NULL;
-			if (src)
-				obs_source_set_audio_mixers(src, engine_audio[i].mixers);
-		}
-		if (!src) {
-			json_object_set_new(r, "result", json_string("cannot create source"));
-			json_array_append_new(out, r);
-			continue;
-		}
-		bool added = false;
-		if (program && program != fb)
-			added |= add_to_scene(program, src);
-		if (fb)
-			added |= add_to_scene(fb, src);
-		json_object_set_new(r, "result", json_string(added ? "added" : "already present"));
-		json_object_set_new(r, "tracks", json_integer((json_int_t)obs_source_get_audio_mixers(src)));
-		if (added)
-			blog(LOG_INFO, "[stream-engine] setup: %s audio '%s' (tracks 0x%x)", fresh ? "added" : "placed", node,
-			     obs_source_get_audio_mixers(src));
-		obs_source_release(src);
-		json_array_append_new(out, r);
-	}
-	obs_source_release(fb);
-	obs_source_release(program);
-	return out;
-}
 
 json_t *se_setup_sources(void)
 {
@@ -600,9 +528,6 @@ json_t *se_setup_sources(void)
 	for (size_t i = 0; i < l.n; i++) {
 		if (is_main(l.items[i])) {
 			json_array_append_new(out, add_feed(l.items[i], SE_CANVAS_WIDE));
-			json_t *audio = add_audio(l.items[i]);
-			json_array_extend(out, audio);
-			json_decref(audio);
 		} else if (!vertical || strcmp(obs_canvas_get_name(l.items[i]), "Vertical") == 0) {
 			vertical = l.items[i];
 		}
