@@ -67,10 +67,16 @@ Audio goes to the `tts` audio slot → `tts` bus (ducks music per `[audio.duck]`
 
 ## Remote mod console
 
-Moderators open `https://<relay domain>/mod`, sign in with Twitch, and get the song queue
+With the optional Worker backend, moderators open `https://<relay domain>/mod`, sign in with Twitch, and get the song queue
 (skip, approve/reject, remove, open/close), alerts (hide, kill, pause), chat holds (policy
 approvals, AutoMod allow/deny), TTS skip/clear, giveaways, and *Clean*. Never mixer, lights,
 scenes, OBS, or presets.
+
+The local hosted queue instead provides a collapsed **Moderator login** section on
+`/queue`; `/mod` returns there. It reuses this authentication but exposes only adding,
+reordering, removing, approving and rejecting song requests. Viewers never need to sign
+in to browse. See [local queue moderator setup](relay.md#optional-moderator-login) for
+the pinned public origin and Twitch callback registration.
 
 How it is secured:
 

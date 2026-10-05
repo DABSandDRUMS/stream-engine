@@ -52,10 +52,24 @@ pub struct HealthState {
     /// Recoveries waiting for their check to pass, by check.
     pending: HashMap<String, Pending>,
     outcome: HashMap<String, (Outcome, Instant)>,
+    /// Acknowledged banner rows, until their status changes or the engine reconnects.
+    dismissed: HashMap<String, Status>,
     /// A recovery viewers would notice, waiting for "Do it".
     confirm: Option<(String, Recovery)>,
     /// Fix with AI folder, keyed by `engine.info.share`.
     ai: Option<(String, Result<PathBuf, String>)>,
+}
+
+impl HealthState {
+    fn retain_dismissed(&mut self, connected: bool) {
+        self.dismissed.retain(|name, status| {
+            if name == ENGINE {
+                !connected
+            } else {
+                self.checks.iter().any(|c| c.name == *name && c.status == *status)
+            }
+        });
+    }
 }
 
 /// One banner row.
@@ -82,10 +96,14 @@ pub fn tick(app: &mut App, ctx: &egui::Context) {
     let now = Instant::now();
     let g = (app.m.gen_of("health"), app.m.conn_gen);
     if app.health.seen_gen != Some(g) {
+        if app.health.seen_gen.is_some_and(|(_, connection)| connection != g.1) {
+            app.health.dismissed.clear();
+        }
         app.health.seen_gen = Some(g);
         app.health.checks = health::checks(&app.m);
         app.health.tracker.update(&app.health.checks, app.m.conn_gen, now);
     }
+    app.health.retain_dismissed(app.m.connected);
     if app.health.pending.is_empty() {
         app.health.outcome.retain(|_, (_, at)| at.elapsed() < OUTCOME_SHOWN);
         return;
@@ -277,12 +295,12 @@ fn outcome_label(app: &App, ui: &mut egui::Ui, check: &str) {
 
 // ---- banner -------------------------------------------------------------------------------------
 
-/// What the alert banner shows: an unreachable engine, then every alerting check.
+/// What the alert banner shows: an unreachable engine, then unacknowledged alerting checks.
 pub fn banner_items(app: &App) -> Vec<Item> {
     let now = Instant::now();
     if !app.m.connected {
         let down = status::down_for(app);
-        if down < Duration::from_secs(3) {
+        if down < Duration::from_secs(3) || app.health.dismissed.contains_key(ENGINE) {
             return Vec::new();
         }
         let why = app.m.last_disconnect.as_deref().filter(|s| !s.is_empty()).unwrap_or("not running");
@@ -296,6 +314,7 @@ pub fn banner_items(app: &App) -> Vec<Item> {
     }
     health::alerts(&app.health.checks, status::on_air(app))
         .into_iter()
+        .filter(|c| app.health.dismissed.get(&c.name) != Some(&c.status))
         .map(|c| Item {
             check: c.name.clone(),
             title: health::title(&c.name),
@@ -312,6 +331,13 @@ pub fn banner(app: &mut App, ui: &mut egui::Ui, items: &[Item]) {
     for it in items.iter().take(BANNER_ROWS) {
         let c = if it.fail { t.bright_red } else { t.yellow };
         ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 34.0), Layout::right_to_left(Align::Center), |ui| {
+            let close = ui.push_id(("dismiss", &it.check), |ui| {
+                widgets::icon_button(ui, &t, icon::CROSS, &format!("Dismiss {} notification", it.title))
+                    .on_hover_text("Hide this banner until its status changes. The problem stays in Health.")
+            });
+            if close.inner.clicked() {
+                app.health.dismissed.insert(it.check.clone(), if it.fail { Status::Fail } else { Status::Warn });
+            }
             ai_button(app, ui, Some(&it.check), Size::Small);
             if widgets::button_ex(ui, &t, None, "Details", Kind::Ghost, Size::Small, 0.0, true).on_hover_text("Every check, with what you can do").clicked() {
                 app.open_view(ViewId::Health);
@@ -512,4 +538,96 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
             ui.add_space(spacing::XS);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui_kittest::{Harness, kittest::Queryable};
+    use se_proto::wire::ServerMsg;
+
+    struct BannerApp(App);
+
+    impl eframe::App for BannerApp {
+        fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
+            tick(&mut self.0, ui.ctx());
+            let items = banner_items(&self.0);
+            egui::CentralPanel::default().show(ui, |ui| banner(&mut self.0, ui, &items));
+        }
+    }
+
+    fn harness() -> Harness<'static, BannerApp> {
+        Harness::builder().with_size([1200.0, 400.0]).build_eframe(|cc| {
+            let mut app = App::new(
+                cc,
+                crate::UiOpts { socket: Some("/nonexistent/se-ui-banner-test.sock".into()), layout: Some("single".into()), program_only: false },
+            );
+            app.m.connected = true;
+            app.m.conn_gen = 1;
+            BannerApp(app)
+        })
+    }
+
+    fn publish(h: &mut Harness<'_, BannerApp>, name: &str, status: &str, detail: &str) {
+        h.state_mut().0.m.apply(ServerMsg::State {
+            changes: vec![(format!("health.{name}"), Value::map().with("status", status).with("detail", detail))],
+        });
+        h.run_steps(3);
+    }
+
+    #[test]
+    fn dismissing_one_problem_keeps_health_and_other_problems_visible() {
+        let mut h = harness();
+        publish(&mut h, "relay", "fail", "retrying in 8s");
+        publish(&mut h, "obs", "fail", "plugin disconnected");
+        h.get_by_label("Dismiss Tips & queue link notification").click();
+        h.run_steps(3);
+        let app = &h.state().0;
+        assert_eq!(banner_items(app).iter().map(|i| i.check.as_str()).collect::<Vec<_>>(), ["obs"]);
+        assert_eq!(health::checks(&app.m).iter().filter(|c| c.status == Status::Fail).count(), 2);
+
+        publish(&mut h, "relay", "fail", "retrying in 7s");
+        assert_eq!(banner_items(&h.state().0).iter().map(|i| i.check.as_str()).collect::<Vec<_>>(), ["obs"]);
+        publish(&mut h, "relay", "pass", "connected");
+        publish(&mut h, "relay", "fail", "connection lost again");
+        assert!(banner_items(&h.state().0).iter().any(|i| i.check == "relay"));
+    }
+
+    #[test]
+    fn a_dismissed_warning_returns_when_it_becomes_a_failure() {
+        let mut h = harness();
+        h.state_mut().0.m.state.insert("show.live_since".into(), Value::Int(1));
+        publish(&mut h, "relay", "warn", "reconnecting");
+        h.get_by_label("Dismiss Tips & queue link notification").click();
+        h.run_steps(3);
+        assert!(banner_items(&h.state().0).is_empty());
+        publish(&mut h, "relay", "fail", "connection failed");
+        assert!(banner_items(&h.state().0).iter().any(|i| i.check == "relay" && i.fail));
+    }
+
+    #[test]
+    fn dismissed_failures_return_after_engine_reconnection() {
+        let mut h = harness();
+        publish(&mut h, "relay", "fail", "connection refused");
+        h.get_by_label("Dismiss Tips & queue link notification").click();
+        h.run_steps(3);
+        assert!(banner_items(&h.state().0).is_empty());
+        h.state_mut().0.m.connected = false;
+        h.run_steps(3);
+        h.state_mut().0.m.connected = true;
+        h.state_mut().0.m.conn_gen += 1;
+        h.run_steps(3);
+        assert_eq!(banner_items(&h.state().0).iter().map(|i| i.check.as_str()).collect::<Vec<_>>(), ["relay"]);
+    }
+
+    #[test]
+    fn engine_disconnect_stays_dismissed_until_the_connection_recovers() {
+        let mut state = HealthState::default();
+        state.dismissed.insert(ENGINE.into(), Status::Fail);
+        state.retain_dismissed(false);
+        assert_eq!(state.dismissed.get(ENGINE), Some(&Status::Fail));
+        state.retain_dismissed(true);
+        state.retain_dismissed(false);
+        assert!(!state.dismissed.contains_key(ENGINE));
+    }
 }

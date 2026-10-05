@@ -3,7 +3,7 @@
 The public song queue can run entirely on the streaming machine. A tunnel supplies HTTPS
 reachability; no Worker deployment, off-machine queue backend, or always-on machine is
 required. The optional Cloudflare Worker backend also lives in `relay/` and shares the
-same read-only page.
+same public page and Twitch-authenticated queue management controls.
 
 ## Local machine hosting
 
@@ -12,14 +12,77 @@ The local Node service uses two separate **loopback-only** listeners:
 | Listener | Routes | Access |
 |---|---|---|
 | `127.0.0.1:8787` | `GET /`, `/queue`, `/queue.js`, `/queue.json`, `/queue/ws` | Read-only public page/data; `/` redirects to `/queue`. Tunnel only this listener. |
+| `127.0.0.1:8787` | `/mod/login`, `/mod/callback`, `/mod/session`, `/mod/logout`, `/mod/api` | Optional Twitch login and authenticated queue-only management; `/mod` returns to `/queue#moderator`. |
 | `127.0.0.1:8788` | `GET /link` WebSocket upgrade | Private engine link; bearer shared secret required. Never tunnel this listener. |
 
-The public listener rejects other paths and non-GET methods. Viewers cannot submit
-commands: WebSocket messages other than `ping` close the connection. Only approved
-public snapshot fields are forwarded: page theme, request availability, pause state, current song,
-upcoming titles/requesters/durations, and queue length. Account identity, pending
-requests, history, quota, credentials, operator API, player, mod console, and Ko-fi
-ingress are not public local routes. The page does not embed or play videos.
+The queue page stays public and read-only until an authorized user opens its optional
+**Moderator login** section. Ordinary viewers need no account, receive no login prompt,
+and make no moderator requests while the section is closed. Public WebSocket messages
+other than `ping` close the connection. Only approved public snapshot fields are forwarded:
+page theme, request availability, pause state, current song, upcoming titles/requesters/durations,
+and queue length. Account identity, pending requests, history and quota are private.
+The local service does not expose the general operator API, player, moderator console,
+or Ko-fi ingress. The page does not embed or play videos.
+
+### Optional moderator login
+
+Open **Moderator login → Sign in with Twitch** to manage songs on the same queue page.
+The broadcaster and verified channel moderators can add a song name or YouTube link,
+move waiting songs with **Up / Down** or the drag handle, remove requests, and approve
+or reject pending requests. Pending requests must be approved before reordering.
+The current song and playback controls are not changed by this panel. Changes appear
+through the existing public live updates.
+The moderation panel does not enable song approval. On this workstation, queue policy
+`approval = off`: valid viewer requests enter the waiting queue without moderator approval.
+
+Local setup:
+
+1. Set `QUEUE_PUBLIC_ORIGIN` to the exact HTTPS queue origin in the queue service environment
+   (on this workstation, `https://queue.dabsanddrums.com`).
+2. Register `https://queue.dabsanddrums.com/mod/callback` as an **OAuth Redirect URL**
+   for the Twitch application identified by `[twitch] client_id`. Other installations
+   use their own exact queue origin followed by `/mod/callback`.
+   Add the queue callback alongside any existing localhost callback; do not replace
+   callbacks used by the engine's other authorization flows.
+3. Enable `[remote_mod]` and restrict its actions to the intended queue controls:
+
+   ```toml
+   [remote_mod]
+   enabled = true
+   actions = ["queue.request", "queue.reorder", "queue.remove", "queue.approve", "queue.reject"]
+   ```
+
+The existing Twitch token validation, channel-moderator lookup, one-use OAuth state,
+token revocation, and HMAC-signed HttpOnly session are reused. Every private queue read
+and command is authorized again against the engine settings; the authenticated actor,
+not browser-supplied user fields, determines attribution. Sessions expire after 12 hours
+by default (`MOD_SESSION_HOURS`); **Sign out** removes the browser's session cookie.
+Local routes additionally reject all other commands and private queries, even for the
+broadcaster. Public viewers cannot mutate the queue by calling the API directly.
+
+OAuth callbacks use the configured origin, not untrusted forwarded host headers.
+A mismatched Host or forwarded protocol returns 403; correct `QUEUE_PUBLIC_ORIGIN`
+and the tunnel configuration rather than weakening the origin check. Without that
+setting, moderator routes accept only direct loopback HTTP hosts. A changing Quick
+Tunnel hostname needs a matching origin setting and Twitch callback registration.
+If Twitch sends the browser to `localhost/?error=redirect_mismatch`, its application
+does not have the exact requested callback registered. In the Twitch developer console,
+manage the app matching `twitch.client_id`, add the queue HTTPS callback and save, then
+start a fresh sign-in from the queue. Do not run a localhost server or change the
+queue callback to localhost to work around the registration mismatch.
+An offline/replaced engine fails outstanding requests instead of replaying mutations
+on reconnection. Command acknowledgement means submitted: YouTube lookup and queue
+policy can still reject an addition. Watch the refreshed queue and engine song-request
+logs for the final outcome.
+
+Verification: `npm run typecheck`, `npm test`, and `npm run build-local`. The deployed
+page was exercised anonymously and with a short-lived signed operator verification
+session: add, remove, up/down, native drag/drop, approve, reject, logout, queue-only
+permission denial, and mobile rendering in both themes. The original waiting order,
+current song, paused state, approval policy, and theme were restored. After registering
+the missing callback in the existing Twitch app, real broadcaster authorization was
+completed in Brave: Twitch consent returned to `/queue#moderator`, which displayed
+**Moderator access authorized** and **Signed in as dabsanddrums**.
 
 ### Page design and album art
 
@@ -53,6 +116,7 @@ Optional page settings:
 |---|---|
 | `QUEUE_TITLE` | Page heading; defaults to `Song queue`. |
 | `QUEUE_CHANNEL` | Twitch login for the header link and **Open chat** button. |
+| `QUEUE_PUBLIC_ORIGIN` | Exact HTTPS tunnel origin for local moderator routes and Twitch callbacks. |
 
 This workstation sets `QUEUE_CHANNEL=dabsanddrums` in `stream-engine-queue.service`.
 `npm run build-local` also verifies that the embedded browser script parses.

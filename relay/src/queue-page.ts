@@ -1,6 +1,6 @@
-// Public song-queue page (`/queue`): now playing, upcoming, requester, position. Live over
-// `/queue/ws`; shows "offline" while the engine isn't connected. Images come only from
-// YouTube thumbnails and Apple Music artwork (`art` entries added by the local service).
+// Public song-queue page (`/queue`) with optional, authenticated moderator management.
+// Public updates use `/queue/ws`; private reads and commands use `/mod/api` only when
+// the moderator section is opened. Images come from YouTube and Apple Music.
 
 import { escapeHtml } from "./util";
 
@@ -95,6 +95,35 @@ h1{margin:0;font-size:clamp(2rem,5vw,3.4rem);font-weight:850;letter-spacing:-.04
 .btn{display:inline-flex;align-items:center;gap:8px;height:38px;padding:0 16px;border-radius:999px;font-size:.88rem;font-weight:750;text-decoration:none;color:#0a0a0e;background:var(--fg);transition:transform .2s,box-shadow .2s}
 .btn:hover{transform:translateY(-1px);box-shadow:0 10px 26px -8px color-mix(in oklab,var(--accent) 80%,transparent)}
 footer{margin-top:28px;text-align:center;font-size:.78rem;color:var(--faint);letter-spacing:.04em}
+.moderator{margin-top:18px;padding:16px 20px}
+.moderator summary{cursor:pointer;font-size:.86rem;font-weight:650;color:var(--dim)}
+.moderator summary:hover{color:var(--fg)}
+.moderator [hidden]{display:none!important}
+.mod-body{padding-top:14px;font-size:.9rem}
+.mod-body p{margin:0 0 12px;line-height:1.5;color:var(--dim);overflow-wrap:anywhere}
+.mod-toolbar,.mod-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.mod-toolbar{justify-content:space-between;margin-bottom:12px}
+.mod-toolbar a{font-size:.85rem}
+.mod-button{font:inherit;font-size:.82rem;min-height:38px;padding:7px 12px;color:var(--fg);background:rgba(255,255,255,.07);border:1px solid var(--line);border-radius:10px;cursor:pointer}
+.mod-button:hover:not(:disabled){background:color-mix(in oklab,var(--accent) 18%,transparent)}
+.mod-button:disabled{opacity:.45;cursor:not-allowed}
+.mod-button:focus-visible,.moderator summary:focus-visible,.mod-input:focus-visible,.mod-login:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.mod-login{display:inline-block;margin-bottom:12px}
+.mod-form{display:flex;align-items:end;gap:10px;flex-wrap:wrap;margin:16px 0}
+.mod-field{flex:1;min-width:min(100%,230px);display:grid;gap:6px}
+.mod-input{width:100%;min-height:42px;padding:10px 12px;font:inherit;color:var(--fg);background:rgba(0,0,0,.18);border:1px solid var(--line);border-radius:10px}
+.mod-section h3{font-size:1rem;margin:20px 0 10px}
+.mod-list{list-style:none;padding:0;margin:0;display:grid;gap:8px}
+.mod-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;padding:12px;border:1px solid var(--line);border-radius:12px}
+.mod-title{font-weight:700;overflow-wrap:anywhere}
+.mod-sub{margin-top:4px;font-size:.8rem;color:var(--dim);overflow-wrap:anywhere}
+.mod-drag{font-size:.76rem;color:var(--dim);cursor:grab;padding:9px 5px}
+.mod-row.dragging{opacity:.5}
+.mod-row.drop-before{border-top:3px solid var(--accent)}
+.mod-row.drop-after{border-bottom:3px solid var(--accent)}
+.mod-message{min-height:1.4em}
+.mod-message.error{color:#ffb7b7}
+@media(max-width:760px){.moderator{padding:14px}.mod-row{grid-template-columns:1fr}.mod-actions{justify-content:flex-end}.mod-form>.mod-button{width:100%}}
 @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(255,69,89,.55)}100%{box-shadow:0 0 0 10px rgba(255,69,89,0)}}
 @keyframes eq{0%,100%{transform:scaleY(.3)}50%{transform:scaleY(1)}}
 @keyframes spin{to{transform:rotate(360deg)}}
@@ -193,6 +222,20 @@ footer{margin-top:28px;text-align:center;font-size:.78rem;color:var(--faint);let
 :root[data-theme="win31"] .btn:focus-visible{outline:1px dotted #000;outline-offset:-6px}
 :root[data-theme="win31"] a.eyebrow:focus-visible{outline:1px dotted #fff;outline-offset:3px}
 :root[data-theme="win31"] footer{margin-top:10px;padding:8px;border:1px solid;border-color:#808080 #fff #fff #808080;text-align:left;font-size:11px;color:#404040;letter-spacing:0}
+:root[data-theme="win31"] .moderator{margin-top:10px;padding:10px}
+:root[data-theme="win31"] .moderator summary{font-size:12px;color:#404040;font-weight:400}
+:root[data-theme="win31"] .mod-body{font-size:13px}
+:root[data-theme="win31"] .mod-button{border:2px solid;border-color:#fff #404040 #404040 #fff;border-radius:0;background:#c0c0c0;color:#000;box-shadow:1px 1px 0 #000;font-size:12px}
+:root[data-theme="win31"] .mod-button:hover:not(:disabled){background:#d0d0d0}
+:root[data-theme="win31"] .mod-button:active:not(:disabled){border-color:#404040 #fff #fff #404040;box-shadow:none}
+:root[data-theme="win31"] .mod-input,:root[data-theme="win31"] .mod-row{border:2px solid;border-color:#808080 #fff #fff #808080;border-radius:0;background:#fff;color:#000}
+:root[data-theme="win31"] .mod-input{font-size:13px}
+:root[data-theme="win31"] .mod-sub,:root[data-theme="win31"] .mod-drag{color:#404040}
+:root[data-theme="win31"] .mod-section h3{font-size:14px}
+:root[data-theme="win31"] .mod-message.error{color:#800000}
+:root[data-theme="win31"] .mod-row.drop-before{border-top:3px solid #000080}
+:root[data-theme="win31"] .mod-row.drop-after{border-bottom:3px solid #000080}
+:root[data-theme="win31"] .mod-button:focus-visible,:root[data-theme="win31"] .moderator summary:focus-visible,:root[data-theme="win31"] .mod-input:focus-visible,:root[data-theme="win31"] .mod-login:focus-visible{outline:1px dotted #000;outline-offset:2px}
 @media (max-width:980px){:root[data-theme="win31"] main{margin-left:12px;margin-right:12px}}
 @media (max-width:600px){
   :root[data-theme="win31"] main{margin:10px;padding:6px}
@@ -417,11 +460,291 @@ const SCRIPT = `"use strict";
       wait += e.duration;
     }
   }
+  // No private request is made until the optional section is opened.
+  const modDetails = $("moderator");
+  let modQueue = null, modActions = [], modLogin = "";
+  let modRead = null, modController = null, modEpoch = 0;
+  let modBusy = false, modFresh = false, modBlocked = false;
+  let modTimer = null, modLiveTimer = null, modListKey = "", modDrag = null;
+  let socketConnected = false;
+  const queueIds = (q) => JSON.stringify((q.upcoming || []).map((e) => e.id));
+  const modAllowed = (action) => modActions.some((pattern) => {
+    // Same dot-segment * / ** matching as the existing moderator console.
+    function segment(p, s) {
+      let i = 0, j = 0, star = -1, retry = 0;
+      while (j < s.length) {
+        if (p[i] === s[j]) { i++; j++; }
+        else if (p[i] === "*") { star = i++; retry = j; }
+        else if (star >= 0) { i = star + 1; j = ++retry; }
+        else return false;
+      }
+      while (p[i] === "*") i++;
+      return i === p.length;
+    }
+    const p = pattern.split("."), a = action.split(".");
+    function match(i, j) {
+      if (i === p.length) return j === a.length;
+      if (p[i] === "**") {
+        for (let k = j; k <= a.length; k++) if (match(i + 1, k)) return true;
+        return false;
+      }
+      return j < a.length && segment(p[i], a[j]) && match(i + 1, j + 1);
+    }
+    return match(0, 0);
+  });
+  function modElement(tag, cls, text) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined) e.textContent = String(text);
+    return e;
+  }
+  function modMessage(text, error) {
+    $("mod-message").textContent = text;
+    $("mod-message").classList.toggle("error", !!error);
+  }
+  function modAccessError(error) {
+    if (error.status !== 401 && error.status !== 403) return false;
+    modQueue = null; modActions = []; modLogin = ""; modFresh = false; modBlocked = true;
+    modDrag = null;
+    $("mod-panel").hidden = true;
+    $("mod-login").hidden = error.status !== 401;
+    $("mod-retry").hidden = error.status === 401;
+    $("mod-status").textContent = error.status === 401
+      ? "Signed out. Sign in with Twitch only if you want to manage requests."
+      : "Moderator access denied: " + error.message;
+    return true;
+  }
+  async function modPost(body, signal) {
+    const response = await fetch("/mod/api", {
+      method: "POST", credentials: "same-origin", signal,
+      headers: { "Content-Type": "application/json", "X-SE-Mod": "1" },
+      body: JSON.stringify(body)
+    });
+    let data;
+    try { data = await response.json(); } catch { data = null; }
+    if (!response.ok || !data || data.ok !== true) {
+      const error = new Error(data && typeof data.error === "string" ? data.error : "Moderator service did not respond. Try again.");
+      error.status = response.status;
+      throw error;
+    }
+    return data;
+  }
+  function modCanManage() {
+    return modDetails.open && !!modQueue && modFresh && socketConnected && state.online && !modBusy;
+  }
+  function renderModerator() {
+    if (!modQueue || !modDetails.open) return;
+    $("mod-panel").hidden = false;
+    $("mod-login").hidden = true;
+    $("mod-retry").hidden = modFresh;
+    $("mod-who").textContent = "Signed in as " + modLogin;
+    if (modFresh) $("mod-status").textContent = !socketConnected ? "Live updates disconnected. Management will return after reconnection."
+      : !state.online ? "The engine is offline. Management will return when it reconnects."
+      : "Moderator access authorized.";
+    $("mod-add").disabled = !modCanManage() || !modAllowed("queue.request");
+    $("mod-text").disabled = modBusy || !modAllowed("queue.request");
+    $("mod-refresh").disabled = !!modRead || modBusy;
+    $("mod-logout").disabled = modBusy;
+    const any = ["queue.request", "queue.reorder", "queue.remove", "queue.approve", "queue.reject"].some(modAllowed);
+    $("mod-permissions").hidden = any;
+    $("mod-permissions").textContent = "Your account is authorized, but queue management actions are not enabled by the engine.";
+    const key = JSON.stringify([modQueue.upcoming, modQueue.pending, modActions, modCanManage()]);
+    if (key === modListKey || modDrag) return;
+    modListKey = key;
+    const renderedOrder = queueIds(modQueue);
+    function button(label, action, args, title) {
+      const b = modElement("button", "mod-button", label);
+      b.type = "button"; b.disabled = !modCanManage() || !modAllowed(action);
+      b.setAttribute("aria-label", label + " · " + title);
+      b.onclick = () => modCommand(action, args, action === "queue.reorder" ? renderedOrder : null);
+      return b;
+    }
+    function list(id, entries, pending) {
+      const ol = $(id); ol.replaceChildren();
+      entries.forEach((e, i) => {
+        const li = modElement("li", "mod-row");
+        const text = modElement("div");
+        const title = songOf(e) || "Untitled request";
+        text.append(modElement("div", "mod-title", (pending ? "#" + e.id : (i + 1) + ".") + " " + title));
+        text.append(modElement("div", "mod-sub", [artistOf(e), e.user ? "requested by " + e.user : "", fmt(e.duration)].filter(Boolean).join(" · ")));
+        const controls = modElement("div", "mod-actions");
+        if (!pending) {
+          const handle = modElement("span", "mod-drag", "Drag");
+          handle.setAttribute("aria-hidden", "true");
+          handle.draggable = modCanManage() && modAllowed("queue.reorder");
+          handle.ondragstart = (ev) => {
+            if (!modCanManage() || !modAllowed("queue.reorder")) { ev.preventDefault(); return; }
+            modDrag = { id: e.id, order: queueIds(modQueue), index: i };
+            li.classList.add("dragging");
+            ev.dataTransfer.effectAllowed = "move";
+            ev.dataTransfer.setData("text/plain", String(e.id));
+          };
+          handle.ondragend = () => {
+            modDrag = null;
+            modListKey = "";
+            renderModerator();
+          };
+          li.ondragover = (ev) => {
+            if (!modDrag || modDrag.id === e.id || !modCanManage()) return;
+            ev.preventDefault(); ev.dataTransfer.dropEffect = "move";
+            const rect = li.getBoundingClientRect();
+            const after = ev.clientY > rect.top + rect.height / 2;
+            document.querySelectorAll(".mod-row.drop-before,.mod-row.drop-after").forEach((r) => r.classList.remove("drop-before", "drop-after"));
+            li.classList.add(after ? "drop-after" : "drop-before");
+          };
+          li.ondragleave = () => li.classList.remove("drop-before", "drop-after");
+          li.ondrop = (ev) => {
+            if (!modDrag || modDrag.id === e.id || !modCanManage()) return;
+            ev.preventDefault();
+            const drag = modDrag, rect = li.getBoundingClientRect();
+            const after = ev.clientY > rect.top + rect.height / 2;
+            // Destination is 1-based, after removing the dragged row.
+            const to = i + (after ? 1 : 0) - (drag.index < i ? 1 : 0) + 1;
+            modDrag = null; modListKey = "";
+            if (to !== drag.index + 1) modCommand("queue.reorder", { id: drag.id, to }, drag.order);
+            else renderModerator();
+          };
+          const up = button("Up", "queue.reorder", { id: e.id, to: i }, title);
+          const down = button("Down", "queue.reorder", { id: e.id, to: i + 2 }, title);
+          up.disabled = up.disabled || i === 0;
+          down.disabled = down.disabled || i === entries.length - 1;
+          controls.append(handle, up, down);
+        } else controls.append(button("Approve", "queue.approve", { id: e.id }, title));
+        controls.append(button("Reject", "queue.reject", { id: e.id }, title), button("Remove", "queue.remove", { id: e.id }, title));
+        li.append(text, controls); ol.append(li);
+      });
+      if (!entries.length) ol.append(modElement("li", "empty", pending ? "No requests awaiting approval." : "No songs waiting."));
+    }
+    list("mod-waiting", modQueue.upcoming, false);
+    list("mod-pending", modQueue.pending, true);
+  }
+  function refreshModerator() {
+    if (!modDetails.open || modBlocked) return Promise.resolve(false);
+    if (modRead) return modRead;
+    const epoch = modEpoch, controller = new AbortController();
+    modController = controller;
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    modRead = (async () => {
+      try {
+        const data = await modPost({ kind: "query", name: "queue" }, controller.signal);
+        if (epoch !== modEpoch || !modDetails.open) return false;
+        if (!data.result || !Array.isArray(data.result.upcoming) || !Array.isArray(data.result.pending) || typeof data.login !== "string" || !Array.isArray(data.actions)) {
+          throw new Error("Moderator service returned an incomplete queue. Try refreshing.");
+        }
+        modQueue = data.result;
+        modActions = data.actions.filter((a) => typeof a === "string");
+        modLogin = data.login; modFresh = true;
+        return true;
+      } catch (error) {
+        if (epoch !== modEpoch || !modDetails.open) return false;
+        modFresh = false;
+        if (!modAccessError(error)) {
+          $("mod-status").textContent = "Management unavailable: " + (error.name === "AbortError" ? "The connection timed out." : error.message);
+          $("mod-retry").hidden = false;
+        }
+        return false;
+      } finally {
+        clearTimeout(timeout);
+        if (epoch === modEpoch) {
+          modRead = null; modController = null;
+          renderModerator();
+        }
+      }
+    })();
+    renderModerator();
+    return modRead;
+  }
+  async function modCommand(action, args, order) {
+    if (!modCanManage() || !modAllowed(action)) return false;
+    const epoch = modEpoch;
+    modBusy = true; modMessage("Checking the latest queue…"); renderModerator();
+    try {
+      if (modRead) await modRead;
+      if (!(await refreshModerator()) || epoch !== modEpoch || !modDetails.open) {
+        if (epoch === modEpoch) modMessage("Command not sent. Refresh moderator access and try again.", true);
+        return false;
+      }
+      if (!socketConnected || !state.online || !modAllowed(action)) throw new Error("Management is unavailable. Reconnect and try again.");
+      if (order !== null && order !== undefined && queueIds(modQueue) !== order) throw new Error("The waiting queue changed. Review the refreshed order and try again.");
+      if (args.id !== undefined) {
+        const entries = action === "queue.approve" ? modQueue.pending
+          : action === "queue.reorder" ? modQueue.upcoming : modQueue.upcoming.concat(modQueue.pending);
+        if (!entries.some((e) => e.id === args.id)) throw new Error("That request is no longer waiting. The queue has been refreshed.");
+      }
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
+      try { await modPost({ kind: "cmd", action, args }, controller.signal); }
+      finally { clearTimeout(timeout); }
+      if (epoch !== modEpoch || !modDetails.open) return false;
+      // Engine commands are asynchronous; an acknowledgement is not proof of addition.
+      modMessage(action === "queue.request" ? "Request submitted. Lookup and queue policy still apply; watch for it in the refreshed queue."
+        : "Command submitted. The queue will refresh as the engine processes it.");
+      await refreshModerator();
+      return true;
+    } catch (error) {
+      if (epoch === modEpoch && modDetails.open) {
+        if (!modAccessError(error)) modMessage(error.name === "AbortError"
+          ? "Command result unknown: the connection timed out. Refresh the queue before submitting again."
+          : error.message || "Network error. Refresh before trying again.", true);
+        if (!modBlocked) await refreshModerator();
+      }
+      return false;
+    } finally {
+      modBusy = false;
+      renderModerator();
+    }
+  }
+  function moderatorLiveChange() {
+    renderModerator();
+    if (!modDetails.open || modBlocked || modBusy || modLiveTimer) return;
+    modLiveTimer = setTimeout(() => { modLiveTimer = null; refreshModerator(); }, 350);
+  }
+  function closeModerator() {
+    modEpoch++;
+    if (modController) modController.abort();
+    clearInterval(modTimer); clearTimeout(modLiveTimer);
+    modTimer = modLiveTimer = modRead = modController = null;
+    modQueue = null; modActions = []; modLogin = ""; modFresh = false; modDrag = null; modListKey = "";
+    $("mod-panel").hidden = true;
+  }
+  function openModerator() {
+    modBlocked = false;
+    $("mod-status").textContent = "Checking moderator access…";
+    $("mod-login").hidden = $("mod-retry").hidden = true;
+    refreshModerator();
+    clearInterval(modTimer);
+    modTimer = setInterval(() => { if (!modBusy) refreshModerator(); }, 5000);
+  }
+  modDetails.addEventListener("toggle", () => modDetails.open ? openModerator() : closeModerator());
+  $("mod-retry").onclick = () => { modBlocked = false; refreshModerator(); };
+  $("mod-refresh").onclick = () => refreshModerator();
+  $("mod-form").onsubmit = async (ev) => {
+    ev.preventDefault();
+    const text = $("mod-text").value.trim();
+    if (!text) return;
+    if (await modCommand("queue.request", { text, user: modLogin }, null)) $("mod-text").value = "";
+  };
+  $("mod-logout").onclick = async () => {
+    if (modBusy) return;
+    modBusy = true; renderModerator();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try {
+      const response = await fetch("/mod/logout", { method: "POST", credentials: "same-origin", signal: controller.signal, headers: { "X-SE-Mod": "1" } });
+      if (!response.ok) throw new Error("Sign out failed. Try again.");
+      closeModerator();
+      modAccessError({ status: 401 });
+    } catch (error) { modMessage(error.name === "AbortError" ? "Sign out timed out. Try again." : error.message || "Network error while signing out.", true); }
+    finally { clearTimeout(timeout); modBusy = false; renderModerator(); }
+  };
+  function moderatorHash() { if (location.hash === "#moderator") modDetails.open = true; }
+  window.addEventListener("hashchange", moderatorHash);
+  moderatorHash();
   let attempt = 0;
   function connect() {
     const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/queue/ws");
     let ping = null;
-    ws.onopen = () => { attempt = 0; ping = setInterval(() => ws.readyState === 1 && ws.send("ping"), 30000); };
+    ws.onopen = () => { socketConnected = true; attempt = 0; ping = setInterval(() => ws.readyState === 1 && ws.send("ping"), 30000); };
     ws.onmessage = (ev) => {
       if (ev.data === "pong") return;
       let m; try { m = JSON.parse(ev.data); } catch { return; }
@@ -429,9 +752,12 @@ const SCRIPT = `"use strict";
       if (m.t === "queue") state = { online: !!m.online, snapshot: m.snapshot || null };
       else if (m.t === "status") state.online = !!m.online;
       render();
+      moderatorLiveChange();
     };
     ws.onclose = () => {
       clearInterval(ping);
+      socketConnected = false;
+      renderModerator();
       $("status").className = "chip status";
       $("status-text").textContent = "Reconnecting";
       setTimeout(connect, Math.min(30000, 1000 * 2 ** attempt++));
@@ -485,6 +811,26 @@ export function queuePage(env: { QUEUE_TITLE?: string; QUEUE_CHANNEL?: string })
   <ol class="list" id="upcoming"></ol>
   <div class="cta" id="cta"><div class="cta-text"><span id="cta-label">Request a song in chat</span><code>!sr song or YouTube link</code></div>${twitch ? `<a class="btn" href="${twitch}" target="_blank" rel="noopener">Open chat ↗</a>` : ""}</div>
 </section>
+<details id="moderator" class="moderator card">
+  <summary>Moderator login</summary>
+  <div class="mod-body">
+    <p>Optional · Broadcasters and channel moderators can manage requests here. Everyone can view the queue without an account.</p>
+    <p id="mod-status" role="status">Open this section to check moderator access.</p>
+    <a id="mod-login" class="mod-login" href="/mod/login" hidden>Sign in with Twitch</a>
+    <button id="mod-retry" class="mod-button" type="button" hidden>Retry access</button>
+    <div id="mod-panel" hidden>
+      <div class="mod-toolbar"><span id="mod-who"></span><div class="mod-actions"><button id="mod-refresh" class="mod-button" type="button">Refresh</button><button id="mod-logout" class="mod-button" type="button">Sign out</button></div></div>
+      <form id="mod-form" class="mod-form">
+        <label class="mod-field" for="mod-text">Add a song or YouTube link<input id="mod-text" class="mod-input" type="text" placeholder="Song name or YouTube link" autocomplete="off" required></label>
+        <button id="mod-add" class="mod-button" type="submit">Add song</button>
+      </form>
+      <p id="mod-permissions" hidden></p>
+      <p class="mod-message" id="mod-message" role="status" aria-live="polite"></p>
+      <section class="mod-section" aria-labelledby="mod-waiting-title"><h3 id="mod-waiting-title">Waiting queue</h3><p>Move songs with Up / Down, or drag the handle to reorder. The current song is not changed here.</p><ol id="mod-waiting" class="mod-list"></ol></section>
+      <section class="mod-section" aria-labelledby="mod-pending-title"><h3 id="mod-pending-title">Pending approval</h3><p>Approve a request to put it in the waiting queue, where it can be reordered.</p><ol id="mod-pending" class="mod-list"></ol></section>
+    </div>
+  </div>
+</details>
 <footer>Updates live · Album art via Apple Music</footer>
 </main><script src="/queue.js?v=${SCRIPT_VERSION}"></script></body></html>`;
   return new Response(html, {

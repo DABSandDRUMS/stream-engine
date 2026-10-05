@@ -211,11 +211,16 @@ page) show in yellow even when they're only warnings. Optional extras you never 
 the YouTube key) never raise the banner, but once they're set up their failures always do. If
 the engine itself can't be reached, the banner says so first.
 
-Each banner line has up to three buttons:
+Each banner line has a close control and up to three action buttons:
 
 - **Recover**: only shown when a fix exists that viewers won't notice. It runs right away.
 - **Details**: opens **Settings → Health**.
 - **Fix with AI**: opens a diagnosis session (see below).
+- **×**: dismisses just that banner line in this window. It stays hidden while the check keeps
+  the same status, including when retry details update. A status change (such as a warning
+  becoming a failure, or a check recovering and later failing again), an engine reconnect, or
+  reopening the window lets it appear again. Dismissing does not run a recovery or change
+  engine state: the problem remains in the Health pill and **Settings → Health**.
 
 **Settings → Health** lists every check, worst first, with its detail and how long it has been
 in its current state, plus the engine connection. Under each problem are the fixes for it, in

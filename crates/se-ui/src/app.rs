@@ -810,7 +810,7 @@ impl App {
             .exact_size(100.0)
             .frame(egui::Frame::new().fill(self.t.chrome).inner_margin(egui::Margin { left: 24, right: 24, top: 0, bottom: 0 }))
             .show(ui, |ui| views::status::ui(self, ui));
-        // Problems are impossible to miss: a banner under the header while anything fails.
+        // Unacknowledged problems appear under the header; every check stays in Health.
         let alerts = views::health::banner_items(self);
         if !alerts.is_empty() {
             egui::Panel::top("alerts").resizable(false).frame(views::health::banner_frame(self, &alerts)).show(ui, |ui| views::health::banner(self, ui, &alerts));

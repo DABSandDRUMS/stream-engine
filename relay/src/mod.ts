@@ -13,7 +13,11 @@
 
 import { type Env, relayStub } from "./env";
 
-export interface ModEnv extends Env {
+export interface ModEnv extends Omit<Env, "RELAY"> {
+  /** Only the Worker default adapter needs a Durable Object binding. */
+  RELAY?: Env["RELAY"];
+  /** Local queue deployment: never expose the general moderator console. */
+  MOD_QUEUE_ONLY?: string;
   /** Twitch identity/API bases; overridable for local tests with a fake OAuth provider. */
   TWITCH_ID_BASE?: string;
   TWITCH_API_BASE?: string;
@@ -38,7 +42,10 @@ export interface ModDeps {
 }
 
 const defaultDeps: ModDeps = {
-  relay: (env) => relayStub(env),
+  relay: (env) => {
+    if (!env.RELAY) throw new Error("relay binding is not configured");
+    return relayStub({ ...env, RELAY: env.RELAY });
+  },
   fetch: (input, init) => fetch(input, init),
   now: () => Date.now(),
 };
@@ -46,8 +53,15 @@ const defaultDeps: ModDeps = {
 export const SESSION_COOKIE = "se_mod";
 export const STATE_COOKIE = "se_mod_state";
 const SCOPE = "user:read:moderated_channels";
-const MAX_BODY = 16 * 1024;
+export const MAX_MOD_BODY = 16 * 1024;
 const ENGINE_TIMEOUT_MS = 8000;
+const QUEUE_ACTIONS: Record<string, true> = {
+  "queue.request": true, "queue.reorder": true, "queue.remove": true, "queue.approve": true, "queue.reject": true,
+};
+
+function queueOnly(env: ModEnv): boolean {
+  return env.MOD_QUEUE_ONLY === "1";
+}
 
 interface Hello {
   enabled: boolean;
@@ -119,7 +133,8 @@ export async function verifySession(secret: string | undefined, token: string, n
   if (!raw) return null;
   try {
     const s = JSON.parse(new TextDecoder().decode(raw)) as Session;
-    if (typeof s.uid !== "string" || typeof s.login !== "string" || typeof s.exp !== "number") return null;
+    if (typeof s.uid !== "string" || !s.uid || typeof s.login !== "string" || !s.login ||
+        typeof s.b !== "boolean" || typeof s.exp !== "number" || !Number.isFinite(s.exp)) return null;
     return s.exp * 1000 > nowMs ? s : null;
   } catch {
     return null;
@@ -276,14 +291,34 @@ function sameOrigin(req: Request, url: URL): boolean {
 
 async function readJson(req: Request): Promise<Record<string, unknown> | null> {
   const len = Number(req.headers.get("Content-Length") ?? "0");
-  if (len > MAX_BODY) return null;
-  const text = await req.text();
-  if (text.length > MAX_BODY) return null;
+  if (!Number.isFinite(len) || len < 0 || len > MAX_MOD_BODY) return null;
+  if (!req.body) return null;
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
   try {
-    const v = JSON.parse(text);
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_MOD_BODY) {
+        await reader.cancel();
+        return null;
+      }
+      chunks.push(value);
+    }
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    const v = JSON.parse(new TextDecoder().decode(bytes));
     return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
   } catch {
     return null;
+  } finally {
+    reader.releaseLock();
   }
 }
 
@@ -301,14 +336,22 @@ export function createModHandler(deps: ModDeps = defaultDeps) {
     const path = url.pathname.replace(/\/+$/, "") || "/mod";
     const get = req.method === "GET" || req.method === "HEAD";
     try {
-      if (path === "/mod" && get) return await index(req, env, deps);
-      if (path === "/mod/style.css" && get) return new Response(STYLE, { headers: { "Content-Type": "text/css; charset=utf-8", "Cache-Control": "public, max-age=300" } });
-      if (path === "/mod/app.js" && get) return new Response(APP_JS, { headers: { "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff" } });
-      if (path === "/mod/callback.js" && get) return new Response(CALLBACK_JS, { headers: { "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff" } });
+      if (path === "/mod" && get) {
+        if (queueOnly(env)) return new Response(null, { status: 302, headers: { Location: "/queue#moderator", ...SECURITY_HEADERS } });
+        return await index(req, env, deps);
+      }
+      if (path === "/mod/style.css" && get) return new Response(STYLE, { headers: { "Content-Type": "text/css; charset=utf-8", ...SECURITY_HEADERS } });
+      if (path === "/mod/app.js" && get && !queueOnly(env)) return new Response(APP_JS, { headers: { "Content-Type": "text/javascript; charset=utf-8", ...SECURITY_HEADERS } });
+      if (path === "/mod/callback.js" && get) return new Response(CALLBACK_JS, { headers: { "Content-Type": "text/javascript; charset=utf-8", ...SECURITY_HEADERS } });
       if (path === "/mod/login" && get) return await login(req, env, deps, url);
       if (path === "/mod/callback" && get) return html(page("Signing in…", `<h1>Signing in…</h1><p class="msg" id="msg">Checking your Twitch account.</p>`, "/mod/callback.js"));
       if (path === "/mod/session" && req.method === "POST") return await createSession(req, env, deps, url);
       if (path === "/mod/api" && req.method === "POST") return await api(req, env, deps, url);
+      if (path === "/mod/logout" && (queueOnly(env) || req.method === "POST")) {
+        if (req.method !== "POST") return json({ ok: false, error: "method not allowed" }, 405, { Allow: "POST" });
+        if (!sameOrigin(req, url)) return json({ ok: false, error: "bad origin" }, 403);
+        return json({ ok: true }, 200, { "Set-Cookie": cookie(SESSION_COOKIE, "", 0, "Strict") });
+      }
       if (path === "/mod/logout" && get) {
         return new Response(null, { status: 302, headers: { Location: "/mod", "Set-Cookie": cookie(SESSION_COOKIE, "", 0, "Strict"), ...SECURITY_HEADERS } });
       }
@@ -394,7 +437,7 @@ async function createSession(req: Request, env: ModEnv, deps: ModDeps, url: URL)
   const h = new Headers();
   h.append("Set-Cookie", cookie(SESSION_COOKIE, session, Math.floor(hours * 3600), "Strict"));
   h.append("Set-Cookie", clearState);
-  return json({ ok: true, login: user.login }, 200, h);
+  return json({ ok: true, login: user.login, ...(queueOnly(env) ? { redirect: "/queue#moderator" } : {}) }, 200, h);
 }
 
 async function api(req: Request, env: ModEnv, deps: ModDeps, url: URL): Promise<Response> {
@@ -403,6 +446,10 @@ async function api(req: Request, env: ModEnv, deps: ModDeps, url: URL): Promise<
   if (!s) return json({ ok: false, error: "signed out" }, 401);
   const body = await readJson(req);
   if (!body) return json({ ok: false, error: "bad request" }, 400);
+  if (queueOnly(env) && !(
+    (body.kind === "query" && body.name === "queue") ||
+    (body.kind === "cmd" && typeof body.action === "string" && QUEUE_ACTIONS[body.action] === true)
+  )) return json({ ok: false, error: "only queue management is available" }, 403);
   const kind = body.kind;
   const user = { id: s.uid, login: s.login, broadcaster: s.b };
   let msg: Record<string, unknown>;
@@ -410,8 +457,19 @@ async function api(req: Request, env: ModEnv, deps: ModDeps, url: URL): Promise<
   else if (kind === "cmd" && typeof body.action === "string" && body.action.length <= 64) msg = { kind, user, action: body.action, args: body.args ?? null };
   else if (kind === "query" && typeof body.name === "string" && body.name.length <= 64) msg = { kind, user, name: body.name, args: body.args ?? null };
   else return json({ ok: false, error: "bad request" }, 400);
+  let actions: string[] = [];
+  if (kind === "query" && body.name === "queue") {
+    const auth = await deps.relay(env).engineCall("mod", { kind: "authorize", user }, ENGINE_TIMEOUT_MS);
+    if (!auth.ok) return json(auth, ["engine offline", "engine did not answer", "engine busy", "service shutting down"].includes(auth.error) ? 503 : 403);
+    const allowed = (auth.result as { actions?: unknown } | null)?.actions;
+    if (!Array.isArray(allowed) || !allowed.every((action) => typeof action === "string")) {
+      return json({ ok: false, error: "invalid engine authorization reply" }, 503);
+    }
+    actions = allowed;
+  }
   const r = await deps.relay(env).engineCall("mod", msg, ENGINE_TIMEOUT_MS);
-  return json(r, r.ok ? 200 : r.error === "engine offline" ? 503 : 403);
+  return json(r.ok && kind === "query" && body.name === "queue" ? { ...r, login: s.login, actions } : r,
+    r.ok ? 200 : ["engine offline", "engine did not answer", "engine busy", "service shutting down"].includes(r.error) ? 503 : 403);
 }
 
 // ------------------------------------------------------------------------------------------
@@ -444,7 +502,7 @@ const CALLBACK_JS = `(function(){
   if(!token||!state){fail('Twitch did not return a sign-in token.');return;}
   fetch('/mod/session',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-SE-Mod':'1'},body:JSON.stringify({access_token:token,state:state})})
     .then(function(r){return r.json();})
-    .then(function(r){if(r.ok){location.replace('/mod');}else{fail(r.error||'Sign-in failed.');}})
+    .then(function(r){if(r.ok){location.replace(r.redirect||'/mod');}else{fail(r.error||'Sign-in failed.');}})
     .catch(function(){fail('Network error while signing in.');});
 })();`;
 

@@ -8,12 +8,14 @@ import { setTimeout, clearTimeout } from "node:timers";
 import { WebSocket, WebSocketServer } from "ws";
 import { ArtLookup, parseVideo } from "./art";
 import { queuePage, queueScript } from "./queue-page";
+import { createModHandler, MAX_MOD_BODY, type EngineReply, type ModEnv, type RelayRpc } from "./mod";
 import { json, text } from "./util";
 
 const PROTOCOL = 1;
 const MAX_FRAME = 256 * 1024;
 const MAX_VIEWERS = 2000;
 const MAX_BUFFER = 1024 * 1024;
+const MAX_MOD_CALLS = 64;
 const HOST = "127.0.0.1";
 const PUBLIC_PORT = 8787;
 const PRIVATE_PORT = 8788;
@@ -81,7 +83,10 @@ function decorate(snapshot: RecordValue, art: ArtLookup): RecordValue {
 
 async function sendResponse(res: ServerResponse, response: Response): Promise<void> {
   const body = await response.text();
-  res.writeHead(response.status, Object.fromEntries(response.headers));
+  const headers: Record<string, string | string[]> = Object.fromEntries(response.headers);
+  const cookies = response.headers.getSetCookie();
+  if (cookies.length) headers["set-cookie"] = cookies;
+  res.writeHead(response.status, headers);
   res.end(body);
 }
 
@@ -91,6 +96,57 @@ function pathname(req: IncomingMessage): string {
   } catch {
     return "";
   }
+}
+
+/** The tunnel must retain Host; never trust client-supplied forwarded host/origin. */
+async function modRequest(req: IncomingMessage, publicOrigin: URL | null): Promise<Request | Response> {
+  const host = req.headers.host?.toLowerCase();
+  let origin: string;
+  if (publicOrigin) {
+    if (host !== publicOrigin.host) return text("untrusted host", 403, { "cache-control": "no-store" });
+    const proto = req.headers["x-forwarded-proto"];
+    if (proto !== undefined && proto !== publicOrigin.protocol.slice(0, -1)) {
+      return text("untrusted forwarded protocol", 403, { "cache-control": "no-store" });
+    }
+    origin = publicOrigin.origin;
+  } else {
+    if (host !== `${HOST}:${PUBLIC_PORT}` && host !== `localhost:${PUBLIC_PORT}`) {
+      return text("QUEUE_PUBLIC_ORIGIN is required for moderator access through a tunnel", 503, { "cache-control": "no-store" });
+    }
+    if (req.headers["x-forwarded-proto"] !== undefined && req.headers["x-forwarded-proto"] !== "http") {
+      return text("untrusted forwarded protocol", 403, { "cache-control": "no-store" });
+    }
+    origin = `http://${host}`;
+  }
+  const target = req.url ?? "/";
+  if (!target.startsWith("/") || target.startsWith("//")) return text("bad request target", 400, { "cache-control": "no-store" });
+  const headers = new Headers();
+  for (const [key, value] of Object.entries(req.headers)) {
+    if (Array.isArray(value)) for (const item of value) headers.append(key, item);
+    else if (value !== undefined) headers.set(key, value);
+  }
+  const method = req.method ?? "GET";
+  let body: string | undefined;
+  if (method !== "GET" && method !== "HEAD") {
+    const declared = Number(req.headers["content-length"] ?? "0");
+    if (!Number.isFinite(declared) || declared < 0 || declared > MAX_MOD_BODY) {
+      req.resume();
+      return text("request body too large", 413, { "cache-control": "no-store" });
+    }
+    const chunks: Buffer[] = [];
+    let size = 0;
+    for await (const chunk of req.iterator({ destroyOnReturn: false })) {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += bytes.byteLength;
+      if (size > MAX_MOD_BODY) {
+        req.resume();
+        return text("request body too large", 413, { "cache-control": "no-store" });
+      }
+      chunks.push(bytes);
+    }
+    body = Buffer.concat(chunks, size).toString("utf8");
+  }
+  return new Request(`${origin}${target}`, { method, headers, body });
 }
 
 function rejectUpgrade(socket: Duplex, status: number, reason: string): void {
@@ -125,9 +181,20 @@ async function main(): Promise<void> {
   } catch {
     throw new Error("cannot read RELAY_SECRET credential");
   }
-  if (!secret) throw new Error("RELAY_SECRET is required");
+  if (secret.length < 16) throw new Error("RELAY_SECRET must contain at least 16 characters");
+  const modEnv: ModEnv = {
+    RELAY_SECRET: secret,
+    MOD_QUEUE_ONLY: "1",
+    TWITCH_CLIENT_ID: process.env.TWITCH_CLIENT_ID,
+    MOD_SESSION_HOURS: process.env.MOD_SESSION_HOURS,
+  };
   const expected = createHash("sha256").update(secret).digest();
   secret = "";
+  const publicOrigin = process.env.QUEUE_PUBLIC_ORIGIN ? new URL(process.env.QUEUE_PUBLIC_ORIGIN) : null;
+  if (publicOrigin && (publicOrigin.protocol !== "https:" || publicOrigin.username || publicOrigin.password ||
+      publicOrigin.pathname !== "/" || publicOrigin.search || publicOrigin.hash)) {
+    throw new Error("QUEUE_PUBLIC_ORIGIN must be an HTTPS origin without a path, credentials, query or fragment");
+  }
   const authenticated = (req: IncomingMessage): boolean => {
     const token = /^Bearer\s+(\S+)\s*$/i.exec(req.headers.authorization ?? "")?.[1] ?? "";
     return timingSafeEqual(expected, createHash("sha256").update(token).digest());
@@ -140,6 +207,48 @@ async function main(): Promise<void> {
   let engineSnapshot: RecordValue | null = null;
   let updatedAt: number | null = null;
   let stopping = false;
+  const calls = new Map<string, {
+    engine: WebSocket;
+    resolve(reply: EngineReply): void;
+    timer: NodeJS.Timeout;
+  }>();
+  const finishCall = (id: string, reply: EngineReply) => {
+    const call = calls.get(id);
+    if (!call) return;
+    calls.delete(id);
+    clearTimeout(call.timer);
+    call.resolve(reply);
+  };
+  const failCalls = (ws: WebSocket | null, error: string) => {
+    for (const [id, call] of calls) if (!ws || call.engine === ws) finishCall(id, { ok: false, error });
+  };
+  const rpc: RelayRpc = {
+    async engineConnected() { return !stopping && engine?.readyState === WebSocket.OPEN; },
+    async engineCall(kind, body, timeoutMs = 8000) {
+      if (stopping) return { ok: false, error: "service shutting down" };
+      if (kind !== "mod") return { ok: false, error: "bad call kind" };
+      const ws = engine;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return { ok: false, error: "engine offline" };
+      if (calls.size >= MAX_MOD_CALLS) return { ok: false, error: "engine busy" };
+      const id = crypto.randomUUID();
+      const frame = JSON.stringify({ t: "mod.req", id, body });
+      if (Buffer.byteLength(frame) > MAX_FRAME || ws.bufferedAmount + Buffer.byteLength(frame) > MAX_BUFFER) {
+        return { ok: false, error: "engine busy" };
+      }
+      const { promise, resolve } = Promise.withResolvers<EngineReply>();
+      const timeout = Number.isFinite(timeoutMs) ? Math.min(Math.max(timeoutMs, 1), 30_000) : 8000;
+      const timer = setTimeout(() => finishCall(id, { ok: false, error: "engine did not answer" }), timeout);
+      timer.unref();
+      calls.set(id, { engine: ws, resolve, timer });
+      try {
+        ws.send(frame, (error) => { if (error) finishCall(id, { ok: false, error: "engine offline" }); });
+      } catch {
+        finishCall(id, { ok: false, error: "engine offline" });
+      }
+      return promise;
+    },
+  };
+  const handleMod = createModHandler({ relay: () => rpc, fetch: (input, init) => fetch(input, init), now: () => Date.now() });
   const state = () => ({ online: engine?.readyState === WebSocket.OPEN, snapshot, updated_at: updatedAt });
   const broadcast = (message: RecordValue) => {
     const frame = JSON.stringify({ ...message, now: Date.now() });
@@ -152,6 +261,17 @@ async function main(): Promise<void> {
   });
   const publicServer = createServer((req, res) => {
     const path = pathname(req);
+    if (path === "/mod" || path.startsWith("/mod/")) {
+      void (async () => {
+        if (stopping) return text("service shutting down", 503, { "cache-control": "no-store" });
+        const request = await modRequest(req, publicOrigin);
+        return request instanceof Response ? request : handleMod(request, modEnv);
+      })().then((response) => sendResponse(res, response)).catch(() => {
+        if (res.headersSent) res.destroy();
+        else void sendResponse(res, text("bad request", 400, { "cache-control": "no-store" })).catch(() => res.destroy());
+      });
+      return;
+    }
     let response: Response;
     if (!["/", "/queue", "/queue.js", "/queue.json", "/queue/ws"].includes(path)) {
       response = text("not found", 404);
@@ -219,6 +339,7 @@ async function main(): Promise<void> {
       clearTimeout(helloDeadline);
       if (engine !== ws) return;
       engine = null;
+      failCalls(ws, "engine offline");
       broadcast({ t: "status", online: false });
     });
     ws.on("message", (data, binary) => {
@@ -245,9 +366,15 @@ async function main(): Promise<void> {
         const previous = engine;
         engine = ws;
         if (previous && previous !== ws) previous.close(4001, "replaced by a newer engine connection");
+        if (previous && previous !== ws) failCalls(previous, "engine offline");
         // Queue-only service: there is no local payment ingress or payment buffer.
         send(ws, JSON.stringify({ t: "welcome", v: PROTOCOL, pending: 0, dropped: 0 }));
         broadcast({ t: "status", online: true });
+      } else if (frame.t === "mod.res" && welcomed && engine === ws && typeof frame.id === "string") {
+        const call = calls.get(frame.id);
+        if (!call || call.engine !== ws) return;
+        if (frame.ok === true) finishCall(frame.id, { ok: true, result: frame.result });
+        else if (frame.ok === false && typeof frame.error === "string") finishCall(frame.id, { ok: false, error: frame.error });
       } else if (frame.t === "queue" && welcomed && engine === ws) {
         const next = publicSnapshot(frame.snapshot);
         if (!next) return send(ws, JSON.stringify({ t: "error", msg: "invalid public snapshot" }));
@@ -259,7 +386,7 @@ async function main(): Promise<void> {
         })));
         broadcast({ t: "queue", ...state() });
       }
-      // ack and RPC responses have no consumer in this queue-only service.
+      // Payment acknowledgments have no consumer in this queue-only service.
     });
   });
 
@@ -267,6 +394,7 @@ async function main(): Promise<void> {
   const shutdown = (): Promise<void> => {
     if (shutdownPromise) return shutdownPromise;
     stopping = true;
+    failCalls(null, "service shutting down");
     shutdownPromise = (async () => {
       const timer = setTimeout(() => {
         for (const ws of [...viewers.clients, ...engines.clients]) ws.terminate();

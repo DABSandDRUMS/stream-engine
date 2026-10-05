@@ -1,6 +1,6 @@
 import { SELF, env as testEnv } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { createModHandler, matches, signSession, verifySession, type EngineReply, type ModDeps, type ModEnv, type RelayRpc } from "../src/mod";
+import { createModHandler, matches, signSession, verifySession, type EngineReply, type ModDeps, type ModEnv, type RelayRpc, type Session } from "../src/mod";
 
 const ORIGIN = "https://relay.example";
 const SECRET = "0123456789abcdef0123456789abcdef";
@@ -20,7 +20,7 @@ interface Harness {
   advance(ms: number): number;
 }
 
-function setup(opts: { enabled?: boolean; connected?: boolean; mods?: string[][]; tokens?: Record<string, { user_id: string; login: string; client_id?: string; scopes?: string[] }>; engine?: (b: Record<string, unknown>) => EngineReply } = {}): Harness {
+function setup(opts: { queueOnly?: boolean; actions?: string[]; enabled?: boolean; connected?: boolean; mods?: string[][]; tokens?: Record<string, { user_id: string; login: string; client_id?: string; scopes?: string[] }>; engine?: (b: Record<string, unknown>) => EngineReply } = {}): Harness {
   const calls: Call[] = [];
   const fetches: string[] = [];
   let now = Date.parse("2026-09-25T20:00:00Z");
@@ -32,7 +32,7 @@ function setup(opts: { enabled?: boolean; connected?: boolean; mods?: string[][]
       if (!connected) return { ok: false, error: "engine offline" };
       if (b.kind === "hello") return { ok: true, result: { enabled: opts.enabled ?? true, client_id: CLIENT, broadcaster: BROADCASTER, actions: ["queue.**", "tts.skip"] } };
       if (opts.engine) return opts.engine(b);
-      if (b.kind === "authorize") return { ok: true, result: { allowed: true } };
+      if (b.kind === "authorize") return { ok: true, result: { allowed: true, actions: opts.actions ?? ["queue.**", "tts.skip"] } };
       return { ok: true, result: { echoed: b } };
     },
     async engineConnected() {
@@ -61,7 +61,7 @@ function setup(opts: { enabled?: boolean; connected?: boolean; mods?: string[][]
     return new Response("unexpected", { status: 599 });
   }) as typeof fetch;
   const deps: ModDeps = { relay: () => relay, fetch: fakeFetch, now: () => now };
-  const env = { RELAY_SECRET: SECRET, TWITCH_ID_BASE: "https://id.fake", TWITCH_API_BASE: "https://api.fake" } as unknown as ModEnv;
+  const env: ModEnv = { RELAY_SECRET: SECRET, MOD_QUEUE_ONLY: opts.queueOnly ? "1" : undefined, TWITCH_ID_BASE: "https://id.fake", TWITCH_API_BASE: "https://api.fake" };
   const handler = createModHandler(deps);
   const call = (path: string, init: RequestInit = {}) => handler(new Request(`${ORIGIN}${path}`, init), env);
   return { calls, fetches, call, env, advance: (ms: number) => (now += ms) };
@@ -82,6 +82,7 @@ interface ApiBody {
   error?: string;
   login?: string;
   result?: { echoed?: unknown };
+  actions?: string[];
 }
 
 async function body(r: Response): Promise<ApiBody> {
@@ -118,10 +119,10 @@ describe("sign-in page and login redirect", () => {
     expect(await r.text()).toContain('href="/mod/login"');
   });
 
-  it("says offline instead of offering sign-in", async () => {
+  it("returns unavailable when the engine is offline", async () => {
     const t = setup({ connected: false });
-    expect(await (await t.call("/mod")).text()).toContain("offline");
     expect((await t.call("/mod/login")).status).toBe(503);
+    expect(t.calls).toEqual([{ kind: "mod", body: { kind: "hello" } }]);
   });
 
   it("redirects to Twitch with our client id, callback, scope, and a state cookie", async () => {
@@ -264,6 +265,200 @@ describe("console API", () => {
   });
 });
 
+describe("queue-only moderator access", () => {
+  it("redirects to the existing public queue without exposing console assets", async () => {
+    const t = setup({ queueOnly: true });
+    const r = await t.call("/mod");
+    expect(r.status).toBe(302);
+    expect(r.headers.get("Location")).toBe("/queue#moderator");
+    expect(r.headers.get("Cache-Control")).toBe("no-store");
+    expect((await t.call("/mod/app.js")).status).toBe(404);
+    expect(t.calls).toEqual([]);
+    const signedIn = await signIn(t);
+    expect(signedIn.status).toBe(200);
+    expect(await signedIn.json()).toEqual({ ok: true, login: "modperson", redirect: "/queue#moderator" });
+    const s = await verifySession(SECRET, cookies(signedIn).se_mod!, Date.parse("2026-09-25T20:00:00Z"));
+    expect(s).toEqual({ uid: "42", login: "modperson", b: false, exp: Date.parse("2026-09-26T08:00:00Z") / 1000 });
+    expect(s).not.toHaveProperty("access_token");
+  });
+
+  it("requires authentication before any private queue read or mutation", async () => {
+    const t = setup({ queueOnly: true });
+    for (const request of [
+      { kind: "query", name: "queue" },
+      ...["request", "reorder", "remove", "approve", "reject"].map((action) => ({ kind: "cmd", action: `queue.${action}` })),
+    ]) {
+      const r = await api(t, "", request);
+      expect(r.status).toBe(401);
+      expect(r.headers.get("Cache-Control")).toBe("no-store");
+    }
+    expect(t.calls).toEqual([]);
+  });
+
+  it("reads only the real private queue and returns current engine permissions", async () => {
+    let actions = ["queue.reorder", "queue.remove"];
+    const snapshot = { upcoming: [{ id: 14, pos: 1, title: "Waiting song" }], pending: [{ id: 15, title: "Held song" }] };
+    const t = setup({
+      queueOnly: true,
+      engine: (b) => ({ ok: true, result: b.kind === "authorize" ? { actions } : snapshot }),
+    });
+    const session = await sessionOf(t);
+    t.calls.length = 0;
+    const user = { id: "42", login: "modperson", broadcaster: false };
+    const read = await api(t, session, { kind: "query", name: "queue", user: { id: BROADCASTER.id, broadcaster: true } });
+    expect(read.status).toBe(200);
+    expect(await read.json()).toEqual({ ok: true, result: snapshot, login: "modperson", actions });
+    expect(t.calls).toEqual([
+      { kind: "mod", body: { kind: "authorize", user } },
+      { kind: "mod", body: { kind: "query", name: "queue", args: null, user } },
+    ]);
+    actions = ["queue.approve"];
+    expect((await body(await api(t, session, { kind: "query", name: "queue" }))).actions).toEqual(actions);
+  });
+
+  it("refuses console state, unrelated/private queries and all other commands before forwarding", async () => {
+    const t = setup({ queueOnly: true });
+    const session = await sessionOf(t);
+    t.calls.length = 0;
+    const requests = [
+      { kind: "state" },
+      ...["queue.ui", "queue.history", "queue.account", "alerts", "tts", "giveaway", "remote_mod.request", "queue.*"].map((name) => ({ kind: "query", name })),
+      ...["queue.skip", "queue.pause", "queue.play", "queue.ban_user", "queue.**", "queue.request.extra", "tts.skip", "clean", "constructor", "__proto__"].map((action) => ({ kind: "cmd", action })),
+    ];
+    for (const request of requests) expect((await api(t, session, request)).status).toBe(403);
+    expect(t.calls).toEqual([]);
+  });
+
+  it("forwards only the five allowed commands with real arguments and signed identity", async () => {
+    const t = setup({ queueOnly: true });
+    const session = await sessionOf(t);
+    t.calls.length = 0;
+    const argsByAction: Record<string, unknown> = {
+      "queue.request": { text: "https://www.youtube.com/watch?v=abcdefghijk", user: "modperson" },
+      "queue.reorder": { id: 12, to: 2 },
+      "queue.remove": { id: 12 },
+      "queue.approve": { id: 13 },
+      "queue.reject": { id: 14 },
+    };
+    for (const [action, args] of Object.entries(argsByAction)) {
+      const r = await api(t, session, { kind: "cmd", action, args, user: { id: BROADCASTER.id, login: "owner", broadcaster: true } });
+      expect(r.status).toBe(200);
+      expect(t.calls.at(-1)).toEqual({
+        kind: "mod", body: { kind: "cmd", action, args, user: { id: "42", login: "modperson", broadcaster: false } },
+      });
+    }
+    expect(t.calls.length).toBe(5);
+  });
+
+  it("keeps engine policy authoritative after sign-in for both reads and commands", async () => {
+    let denied = false;
+    const t = setup({
+      queueOnly: true,
+      engine: (b) => denied ? { ok: false, error: "access disabled by engine" }
+        : { ok: true, result: b.kind === "authorize" ? { actions: ["queue.**"] } : {} },
+    });
+    const session = await sessionOf(t);
+    denied = true;
+    t.calls.length = 0;
+    expect((await api(t, session, { kind: "query", name: "queue" })).status).toBe(403);
+    expect(t.calls.map((c) => c.body.kind)).toEqual(["authorize"]);
+    expect((await api(t, session, { kind: "cmd", action: "queue.remove", args: { id: 12 } })).status).toBe(403);
+    expect(t.calls.at(-1)?.body.kind).toBe("cmd");
+  });
+
+  it("fails closed when engine authorization does not provide valid action patterns", async () => {
+    let result: unknown = { actions: ["queue.**"] };
+    const t = setup({ queueOnly: true, engine: () => ({ ok: true, result }) });
+    const session = await sessionOf(t);
+    for (const invalid of [null, {}, { actions: "**" }, { actions: ["queue.**", 1] }]) {
+      result = invalid;
+      t.calls.length = 0;
+      expect((await api(t, session, { kind: "query", name: "queue" })).status).toBe(503);
+      expect(t.calls.map((c) => c.body.kind)).toEqual(["authorize"]);
+    }
+  });
+
+  it("reports transport failure as unavailable without granting access", async () => {
+    let error: string | null = null;
+    const t = setup({
+      queueOnly: true,
+      engine: () => error ? { ok: false, error } : { ok: true, result: { actions: ["queue.**"] } },
+    });
+    const session = await sessionOf(t);
+    for (const failure of ["engine offline", "engine did not answer", "engine busy", "service shutting down"]) {
+      error = failure;
+      expect((await api(t, session, { kind: "query", name: "queue" })).status).toBe(503);
+      expect((await api(t, session, { kind: "cmd", action: "queue.remove", args: { id: 12 } })).status).toBe(503);
+    }
+  });
+
+  it("rejects wrong-client tokens, missing moderator scope, and non-moderators without issuing sessions", async () => {
+    const cases = [
+      { tokens: { "tok-mod": { user_id: "42", login: "m", client_id: "other-app", scopes: ["user:read:moderated_channels"] } }, status: 401 },
+      { tokens: { "tok-mod": { user_id: "42", login: "m", scopes: [] } }, status: 401 },
+      { mods: [["another-channel"]], status: 403 },
+    ];
+    for (const test of cases) {
+      const t = setup({ ...test, queueOnly: true });
+      const r = await signIn(t);
+      expect(r.status).toBe(test.status);
+      expect(cookies(r).se_mod).toBeUndefined();
+      expect(t.calls.some((c) => c.body.kind === "authorize")).toBe(false);
+    }
+  });
+
+  it("rejects expired, tampered and wrong-key sessions before accessing private data", async () => {
+    const t = setup({ queueOnly: true });
+    const session = await sessionOf(t);
+    const wrongKey = await signSession(`${SECRET}x`, { uid: BROADCASTER.id, login: BROADCASTER.login, b: true, exp: 9e9 });
+    t.calls.length = 0;
+    for (const token of [`${session}x`, wrongKey, "tok-mod"]) {
+      expect((await api(t, token, { kind: "query", name: "queue" })).status).toBe(401);
+      expect((await api(t, token, { kind: "cmd", action: "queue.remove", args: { id: 12 } })).status).toBe(401);
+    }
+    t.advance(12 * 3600 * 1000);
+    expect((await api(t, session, { kind: "query", name: "queue" })).status).toBe(401);
+    expect(t.calls).toEqual([]);
+  });
+
+  it("rejects cross-origin or missing-CSRF-header posts without engine access", async () => {
+    const t = setup({ queueOnly: true });
+    const session = await sessionOf(t);
+    t.calls.length = 0;
+    const invalidHeaders: Record<string, string>[] = [{ Origin: "https://evil.example" }, { Origin: "" }, { "X-SE-Mod": "" }];
+    for (const headers of invalidHeaders) {
+      expect((await api(t, session, { kind: "query", name: "queue" }, headers)).status).toBe(403);
+      expect((await api(t, session, { kind: "cmd", action: "queue.request", args: { text: "song" } }, headers)).status).toBe(403);
+    }
+    expect(t.calls).toEqual([]);
+  });
+
+  it("enforces body byte limits even without Content-Length or with multibyte JSON", async () => {
+    const t = setup({ queueOnly: true });
+    const session = await sessionOf(t);
+    t.calls.length = 0;
+    const request = { kind: "cmd", action: "queue.request", args: { text: "界".repeat(6000) } };
+    expect((await api(t, session, request)).status).toBe(400);
+    expect((await api(t, session, { kind: "query", name: "queue" }, { "Content-Length": "20000" })).status).toBe(400);
+    expect(t.calls).toEqual([]);
+  });
+
+  it("requires same-origin POST logout and clears the protected session cookie", async () => {
+    const t = setup({ queueOnly: true });
+    expect((await t.call("/mod/logout")).status).toBe(405);
+    expect((await t.call("/mod/logout", { method: "POST", headers: { Origin: "https://evil.example", "X-SE-Mod": "1" } })).status).toBe(403);
+    expect((await t.call("/mod/logout", { method: "POST", headers: { Origin: ORIGIN } })).status).toBe(403);
+    const r = await t.call("/mod/logout", { method: "POST", headers: { Origin: ORIGIN, "X-SE-Mod": "1" } });
+    expect(r.status).toBe(200);
+    expect(await r.json()).toEqual({ ok: true });
+    expect(r.headers.get("Cache-Control")).toBe("no-store");
+    expect(r.headers.getSetCookie()).toEqual(["se_mod=; Path=/mod; HttpOnly; Secure; SameSite=Strict; Max-Age=0"]);
+    const worker = setup();
+    expect((await worker.call("/mod/logout", { method: "POST", headers: { Origin: ORIGIN, "X-SE-Mod": "1" } })).status).toBe(200);
+    expect((await worker.call("/mod/logout")).status).toBe(302);
+  });
+});
+
 describe("session tokens and patterns", () => {
   it("round-trips and rejects wrong secrets", async () => {
     const tok = await signSession(SECRET, { uid: "1", login: "a", b: false, exp: 2000 });
@@ -272,6 +467,18 @@ describe("session tokens and patterns", () => {
     expect(await verifySession(SECRET, tok, 2000 * 1000)).toBeNull();
     expect(await verifySession(SECRET, `${tok}.x`, 0)).toBeNull();
     await expect(signSession("short", { uid: "1", login: "a", b: false, exp: 1 })).rejects.toThrow(/RELAY_SECRET/);
+  });
+
+  it("rejects signed payloads with empty identities, missing roles or invalid expiry", async () => {
+    const valid = { uid: "1", login: "a", b: false, exp: 2000 };
+    for (const s of [
+      { ...valid, uid: "" }, { ...valid, login: "" },
+      { ...valid, b: undefined }, { ...valid, b: "true" },
+      { ...valid, exp: Infinity }, { ...valid, exp: "2000" },
+    ]) {
+      const token = await signSession(SECRET, s as Session);
+      expect(await verifySession(SECRET, token, 1000 * 1000)).toBeNull();
+    }
   });
 
   it("matches command patterns like the engine", () => {
