@@ -52,6 +52,8 @@ pub struct HostArgs {
     pub log_file: PathBuf,
     pub gpu: bool,
     pub devtools_port: Option<u16>,
+    /// Vulkan ICD manifest override for the off-screen GPU host only.
+    pub vulkan_driver: Option<PathBuf>,
 }
 
 /// Messages from host processes to the supervisor.
@@ -141,8 +143,43 @@ fn rotate_log(path: &Path) {
     }
 }
 
+/// Validate an explicit single-driver selection before allowing a host to start.
+pub(crate) fn validate_vulkan_driver(path: &Path) -> io::Result<()> {
+    if path.as_os_str().is_empty() || !path.is_absolute() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "[web] vulkan_driver must be a nonempty absolute ICD manifest path"));
+    }
+    // The Vulkan loader treats ':' as a list separator, not part of a Unix filename.
+    if path.as_os_str().as_encoded_bytes().contains(&b':') {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "[web] vulkan_driver must select one ICD manifest (no ':' path separator)"));
+    }
+    let file = std::fs::File::open(path).map_err(|e| {
+        io::Error::new(e.kind(), format!("[web] vulkan_driver {}: cannot read ICD manifest: {e}", path.display()))
+    })?;
+    let metadata = file.metadata().map_err(|e| {
+        io::Error::new(e.kind(), format!("[web] vulkan_driver {}: cannot inspect ICD manifest: {e}", path.display()))
+    })?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("[web] vulkan_driver {}: ICD manifest must be a regular file", path.display())));
+    }
+    let manifest: serde_json::Value = serde_json::from_reader(io::BufReader::new(file)).map_err(|e| {
+        io::Error::new(io::ErrorKind::InvalidData, format!("[web] vulkan_driver {}: invalid ICD manifest JSON: {e}", path.display()))
+    })?;
+    for key in ["/file_format_version", "/ICD/library_path", "/ICD/api_version"] {
+        if manifest.pointer(key).and_then(serde_json::Value::as_str).is_none_or(|v| v.trim().is_empty()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("[web] vulkan_driver {}: ICD manifest requires a nonempty {key} string", path.display()),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Spawn the off-screen host with its control socket mapped to standard input.
 pub fn spawn(paths: &HostPaths, args: &HostArgs, session: u64, events: mpsc::UnboundedSender<Event>) -> io::Result<Session> {
+    if let Some(driver) = &args.vulkan_driver {
+        validate_vulkan_driver(driver)?;
+    }
     let (ours, theirs) = protocol::socketpair()?;
     protocol::set_send_buffer(ours.as_fd(), 1 << 20);
     if let Some(dir) = args.log_file.parent() {
@@ -156,6 +193,12 @@ pub fn spawn(paths: &HostPaths, args: &HostArgs, session: u64, events: mpsc::Unb
         .arg(format!("--se-log-file={}", args.log_file.display()));
     if !args.gpu {
         cmd.arg("--se-no-gpu");
+    }
+    if args.gpu && let Some(driver) = &args.vulkan_driver {
+        // Child-local: the engine renderer and headed sign-in retain their existing GPU.
+        // The additive override would otherwise let another ICD defeat this selection.
+        cmd.env("VK_DRIVER_FILES", driver).env_remove("VK_ICD_FILENAMES").env_remove("VK_ADD_DRIVER_FILES");
+        tracing::info!(target: "se_web::host", "off-screen CEF Vulkan driver: {}", driver.display());
     }
     if let Some(p) = args.devtools_port {
         cmd.arg(format!("--se-devtools-port={p}"));

@@ -1,0 +1,149 @@
+--- a/src/utils/widgets/output-widget.cpp
++++ b/src/utils/widgets/output-widget.cpp
+@@ -413,54 +413,42 @@
+ 
+ void OutputWidget::output_stop(void *data, calldata_t *calldata)
+ {
+-	UNUSED_PARAMETER(calldata);
+ 	auto this_ = (OutputWidget *)data;
+-	if (this_->onStarted) {
+-		const char *last_error = (const char *)calldata_ptr(calldata, "last_error");
+-		if (last_error) {
+-			blog(LOG_WARNING, "[Aitum Stream Suite] failed to start '%s': %s", this_->objectName().toUtf8().constData(),
+-			     last_error);
+-		} else {
+-			blog(LOG_WARNING, "[Aitum Stream Suite] failed to start '%s'", this_->objectName().toUtf8().constData());
+-		}
+-
+-		this_->onStarted();
+-		this_->onStarted = nullptr;
+-	}
+-	if (this_->outputButton->isChecked()) {
+-		QMetaObject::invokeMethod(
+-			this_->outputButton, [this_] { this_->outputButton->setChecked(false); }, Qt::QueuedConnection);
+-	}
+-
+-	if (this_->output) {
+-		const char *error = (const char *)calldata_ptr(calldata, "last_error");
+-		std::string last_error;
+-		if (error) {
+-			last_error = error;
+-		}
+-		auto code = calldata_int(calldata, "code");
+-		QMetaObject::invokeMethod(
+-			this_->outputButton,
+-			[this_, last_error, code] {
+-				if (this_->output && strcmp(obs_output_get_id(this_->output), "virtualcam_output") == 0) {
+-					obs_output_set_media(this_->output, obs_get_video(), obs_get_audio());
+-				}
++	OBSOutput stopped = static_cast<obs_output_t *>(calldata_ptr(calldata, "output"));
++	if (!stopped)
++		return;
++	const char *error = static_cast<const char *>(calldata_ptr(calldata, "last_error"));
++	const std::string last_error = error ? error : "";
++	const auto code = calldata_int(calldata, "code");
++	QMetaObject::invokeMethod(
++		this_,
++		[this_, stopped, last_error, code] {
++			// A delayed stop belongs to this output, never to its replacement.
++			if (this_->output == stopped.Get()) {
++				this_->outputButton->setChecked(false);
++				if (strcmp(obs_output_get_id(stopped), "virtualcam_output") == 0)
++					obs_output_set_media(stopped, obs_get_video(), obs_get_audio());
+ 				obs_output_release(this_->output);
+ 				this_->output = nullptr;
+-				if (vendor) {
+-					const auto d = obs_data_create();
+-					obs_data_set_string(d, "output", obs_output_get_name(this_->output));
+-					if (!last_error.empty()) {
+-						obs_data_set_string(d, "last_error", last_error.c_str());
+-					}
+-					obs_data_set_int(d, "code", code);
+-
+-					obs_websocket_vendor_emit_event(vendor, "stop_output", d);
+-					obs_data_release(d);
+-				}
+-			},
+-			Qt::QueuedConnection);
+-	}
++				if (this_->onStarted) {
++					blog(LOG_WARNING, "[Aitum Stream Suite] failed to start '%s': %s",
++					     this_->objectName().toUtf8().constData(), last_error.c_str());
++					auto onStarted = std::move(this_->onStarted);
++					this_->onStarted = nullptr;
++					onStarted();
++				}
++			}
++			if (vendor) {
++				const auto d = obs_data_create();
++				obs_data_set_string(d, "output", obs_output_get_name(stopped));
++				if (!last_error.empty())
++					obs_data_set_string(d, "last_error", last_error.c_str());
++				obs_data_set_int(d, "code", code);
++				obs_websocket_vendor_emit_event(vendor, "stop_output", d);
++				obs_data_release(d);
++			}
++		},
++		Qt::QueuedConnection);
+ }
+ 
+ bool OutputWidget::StartOutput(bool automated)
+@@ -485,6 +473,25 @@
+ 		}
+ 	}
+ 
++	// Stream Engine can suspend the vertical canvas without changing saved outputs.
++	// Query before creating an encoder, including automatic starts with the main stream.
++	const char *gate_canvas_name = obs_data_get_string(settings, "canvas");
++	auto gate_canvas = (!gate_canvas_name || !*gate_canvas_name)
++				   ? obs_get_main_canvas() : obs_get_canvas_by_name(gate_canvas_name);
++	calldata_t gate = {};
++	calldata_set_ptr(&gate, "canvas", gate_canvas);
++	calldata_set_bool(&gate, "enabled", true);
++	proc_handler_call(obs_get_proc_handler(), "stream_engine_canvas_enabled", &gate);
++	const bool canvas_enabled = calldata_bool(&gate, "enabled");
++	calldata_free(&gate);
++	obs_canvas_release(gate_canvas);
++	if (!canvas_enabled) {
++		outputButton->setChecked(false);
++		blog(LOG_INFO, "Aitum output '%s' held: vertical video disabled in Stream Engine",
++		     obs_data_get_string(settings, "name"));
++		return false;
++	}
++
+ 	const char *name = obs_data_get_string(settings, "name");
+ 	if (output) {
+ 		auto service = obs_output_get_service(output);
+@@ -1244,8 +1251,9 @@
+ 				for (size_t idx = 0; idx < MAX_OUTPUT_VIDEO_ENCODERS; idx++) {
+ 					auto enc = obs_output_get_video_encoder2(output, idx);
+ 					if (enc && obs_encoder_video(enc) == d->second) {
+-						*d->first = enc;
+-						return false;
++						*d->first = obs_encoder_get_ref(enc);
++						if (*d->first)
++							return false;
+ 					}
+ 				}
+ 				return true;
+@@ -1271,9 +1279,10 @@
+ 			if (!main_output) {
+ 				main_output = obs_frontend_get_streaming_output();
+ 			}
+-			venc = main_output ? obs_output_get_video_encoder(main_output) : nullptr;
++			if (main_output && obs_output_active(main_output))
++				venc = obs_encoder_get_ref(obs_output_get_video_encoder(main_output));
+ 			obs_output_release(main_output);
+-			if (!venc || !obs_output_active(main_output)) {
++			if (!venc) {
+ 				blog(LOG_WARNING, "[Aitum Stream Suite] failed to start output '%s' because main was not started",
+ 				     output_name);
+ 				if (!automated) {
+@@ -1282,7 +1291,6 @@
+ 				}
+ 				return nullptr;
+ 			}
+-			obs_encoder_get_ref(venc);
+ 		} else if (!venc) {
+ 			auto videoEncoderIds = {"obs_nvenc_h264_tex", "jim_nvenc", "ffmpeg_nvenc", "obs_qsv11_v2",
+ 						"h264_texture_amf"};

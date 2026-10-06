@@ -21,6 +21,9 @@ pub fn canvas_size(canvas: &str) -> [f32; 2] {
 
 /// Ask for `c` this frame at `hz` and return the latest texture (if any).
 pub fn texture(app: &mut App, c: Canvas, hz: f32) -> Option<FrameTexture> {
+    if c == Canvas::Tall && app.m.get("render.vertical.enabled").is_some_and(|v| !v.truthy()) {
+        return None;
+    }
     app.frames.want(c, hz);
     app.frames.texture(c).filter(|t| t.age.as_millis() < DEAD_MS)
 }
@@ -52,6 +55,24 @@ pub fn monitor(app: &mut App, ui: &mut egui::Ui, canvas: Canvas, scene: &str, la
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     if !ui.is_rect_visible(rect) {
         return resp;
+    }
+    if canvas == Canvas::Tall {
+        let disabled = app.m.get("render.vertical.enabled").is_some_and(|v| !v.truthy());
+        let restoring = app.m.b("obs.vertical.enabled") && app.m.has("obs.vertical.ready") && !app.m.b("obs.vertical.ready");
+        if disabled || !app.m.connected || restoring {
+            let text = if !app.m.connected {
+                "Vertical state unknown\nEngine disconnected"
+            } else if disabled {
+                if app.m.b("obs.vertical.enabled") { "Restoring vertical video…" } else { "Vertical video off\nEncoder and canvas stopped" }
+            } else {
+                "Restoring vertical video…\nWaiting for OBS"
+            };
+            let p = ui.painter_at(rect);
+            p.rect(rect, CornerRadius::same(radius::TILE), t.inset, Stroke::new(1.0, t.border), StrokeKind::Inside);
+            let g = p.layout(text.into(), font_medium(type_scale::BODY), t.text_dim, (rect.width() - 24.0).max(16.0));
+            p.galley(rect.center() - g.size() / 2.0, g, t.text_dim);
+            return resp;
+        }
     }
     let tex = texture(app, canvas, hz);
     let p = ui.painter_at(rect.expand(4.0));

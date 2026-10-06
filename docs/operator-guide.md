@@ -340,6 +340,17 @@ Details: [OBS](obs.md), [Twitch](twitch.md), [alerts and the chat bot](bot-and-a
   it pick which picture to show.
 - **Up next** (smaller, amber outline): the scene you've picked but not shown yet.
 
+**Vertical video**, above the program picture, is a separate on/off switch. **Off**
+stops the vertical broadcast's encoder and then stops the engine's tall-canvas rendering
+and frame export. The landscape stream and Stream Engine's main recording continue.
+Turning it off while a stream may be live asks for confirmation.
+**On** restores vertical rendering and resumes outputs stopped by this switch if the main
+broadcast is still running; with no main broadcast, it only makes vertical available.
+The preference survives restarts. Wait for the applied status: a saved preference or
+disconnected OBS is not confirmation that an encoder stopped. Update both OBS plugins if
+the control reports an unsupported integration. Main/Vertical/Both only select the preview;
+they do not stop an encoder.
+
 To change what's on air:
 
 1. Click a scene under **Scenes**, or press its number key (`1` to `9`; the number is under each
@@ -714,6 +725,25 @@ pill reports a source problem, click **Fix**; select the source at **Sources →
 choose **Reload** under **Files** if it needs a manual restart. **Settings → Health** offers
 **Reload the song player…** and **Reload <overlay>…** too; they ask first because viewers see
 (or hear) that one source restart.
+
+### GPU pressure while streaming
+
+For this workstation, record the main video only in Stream Engine; leave OBS recording
+and Aitum Backtrack off. If you do not need a vertical broadcast, turn **Overview → Vertical
+video** off to remove its encoder and tall-canvas work. Keep OBS's own preview disabled and
+use Stream Engine's program picture: disabling that duplicate display substantially reduced
+OBS frame skips in the measured comparison. OBS's **Enable Preview** button reverses it.
+
+The offscreen browser host and private camera/program preview encoder use the AMD integrated
+GPU. The private desktop preview encodes on the CPU. The RTX 3070 still renders and encodes
+the enabled broadcasts and master; their resolution, frame rate and quality are unchanged.
+
+GPU memory has two different limits here: ordinary VRAM and a small 256 MiB CPU-visible
+mapping aperture (**BAR1**). Free VRAM does not mean BAR1 has room. Check both with
+`nvidia-smi -q -d MEMORY`; a measured margin is not permission to add unlimited browser
+profiles or GPU workloads. Keep normal browser windows in the same profile when possible.
+Do not change GPU drivers, restart the browser host, or restart OBS during a live show.
+See [OBS](obs.md#measured-workstation-load) for the tested workload and remaining limitations.
 
 ### OBS drops
 

@@ -35,6 +35,8 @@ impl FallbackMode {
 pub struct ObsConfig {
     /// obs.sock path (default `$SE_RUNTIME_DIR/obs.sock`, else `$XDG_RUNTIME_DIR/stream-engine/obs.sock`).
     pub socket: PathBuf,
+    /// Allow vertical OBS outputs and the engine's tall canvas.
+    pub vertical_enabled: bool,
     /// A feed with no frame for this long is stale (plugin side).
     pub stale_ms: u32,
     pub fallback_mode: FallbackMode,
@@ -50,6 +52,7 @@ impl Default for ObsConfig {
     fn default() -> Self {
         ObsConfig {
             socket: default_socket(),
+            vertical_enabled: true,
             stale_ms: 500,
             fallback_mode: FallbackMode::Live,
             fallback_scene: "Technical Difficulties".into(),
@@ -96,6 +99,7 @@ impl ObsConfig {
         for (k, v) in t {
             match k.as_str() {
                 "socket" => c.socket = expand_home(&string(k, v)?),
+                "vertical_enabled" => c.vertical_enabled = v.as_bool().ok_or("[obs] vertical_enabled: expected a boolean")?,
                 "stale_ms" | "stale" => {
                     let ms = duration_ms(k, v)?;
                     if !(50..=60_000).contains(&ms) {

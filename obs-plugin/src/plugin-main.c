@@ -83,6 +83,8 @@ uint64_t se_stale_ms(void)
 static void config_defaults(struct se_config *c)
 {
 	c->stale_ms = 500;
+	c->vertical_enabled = true;
+	c->vertical_revision = 0;
 	c->fallback_mode = SE_FALLBACK_LIVE;
 	snprintf(c->fallback_scene, sizeof(c->fallback_scene), "%s", SE_DEFAULT_FALLBACK_SCENE);
 	snprintf(c->fallback_text, sizeof(c->fallback_text), "%s", SE_DEFAULT_FALLBACK_TEXT);
@@ -93,6 +95,13 @@ static bool config_apply_json(struct se_config *c, json_t *o)
 {
 	bool changed = false;
 	json_t *v;
+	if (json_is_integer(v = json_object_get(o, "vertical_revision")))
+		c->vertical_revision = (uint64_t)json_integer_value(v);
+	if (json_is_boolean(v = json_object_get(o, "vertical_enabled"))) {
+		bool enabled = json_is_true(v);
+		changed |= enabled != c->vertical_enabled;
+		c->vertical_enabled = enabled;
+	}
 	if (json_is_integer(v = json_object_get(o, "stale_ms"))) {
 		json_int_t ms = json_integer_value(v);
 		uint32_t clamped = ms < 50 ? 50 : ms > 60000 ? 60000 : (uint32_t)ms;
@@ -119,7 +128,8 @@ static bool config_apply_json(struct se_config *c, json_t *o)
 
 static json_t *config_json(const struct se_config *c)
 {
-	return json_pack("{s:i, s:s, s:s, s:s}", "stale_ms", (int)c->stale_ms, "fallback_mode", mode_name(c->fallback_mode),
+	return json_pack("{s:i, s:b, s:s, s:s, s:s}", "stale_ms", (int)c->stale_ms,
+			 "vertical_enabled", c->vertical_enabled, "fallback_mode", mode_name(c->fallback_mode),
 			 "fallback_scene", c->fallback_scene, "fallback_text", c->fallback_text);
 }
 
@@ -454,6 +464,11 @@ static void send_status(uint64_t now_mono, const struct se_monitor_result *mon)
 	json_object_set_new(m, "feeds", feeds);
 	json_object_set_new(m, "fallback", json_boolean(atomic_load(&se_g.fallback_engaged)));
 	json_object_set_new(m, "outputs", outputs);
+	json_t *vertical = se_vertical_status();
+	struct se_config cfg;
+	se_config_copy(&cfg);
+	json_object_set_new(vertical, "revision", json_integer((json_int_t)cfg.vertical_revision));
+	json_object_set_new(m, "vertical", vertical);
 	send_json(m);
 }
 
@@ -610,6 +625,10 @@ static void on_tick(void *ud, uint64_t now)
 	struct se_config cfg;
 	se_config_copy(&cfg);
 
+	if (atomic_load(&loaded))
+		se_vertical_tick(cfg.vertical_enabled, now);
+	else
+		se_vertical_reset();
 	track_outputs();
 	const bool live = any_output_live();
 	const bool allowed = atomic_load(&loaded) &&
@@ -711,10 +730,29 @@ static void on_frontend_event(enum obs_frontend_event event, void *data)
 
 /* ---- module -------------------------------------------------------------------------- */
 
+/* Aitum's start path asks before allocating an encoder, including automatic
+ * starts. Main-canvas outputs are never held. */
+static void canvas_enabled(void *data, calldata_t *cd)
+{
+	UNUSED_PARAMETER(data);
+	obs_canvas_t *canvas = calldata_ptr(cd, "canvas");
+	struct se_config cfg;
+	se_config_copy(&cfg);
+	bool enabled = true;
+	if (!cfg.vertical_enabled && canvas && !(obs_canvas_get_flags(canvas) & MAIN)) {
+		char kind[64];
+		se_canvas_kind_for_video(obs_canvas_get_video(canvas), kind, sizeof(kind));
+		enabled = strcmp(kind, "tall") != 0;
+	}
+	calldata_set_bool(cd, "enabled", enabled);
+}
+
 bool obs_module_load(void)
 {
 	pthread_mutex_init(&se_g.mu, NULL);
 	plugin_config_load();
+	proc_handler_add(obs_get_proc_handler(), "void stream_engine_canvas_enabled(ptr canvas, out bool enabled)",
+			 canvas_enabled, NULL);
 	se_register_sources();
 
 	char path[108] = "";
@@ -747,6 +785,7 @@ void obs_module_unload(void)
 	atomic_store(&se_g.exiting, true);
 	se_control_stop(se_g.control);
 	se_g.control = NULL;
+	se_vertical_reset();
 	for (size_t i = 0; i < MAX_TRACKED; i++) {
 		if (tracked[i].used) {
 			obs_weak_output_release(tracked[i].weak);

@@ -268,21 +268,33 @@ The private viewers use continuous **H264 WebRTC**, not thumbnail polling or VNC
 
 | Viewer | Workstation URL | Source |
 |---|---|---|
-| Camera | `https://omarchy.tailc04968.ts.net:10001/` | Existing `cam_wide` capture, 1920×1080 at 30 fps |
+| Camera/program | `https://omarchy.tailc04968.ts.net:10001/` | Wide program canvas, 1920×1080 at 30 fps, plus `se-program` stereo audio |
 | Desktop | `https://omarchy.tailc04968.ts.net:10000/` | DP-2 monitor containing Stream Engine, 3440×1440 at 30 fps |
 | Mouse/keyboard control | `https://omarchy.tailc04968.ts.net:10002/vnc.html?autoconnect=true&resize=scale` | Existing noVNC/WayVNC control path |
 
 The WebRTC viewers are view-only. The original desktop URL now serves encoded video;
 VNC is retained separately for input. Existing Serve routes on 443 and 8443 are unchanged.
-No viewer records files, captures audio, changes lighting, or exposes engine commands.
+No viewer records files, changes lighting, or exposes engine commands.
 
-`se-camera-stream` reads the engine's `preview` SHM canvas through `frames.sock`, releases
-skipped buffers promptly, and feeds FFmpeg NVENC directly without a second V4L2 capture.
-The project's `private_camera` preview scene contains only `cam_wide`; `[render]` sets
-preview scale to 1 and disables preview canvas/output FX. **Selecting a different preview
-scene changes this camera feed**; it is not an independent preview selection.
-The desktop publisher uses the installed `gpu-screen-recorder`, H264 baseline, 6 Mbps,
-30 fps and a one-second keyframe interval. The camera publisher uses approximately 4 Mbps.
+`se-camera-stream` reads a selected SHM canvas through `frames.sock`, releases skipped
+buffers promptly, and feeds FFmpeg without a second V4L2 capture. The CLI defaults to
+`preview`; the installed service explicitly selects `--canvas wide --audio se-program`.
+The program feed therefore follows the wide program, not a private preview selection.
+
+NVENC remains the CLI default. `--vaapi-device /dev/dri/by-path/pci-0000:0d:00.0-render`
+selects this workstation's AMD encoder instead, retaining H264 constrained-baseline,
+approximately 4 Mbps, 30 fps and the existing Opus audio. Select the actual render node
+on other machines. Its systemd service also needs `Environment=LIBVA_DRIVER_NAME=radeonsi`:
+the desktop session forces `LIBVA_DRIVER_NAME=nvidia`, which otherwise makes AMD H264
+encoding fail with “No usable encoding entrypoint” and the publisher retry continuously.
+Verify the real RTSP video/audio after changing it, not just `systemctl is-active`.
+
+The desktop publisher uses `gpu-screen-recorder`, 3440×1440 H264 baseline, 6 Mbps,
+30 fps and a one-second keyframe interval. The installed service selects `-encoder cpu`
+with `preset=veryfast;tune=zerolatency;profile=baseline;bf=0`. This keeps private desktop
+encoding off NVENC without lowering broadcast or master-recording settings; GPU screen
+capture remains in use. Both publisher service files are workstation configuration,
+not installed by the engine's ordinary development installer.
 
 Stock [MediaMTX v1.21.1](https://github.com/bluenviron/mediamtx/releases/tag/v1.21.1)
 receives both publishers on loopback RTSP/TCP port 18554. Its player/WHEP listener is

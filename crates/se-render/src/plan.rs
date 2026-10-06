@@ -548,6 +548,8 @@ pub struct Plan {
     /// `se_patch::wgsl::STANDARD_SIGNALS` in the signal table (transition headers).
     pub std_signals: Vec<AddrId>,
     pub show: ShowAddrs,
+    /// Effective runtime gate; absent state keeps vertical rendering enabled.
+    pub vertical_enabled: AddrId,
     pub state: AddrTable,
     pub signals: AddrTable,
     pub project_root: PathBuf,
@@ -1050,6 +1052,7 @@ impl Plan {
             bass: b.signals.intern("band.bass"),
             level: b.signals.intern("band.level"),
         };
+        let vertical_enabled = b.state.intern("render.vertical.enabled");
         let palette = SLOTS.map(|s| b.state.intern(&format!("palette.{s}")));
         let std_signals = se_patch::wgsl::STANDARD_SIGNALS.iter().map(|s| b.signals.intern(s)).collect();
 
@@ -1319,6 +1322,7 @@ impl Plan {
             palette,
             std_signals,
             show,
+            vertical_enabled,
             state: b.state,
             signals: b.signals,
             project_root,

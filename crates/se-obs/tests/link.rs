@@ -417,3 +417,66 @@ async fn stale_socket_file_is_replaced() {
     e.state("obs.link", true).await;
     wait_for("old socket removed", || !e.sock.exists()).await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn vertical_gate_waits_for_current_encoder_ack_and_preserves_wide_health() {
+    let e = engine().await;
+    let mut p = Plugin::connect(&e.sock).await;
+    let first = p.hello().await;
+    e.cfg_tx.send(Arc::new(project(&obs_section(&e.sock, "vertical_enabled = false")))).unwrap();
+    let off = p.recv().await;
+    e.state("obs.vertical.enabled", false).await;
+    e.state("render.vertical.enabled", true).await;
+
+    // A late acknowledgment from an earlier configuration cannot stop rendering.
+    p.send(status(serde_json::json!({
+        "fps": 57.0, "vertical": {"enabled": false, "ready": true, "revision": first["vertical_revision"]}
+    }))).await;
+    e.state("obs.fps", 57.0).await;
+    assert_eq!(e.get("obs.vertical.ready"), Value::Bool(false));
+    assert_eq!(e.get("render.vertical.enabled"), Value::Bool(true));
+
+    p.send(status(serde_json::json!({
+        "vertical": {"enabled": false, "ready": false, "revision": off["vertical_revision"], "error": "encoder still stopping"}
+    }))).await;
+    e.state("obs.vertical.error", "encoder still stopping").await;
+    e.state("render.vertical.enabled", true).await;
+    e.health_is("fail", "encoder still stopping").await;
+
+    p.send(status(serde_json::json!({
+        "stale": {"wide": false, "tall": true},
+        "vertical": {"enabled": false, "ready": true, "revision": off["vertical_revision"]}
+    }))).await;
+    e.state("obs.vertical.ready", true).await;
+    e.state("render.vertical.enabled", false).await;
+    e.health_is("pass", "vertical video disabled").await;
+    p.send(status(serde_json::json!({
+        "stale": {"wide": true, "tall": true},
+        "vertical": {"enabled": false, "ready": true, "revision": off["vertical_revision"]}
+    }))).await;
+    e.health_is("fail", "wide canvas").await;
+
+    // Re-enable rendering immediately, before OBS has restarted the stopped output.
+    e.cfg_tx.send(Arc::new(project(&obs_section(&e.sock, "vertical_enabled = true")))).unwrap();
+    let on = p.recv().await;
+    e.state("render.vertical.enabled", true).await;
+    e.state("obs.vertical.ready", false).await;
+    p.send(status(serde_json::json!({
+        "vertical": {"enabled": true, "ready": true, "revision": on["vertical_revision"]}
+    }))).await;
+    e.state("obs.vertical.ready", true).await;
+    e.health_is("pass", "wide + tall").await;
+
+    // Saved OFF survives disconnect, but the engine cannot claim encoder shutdown.
+    e.cfg_tx.send(Arc::new(project(&obs_section(&e.sock, "vertical_enabled = false")))).unwrap();
+    let off = p.recv().await;
+    p.send(status(serde_json::json!({
+        "vertical": {"enabled": false, "ready": true, "revision": off["vertical_revision"]}
+    }))).await;
+    e.state("render.vertical.enabled", false).await;
+    drop(p);
+    e.state("obs.link", false).await;
+    e.state("obs.vertical.enabled", false).await;
+    e.state("obs.vertical.ready", false).await;
+    e.state("render.vertical.enabled", true).await;
+}

@@ -86,7 +86,8 @@ void se_sources_monitor(uint64_t now, uint32_t stale_ms, bool trigger_allowed, s
 		if (!stale) {
 			r->fresh[k] = true;
 			s->latched = false;
-		} else if (trigger_allowed && !s->latched && obs_source_active(s->source)) {
+		} else if (trigger_allowed && !s->latched && obs_source_active(s->source) &&
+			   (k != SE_CANVAS_TALL || se_g.config.vertical_enabled)) {
 			s->latched = true;
 			r->engage = true;
 		}

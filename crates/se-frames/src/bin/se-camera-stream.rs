@@ -1,4 +1,4 @@
-//! SHM-only frames.sock consumer feeding a bounded, low-latency H264/NVENC publisher.
+//! SHM-only frames.sock consumer feeding a bounded, low-latency H264 publisher.
 
 use std::io::{self, Write};
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};
@@ -21,6 +21,7 @@ const USAGE: &str = "usage: se-camera-stream [options]
   --fps <integer>        output rate, 1..=60 (default: 30)
   --rtsp-url <url>       output (default: rtsp://127.0.0.1:18554/camera)
   --ffmpeg <path>        FFmpeg executable (default: ffmpeg)
+  --vaapi-device <path>  use H264 VAAPI on this absolute DRM render-node path (default: NVENC)
   --audio <source>       also publish this PulseAudio/PipeWire source as Opus (e.g. se-program)
   -h, --help            show this help
 Exits on disconnect, canvas replacement, encoder failure or stalled input/output.
@@ -33,9 +34,14 @@ struct Args {
     rtsp_url: String,
     ffmpeg: PathBuf,
     audio: Option<String>,
+    vaapi_device: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Option<Args>> {
+    parse_args_from(std::env::args().skip(1))
+}
+
+fn parse_args_from(input: impl IntoIterator<Item = String>) -> Result<Option<Args>> {
     let mut args = Args {
         socket: se_frames::default_socket_path(),
         canvas: proto::CANVAS_PREVIEW,
@@ -43,14 +49,15 @@ fn parse_args() -> Result<Option<Args>> {
         rtsp_url: "rtsp://127.0.0.1:18554/camera".into(),
         ffmpeg: "ffmpeg".into(),
         audio: None,
+        vaapi_device: None,
     };
-    let mut input = std::env::args().skip(1);
+    let mut input = input.into_iter();
     while let Some(flag) = input.next() {
         if flag == "-h" || flag == "--help" {
             println!("{USAGE}");
             return Ok(None);
         }
-        ensure!(matches!(flag.as_str(), "--socket" | "--canvas" | "--fps" | "--rtsp-url" | "--ffmpeg" | "--audio"), "unknown option {flag}\n{USAGE}");
+        ensure!(matches!(flag.as_str(), "--socket" | "--canvas" | "--fps" | "--rtsp-url" | "--ffmpeg" | "--audio" | "--vaapi-device"), "unknown option {flag}\n{USAGE}");
         let value = input.next().with_context(|| format!("missing value for {flag}"))?;
         match flag.as_str() {
             "--socket" => args.socket = value.into(),
@@ -64,6 +71,11 @@ fn parse_args() -> Result<Option<Args>> {
                 args.rtsp_url = value;
             }
             "--ffmpeg" => args.ffmpeg = value.into(),
+            "--vaapi-device" => {
+                let device = PathBuf::from(value);
+                ensure!(device.is_absolute(), "vaapi-device must be an absolute DRM render-node path");
+                args.vaapi_device = Some(device);
+            }
             "--audio" => {
                 ensure!(!value.is_empty(), "audio source must not be empty");
                 args.audio = Some(value);
@@ -150,6 +162,10 @@ struct Encoder {
 impl Encoder {
     fn spawn(args: &Args, canvas: &Canvas) -> Result<Self> {
         let mut command = Command::new(&args.ffmpeg);
+        if let Some(device) = &args.vaapi_device {
+            // Initialize the selected device before any input; never fall back to NVENC.
+            command.arg("-vaapi_device").arg(device);
+        }
         command.args(["-hide_banner", "-loglevel", "warning", "-nostdin", "-fflags", "nobuffer", "-probesize", "32", "-analyzeduration", "0", "-f", "rawvideo", "-pixel_format", "rgba", "-video_size"])
             .arg(format!("{}x{}", canvas.msg.width, canvas.msg.height))
             .arg("-framerate").arg(args.fps.to_string())
@@ -161,9 +177,16 @@ impl Encoder {
         } else {
             command.arg("-an");
         }
-        command.args(["-vf", "format=yuv420p", "-c:v", "h264_nvenc", "-profile:v", "baseline", "-preset", "p1", "-tune", "ull", "-rc", "cbr", "-b:v", "4M", "-maxrate", "4M", "-bufsize", "133k", "-g"])
-            .arg(args.fps.to_string())
-            .args(["-bf", "0", "-rc-lookahead", "0", "-zerolatency", "1", "-delay", "0", "-forced-idr", "1", "-flush_packets", "1", "-f", "rtsp", "-rtsp_transport", "tcp"])
+        if args.vaapi_device.is_some() {
+            command.args(["-vf", "format=nv12,hwupload", "-c:v", "h264_vaapi", "-profile:v", "constrained_baseline", "-rc_mode", "CBR", "-b:v", "4M", "-maxrate", "4M", "-bufsize", "133k", "-g"])
+                .arg(args.fps.to_string())
+                .args(["-bf", "0", "-async_depth", "1"]);
+        } else {
+            command.args(["-vf", "format=yuv420p", "-c:v", "h264_nvenc", "-profile:v", "baseline", "-preset", "p1", "-tune", "ull", "-rc", "cbr", "-b:v", "4M", "-maxrate", "4M", "-bufsize", "133k", "-g"])
+                .arg(args.fps.to_string())
+                .args(["-bf", "0", "-rc-lookahead", "0", "-zerolatency", "1", "-delay", "0", "-forced-idr", "1"]);
+        }
+        command.args(["-flush_packets", "1", "-f", "rtsp", "-rtsp_transport", "tcp"])
             .arg(&args.rtsp_url)
             .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::inherit());
         let parent_pid = std::process::id() as libc::pid_t;
@@ -203,7 +226,7 @@ impl Encoder {
     fn write_frame(&mut self, client: &mut FramesClient, canvas: &Canvas, frame: FrameMsg) -> Result<()> {
         let input = self.input.as_mut().context("FFmpeg input is closed")?;
         let bytes = canvas.views[frame.buffer as usize].as_slice();
-        // NVENC and RTSP initialize after raw input begins; steady-state writes
+        // The encoder and RTSP initialize after raw input begins; steady-state writes
         // keep the short deadline, without treating cold encoder startup as a stall.
         let timeout = self.warmup_until.checked_duration_since(Instant::now()).unwrap_or(WRITE_TIMEOUT).max(WRITE_TIMEOUT);
         let deadline = Instant::now() + timeout;
@@ -274,7 +297,11 @@ fn run(args: Args) -> Result<()> {
         _ => bail!("expected initial SHM canvas announcement"),
     };
     let mut encoder = Encoder::spawn(&args, &canvas)?;
-    eprintln!("publishing {} {}x{} at {}fps to {} using H264 NVENC baseline", proto::CANVAS_NAMES[args.canvas as usize], canvas.msg.width, canvas.msg.height, args.fps, args.rtsp_url);
+    if let Some(device) = &args.vaapi_device {
+        eprintln!("publishing {} {}x{} at {}fps to {} using H264 VAAPI constrained_baseline on {}", proto::CANVAS_NAMES[args.canvas as usize], canvas.msg.width, canvas.msg.height, args.fps, args.rtsp_url, device.display());
+    } else {
+        eprintln!("publishing {} {}x{} at {}fps to {} using H264 NVENC baseline", proto::CANVAS_NAMES[args.canvas as usize], canvas.msg.width, canvas.msg.height, args.fps, args.rtsp_url);
+    }
     let period = Duration::from_secs_f64(1.0 / f64::from(args.fps));
     let mut next_frame = Instant::now();
     let mut last_received = Instant::now();
@@ -337,6 +364,36 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vaapi_device_requires_a_value_and_an_absolute_path() {
+        for input in [
+            vec!["--vaapi-device"],
+            vec!["--vaapi-device", ""],
+            vec!["--vaapi-device", "renderD128"],
+            vec!["--vaapi-device", "dev/dri/renderD128"],
+        ] {
+            let error = parse_args_from(input.into_iter().map(String::from)).err().unwrap();
+            let detail = error.to_string();
+            assert!(detail.contains("missing value for --vaapi-device") || detail.contains("absolute DRM render-node path"), "{detail}");
+        }
+    }
+
+    #[test]
+    fn vaapi_selection_preserves_fps_boundaries() {
+        for fps in ["0", "61", "not-an-integer"] {
+            assert!(parse_args_from([
+                "--vaapi-device".into(), "/dev/dri/by-path/pci-0000:0d:00.0-render".into(),
+                "--fps".into(), fps.into(),
+            ]).is_err());
+        }
+        for fps in ["1", "30", "60"] {
+            assert!(parse_args_from([
+                "--vaapi-device".into(), "/dev/dri/by-path/pci-0000:0d:00.0-render".into(),
+                "--fps".into(), fps.into(),
+            ]).is_ok());
+        }
+    }
 
     #[test]
     fn padded_rows_and_partial_writes_exclude_offset_and_padding() {

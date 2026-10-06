@@ -34,7 +34,7 @@ if(SE_OBS_BUILD_PLUGIN)
   find_package(obs-frontend-api REQUIRED)
   pkg_check_modules(EGL REQUIRED IMPORTED_TARGET egl)
 
-  add_library(stream-engine MODULE src/plugin-main.c src/canvas-source.c src/fallback.c src/gl-fence.c)
+  add_library(stream-engine MODULE src/plugin-main.c src/canvas-source.c src/fallback.c src/gl-fence.c src/vertical.c)
   set_target_properties(stream-engine PROPERTIES PREFIX "" C_VISIBILITY_PRESET hidden)
   target_link_libraries(stream-engine PRIVATE se-obs-proto OBS::libobs OBS::obs-frontend-api PkgConfig::EGL)
 

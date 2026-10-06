@@ -47,6 +47,23 @@ replay buffer or virtual camera. Removing the plugin is not an equivalent single
 regular OBS configuration. Avoid duplicate camera/audio captures first; plugin removal needs
 a measured benefit and an equivalent output plan.
 
+### Vertical output switch
+
+**Overview → Vertical video** persists `[obs] vertical_enabled` (default `true`).
+OFF stops active tall-canvas outputs, waits for their encoders to become inactive, and only
+then suppresses the engine's tall render pass and frame export. Main-canvas outputs and the
+app's landscape master recording are not stopped or reconfigured. Intentionally disabled
+tall feeds do not trigger stale-feed fallback or missing-source health failures.
+ON resumes the outputs stopped by this switch while the main broadcast remains active;
+otherwise it only arms vertical. An idle vertical output is never started just by enabling it.
+
+Use the current stream-engine OBS plugin and the patched Aitum 1.2.4 build below. The Aitum
+patch checks `stream_engine_canvas_enabled` before allocating an encoder, including automatic
+starts with the main stream. Old plugins and disconnected OBS remain unconfirmed; the engine
+does not stop tall rendering on an unacknowledged setting. Errors appear beside the switch.
+Resolution, frame rate, encoder settings, destinations and hardware audio routing are preserved.
+
+
 For headroom, keep OBS **Recording Quality → Same as stream** when an OBS copy is
 needed: it shares the stream encoder. A separate HQ recording starts another NVENC
 session; the app's independent HEVC master is already a separate session.
@@ -61,7 +78,104 @@ for both canvases' frame progress, age and producer-fence timeouts. A private lo
 stream exercises encoding without broadcasting, but cannot validate remote uplink
 quality or a separate Aitum encoder unless those paths are actually exercised.
 
+### Aitum 1.2.4 shared-encoder lifetime repair
+
+`scripts/install-aitum.sh` builds pinned upstream 1.2.4 with
+`scripts/aitum-1.2.4-ownership.patch` and atomically replaces the user plugin.
+It checks that the engine is off air before installation; restart OBS off air to load it.
+`--build-only` does not install. Build dependencies: Git, patch, CMake, a C++ compiler,
+OBS development files, Qt6 and libcurl. The previous binary stays in the printed build directory.
+
+The repair takes a strong reference when reusing another output's encoder, retains the
+stopped output across queued Qt cleanup, and ignores an old output's delayed stop callback
+when a replacement output is current. Unpatched 1.2.4 stalled vertical video after stopping
+its shared replay buffer; restarting that output then crashed the GPU encoder thread.
+This is separate from NVIDIA mapping-allocation failures under browser load.
+Check actual frame/byte progress after replay stop and output restart, not just `active`.
+Keep OBS recording and Backtrack disabled for the normal engine-only recording workload.
+
+Off-air regression: with an **isolated** `Untitled` OBS profile already streaming wide
+and vertical to `127.0.0.1` receivers, and recording/Backtrack stopped, run
+`node scripts/check-aitum-lifecycle.mjs /isolated/config/obs-studio`.
+It cycles Backtrack three times and requires vertical frames and bytes to keep advancing
+after every stop. It does not start a stream or modify destinations; do not use it on
+production OBS. The separate output-restart smoke also requires reopening its receiver.
+
+
 Check: `streamctl preflight` → `obs: pass — OBS 32.2.2, plugin 0.1.0: receiving wide + tall`.
+
+## Measured workstation load
+
+2026-10-06 UTC, RTX 3070 / driver 610.57.04, repaired Aitum 1.2.4, AMD-offloaded
+offscreen CEF and private program-preview encoding, CPU private desktop-preview encoding:
+
+- Both 1080p60 canvases streamed to local RTMP receivers for about 19 minutes. Only
+  Stream Engine recorded the master; OBS recording and Backtrack remained stopped.
+- The representative workload included the drum-camera scene, verified Covers-account
+  YouTube queue playback, Apple Music playback, two ordinary Chromium windows in one
+  profile animating WebGL and playing local 1080p60 video, AUTO FX plus kaleidoscope/cascade
+  presets, and automatic USB DMX lighting. Hardware mixer FX and audio routing were untouched.
+- The final 301.5-second telemetry window averaged 59.986 engine fps and 3.09 ms GPU
+  frame time (4.44 ms maximum sampled). Engine counters increased by three dropped frames,
+  zero late frames, zero device recoveries and zero real-time allocation violations.
+  Master recording drops remained zero. OBS reported 150 rendering/encoding skips out of
+  18,091 frames (0.83%); do not add those two counters as separate losses. Each output's
+  frame counter advanced by 18,092 with zero network drops or DMA-BUF fence timeouts.
+- BAR1 use was 165–181 / 256 MiB: at least 75 MiB (29%) remained free. Ordinary VRAM use
+  was 3,915–3,955 MiB. GPU utilization averaged 41.6% (48% sampled maximum); encoder
+  utilization averaged 68.5% and briefly reached 100%. Neither number guarantees spare
+  encoder capacity. No matching NVIDIA GPU-fault or AMD reset/timeout messages appeared
+  in the kernel log during the repaired run.
+- YouTube frames and audio samples, both browser animations/videos, and Apple Music track
+  positions advanced. USB DMX sent 13,244 frames at about 44 fps with zero errors and
+  changing universe values. This verifies transport, not a visual inspection of every fixture.
+- The isolated OBS captures contained music, but the master's configured Studio24c hardware
+  return was almost silent across the five-minute sample (mean -85.5 dBFS, peak -53.9 dBFS).
+  The interface input and desk Computer/Main controls were unmuted. Playback meters and
+  OBS's desktop-monitor audio therefore do **not** certify the complete hardware-mixed
+  recording path. Confirm the 16R-to-Studio24c return with an audible short master recording
+  before a show; do not add duplicate music inputs or change hardware FX to bypass it.
+- Full CPU decoding completed without errors for the 37m15s HEVC/FLAC master and both
+  19m09s H.264/AAC loopback captures. Decodable audio tracks are not proof of audible content.
+
+This is a bounded off-air local-output test, not a full-show or remote-ingest guarantee.
+The remaining OBS skips mean it is not a zero-stutter result. The 256 MiB BAR1 limit remains.
+Detailed measurements and saved captures are in
+`~/.cache/stream-engine-gpu-stability-Dx8Z2a/`.
+
+### Vertical OFF and OBS preview comparison
+
+2026-10-06 UTC, same workstation, with the vertical switch installed. A matched workload
+kept the drum-camera scene, verified Covers playback, Apple Music, two WebGL/video browser
+windows, AUTO FX plus alternating kaleidoscope/cascade, USB DMX, and the app master running.
+Only local RTMP receivers were used; OBS recording and replay remained off.
+
+| Measured interval | OBS skipped / total frames | Encoder utilization, sampled mean |
+|---|---:|---:|
+| Both canvases, OBS preview on, 118 s | 63 / 7,080 (0.89%) | 69.6% |
+| Landscape only, OBS preview on, 298 s | 157 / 17,886 (0.88%) | 49.1% |
+| Landscape only, OBS preview off, 120 s | 2 / 7,198 (0.028%) | 50.5% |
+
+Vertical OFF reduced active NVIDIA encoder sessions from three to two and the tall render
+pass to zero; it did not materially reduce OBS skips by itself. Disabling the redundant OBS
+preview reduced the observed skip rate by about 97% in this shorter sample. Keep OBS's
+preview disabled on this workstation and use Stream Engine's program picture. The saved
+setting is `[BasicWindow] PreviewEnabled=false` in `~/.config/obs-studio/user.ini`; normal
+OBS startup was visually checked. Re-enable through OBS's **Enable Preview** button if needed.
+This changes only local display work, not broadcast resolution, FPS, bitrate, or recording quality.
+
+The real Overview switch was exercised OFF/ON while streaming and recording: vertical
+frames/bytes resumed, landscape counters kept advancing, and the master stayed in the same
+file. Recording had eight startup drops before the first checkpoint and no additional drops
+through the rest of the run. Engine recovery counters did not increase in the measured
+intervals; BAR1 use stayed below the 192 MiB guard. CPU decode checks passed for the master
+and landscape intervals spanning the OFF/ON transitions, and samples from both vertical
+captures. These were interval checks, not full-file decodes.
+
+The 0.028% result is not zero stutter or proof of whole-show/remote-ingest reliability.
+The hardware-audio caveat above still applies. Saved measurements, captures and screenshots:
+`~/.cache/stream-engine-vertical-xQOtQ7/`.
+
 
 ## Canvas color handling
 
@@ -120,6 +234,7 @@ engine is down.
 [obs]
 # socket = "~/…/obs.sock"        # default $SE_RUNTIME_DIR/obs.sock, else $XDG_RUNTIME_DIR/stream-engine/obs.sock
 stale_ms = 500                    # or "500ms"
+vertical_enabled = true           # Overview → Vertical video; false suspends tall outputs
 fallback_mode = "live"            # off | live | always
 fallback_scene = "Technical Difficulties"
 fallback_text = "Technical difficulties — back in a moment"
@@ -134,6 +249,7 @@ Hot-reloaded; a broken `[obs]` keeps the last good settings. The plugin finds th
 | Kind | Names |
 |---|---|
 | State | `obs.link`, `obs.version`, `obs.plugin.{version,installed}`, `obs.stream.{active,kbps,dropped,total,lag_ms,congestion}`, `obs.fps`, `obs.render.{ms,lagged}`, `obs.encode.skipped`, `obs.stale.{wide,tall}`, `obs.fallback.active`, `obs.scene`, `obs.output.<id>.{active,kbps,dropped,total,label,canvas,kind}` (generic output telemetry incl. Aitum's; independently active record outputs may appear, without file ownership), `health.obs` |
+| Vertical state | `obs.vertical.enabled` (desired), `obs.vertical.ready` (current preference applied, including OFF), `obs.vertical.error`, `render.vertical.enabled` (effective render/export gate) |
 | Events | `obs.stream_started`, `obs.stream_stopped`, `obs.fallback {active,canvas,canvases,scene,from/to,reason}` — timestamped on the master clock; `obs.dry_run {action}` (a stream start skipped in rehearsal) |
 | Actions | `obs.stream.start|stop`, `obs.fallback.on|off`, `obs.fallback.setup`, `obs.setup` (result or error in the engine log). In show mode `rehearsal`, `obs.stream.start` is skipped (never on air during a practice run). App recording remains independent. A mode change sent just before `obs.stream.start` counts, so "Go live" from rehearsal starts the stream. |
 | Query | `obs` (link, config, per-canvas feed stats) |

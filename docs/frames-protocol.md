@@ -124,6 +124,7 @@ One plugin connection at a time: while a connection is alive (a line within 5 s)
  "scene":"Scene","stale":{"wide":false,"tall":false},"sources":{"wide":1,"tall":1,"preview":0,"atlas":0},
  "feeds":{"wide":{"connected":true,"frames":600,"superseded":0,"fence_timeouts":0,"width":1920,"height":1080,"dmabuf":true,"goodbye":false,"age_ms":8}},
  "fallback":false,
+ "vertical":{"enabled":true,"ready":true,"error":"","revision":1},
  "outputs":[{"name":"simple_stream","id":"rtmp_output","kind":"stream","active":true,"kbps":6000.0,"dropped":0,"total":3600,"congestion":0.0,"canvas":"wide"}]}
 {"t":"event","name":"stream_started","obs_ns":123,"mono_ns":456}   // stream_started|stream_stopped
 {"t":"event","name":"scene_fallback","canvas":"Main","scene":"Technical Difficulties","from":"Scene","canvases":["wide"],"reason":"stale","obs_ns":…,"mono_ns":…}
@@ -141,10 +142,20 @@ its own capture lifecycle and app master-clock metadata, not `obs.sock`.
 ### Engine → plugin
 
 ```json
-{"t":"config","stale_ms":500,"fallback_mode":"live","fallback_scene":"Technical Difficulties","fallback_text":"…"}   // after hello and on change
+{"t":"config","stale_ms":500,"vertical_enabled":true,"vertical_revision":1,"fallback_mode":"live","fallback_scene":"Technical Difficulties","fallback_text":"…"}   // after hello and on change
 {"t":"cmd","id":7,"op":"stream.start"}   // stream.start|stream.stop|fallback.on|fallback.off|fallback.setup|setup
 {"t":"error","error":"another OBS instance is already connected to this engine"}
 ```
 
 The plugin executes `cmd` on OBS's UI thread through the frontend API and answers with `reply`.
 `fallback_mode`: `off` (manual only), `live` (only while streaming), `always`.
+
+`vertical_enabled` defaults to true. The plugin echoes `vertical_revision` in
+`status.vertical.revision`; the engine accepts shutdown confirmation only for its current
+connection/configuration revision and requested enabled state. `ready=true` means that
+the requested state is applied, including OFF; it does not mean a broadcast is active.
+On OFF, all active tall-canvas outputs and their encoders must stop before readiness.
+Only then may the engine stop tall rendering and export. Unknown/old-plugin status keeps
+rendering enabled and reports the pending or unsupported state instead of claiming success.
+The Aitum start path also consults the local `stream_engine_canvas_enabled` proc handler
+before allocating an encoder, preventing an automatic start from bypassing OFF.

@@ -266,7 +266,13 @@ impl Supervisor {
 
     /// Idle with sources to show and the restart delay over (spawn without waiting for a tick).
     fn wants_host(&self) -> bool {
-        matches!(self.state, HostState::Idle) && !self.sources.is_empty() && self.installed()
+        matches!(self.state, HostState::Idle) && !self.sources.is_empty() && self.installed() && self.driver_config_error().is_none()
+    }
+
+    /// Unlike ordinary ignored config keys, an explicit invalid GPU choice is fatal:
+    /// reverting to automatic selection could put the off-screen host back on NVIDIA.
+    fn driver_config_error(&self) -> Option<&str> {
+        self.config_errors.iter().find(|e| e.starts_with("[web] vulkan_driver ")).map(String::as_str)
     }
 
     fn log(&self, level: &str, msg: String) {
@@ -287,13 +293,14 @@ impl Supervisor {
     fn reconcile(&mut self, set: &PatchSet) {
         let config = self.ctx.config.borrow().clone();
         let (desired, settings, errors) = sources::desired(&config, set, &self.base, &self.ctx.share_dir);
+        let driver_error_changed = self.driver_config_error() != errors.iter().find(|e| e.starts_with("[web] vulkan_driver ")).map(String::as_str);
         if errors != self.config_errors {
             for e in &errors {
                 self.log("error", format!("project.toml {e}"));
             }
             self.config_errors = errors;
         }
-        if settings != self.settings {
+        if settings != self.settings || driver_error_changed {
             self.settings = settings;
             if matches!(self.state, HostState::Starting(..) | HostState::Ready(..)) {
                 self.log("info", "[web] settings changed; restarting the CEF host".into());
@@ -309,6 +316,14 @@ impl Supervisor {
                 None => self.add(spec),
                 Some(src) if src.spec != spec => self.update(&slot, spec),
                 Some(_) => {}
+            }
+        }
+        if let Some(error) = self.driver_config_error().map(str::to_owned)
+            && !matches!(self.state, HostState::Login(_))
+        {
+            for src in self.sources.values_mut() {
+                src.status = "unavailable";
+                src.set_error(error.clone(), false);
             }
         }
     }
@@ -448,6 +463,9 @@ impl Supervisor {
     // ----- host lifecycle -----------------------------------------------------------------
 
     fn spawn_host(&mut self) {
+        if self.driver_config_error().is_some() {
+            return;
+        }
         self.paths = host::find_host(&self.ctx.share_dir);
         let Some(paths) = self.paths.clone() else {
             for s in self.sources.values_mut() {
@@ -463,6 +481,7 @@ impl Supervisor {
             log_file: cef_dir.join("host.log"),
             gpu: self.settings.gpu,
             devtools_port: self.settings.devtools_port,
+            vulkan_driver: self.settings.vulkan_driver.clone(),
         };
         self.next_session += 1;
         match host::spawn(&paths, &args, self.next_session, self.events_tx.clone()) {
@@ -801,6 +820,9 @@ impl Supervisor {
     // ----- publication --------------------------------------------------------------------
 
     fn health(&self) -> Value {
+        if let Some(error) = self.driver_config_error() {
+            return Value::map().with("status", "fail").with("detail", format!("project.toml {error}; off-screen CEF host blocked until corrected"));
+        }
         let (status, detail) = match &self.state {
             HostState::Ready(_, i) => (
                 "pass",
@@ -872,6 +894,7 @@ impl Supervisor {
             .with("cef", cef)
             .with("chromium", chromium)
             .with("gpu", gpu)
+            .with("vulkan_driver", self.settings.vulkan_driver.as_ref().map(|p| Value::Str(p.display().to_string())).unwrap_or(Value::Null))
             .with("installed", self.installed())
             .with("exe", self.paths.as_ref().map(|p| Value::Str(p.exe.display().to_string())).unwrap_or(Value::Null))
             .with("restarts", Value::Int(self.restarts as i64))
@@ -897,5 +920,61 @@ impl Supervisor {
             })
             .collect();
         *self.table.lock() = Value::map().with("host", host).with("sources", Value::List(list));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use se_core::{Config, SourceFile};
+    use se_patch::{Manifest, PatchInfo};
+
+    #[test]
+    fn invalid_driver_blocks_offscreen_start_and_recovers_without_changing_login() {
+        let dir = tempfile::tempdir().unwrap();
+        let (hub, _inputs) = Hub::new(Arc::new(se_clock::Clock::new()));
+        let project = |selection: &str| {
+            Arc::new(Config::build(&[SourceFile {
+                kind: "project".into(),
+                name: "project".into(),
+                path: "project.toml".into(),
+                table: format!("schema = 1\n[web]\n{selection}").parse().unwrap(),
+            }]))
+        };
+        let (config_tx, config_rx) = watch::channel(project("vulkan_driver = false"));
+        let ctx = EngineCtx {
+            hub,
+            db: se_store::Db::memory().unwrap(),
+            project_root: dir.path().to_path_buf(),
+            data_dir: dir.path().to_path_buf(),
+            share_dir: dir.path().to_path_buf(),
+            config: config_rx,
+            http: "127.0.0.1:7870".parse().unwrap(),
+            dev: true,
+        };
+        let (events_tx, _events_rx) = mpsc::unbounded_channel();
+        let mut sup = Supervisor::new(ctx, Arc::new(Auth::new(None)), Arc::new(Mutex::new(Value::map())), events_tx);
+        // Installed paths are enough to exercise the start decision; no subprocess is run.
+        sup.paths = Some(HostPaths { exe: dir.path().join("host"), runtime_dir: dir.path().to_path_buf() });
+        let manifest = Manifest::parse(&dir.path().join("patches/test"), "kind = \"web\"").unwrap();
+        let patches = BTreeMap::from([("test".into(), PatchInfo { manifest: Arc::new(manifest), enabled: true, generation: 1 })]);
+        for selection in ["vulkan_driver = false", "vulkan_driver = ''", "vulkan_driver = 'relative.json'", "vulkan_driver = '/nonexistent/stream-engine-test-icd.json'"] {
+            config_tx.send_replace(project(selection));
+            sup.reconcile(&patches);
+            assert!(!sup.wants_host(), "{selection}: invalid GPU selection must never start the default host");
+            assert_eq!(sup.health().get_path("status").and_then(Value::as_str), Some("fail"));
+            assert!(sup.sources["patch.test"].error.contains("vulkan_driver"));
+            sup.spawn_host();
+            assert_eq!(sup.next_session, 0, "the periodic start path must also reject invalid selection");
+        }
+        config_tx.send_replace(project(""));
+        sup.reconcile(&patches);
+        assert!(sup.wants_host(), "removing the invalid setting restores automatic startup");
+        assert!(sup.driver_config_error().is_none());
+
+        sup.state = HostState::Login(123);
+        config_tx.send_replace(project("vulkan_driver = 'relative.json'"));
+        sup.reconcile(&patches);
+        assert!(matches!(sup.state, HostState::Login(123)), "driver selection must never restart the headed sign-in window");
     }
 }

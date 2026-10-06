@@ -2707,7 +2707,7 @@ impl Core {
         let sgen = self.signals.generation;
         let mode = self.mode_str().to_string();
         let program = self.state.get(addr::PROGRAM).and_then(Value::as_str).unwrap_or("").to_string();
-        let mut mods: HashMap<usize, Vec<Mod>> = HashMap::new();
+        let mut mods: BTreeMap<usize, Vec<Mod>> = BTreeMap::new();
         let mut bindings = std::mem::take(&mut self.bindings);
         for b in bindings.iter_mut() {
             if b.targets_gen != sgen_state {
@@ -2773,16 +2773,17 @@ impl Core {
             }
         }
         self.bindings = bindings;
-        // clear mods on params that no longer have active bindings
+        // Merge ordered targets with the state ids: untouched params need no keyed lookup.
+        // Keep the ascending traversal so dirty params and published changes retain their order.
+        let mut mods = mods.into_iter().peekable();
         let n = self.state.len();
         for i in 0..n {
-            match mods.remove(&i) {
-                Some(m) => self.state.set_mods(i, m),
-                None => {
-                    if !self.state.param(i).mods.is_empty() {
-                        self.state.set_mods(i, Vec::new());
-                    }
-                }
+            if mods.peek().is_some_and(|(target, _)| *target == i) {
+                let (_, m) = mods.next().expect("peeked binding target");
+                self.state.set_mods(i, m);
+            } else if !self.state.param(i).mods.is_empty() {
+                // Clear mods on params that no longer have active bindings.
+                self.state.set_mods(i, Vec::new());
             }
         }
     }

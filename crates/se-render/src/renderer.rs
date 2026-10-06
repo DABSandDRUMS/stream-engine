@@ -295,6 +295,7 @@ pub struct Renderer {
     arena: Arena,
     binds: BindCache,
     canvases: Vec<CanvasRt>,
+    vertical_enabled: bool,
     sources: Vec<Src>,
     patches: Vec<PatchRt>,
     freeze_photos: FreezePhotos,
@@ -384,6 +385,7 @@ impl Renderer {
             arena,
             binds: BindCache::default(),
             canvases: Vec::new(),
+            vertical_enabled: true,
             sources: Vec::new(),
             patches: Vec::new(),
             freeze_photos: FreezePhotos::new(stats.freeze_photos.clone()),
@@ -701,6 +703,7 @@ impl Renderer {
         self.frame += 1;
         let plan = self.plan.clone();
         self.res.update(snap, &plan.state, &plan.signals);
+        self.vertical_enabled = self.res.bool(snap, plan.vertical_enabled, true);
         {
             let _p = se_alloc::Pause::new();
             let _ = self.gpu.device.poll(wgpu::PollType::Poll);
@@ -727,6 +730,7 @@ impl Renderer {
         let want_preview = demand(PREVIEW).any();
         let atlas_period = 1_000_000_000 / plan.canvases[ATLAS].fps.max(1) as u64;
         let want_atlas = demand(ATLAS).any() && now.saturating_sub(self.canvases[ATLAS].last_render) + 2_000_000 >= atlas_period;
+        let wanted = [true, self.vertical_enabled, want_preview, want_atlas];
         let tr = scene::transition_state(&plan, snap, &self.res, now);
         let preview_scene = self.res.str(snap, plan.show.preview).and_then(|s| plan.scene_index.get(s).copied());
 
@@ -738,7 +742,7 @@ impl Renderer {
             let cv = &mut self.canvases[c];
             cv.items.clear();
             cv.items_b.clear();
-            if c == PREVIEW && !want_preview {
+            if !wanted[c] {
                 continue;
             }
             let layout = plan.canvases[c].layout;
@@ -775,7 +779,7 @@ impl Renderer {
         }
         for o in &plan.overlays {
             for c in [WIDE, TALL, PREVIEW] {
-                if o.canvases[c] && (c != PREVIEW || want_preview) {
+                if o.canvases[c] && wanted[c] {
                     self.sources[o.source as usize].used |= 1 << plan.canvases[c].layout;
                 }
             }
@@ -811,7 +815,7 @@ impl Renderer {
         let flash_scale = self.flash_scale();
         let passes = [(WIDE, P_WIDE), (TALL, P_TALL), (PREVIEW, P_PREVIEW)];
         for (c, pass) in passes {
-            if c == PREVIEW && !want_preview {
+            if !wanted[c] {
                 continue;
             }
             if let Some(ts) = &mut self.ts {
@@ -840,12 +844,7 @@ impl Renderer {
         self.presents.clear();
         self.barrier_images.clear();
         for c in [WIDE, TALL, PREVIEW, ATLAS] {
-            let rendered = match c {
-                PREVIEW => want_preview,
-                ATLAS => want_atlas,
-                _ => true,
-            };
-            if rendered {
+            if wanted[c] {
                 self.export_canvas(&mut enc, c, now);
             }
         }
@@ -907,6 +906,9 @@ impl Renderer {
         }
         let mut s: f32 = 1.0;
         for c in [WIDE, TALL] {
+            if c == TALL && !self.vertical_enabled {
+                continue;
+            }
             if let Some(f) = &self.canvases[c].flash {
                 s = s.min(f.detector.effect_scale());
             }
@@ -920,6 +922,9 @@ impl Renderer {
         }
         let mut k: f32 = 1.0;
         for c in [WIDE, TALL] {
+            if c == TALL && !self.vertical_enabled {
+                continue;
+            }
             if let Some(f) = &self.canvases[c].flash {
                 k = k.min(f.detector.max_step());
             }
@@ -941,6 +946,9 @@ impl Renderer {
                 }
                 f.readback.release_read(i);
                 f.detector.observe(&cells, f.times[i]);
+            }
+            if c == TALL && !self.vertical_enabled {
+                continue;
             }
             let s = f.detector.state();
             limit = limit.max(s.limit);
@@ -1625,7 +1633,9 @@ impl Renderer {
                     k += 1;
                     continue;
                 }
-                if let Some(b) = frames.acquire(c as u32, RingKind::Shm) {
+                // Drain already submitted readbacks without publishing a disabled canvas.
+                // Keep its rings intact: consumers may still hold leases across the toggle.
+                if (c != TALL || self.vertical_enabled) && let Some(b) = frames.acquire(c as u32, RingKind::Shm) {
                     let (w, h) = (cv.size[0] as usize * 4, cv.size[1] as usize);
                     let row = shm.row as usize;
                     if let Ok(view) = shm.readback.buffers[i].slice(..).get_mapped_range() {

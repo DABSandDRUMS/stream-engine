@@ -6,7 +6,7 @@ use se_api::auth::Scope;
 use se_core::Config;
 use se_patch::{Kind, Layer, PatchSet};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Video/audio slot of the YouTube player page (§13.3).
 pub const YOUTUBE_SLOT: &str = "youtube";
@@ -64,11 +64,13 @@ pub struct HostSettings {
     pub gpu: bool,
     /// Chromium remote debugging on 127.0.0.1 (DevTools for off-screen pages).
     pub devtools_port: Option<u16>,
+    /// Explicit Vulkan ICD manifest for the off-screen GPU host, never the sign-in window.
+    pub vulkan_driver: Option<PathBuf>,
 }
 
 impl Default for HostSettings {
     fn default() -> Self {
-        HostSettings { gpu: true, devtools_port: None }
+        HostSettings { gpu: true, devtools_port: None, vulkan_driver: None }
     }
 }
 
@@ -80,7 +82,8 @@ struct YoutubeSettings {
     size: Option<(u32, u32)>,
 }
 
-/// Parse `[web]`; problems are reported and the offending key ignored.
+/// Parse `[web]`; problems are reported. An invalid explicit driver blocks the off-screen
+/// host rather than discarding the selection and reverting to the default GPU.
 fn web_settings(section: Option<&toml::Value>, errors: &mut Vec<String>) -> (HostSettings, YoutubeSettings) {
     let mut host = HostSettings::default();
     let mut yt = YoutubeSettings::default();
@@ -93,6 +96,14 @@ fn web_settings(section: Option<&toml::Value>, errors: &mut Vec<String>) -> (Hos
         match (k.as_str(), v) {
             ("gpu", toml::Value::Boolean(b)) => host.gpu = *b,
             ("devtools_port", toml::Value::Integer(p)) if (1..=65535).contains(p) => host.devtools_port = Some(*p as u16),
+            ("vulkan_driver", toml::Value::String(s)) => {
+                let path = PathBuf::from(s);
+                if let Err(e) = crate::host::validate_vulkan_driver(&path) {
+                    errors.push(e.to_string());
+                }
+                host.vulkan_driver = Some(path);
+            }
+            ("vulkan_driver", _) => errors.push("[web] vulkan_driver must be a nonempty absolute ICD manifest path string".into()),
             ("youtube", toml::Value::Table(y)) => {
                 for (k, v) in y {
                     match (k.as_str(), v) {
@@ -111,7 +122,7 @@ fn web_settings(section: Option<&toml::Value>, errors: &mut Vec<String>) -> (Hos
                     }
                 }
             }
-            (k, _) => errors.push(format!("[web] {k}: unknown key or bad value (gpu = bool, devtools_port = 1–65535, [web.youtube])")),
+            (k, _) => errors.push(format!("[web] {k}: unknown key or bad value (gpu = bool, devtools_port = 1–65535, vulkan_driver = absolute ICD manifest path, [web.youtube])")),
         }
     }
     (host, yt)
@@ -373,7 +384,7 @@ mod tests {
         let over = format!("{PROJECT}[web]\ngpu = false\ndevtools_port = 9333\n[web.youtube]\nurl = \"/web/player2.html\"\nfps = 60\nsize = [1280, 720]\n");
         let (d, host, errs) = desired(&config(&over, &scenes), &PatchSet::new(), base, dir.path());
         assert!(errs.is_empty(), "{errs:?}");
-        assert_eq!(host, HostSettings { gpu: false, devtools_port: Some(9333) });
+        assert_eq!(host, HostSettings { gpu: false, devtools_port: Some(9333), ..HostSettings::default() });
         let yt = &d[YOUTUBE_SLOT];
         assert_eq!((yt.url.as_str(), yt.with_token, yt.fps, yt.size), ("http://127.0.0.1:7870/web/player2.html", true, 60, (1280, 720)));
 
@@ -385,6 +396,59 @@ mod tests {
         let (d, _, errs) = desired(&config(&off, &scenes), &PatchSet::new(), base, dir.path());
         assert!(d.is_empty());
         assert_eq!(errs.len(), 1, "bad fps reported: {errs:?}");
+    }
+
+    #[test]
+    fn explicit_vulkan_driver_is_validated_without_discarding_the_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let driver = dir.path().join("driver with spaces.json");
+        std::fs::write(&driver, r#"{"file_format_version":"1.0.0","ICD":{"library_path":"libvulkan_radeon.so","api_version":"1.3.0"}}"#).unwrap();
+        let settings = |value: toml::Value| {
+            let mut table = toml::map::Map::new();
+            table.insert("vulkan_driver".into(), value);
+            let mut errors = Vec::new();
+            let (host, _) = web_settings(Some(&toml::Value::Table(table)), &mut errors);
+            (host, errors)
+        };
+        let (selected, errors) = settings(toml::Value::String(driver.display().to_string()));
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(selected.vulkan_driver.as_deref(), Some(driver.as_path()));
+        assert_ne!(selected, HostSettings::default(), "selection changes must trigger the existing host restart");
+
+        for path in [
+            PathBuf::new(),
+            PathBuf::from("   "),
+            PathBuf::from("relative.json"),
+            dir.path().to_path_buf(),
+            dir.path().join("missing.json"),
+            dir.path().join("first.json:second.json"),
+        ] {
+            let (host, errors) = settings(toml::Value::String(path.display().to_string()));
+            assert_eq!(host.vulkan_driver.as_deref(), Some(path.as_path()), "invalid selection must not revert to the default GPU");
+            assert_eq!(errors.len(), 1, "{path:?}: {errors:?}");
+            assert!(errors[0].starts_with("[web] vulkan_driver"), "{errors:?}");
+        }
+        for value in [toml::Value::Boolean(false), toml::Value::Integer(0), toml::Value::Array(Vec::new())] {
+            let (_, errors) = settings(value);
+            assert_eq!(errors.len(), 1);
+            assert!(errors[0].starts_with("[web] vulkan_driver"), "{errors:?}");
+        }
+        for manifest in [
+            "",
+            "not JSON",
+            "{}",
+            r#"{"file_format_version":"1.0.0","ICD":{"library_path":"","api_version":"1.3.0"}}"#,
+        ] {
+            std::fs::write(&driver, manifest).unwrap();
+            let (host, errors) = settings(toml::Value::String(driver.display().to_string()));
+            assert_eq!(host, selected);
+            assert_eq!(errors.len(), 1, "an existing non-manifest file must not be accepted: {manifest:?}");
+            assert!(errors[0].starts_with("[web] vulkan_driver"), "{errors:?}");
+        }
+        std::fs::remove_file(&driver).unwrap();
+        let (missing, errors) = settings(toml::Value::String(driver.display().to_string()));
+        assert_eq!(missing, selected, "driver disappearance must not clear the selected GPU");
+        assert_eq!(errors.len(), 1, "a disappeared manifest must become a visible config failure");
     }
 
     #[test]

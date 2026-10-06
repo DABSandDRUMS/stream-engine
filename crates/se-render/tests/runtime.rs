@@ -451,6 +451,163 @@ fn native_fit_live_windows_clip_pixels_before_node_and_group_fx() {
 }
 
 #[test]
+fn vertical_gate_skips_tall_scene_sources_and_effects_without_changing_wide() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(root, "project.toml", &format!(
+        "{PROJECT}\n[render.canvas_fx]\ntall=[{{name='fade_to_black',amount=0.5}}]\n[render.output_fx]\ntall=[{{name='fade_to_black',amount=0.5}}]\n[overlays.badge]\ncanvases=['tall']\n"
+    ));
+    write_file(
+        root,
+        "scenes/s.toml",
+        "[canvas.wide]\nnodes=[{src='shared'}]\n[canvas.tall]\nfx=[{name='fade_to_black',amount=0.5}]\nnodes=[{src='shared',rect=[0,0,0.5,1]},{src='exclusive',rect=[0.5,0,0.5,1],fx=[{name='fade_to_black',amount=0.5}]}]\n",
+    );
+    write_file(root, "sources/exclusive.toml", "kind='camera'\nfx=[{name='fade_to_black',amount=0.5}]\n");
+    write_file(root, "patches/badge/patch.toml", "kind='shader'\nlayer='overlay'\nparams.level={default=1.0}\n");
+    write_file(root, "patches/badge/main.wgsl", &probe("0.0, 1.0, 0.0"));
+    let mut h = Harness::unfused(root);
+    let mut shared = h.video("shared");
+    let mut exclusive = h.video("exclusive");
+    shared.write(16, 16, 64, PixelFormat::Rgba8, 1, &[255, 0, 0, 255].repeat(16 * 16));
+    exclusive.write(16, 16, 64, PixelFormat::Rgba8, 1, &vec![255; 16 * 16 * 4]);
+    h.set("show.scene.program", "s");
+    h.set("render.vertical.enabled", false);
+    h.frame();
+    assert!(h.r.final_texture(TALL).is_none(), "disabled tall never allocates a render target");
+    assert_eq!(h.stats.canvas_seq[TALL].load(Ordering::Relaxed), 0, "no tall export work");
+    assert_eq!(h.stats.view().fx_passes, 0, "no tall-only source, node, layout, canvas or output FX");
+    let used = |h: &Harness, name: &str| {
+        let i = h.plan.source_index[name] as usize;
+        h.stats.used()[i / 64] & (1 << (i % 64)) != 0
+    };
+    assert!(used(&h, "shared"), "shared sources still serve wide");
+    assert!(!used(&h, "exclusive"), "tall-only video and its source FX are unused");
+    assert!(!used(&h, "patch.badge"), "tall-only overlays are unused");
+    assert_eq!(px(&h.read(WIDE), 160, 90), [255, 0, 0, 255]);
+
+    // Missing state defaults to enabled, just as at boot before the OBS owner publishes it.
+    h.unset("render.vertical.enabled");
+    h.frame();
+    assert_eq!(h.stats.canvas_seq[TALL].load(Ordering::Relaxed), 1);
+    assert!(h.stats.view().fx_passes >= 5, "all tall-only effect stages return");
+    assert!(used(&h, "exclusive") && used(&h, "patch.badge"));
+    let tall = h.read(TALL);
+    assert_eq!((tall.0, tall.1), (180, 320), "quality and resolution unchanged");
+    assert_eq!(px(&h.read(WIDE), 160, 90), [255, 0, 0, 255]);
+
+    h.set("render.vertical.enabled", false);
+    shared.write(16, 16, 64, PixelFormat::Rgba8, 2, &[0, 0, 255, 255].repeat(16 * 16));
+    h.frame();
+    assert_eq!(h.read(TALL), tall, "disabled tall is not rendered even after source changes");
+    assert_eq!(h.stats.canvas_seq[TALL].load(Ordering::Relaxed), 1);
+    assert_eq!(h.stats.view().fx_passes, 0);
+    assert_eq!(px(&h.read(WIDE), 160, 90), [0, 0, 255, 255], "wide keeps consuming fresh frames");
+    h.set("render.vertical.enabled", true);
+    h.frame();
+    assert_eq!(h.stats.canvas_seq[TALL].load(Ordering::Relaxed), 2);
+    assert!(h.stats.view().fx_passes >= 5);
+    assert_eq!(px(&h.read(WIDE), 160, 90), [0, 0, 255, 255]);
+}
+
+#[test]
+fn vertical_gate_suppresses_pending_exports_and_preserves_consumer_leases() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_file(root, "project.toml", PROJECT);
+    write_file(
+        root,
+        "scenes/s.toml",
+        "[canvas.wide]\nnodes=[{src='cam'}]\n[canvas.tall]\nnodes=[{src='cam'}]\n",
+    );
+    let sock = root.join("frames.sock");
+    let server = Arc::new(FramesServer::start(&sock).unwrap());
+    let mut client = FramesClient::connect(&sock).unwrap();
+    client.hello(se_frames::proto::CLIENT_UI, 0b1111, false).unwrap();
+    for c in [WIDE, TALL, PREVIEW, ATLAS] {
+        wait_demand(&server, c as u32, false, true);
+    }
+    let mut h = Harness::with_frames(root, Some(server));
+    h.set("show.scene.program", "s");
+    h.set("show.scene.preview", "s");
+    let mut camera = h.video("cam");
+    camera.write(16, 16, 64, PixelFormat::Rgba8, 1, &[255, 0, 0, 255].repeat(16 * 16));
+    let mut generations = [None; 4];
+    let mut maps: [Vec<ShmView>; 4] = std::array::from_fn(|_| Vec::new());
+    let mut sizes = [(0u32, 0u32); 4];
+    let mut held = None;
+    let mut step = |h: &mut Harness, frame: u64, enabled: bool| {
+        h.frame_at(T0 + frame * 16_666_667);
+        h.r.wait_idle();
+        let mut received = [0u32; 4];
+        while let Some(m) = client.recv(Duration::from_millis(10)).unwrap() {
+            match m {
+                ClientMsg::Canvas { msg, fds } => {
+                    let c = msg.canvas as usize;
+                    assert!(generations[c].is_none(), "toggle must not replace canvas {c}'s ring");
+                    generations[c] = Some(msg.generation);
+                    sizes[c] = (msg.width, msg.height);
+                    maps[c] = fds.iter().map(|fd| ShmView::map(std::os::fd::AsFd::as_fd(fd), msg.min_buffer_len() as usize).unwrap()).collect();
+                }
+                ClientMsg::Frame { msg, fence } => {
+                    let c = msg.canvas as usize;
+                    assert!(c != TALL || enabled, "disabled tall exports no frames, including pending readbacks");
+                    assert_eq!(Some(msg.generation), generations[c]);
+                    assert!(fence.is_none());
+                    received[c] += 1;
+                    if c == TALL && held.is_none() {
+                        held = Some((msg.canvas, msg.buffer, msg.seq));
+                    } else {
+                        client.release(msg.canvas, msg.buffer, msg.seq).unwrap();
+                    }
+                }
+                ClientMsg::Goodbye(g) => panic!("unexpected goodbye {g:?}"),
+            }
+        }
+        if let Some((_, b, _)) = held {
+            let (w, height) = sizes[TALL];
+            let i = (((height / 2) * w + w / 2) * 4) as usize;
+            assert_eq!(&maps[TALL][b as usize].as_slice()[i..i + 4], &[255, 0, 0, 255], "held tall buffer is never overwritten");
+        }
+        received
+    };
+    let mut before = [0u32; 4];
+    for f in 0..6 {
+        let n = step(&mut h, f, true);
+        for c in 0..4 { before[c] += n[c]; }
+    }
+    assert!(before.iter().all(|n| *n > 0), "all canvases export before disable: {before:?}");
+    let tall_seq = h.stats.canvas_seq[TALL].load(Ordering::Relaxed);
+    let wide_seq = h.stats.canvas_seq[WIDE].load(Ordering::Relaxed);
+    h.set("render.vertical.enabled", false);
+    camera.write(16, 16, 64, PixelFormat::Rgba8, 2, &[0, 0, 255, 255].repeat(16 * 16));
+    let mut disabled = [0u32; 4];
+    for f in 6..12 {
+        let n = step(&mut h, f, false);
+        for c in 0..4 { disabled[c] += n[c]; }
+    }
+    assert_eq!(disabled[TALL], 0);
+    for c in [WIDE, PREVIEW, ATLAS] {
+        assert!(disabled[c] > 0, "canvas {c} exports independently of tall");
+    }
+    assert_eq!(h.stats.canvas_seq[TALL].load(Ordering::Relaxed), tall_seq);
+    assert_eq!(h.stats.canvas_seq[WIDE].load(Ordering::Relaxed), wide_seq + 6);
+    assert_eq!(px(&h.read(WIDE), 160, 90), [0, 0, 255, 255]);
+    assert_eq!(px(&h.read(PREVIEW), 80, 45), [0, 0, 255, 255]);
+    h.set("render.vertical.enabled", true);
+    let mut resumed = [0u32; 4];
+    for f in 12..18 {
+        let n = step(&mut h, f, true);
+        for c in 0..4 { resumed[c] += n[c]; }
+    }
+    assert!(resumed.iter().all(|n| *n > 0), "all canvases resume on existing rings: {resumed:?}");
+    assert_eq!(h.stats.canvas_seq[TALL].load(Ordering::Relaxed), tall_seq + 6);
+    assert_eq!(px(&h.read(TALL), 90, 160), [0, 0, 255, 255], "tall resumes with fresh content at original quality");
+    drop(step);
+    let (c, b, seq) = held.expect("a consumer lease survives disable and enable");
+    client.release(c, b, seq).unwrap();
+}
+
+#[test]
 fn frames_sock_exports_dmabuf_and_shm() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
@@ -604,5 +761,12 @@ fn steady_state_frames_do_not_allocate() {
         let after = h.stats.alloc_violations.load(Ordering::Relaxed);
         assert_eq!(after - before, 0, "{kind}: render thread allocated {} times in 120 steady-state frames", after - before);
         assert!(h.stats.view().frame_ms < 50.0);
+        for (enabled, range) in [(false, 150..180), (true, 180..210)] {
+            h.set("render.vertical.enabled", enabled);
+            let before = h.stats.alloc_violations.load(Ordering::Relaxed);
+            run(&mut h, &mut a, &mut b, range);
+            let after = h.stats.alloc_violations.load(Ordering::Relaxed);
+            assert_eq!(after - before, 0, "{kind}: vertical gate {enabled} allocated on the render thread");
+        }
     }
 }

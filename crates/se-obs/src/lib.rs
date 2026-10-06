@@ -68,6 +68,7 @@ type Pending = HashMap<u64, (String, oneshot::Sender<Result<serde_json::Value, S
 
 struct Inner {
     cfg: ObsConfig,
+    vertical_revision: u64,
     conn: Option<Conn>,
     next_cmd: u64,
     pending: Pending,
@@ -101,6 +102,7 @@ pub async fn start(ctx: EngineCtx) -> anyhow::Result<Arc<Obs>> {
         ctx: ctx.clone(),
         inner: Mutex::new(Inner {
             cfg,
+            vertical_revision: 0,
             conn: None,
             next_cmd: 1,
             pending: HashMap::new(),
@@ -151,6 +153,10 @@ impl Obs {
         let big = [0.0, 1e12];
         let decl: Vec<(&str, Meta)> = vec![
             ("obs.link", ro(Meta::boolean(false), "OBS plugin connected")),
+            ("obs.vertical.enabled", ro(Meta::boolean(true), "Saved vertical video preference")),
+            ("obs.vertical.ready", ro(Meta::boolean(false), "Vertical encoder gate confirmed applied")),
+            ("obs.vertical.error", string_meta("Vertical output control error")),
+            ("render.vertical.enabled", ro(Meta::boolean(true), "Render tall until its encoder shutdown is confirmed")),
             ("obs.version", string_meta("OBS version")),
             ("obs.plugin.version", string_meta("stream-engine OBS plugin version")),
             ("obs.plugin.installed", ro(Meta::boolean(false), "stream-engine OBS plugin installed on this machine")),
@@ -213,6 +219,20 @@ impl Obs {
     }
 
     fn update_health(&self, g: &mut Inner) {
+        let enabled = g.cfg.vertical_enabled;
+        let vertical = g.status.as_ref().and_then(|s| s.vertical.as_ref());
+        let ready = vertical.is_some_and(|v| v.enabled == enabled && v.ready && v.error.is_empty());
+        let error = match vertical {
+            Some(v) if v.enabled == enabled => v.error.as_str(),
+            None if g.status.is_some() && g.conn.as_ref().and_then(|c| c.hello.as_ref())
+                .and_then(|h| h.config.as_ref()).and_then(|c| c.get("vertical_enabled")).is_none()
+                => "Update the stream-engine OBS plugin to control vertical video",
+            _ => "",
+        }.to_string();
+        self.set(g, "obs.vertical.enabled", enabled);
+        self.set(g, "obs.vertical.ready", ready);
+        self.set(g, "obs.vertical.error", error);
+        self.set(g, "render.vertical.enabled", enabled || !ready);
         let (status, detail) = health(g);
         self.set(g, "health.obs", Value::map().with("status", status).with("detail", detail));
     }
@@ -234,9 +254,11 @@ impl Obs {
         g.conn.as_ref().is_some_and(|c| c.tx.send(m.line()).is_ok())
     }
 
-    fn config_msg(cfg: &ObsConfig) -> EngineMsg {
+    fn config_msg(cfg: &ObsConfig, vertical_revision: u64) -> EngineMsg {
         EngineMsg::Config {
             stale_ms: cfg.stale_ms,
+            vertical_enabled: cfg.vertical_enabled,
+            vertical_revision,
             fallback_mode: cfg.fallback_mode.as_str().into(),
             fallback_scene: cfg.fallback_scene.clone(),
             fallback_text: cfg.fallback_text.clone(),
@@ -329,7 +351,8 @@ impl Obs {
     }
 
     fn on_hello(&self, g: &mut Inner, h: Hello) {
-        let msg = Self::config_msg(&g.cfg);
+        g.vertical_revision += 1;
+        let msg = Self::config_msg(&g.cfg, g.vertical_revision);
         self.ctx.hub.log("info", TARGET, format!("OBS {} connected (plugin {}, sources: {})", h.obs, h.plugin, h.canvases.join(", ")));
         self.set(g, "obs.link", true);
         self.set(g, "obs.version", h.obs.clone());
@@ -343,7 +366,10 @@ impl Obs {
         self.update_health(g);
     }
 
-    fn on_status(&self, g: &mut Inner, s: Status) {
+    fn on_status(&self, g: &mut Inner, mut s: Status) {
+        if s.vertical.as_ref().is_some_and(|v| v.revision != g.vertical_revision) {
+            s.vertical = None;
+        }
         self.set(g, "obs.stream.active", s.streaming);
         self.set(g, "obs.stream.kbps", round1(s.kbps));
         self.set(g, "obs.stream.dropped", s.dropped);
@@ -478,8 +504,14 @@ impl Obs {
             return;
         }
         let socket_changed = g.cfg.socket != cfg.socket;
-        let msg = Self::config_msg(&cfg);
+        g.vertical_revision += 1;
+        let msg = Self::config_msg(&cfg, g.vertical_revision);
         g.cfg = cfg.clone();
+        // Do not accept an old acknowledgment when the operator toggles twice quickly.
+        if let Some(status) = g.status.as_mut() {
+            status.vertical = None;
+        }
+        self.update_health(&mut g);
         if g.conn.as_ref().is_some_and(|c| c.hello.is_some()) {
             self.send(&g, &msg);
         }
@@ -502,6 +534,7 @@ impl Obs {
             .with("connected", hello.is_some())
             .with("socket", g.cfg.socket.to_string_lossy().to_string())
             .with("stale_ms", g.cfg.stale_ms as i64)
+            .with("vertical_enabled", g.cfg.vertical_enabled)
             .with("fallback_mode", g.cfg.fallback_mode.as_str())
             .with("fallback_scene", g.cfg.fallback_scene.clone())
             .with("installed", g.installed);
@@ -551,7 +584,21 @@ fn health(g: &Inner) -> (&'static str, String) {
     };
     let mut status = "pass";
     let mut problems = Vec::new();
+    if let Some(v) = &s.vertical {
+        if v.enabled == g.cfg.vertical_enabled && !v.error.is_empty() {
+            return ("fail", format!("Vertical video: {}", v.error));
+        }
+    }
+    if !g.cfg.vertical_enabled && !s.vertical.as_ref().is_some_and(|v| !v.enabled && v.ready) {
+        status = "warn";
+        problems.push("Vertical disable pending: waiting for encoder shutdown confirmation".into());
+    }
     for canvas in ["wide", "tall"] {
+        if canvas == "tall" && !g.cfg.vertical_enabled
+            && s.vertical.as_ref().is_some_and(|v| !v.enabled && v.ready && v.error.is_empty())
+        {
+            continue;
+        }
         if s.sources.get(canvas).copied().unwrap_or(0) == 0 {
             problems.push(format!("no `stream-engine: {canvas}` source in OBS"));
             if status == "pass" {
@@ -562,7 +609,12 @@ fn health(g: &Inner) -> (&'static str, String) {
             status = "fail";
         }
     }
-    if problems.is_empty() { (status, format!("OBS {}, plugin {}: receiving wide + tall", hello.obs, hello.plugin)) } else { (status, problems.join("; ")) }
+    if problems.is_empty() {
+        let canvases = if g.cfg.vertical_enabled { "wide + tall" } else { "wide; vertical video disabled" };
+        (status, format!("OBS {}, plugin {}: receiving {canvases}", hello.obs, hello.plugin))
+    } else {
+        (status, problems.join("; "))
+    }
 }
 
 // ---- socket ------------------------------------------------------------------------------

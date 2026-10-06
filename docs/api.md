@@ -137,6 +137,12 @@ texture_ref, trigger, list, map`; `merge` is `ltp` or `htp`.
 The resolver builds explanation layers only for `explain`, not on normal ticks. Exact `get`
 uses the address index; wildcard matching iterates segments without allocating temporary
 paths. Animation, expiry, HTP/LTP precedence and wildcard ordering are unchanged.
+Binding updates merge ordered target IDs with the state tree instead of hashing every parameter ID
+on each tick; binding declaration order, change publication order, and clearing disabled or
+removed bindings are preserved. Snapshot publication caches which IDs belong to lighting and
+rebuilds that membership when addresses change. Override priorities are still recomputed for
+every snapshot, so release, expiry, and priority changes remain visible without changing the
+snapshot cadence or mutating a snapshot already held by a reader.
 
 **`trace` record kinds:** `event`, `rule`, `command`, `change`, `preset`, `error`, `policy`.
 

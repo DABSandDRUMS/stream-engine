@@ -59,6 +59,17 @@ pub struct Status {
     pub feeds: BTreeMap<String, serde_json::Value>,
     pub fallback: bool,
     pub outputs: Vec<OutputStatus>,
+    pub vertical: Option<VerticalStatus>,
+}
+
+/// Confirmed encoder gate, distinct from the saved desired setting.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct VerticalStatus {
+    pub revision: u64,
+    pub enabled: bool,
+    pub ready: bool,
+    pub error: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -109,6 +120,8 @@ pub struct Reply {
 pub enum EngineMsg {
     Config {
         stale_ms: u32,
+        vertical_enabled: bool,
+        vertical_revision: u64,
         fallback_mode: String,
         fallback_scene: String,
         fallback_text: String,
@@ -167,7 +180,11 @@ mod tests {
     fn engine_messages_are_single_lines() {
         let l = EngineMsg::Cmd { id: 7, op: "stream.start".into() }.line();
         assert_eq!(l, "{\"t\":\"cmd\",\"id\":7,\"op\":\"stream.start\"}\n");
-        let c = EngineMsg::Config { stale_ms: 500, fallback_mode: "live".into(), fallback_scene: "A\nB".into(), fallback_text: "x".into() }.line();
+        let c = EngineMsg::Config {
+            stale_ms: 500, vertical_enabled: true, fallback_mode: "live".into(),
+            vertical_revision: 1,
+            fallback_scene: "A\nB".into(), fallback_text: "x".into(),
+        }.line();
         assert_eq!(c.matches('\n').count(), 1);
     }
 

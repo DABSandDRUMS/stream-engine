@@ -420,33 +420,60 @@ fn answer(core: &mut Core, q: CoreQuery) -> CoreReply {
     }
 }
 
-fn publish_snapshot(hub: &Hub, core: &Core, cache: &mut (u64, Arc<HashMap<String, usize>>, u64, Arc<Vec<String>>, Arc<HashMap<String, usize>>)) {
+struct SnapshotCache {
+    state_generation: u64,
+    index: Arc<HashMap<String, usize>>,
+    lighting: Vec<usize>,
+    signal_generation: u64,
+    signal_names: Arc<Vec<String>>,
+    signal_index: Arc<HashMap<String, usize>>,
+}
+
+impl Default for SnapshotCache {
+    fn default() -> Self {
+        Self {
+            state_generation: u64::MAX,
+            index: Arc::new(HashMap::new()),
+            lighting: Vec::new(),
+            signal_generation: u64::MAX,
+            signal_names: Arc::new(Vec::new()),
+            signal_index: Arc::new(HashMap::new()),
+        }
+    }
+}
+
+fn publish_snapshot(hub: &Hub, core: &Core, cache: &mut SnapshotCache) {
     let st = core.state();
-    if cache.0 != st.generation || cache.1.is_empty() && !st.is_empty() {
-        cache.0 = st.generation;
-        cache.1 = Arc::new(st.params().iter().enumerate().map(|(i, p)| (p.addr.clone(), i)).collect());
+    if cache.state_generation != st.generation || cache.index.is_empty() && !st.is_empty() {
+        cache.state_generation = st.generation;
+        cache.lighting.clear();
+        cache.index = Arc::new(st.params().iter().enumerate().map(|(i, p)| {
+            if p.addr.starts_with("lights.") {
+                cache.lighting.push(i);
+            }
+            (p.addr.clone(), i)
+        }).collect());
     }
     let sg = core.signals();
-    if cache.2 != sg.generation || cache.3.len() != sg.names().len() {
-        cache.2 = sg.generation;
-        cache.3 = Arc::new(sg.names().to_vec());
-        cache.4 = Arc::new(sg.names().iter().enumerate().map(|(i, n)| (n.clone(), i)).collect());
+    if cache.signal_generation != sg.generation || cache.signal_names.len() != sg.names().len() {
+        cache.signal_generation = sg.generation;
+        cache.signal_names = Arc::new(sg.names().to_vec());
+        cache.signal_index = Arc::new(sg.names().iter().enumerate().map(|(i, n)| (n.clone(), i)).collect());
+    }
+    // Membership follows the state index; override priorities remain fresh every publication.
+    let mut priorities = vec![0; st.len()];
+    for &i in &cache.lighting {
+        priorities[i] = st.param(i).overrides.iter().map(|o| o.priority).max().unwrap_or(0);
     }
     hub.snapshot.store(Arc::new(Snapshot {
         tick: core.tick_index(),
         now: core.now(),
         generation: st.generation,
-        index: cache.1.clone(),
+        index: cache.index.clone(),
         values: st.params().iter().map(|p| p.resolved.clone()).collect(),
-        priorities: st.params().iter().map(|p| {
-            if p.addr.starts_with("lights.") {
-                p.overrides.iter().map(|o| o.priority).max().unwrap_or(0)
-            } else {
-                0
-            }
-        }).collect(),
-        signal_names: cache.3.clone(),
-        signal_index: cache.4.clone(),
+        priorities,
+        signal_names: cache.signal_names.clone(),
+        signal_index: cache.signal_index.clone(),
         signals: sg.values().to_vec(),
     }));
 }
@@ -488,7 +515,7 @@ fn route_outputs(hub: &Hub, outs: Vec<Output>) {
 /// Run the core on the current thread until shutdown.
 pub fn run_core(mut core: Core, hub: Arc<Hub>, rx: crossbeam_channel::Receiver<CoreMsg>, mut hooks: RunnerHooks) {
     let period = core.period();
-    let mut cache = (u64::MAX, Arc::new(HashMap::new()), u64::MAX, Arc::new(Vec::new()), Arc::new(HashMap::new()));
+    let mut cache = SnapshotCache::default();
     let mut last_snap_tick = 0u64;
     publish_snapshot(&hub, &core, &mut cache);
     route_outputs(&hub, core.drain_outputs());
@@ -554,6 +581,115 @@ pub fn any_match(patterns: &[String], s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn set_snapshot_override(core: &mut Core, address: &str, key: &str, priority: u16) {
+        core.submit(Input::Command {
+            cmd: Command::new(Origin::System, Op::Set { address: address.into(), value: Value::Float(0.5) })
+                .with_key(key)
+                .with_priority(Some(priority)),
+        });
+    }
+
+    fn assert_snapshot_priorities(snap: &Snapshot, core: &Core) {
+        assert_eq!(snap.priorities.len(), snap.values.len());
+        assert_eq!(snap.priorities.len(), core.state().len());
+        for (i, p) in core.state().params().iter().enumerate() {
+            let expected = if p.addr.starts_with("lights.") {
+                p.overrides.iter().map(|o| o.priority).max().unwrap_or(0)
+            } else {
+                0
+            };
+            assert_eq!(snap.id(&p.addr), Some(i));
+            assert_eq!(snap.priorities[i], expected, "{}", p.addr);
+        }
+    }
+
+    #[test]
+    fn snapshot_priorities_follow_override_changes_without_mutating_old_snapshots() {
+        let (hub, _rx) = Hub::new(Arc::new(se_clock::Clock::new()));
+        let mut core = Core::new(se_core::config::Config::default(), 0);
+        for address in ["lights.fixture.dimmer", "test.level"] {
+            core.submit(Input::Declare { address: address.into(), meta: Meta::float(0.0, [0.0, 1.0]) });
+        }
+        set_snapshot_override(&mut core, "lights.fixture.dimmer", "low", 200);
+        set_snapshot_override(&mut core, "lights.fixture.dimmer", "high", 400);
+        set_snapshot_override(&mut core, "test.level", "nonlight", 500);
+        core.step();
+        let mut cache = SnapshotCache::default();
+        publish_snapshot(&hub, &core, &mut cache);
+        let first = hub.snapshot.load_full();
+        assert_snapshot_priorities(&first, &core);
+        let light = first.id("lights.fixture.dimmer").unwrap();
+        assert_eq!(first.priorities[light], 400);
+        assert_eq!(first.priorities[first.id("test.level").unwrap()], 0);
+
+        core.submit(Input::Command {
+            cmd: Command::new(Origin::System, Op::Release { address: "lights.fixture.dimmer".into() })
+                .with_key("high")
+                .with_priority(Some(400)),
+        });
+        core.step();
+        publish_snapshot(&hub, &core, &mut cache);
+        let second = hub.snapshot.load_full();
+        assert_snapshot_priorities(&second, &core);
+        assert_eq!(second.generation, first.generation);
+        assert_eq!(second.priorities[light], 200);
+        assert_eq!(first.priorities[light], 400);
+
+        set_snapshot_override(&mut core, "lights.fixture.dimmer", "low", 300);
+        core.step();
+        publish_snapshot(&hub, &core, &mut cache);
+        let third = hub.snapshot.load_full();
+        assert_snapshot_priorities(&third, &core);
+        assert_eq!(third.priorities[light], 300);
+        core.submit(Input::Command {
+            cmd: Command::new(Origin::System, Op::Release { address: "lights.fixture.dimmer".into() })
+                .with_key("low")
+                .with_priority(Some(300)),
+        });
+        core.step();
+        publish_snapshot(&hub, &core, &mut cache);
+        let fourth = hub.snapshot.load_full();
+        assert_snapshot_priorities(&fourth, &core);
+        assert_eq!(fourth.priorities[light], 0);
+        assert_eq!(third.priorities[light], 300);
+    }
+
+    #[test]
+    fn snapshot_lighting_indices_rebuild_after_declarations_and_removal() {
+        let (hub, _rx) = Hub::new(Arc::new(se_clock::Clock::new()));
+        let mut core = Core::new(se_core::config::Config::default(), 0);
+        core.submit(Input::Declare { address: "lights.first.dimmer".into(), meta: Meta::float(0.0, [0.0, 1.0]) });
+        set_snapshot_override(&mut core, "lights.first.dimmer", "first", 200);
+        core.step();
+        let mut cache = SnapshotCache::default();
+        publish_snapshot(&hub, &core, &mut cache);
+        let first = hub.snapshot.load_full();
+
+        core.submit(Input::Declare { address: "lights.second.dimmer".into(), meta: Meta::float(0.0, [0.0, 1.0]) });
+        set_snapshot_override(&mut core, "lights.second.dimmer", "second", 300);
+        core.step();
+        publish_snapshot(&hub, &core, &mut cache);
+        let second = hub.snapshot.load_full();
+        assert_snapshot_priorities(&second, &core);
+        assert_ne!(second.generation, first.generation);
+        assert_eq!(second.priorities[second.id("lights.second.dimmer").unwrap()], 300);
+        assert!(first.id("lights.second.dimmer").is_none());
+
+        let before_removal = second.id("lights.second.dimmer").unwrap();
+        core.submit(Input::Remove { prefix: "lights.first".into() });
+        core.step();
+        publish_snapshot(&hub, &core, &mut cache);
+        let third = hub.snapshot.load_full();
+        assert_snapshot_priorities(&third, &core);
+        assert_ne!(third.generation, second.generation);
+        assert!(third.id("lights.first.dimmer").is_none());
+        let after_removal = third.id("lights.second.dimmer").unwrap();
+        assert!(after_removal < before_removal, "removal compacts state indices");
+        assert_eq!(third.priorities[after_removal], 300);
+        assert_eq!(second.priorities[before_removal], 300);
+        assert_eq!(first.priorities[first.id("lights.first.dimmer").unwrap()], 200);
+    }
 
 
     #[tokio::test]

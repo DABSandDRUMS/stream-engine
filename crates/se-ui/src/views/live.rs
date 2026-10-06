@@ -10,6 +10,7 @@ use se_proto::{Op, Value};
 use se_ui_kit::theme::{font_bold, font_medium, font_mono, font_semibold, mix, radius, spacing, type_scale};
 use se_ui_kit::widgets::{self, Kind, LedState, Size, icon};
 
+use std::time::{Duration, Instant};
 /// Which program canvases the On-air monitor shows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum OnAirView {
@@ -157,6 +158,8 @@ fn on_air(app: &mut App, ui: &mut egui::Ui, geo: &Geometry) {
         });
     });
     ui.add_space(spacing::S);
+    vertical_control(app, ui);
+    ui.add_space(spacing::S);
     let hz = app.program_hz();
     let h = air_w * 9.0 / 16.0;
     match app.show.on_air {
@@ -179,6 +182,127 @@ fn on_air(app: &mut App, ui: &mut egui::Ui, geo: &Geometry) {
             });
         }
     }
+}
+
+#[derive(Clone, Default)]
+struct VerticalControl {
+    confirm_off: bool,
+    saving: Option<(bool, Instant)>,
+    save_error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VerticalPhase {
+    EngineDisconnected,
+    ObsDisconnected,
+    Error,
+    Pending,
+    On,
+    Off,
+}
+
+fn vertical_phase(engine: bool, obs: bool, error: bool, ready: bool, desired: bool, rendering: bool) -> VerticalPhase {
+    if !engine {
+        VerticalPhase::EngineDisconnected
+    } else if error {
+        VerticalPhase::Error
+    } else if !obs {
+        VerticalPhase::ObsDisconnected
+    } else if !ready || desired != rendering {
+        VerticalPhase::Pending
+    } else if desired {
+        VerticalPhase::On
+    } else {
+        VerticalPhase::Off
+    }
+}
+
+fn vertical_control(app: &mut App, ui: &mut egui::Ui) {
+    let t = app.t.clone();
+    let id = ui.make_persistent_id("vertical-output-control");
+    let mut control = ui.data_mut(|d| std::mem::take(d.get_temp_mut_or_default::<VerticalControl>(id)));
+    let desired = app.m.get("obs.vertical.enabled").is_none_or(Value::truthy);
+    let rendering = app.m.get("render.vertical.enabled").is_none_or(Value::truthy);
+    let now = Instant::now();
+    if let Some((want, at)) = control.saving {
+        if app.m.connected && app.m.has("obs.vertical.enabled") && desired == want {
+            control.saving = None;
+        } else if !app.m.connected || now.duration_since(at) > Duration::from_secs(10) {
+            control.saving = None;
+            control.save_error = Some("The engine has not confirmed the saved preference. Reconnect or check the project write error before trying again.".into());
+        }
+    }
+    let error = app.m.str("obs.vertical.error").to_string();
+    let phase = vertical_phase(app.m.connected, app.m.b("obs.link"), !error.is_empty(), app.m.b("obs.vertical.ready"), desired, rendering);
+    let mut want = control.saving.map_or(desired, |(value, _)| value);
+    let mut save = None;
+    ui.add_enabled_ui(app.m.connected && control.saving.is_none(), |ui| {
+        if widgets::toggle_row(
+            ui,
+            &t,
+            "Vertical video",
+            "Off stops the vertical broadcast, encoder and canvas work. The main stream and Stream Engine recording stay untouched.",
+            &mut want,
+        )
+        .changed()
+        {
+            // Unknown/offline integrations can still have live viewers. Ask before saving,
+            // not after an optimistic local flip or an OBS command.
+            let may_be_live = !app.m.connected
+                || !app.m.b("obs.link")
+                || !app.m.has("show.mode")
+                || app.m.str("show.mode") != "offline"
+                || app.m.b("twitch.stream.live")
+                || crate::views::status::on_air(app);
+            if !want && may_be_live {
+                control.confirm_off = true;
+            } else {
+                control.confirm_off = false;
+                save = Some(want);
+            }
+        }
+    });
+    if control.confirm_off {
+        if widgets::callout(
+            ui,
+            &t,
+            widgets::Tone::Danger,
+            icon::LIVE,
+            "Stop vertical video for viewers?",
+            "A stream may be live. This ends the vertical broadcast and stops its encoder. Main streaming and Stream Engine recording continue.",
+            Some("Turn vertical video off"),
+        ) && app.m.connected
+        {
+            save = Some(false);
+            control.confirm_off = false;
+        } else if widgets::button_ex(ui, &t, None, "Cancel", Kind::Ghost, Size::Small, 0.0, true).clicked() {
+            control.confirm_off = false;
+        }
+    }
+    if let Some(enabled) = save {
+        app.m.action("project.write", Value::map().with("path", "project.toml").with("set", Value::map().with("obs.vertical_enabled", enabled)));
+        control.saving = Some((enabled, now));
+        control.save_error = None;
+    }
+    let (text, color) = if control.saving.is_some() {
+        ("Saving vertical preference… Output change is not confirmed yet.", t.yellow)
+    } else {
+        match phase {
+            VerticalPhase::EngineDisconnected => ("Engine disconnected. Reconnect to save; vertical output state is unknown.", t.yellow),
+            VerticalPhase::ObsDisconnected => ("OBS disconnected. Preference can be saved, but encoder state is not confirmed.", t.yellow),
+            VerticalPhase::Error => (error.as_str(), t.bright_red),
+            VerticalPhase::Pending if desired => ("On requested · waiting for OBS to restore vertical availability.", t.yellow),
+            VerticalPhase::Pending => ("Off requested · waiting for confirmation that vertical encoders have stopped.", t.yellow),
+            VerticalPhase::On => ("On · vertical video is available.", t.green),
+            VerticalPhase::Off => ("Off · vertical encoders and canvas work are stopped.", t.text_dim),
+        }
+    };
+    ui.label(RichText::new(text).size(type_scale::SMALL).color(color));
+    if let Some(error) = &control.save_error {
+        ui.label(RichText::new(error).size(type_scale::SMALL).color(t.bright_red));
+    }
+    widgets::hint(ui, &t, "On restores vertical availability and can resume the output stopped by this switch while the main stream continues. Resolution, quality and audio settings are preserved.");
+    ui.data_mut(|d| d.insert_temp(id, control));
 }
 
 fn up_next(app: &mut App, ui: &mut egui::Ui, next_w: f32) {
@@ -545,6 +669,23 @@ fn source_chip(app: &mut App, ui: &mut egui::Ui, source: &mix::SourceChannel, w:
 mod tests {
     use super::*;
     use egui_kittest::{Harness, kittest::Queryable};
+
+    #[test]
+    fn vertical_off_requires_applied_encoder_and_renderer_confirmation() {
+        assert_eq!(vertical_phase(true, true, false, false, false, true), VerticalPhase::Pending);
+        assert_eq!(vertical_phase(true, true, false, true, false, true), VerticalPhase::Pending);
+        assert_eq!(vertical_phase(true, true, false, true, false, false), VerticalPhase::Off);
+        assert_eq!(vertical_phase(true, true, false, true, true, true), VerticalPhase::On);
+        assert_eq!(vertical_phase(true, true, false, true, true, false), VerticalPhase::Pending);
+    }
+
+    #[test]
+    fn vertical_disconnect_and_error_never_claim_applied_state() {
+        assert_eq!(vertical_phase(false, true, false, true, false, false), VerticalPhase::EngineDisconnected);
+        assert_eq!(vertical_phase(true, false, false, true, false, false), VerticalPhase::ObsDisconnected);
+        assert_eq!(vertical_phase(true, true, true, true, false, false), VerticalPhase::Error);
+        assert_eq!(vertical_phase(true, false, true, false, true, true), VerticalPhase::Error);
+    }
 
     #[test]
     fn compact_rail_keeps_chat_and_composer_above_queue() {

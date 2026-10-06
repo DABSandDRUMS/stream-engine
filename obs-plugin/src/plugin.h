@@ -26,6 +26,8 @@ enum se_fallback_mode {
 
 struct se_config {
 	uint32_t stale_ms;
+	bool vertical_enabled;
+	uint64_t vertical_revision;
 	enum se_fallback_mode fallback_mode;
 	char fallback_scene[256];
 	char fallback_text[512];
@@ -120,6 +122,11 @@ void se_fallback_reset(void);
 json_t *se_setup_sources(void);
 /* Name of the OBS canvas a video output renders (main = "Main"); any thread. */
 void se_canvas_kind_for_video(video_t *video, char *out, size_t len);
+
+/* vertical.c: control thread, reset after joining that thread on shutdown. */
+void se_vertical_tick(bool enabled, uint64_t now);
+json_t *se_vertical_status(void);
+void se_vertical_reset(void);
 
 /* gl-fence.c (graphics thread) */
 enum se_gl_fence_status { SE_GL_FENCE_PENDING, SE_GL_FENCE_COMPLETE, SE_GL_FENCE_FAILED };

@@ -285,6 +285,14 @@ pub fn warnings(app: &App) -> Vec<Warning> {
         }
     }
     for c in ["wide", "tall"] {
+        if c == "tall"
+            && app.m.has("obs.vertical.enabled")
+            && !app.m.b("obs.vertical.enabled")
+            && app.m.b("obs.vertical.ready")
+            && app.m.get("render.vertical.enabled").is_some_and(|v| !v.truthy())
+        {
+            continue;
+        }
         // only meaningful while OBS is connected (otherwise "OBS isn't open" says it all)
         if app.m.b("obs.link") && app.m.b(&format!("obs.stale.{c}")) {
             w.push(Warning {

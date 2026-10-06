@@ -119,7 +119,9 @@ static bool find_item(obs_scene_t *scene, obs_sceneitem_t *item, void *param)
 	bool stale;
 	if (se_source_lookup(src, &canvas, &stale)) {
 		f->kinds |= 1u << canvas;
-		if (!f->stale_only || stale)
+		struct se_config cfg;
+		se_config_copy(&cfg);
+		if (!f->stale_only || (stale && (canvas != SE_CANVAS_TALL || cfg.vertical_enabled)))
 			f->found = true;
 	} else if (obs_sceneitem_is_group(item) && f->depth < MAX_DEPTH) {
 		f->depth++;

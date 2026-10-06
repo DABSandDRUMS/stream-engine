@@ -456,6 +456,75 @@ fn pickup_fader_follows_external_changes_without_jumps() {
     assert!((f(&c, "mixer.16r.ch.3.fader") - 0.28).abs() < 1e-6, "picked up again");
 }
 
+#[test]
+fn binding_target_merge_preserves_layer_and_publication_order_through_disable_remove_and_reload() {
+    let mut cfg = Config::build(&[file(
+        "bindings",
+        "ordered",
+        "[[binding]]\nname='replace'\ntarget='test.bound.*'\nsignal='music.kick'\nmode='replace'\nrange=[0,10]\n\
+         [[binding]]\nname='multiply'\ntarget='test.bound.*'\nsignal='music.kick'\nmode='multiply'\nrange=[0,4]\n\
+         [[binding]]\nname='add'\ntarget='test.bound.*'\nsignal='music.kick'\nmode='add'\nrange=[0,2]",
+    )]);
+    assert!(cfg.errors.is_empty(), "{:?}", cfg.errors);
+    let mut c = Core::new(cfg.clone(), 0);
+    // State ids intentionally differ from address order, with an unbound gap between them.
+    for (address, base) in [("test.bound.z", 10.0), ("test.gap", 7.0), ("test.bound.a", 20.0)] {
+        c.submit(Input::Declare { address: address.into(), meta: Meta::float(base, [0.0, 100.0]) });
+    }
+    c.submit(Input::Signal { name: "music.kick".into(), value: 0.5 });
+    c.step();
+    let changed = |out: Vec<Output>| -> Vec<String> {
+        out.into_iter().filter_map(|o| match o { Output::Changes(v) => Some(v), _ => None })
+            .flatten().filter_map(|(a, _)| a.starts_with("test.bound.").then_some(a)).collect()
+    };
+    assert_eq!(changed(c.drain_outputs()), ["test.bound.z", "test.bound.a"]);
+    for address in ["test.bound.z", "test.bound.a"] {
+        assert_eq!(f(&c, address), 11.0, "replace, multiply, then add in declaration order");
+        let p = c.explain(address).unwrap();
+        let bindings: Vec<_> = p.layers.iter().filter(|l| l.kind == "binding").map(|l| l.source.as_str()).collect();
+        assert_eq!(bindings, ["replace", "multiply", "add"]);
+    }
+    assert_eq!(f(&c, "test.gap"), 7.0, "an id without bindings is untouched");
+    let enable = |name: &str, enabled: bool| Input::Command {
+        cmd: Command::new(Origin::Ui, Op::Action {
+            name: if enabled { "binding.enable" } else { "binding.disable" }.into(),
+            args: Value::map().with("name", name),
+        }),
+    };
+    for name in ["replace", "multiply", "add"] { c.submit(enable(name, false)); }
+    c.step();
+    assert_eq!(changed(c.drain_outputs()), ["test.bound.z", "test.bound.a"]);
+    assert_eq!(f(&c, "test.bound.z"), 10.0);
+    assert_eq!(f(&c, "test.bound.a"), 20.0);
+    assert!(c.explain("test.bound.a").unwrap().layers.iter().all(|l| l.kind != "binding"));
+
+    // Removing earlier ids and adding a new target must rebuild wildcard caches.
+    c.submit(Input::Remove { prefix: "test.bound.z".into() });
+    c.submit(Input::Remove { prefix: "test.gap".into() });
+    c.submit(Input::Declare { address: "test.bound.z".into(), meta: Meta::float(30.0, [0.0, 100.0]) });
+    for name in ["replace", "multiply", "add"] { c.submit(enable(name, true)); }
+    c.step();
+    assert_eq!(changed(c.drain_outputs()), ["test.bound.a", "test.bound.z"]);
+    assert_eq!(f(&c, "test.bound.a"), 11.0);
+    assert_eq!(f(&c, "test.bound.z"), 11.0);
+    assert!(c.get("test.gap").is_none());
+
+    c.submit(Input::Declare { address: "test.reloaded.x".into(), meta: Meta::float(3.0, [0.0, 100.0]) });
+    c.step();
+    c.drain_outputs();
+    for binding in &mut cfg.bindings { binding.target = "test.reloaded.*".into(); }
+    c.apply_config(cfg);
+    c.step();
+    c.drain_outputs();
+    assert_eq!(f(&c, "test.bound.a"), 20.0, "reload retires the old target mods");
+    assert_eq!(f(&c, "test.bound.z"), 30.0);
+    assert_eq!(f(&c, "test.reloaded.x"), 11.0, "reload resolves the new targets");
+    c.apply_config(Config::default());
+    c.step();
+    assert_eq!(f(&c, "test.reloaded.x"), 3.0, "removing all bindings clears the final mods");
+    assert!(c.explain("test.reloaded.x").unwrap().layers.iter().all(|l| l.kind != "binding"));
+}
+
 
 #[test]
 fn wildcard_addresses_in_commands_hit_every_match() {

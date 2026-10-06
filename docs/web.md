@@ -30,7 +30,7 @@ IPC thread ◀─ events + memfds (SCM_RIGHTS) ───── on_paint → seal
   single-producer/single-consumer ring and moved into the `hub.audio` slot (interleaved `f32`,
   2 ch, 48 kHz, 0.5 s buffer). With an audio handler Chromium plays nothing to the speakers.
 - **Chromium setup:** `--ozone-platform=headless` (no display server needed), WebGL and
-  compositing on the RTX 3070 through ANGLE on Vulkan (`--use-angle=vulkan`), with
+  compositing through ANGLE on Vulkan (`--use-angle=vulkan`), with
   `--enable-features=Vulkan,VulkanFromANGLE` so the compositor and ANGLE share Vulkan.
   ANGLE alone fails to import decoded native video buffers (`MailboxVideoFrameConverter`),
   resetting the GPU process and stopping video; WebGL-only smoke checks miss this failure.
@@ -100,6 +100,7 @@ host binary takes effect on its next launch; activate an upgrade only during an 
 [web]
 gpu = true              # false = software rendering (--disable-gpu), e.g. to rule out GPU issues
 devtools_port = 9222    # optional: Chromium remote debugging on 127.0.0.1 (restarts the host)
+# vulkan_driver = "/usr/share/vulkan/icd.d/radeon_icd.json" # optional offscreen iGPU
 
 [web.youtube]
 enabled = true
@@ -107,6 +108,15 @@ url = "/web/player.html"  # path on the engine (token added) or an absolute URL 
 fps = 30
 size = [1280, 720]
 ```
+
+`vulkan_driver` selects one absolute, readable Vulkan ICD JSON manifest for the offscreen
+host. On a hybrid workstation this can move browser graphics to the AMD iGPU while
+the engine renderer and OBS stay on NVIDIA. Changing it restarts the host: do this
+only off air. It does not change the headed sign-in window's driver selection.
+Invalid selections fail visibly instead of silently falling back to the default GPU.
+`streamctl query web` reports the selected path; verify actual hardware and video
+playback before adopting a driver. This is not a desktop Chromium GPU override.
+
 
 ## Status, queries, actions
 
@@ -118,7 +128,7 @@ size = [1280, 720]
 | `web.<slot>.crashes` | renderer crashes since the engine started |
 | `web.<slot>.status` | `starting · loading · running · error · crashed · restarting · paused · unavailable` |
 | `web.<slot>.error` | same text as `patch.<id>.error` (also for `youtube`) |
-| query `web` (`streamctl query web`) | `{host: {state, pid, cef, chromium, gpu, installed, exe, restarts, health}, sources: [{slot, url (token redacted), size, frame_size, fps, target_fps, status, error, crashes, frames, latency_ms, audio_samples}]}` |
+| query `web` (`streamctl query web`) | `{host: {state, pid, cef, chromium, gpu, vulkan_driver, installed, exe, restarts, health}, sources: [{slot, url (token redacted), size, frame_size, fps, target_fps, status, error, crashes, frames, latency_ms, audio_samples}]}` |
 | `web.reload [slot]` | reload one source (or all), bypassing the cache — `streamctl do web.reload patch.aurora` |
 | `web.login [url]` | open the sign-in window (below) |
 
