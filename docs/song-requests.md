@@ -2,8 +2,8 @@
 
 `se-songs` implements PLAN §13: YouTube lookup with a cache/library and a quota ledger, the
 request queue with a UI-editable policy, and control of the player page.
-**Overview → Songs** is the live controller: open/close requests, pause/resume, skip,
-approve/reject, and hover an upcoming song to move it up/down or remove it.
+**Overview → Songs** is the live controller: open/close requests, play/pause, skip,
+approve/reject, click a queued song to start it, or hover it to move it up/down or remove it.
 **Community → Song requests** adds manual requests, policy, library, history, and
 **YouTube & web** setup. Both surfaces control the same queue; no separate localhost
 controller or StreamElements account is needed.
@@ -192,6 +192,17 @@ streamctl do queue.policy.set max_duration_s=360
 
 This setting is saved in the runtime DB and applies without an engine restart.
 
+For this stream, the recently-played cooldown is **disabled for everyone**, including
+ordinary viewers, moderators, and the broadcaster:
+
+```sh
+streamctl do queue.policy.set no_repeat_min=0
+```
+
+Zero disables the repeat window and is saved across restarts. Songs may be requested again
+immediately after playing; the separate check for a song already playing or waiting in the
+queue still applies.
+
 | Group | Fields |
 |---|---|
 | Access | `open`, `min_role`, `min_follow_days` (below sub; uses `twitch.follow_age`), `cost_bits`, `cost_points` |
@@ -207,6 +218,20 @@ explicit-lyrics flag.
 
 ## Control surface
 
+**Play** is available even when nothing is currently playing and songs are waiting.
+A paused queue does not start new requests automatically: press **Play** to start the
+first waiting song and resume automatic progression. In either native queue view,
+click a waiting song's title to play that specific request immediately; the full view
+also has a Play arrow on each row. Selecting a song clears the queue pause, skips a
+current song if necessary, and preserves the relative order of the other waiting songs.
+An entry that has already left the waiting list cannot accidentally skip another song.
+
+In the native queue sidebar, the **Restart song from beginning** arrow beside Play/Pause
+seeks the current song to `0:00`. **Community → Song requests → Now playing** has a labeled
+**Restart** button with the same behavior. Neither changes the current request or the next
+song; a paused song stays paused until you press Play. To request a finished song again,
+use **Played → Again** or submit another request; the repeat cooldown is disabled as above.
+
 Actions (chat commands in `commands/songs.toml` map onto these; mod-only ones require a mod
 actor when they come from chat):
 
@@ -217,6 +242,7 @@ actor when they come from chat):
 | `queue.remove` | `id` \| `index` (1-based upcoming) \| `user` [+ `last=true`]; requesters may remove their own |
 | `queue.approve` · `queue.reject` | `id` (`12` or `"#12"`), `reason?` |
 | `queue.reorder` | `id`, `to` (1-based) |
+| `queue.play` | `id` — start that upcoming request now and resume playback; mod/operator only, approved embedded account required |
 | `queue.ban_user` · `queue.unban_user` | `user` |
 | `queue.ban_song` | `id?` (entry id or video id/link; default: current) · `queue.unban_song {video}` |
 | `queue.library.reset` | `video?` — forget "can't be played here" marks (one video, or all) |

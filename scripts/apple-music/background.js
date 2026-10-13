@@ -3,7 +3,7 @@
 const NATIVE_HOST = "com.stream_engine.apple_music";
 const APPLE_ORIGIN = "https://music.apple.com";
 const RECONNECT_ALARM = "apple-music-native-reconnect";
-const ACTIONS = new Set(["play", "pause", "next", "previous", "volume_up", "volume_down", "status"]);
+const ACTIONS = new Set(["play", "pause", "toggle", "next", "previous", "volume_up", "volume_down", "status"]);
 let nativePort = null;
 let requests = Promise.resolve();
 
@@ -165,18 +165,20 @@ async function controlMusicKit(action) {
     }
 
     const before = readStatus();
+    // Resolve toggles from MusicKit here, not the engine's five-second status cache.
+    const playbackAction = action === "toggle" ? (before.playing ? "pause" : "play") : action;
     let requestedVolume;
-    if (action === "play" || action === "pause") {
-      const shouldPlay = action === "play";
+    if (playbackAction === "play" || playbackAction === "pause") {
+      const shouldPlay = playbackAction === "play";
       if (before.playing !== shouldPlay) {
         if (shouldPlay && !player.nowPlayingItem && !music.nowPlayingItem) {
           throw new Error("Choose a song or album in Apple Music first, then press Play.");
         }
-        const owner = typeof music[action] === "function" ? music : player;
-        if (typeof owner[action] !== "function") {
-          throw new Error(`MusicKit.${action} is unavailable.`);
+        const owner = typeof music[playbackAction] === "function" ? music : player;
+        if (typeof owner[playbackAction] !== "function") {
+          throw new Error(`MusicKit.${playbackAction} is unavailable.`);
         }
-        await callWithDeadline(owner, action, shouldPlay);
+        await callWithDeadline(owner, playbackAction, shouldPlay);
       }
     } else if (action === "next" || action === "previous") {
       if (!player.nowPlayingItem && !music.nowPlayingItem) {
@@ -198,8 +200,8 @@ async function controlMusicKit(action) {
     }
 
     const status = readStatus();
-    if ((action === "play" && !status.playing) || (action === "pause" && status.playing)) {
-      throw new Error(`MusicKit.${action} returned without reaching the requested playback state.`);
+    if ((playbackAction === "play" && !status.playing) || (playbackAction === "pause" && status.playing)) {
+      throw new Error(`MusicKit.${playbackAction} returned without reaching the requested playback state.`);
     }
     if (requestedVolume !== undefined && Math.abs(status.volume - requestedVolume) > 0.000001) {
       throw new Error(`MusicKit volume did not reach ${requestedVolume}; actual volume is ${status.volume}.`);
@@ -225,7 +227,7 @@ async function respondToRequest(message, port) {
       throw new Error("Native request must contain a non-empty string id.");
     }
     if (!ACTIONS.has(message?.action)) {
-      throw new Error("Unsupported action; expected play, pause, next, previous, volume_up, volume_down, or status.");
+      throw new Error("Unsupported action; expected play, pause, toggle, next, previous, volume_up, volume_down, or status.");
     }
     const tab = await selectAppleTab();
     // A disconnected host's queued commands are discarded, not replayed on its replacement.

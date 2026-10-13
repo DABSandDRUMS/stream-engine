@@ -32,6 +32,12 @@ next, with scene, light and sound controls. **Edit** is where you set everything
 stream; its sidebar contains the detailed pages below. **Clipping** is for recording, past
 streams and clips. The sidebar only appears under **Edit**.
 
+The **Overview** chat box sends as your broadcaster account, not as an automated bot reply.
+Press **Enter** or click **Send**; commands such as `!song` and `!sr` work as they do in Twitch
+chat. The box keeps keyboard focus when messages arrive, so you can keep typing. Twitch must
+be connected, but the channel can be off air. In rehearsal, Twitch sends remain dry runs.
+Automated bot replies still defuse command prefixes to prevent reply loops.
+
 | Edit page | What it's for | Tabs |
 |---|---|---|
 | **Scenes** | Arrange sources in scenes and choose their look. | **Scenes**, **Effects**, **Transitions** |
@@ -521,6 +527,14 @@ logical aim is not a surveyed safe physical target; commissioning is still requi
 **Auto sequence** is separate from AUTO SHOW: start **Drum cycle** to rotate camera scenes;
 turning automatic lights on alone does not start scene cycling.
 
+**Thunder Kiss '65 sirens:** the drum-stream project follows the official WhiteZombieVEVO
+music video (`yPNFVj-pISU`), whose captions mark the sirens at **1:43.061–1:52.070**.
+Every play triggers opposing red/blue banks during that region, overriding normal/manual
+colors without switching off **AUTO LIGHTS**. Main stays off while the cop DMX takes over;
+the underlying look continues and returns after a 400 ms release. Pause, buffering and skip
+release the override; resuming or seeking into the region activates it again. Blackout,
+panic, brightness and output safety still apply. The album/Topic upload does not trigger it.
+
 Flash safety is always on: never more than 3 flashes a second. A yellow **Softening flashes
 now** badge means some fast flashes are being softened to keep them safe for viewers. That's
 normal during strobe effects.
@@ -545,8 +559,12 @@ Viewers ask for songs by typing `!sr` and a song name in chat. The requested vid
 YouTube player on the duo scene, with a now-playing card beside it.
 
 Overview's right-hand column keeps chat above the lower pane. The **Songs**, **Activity**, and
-**Mod** tabs select only that lower pane; **Songs** is selected by default. Both panes scroll
-independently, and switching tabs does not resize or hide chat:
+**Mod** tabs select only that lower pane; **Songs** is selected by default. The column reserves
+its own viewport, so long chat messages and window resizing cannot let the main controls draw
+over it. On narrow windows, the main controls scroll horizontally as well as vertically.
+Chat also reserves room for its search, latest message and composer when warning banners
+reduce the window's usable height; the preferred pane split cannot shrink that reservation.
+Both panes scroll independently, and switching tabs does not resize or hide chat:
 
 - The switch at the top turns requests on (**Taking requests**) or off (**Requests closed**).
 - **Now playing** shows the song and who asked for it, with pause and skip buttons.

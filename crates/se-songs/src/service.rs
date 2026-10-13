@@ -108,9 +108,15 @@ fn declare(hub: &Hub) {
     hub.declare("song.current.artist", ro(Meta::string(""), "Current song: artist (MusicBrainz, else read from the video title); empty when unknown"));
     hub.declare(
         "song.current.genres",
-        ro(Meta { ty: ValueType::List, default: Value::List(Vec::new()), ..Default::default() }, "Current song: genres, lowercase (MusicBrainz); empty when unknown"),
+        ro(
+            Meta { ty: ValueType::List, default: Value::List(Vec::new()), ..Default::default() },
+            "Current song: genres, lowercase (MusicBrainz); empty when unknown",
+        ),
     );
-    hub.declare("song.current.year", ro(Meta { ty: ValueType::Any, default: Value::Null, ..Default::default() }, "Current song: first-release year (int) or null"));
+    hub.declare(
+        "song.current.year",
+        ro(Meta { ty: ValueType::Any, default: Value::Null, ..Default::default() }, "Current song: first-release year (int) or null"),
+    );
     for h in ["health.youtube", "health.player"] {
         hub.declare(h, ro(Meta { ty: ValueType::Map, ..Default::default() }, "song requests"));
     }
@@ -204,8 +210,14 @@ pub async fn spawn(ctx: EngineCtx, secrets: Arc<dyn SecretStore>) -> Result<Hand
         meta_pending: HashSet::new(),
         meta_worker,
     };
-    let restored: Vec<(String, String, String)> =
-        songs.queue.current.iter().chain(&songs.queue.upcoming).chain(&songs.queue.pending).map(|e| (e.video.clone(), e.title.clone(), e.channel.clone())).collect();
+    let restored: Vec<(String, String, String)> = songs
+        .queue
+        .current
+        .iter()
+        .chain(&songs.queue.upcoming)
+        .chain(&songs.queue.pending)
+        .map(|e| (e.video.clone(), e.title.clone(), e.channel.clone()))
+        .collect();
     for (video, title, channel) in restored {
         songs.ensure_meta(&video, &title, &channel);
     }
@@ -753,6 +765,7 @@ impl Songs {
         let modonly = matches!(
             name.as_str(),
             "queue.skip"
+                | "queue.play"
                 | "queue.approve"
                 | "queue.reject"
                 | "queue.reorder"
@@ -776,7 +789,7 @@ impl Songs {
             self.hub.log("warn", "songs", format!("{name}: not permitted for {}", c.actor.as_ref().map(|a| a.name.as_str()).unwrap_or("?")));
             return;
         }
-        if matches!(name.as_str(), "queue.open" | "queue.resume") && !self.player.account_verified(Instant::now()) {
+        if matches!(name.as_str(), "queue.open" | "queue.resume" | "queue.play") && !self.player.account_verified(Instant::now()) {
             self.hub.log("warn", "songs", format!("{name} blocked: {}", self.player.account_error()));
             return;
         }
@@ -802,6 +815,7 @@ impl Songs {
                 }
             }
             "queue.skip" => self.skip(Status::Skipped, "skipped", causal),
+            "queue.play" => self.play_queued(&args, causal),
             "queue.voteskip" => self.voteskip(&c, &args),
             "queue.remove" => self.remove(&c, &args),
             "queue.approve" => self.approve(&args, causal),
@@ -996,6 +1010,21 @@ impl Songs {
         if let Err(e) = self.store.save_order(&ids) {
             self.hub.log("error", "songs", format!("save queue order: {e:#}"));
         }
+    }
+
+    /// Start a selected waiting entry atomically; stale selections cannot skip another song.
+    fn play_queued(&mut self, args: &Value, causal: Option<u64>) {
+        let id = args.get_path("id").or_else(|| positional(args, 0)).and_then(text::parse_id);
+        if !id.is_some_and(|id| self.queue.reorder(id, 1)) {
+            self.hub.log("warn", "songs", "queue.play {id}: entry is no longer waiting");
+            return;
+        }
+        if self.queue.current.is_some() {
+            self.skip(Status::Skipped, "skipped", causal);
+        } else {
+            self.advance(causal);
+        }
+        self.set_paused(false);
     }
 
     fn set_paused(&mut self, paused: bool) {
@@ -1412,12 +1441,7 @@ impl Songs {
     fn entry_value(&self, e: &Entry, pos: Option<usize>) -> Value {
         match self.meta.get(&e.video) {
             Some(info) => info.with_fields(e.to_value(pos)),
-            None => self
-                .store
-                .song_meta(&e.video)
-                .and_then(|r| r.info)
-                .unwrap_or_else(|| SongInfo::parsed(&e.title, &e.channel))
-                .with_fields(e.to_value(pos)),
+            None => self.store.song_meta(&e.video).and_then(|r| r.info).unwrap_or_else(|| SongInfo::parsed(&e.title, &e.channel)).with_fields(e.to_value(pos)),
         }
     }
 

@@ -280,6 +280,12 @@ combined image. The group composites at its own z, opacity, and blend; unrelated
 their z. Each node may belong to only one group per layout. Unknown/duplicate members and
 duplicate group IDs reject the scene; groups are not nested.
 
+Node FX run before node placement, including rotation, crop, zoom, and pan; group FX run
+after the members have been placed. To rotate a camera without rotating effect-generated
+text or graphics, keep the rotation on the camera node and attach the effect chain to a
+group containing that camera. Keep unrelated overlays, such as a YouTube player, outside
+the camera group.
+
 Group FX bypass preserves grouping and stacking; deleting the group restores individual layer
 placement. Groups use reusable full-canvas GPU surfaces, so memory grows with concurrently
 visible groups and transition sides. Wide, tall, and preview use their respective layouts.

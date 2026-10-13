@@ -192,9 +192,27 @@ fn now_playing(app: &mut App, ui: &mut egui::Ui, q: &Value) {
                 ui.add_space(spacing::S);
                 ui.vertical(|ui| {
                     ui.label(RichText::new("Nothing playing").font(font_semibold(type_scale::LARGE)).color(t.fg));
-                    widgets::hint(ui, &t, "The next song starts here by itself.");
+                    widgets::hint(
+                        ui,
+                        &t,
+                        if paused { "Song queue paused. Press Play or click a queued song to start." } else { "The next song starts here by itself." },
+                    );
                 });
             });
+            if widgets::button_ex(
+                ui,
+                &t,
+                Some(icon::PLAY),
+                "Play",
+                Kind::Primary,
+                Size::Medium,
+                110.0,
+                q.get_path("upcoming").and_then(Value::as_list).is_some_and(|v| !v.is_empty()),
+            )
+            .clicked()
+            {
+                act(app, "queue.resume", Value::Null);
+            }
             return;
         }
         ui.horizontal(|ui| {
@@ -236,10 +254,16 @@ fn now_playing(app: &mut App, ui: &mut egui::Ui, q: &Value) {
             });
         });
         ui.add_space(spacing::M);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let (ic, label, a) = if paused { (icon::PLAY, "Play", "queue.resume") } else { (icon::PAUSE, "Pause", "queue.pause") };
             if widgets::button_ex(ui, &t, Some(ic), label, Kind::Primary, Size::Medium, 110.0, true).clicked() {
                 act(app, a, Value::Null);
+            }
+            if widgets::button_ex(ui, &t, Some(icon::UNDO), "Restart", Kind::Secondary, Size::Medium, 100.0, true)
+                .on_hover_text("Restart this song from the beginning; stays paused if paused")
+                .clicked()
+            {
+                act(app, "queue.seek", Value::map().with("t", 0.0));
             }
             if widgets::button_ex(ui, &t, Some(icon::RIGHT), "Skip", Kind::Secondary, Size::Medium, 100.0, true).on_hover_text("Play the next song").clicked() {
                 act(app, "queue.skip", Value::Null);
@@ -378,8 +402,18 @@ fn up_next(app: &mut App, ui: &mut egui::Ui, form: &mut Form, q: &Value) {
                                 if e.get_path("paid").is_some_and(Value::truthy) {
                                     widgets::badge(ui, &t, "Paid", t.yellow).on_hover_text("Paid requests go first");
                                 }
-                                ui.add(egui::Label::new(RichText::new(s(e, "title")).font(font_medium(type_scale::BODY + 0.5)).color(t.fg)).truncate())
-                                    .on_hover_text(format!("{}\n{}", s(e, "channel"), s(e, "url")));
+                                if ui
+                                    .add(
+                                        egui::Label::new(RichText::new(s(e, "title")).font(font_medium(type_scale::BODY + 0.5)).color(t.fg))
+                                            .sense(Sense::click())
+                                            .truncate(),
+                                    )
+                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                    .on_hover_text(format!("Play this song now\n{}\n{}", s(e, "channel"), s(e, "url")))
+                                    .clicked()
+                                {
+                                    act_ = Some(("queue.play", Value::map().with("id", id)));
+                                }
                             });
                             ui.label(RichText::new(format!("{} · {}", s(e, "user"), mmss(f(e, "duration")))).size(type_scale::SMALL + 0.5).color(t.text_dim));
                         });
@@ -392,6 +426,9 @@ fn up_next(app: &mut App, ui: &mut egui::Ui, form: &mut Form, q: &Value) {
                             }
                             if pos > 1 && widgets::icon_button(ui, &t, icon::UP, "Move up").clicked() {
                                 act_ = Some(("queue.reorder", Value::map().with("id", id).with("to", pos - 1)));
+                            }
+                            if widgets::icon_button(ui, &t, icon::PLAY, "Play this song now").clicked() {
+                                act_ = Some(("queue.play", Value::map().with("id", id)));
                             }
                             if pos > 1 && widgets::button_ex(ui, &t, None, "Play next", Kind::Ghost, Size::Small, 0.0, true).clicked() {
                                 act_ = Some(("queue.reorder", Value::map().with("id", id).with("to", 1)));

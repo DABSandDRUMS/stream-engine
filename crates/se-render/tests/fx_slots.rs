@@ -115,6 +115,56 @@ fn group_effect_sees_composited_pixels_not_individual_members() {
 }
 
 #[test]
+fn group_vfx_stay_upright_after_camera_rotation_on_wide_and_tall() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(dir.path(), "project.toml", PROJECT);
+    write_file(dir.path(), "sources/cam.toml", "kind='camera'\n");
+    write_file(dir.path(), "scenes/s.toml", r#"
+[canvas.wide]
+nodes=[{id='overhead',src='cam',rotation=180,scale=1.25}]
+groups=[{id='cams',nodes=['overhead'],fx=[{id='marker',name='patch.marker',triggered=true}]}]
+[canvas.tall]
+nodes=[{id='overhead_v',src='cam',rotation=180,scale=1.25,crop=[0.341797,0,0.341797,0]}]
+groups=[{id='cams',nodes=['overhead_v'],fx=[{id='marker',name='patch.marker',triggered=true}]}]
+"#);
+    write_file(dir.path(), "patches/marker/patch.toml", "kind='shader'\nlayer='effect'\ntrigger={attack='1ms',hold='1s',release='1ms'}\n");
+    write_file(dir.path(), "patches/marker/main.wgsl", r#"
+@fragment
+fn fs(in: SeVsOut) -> @location(0) vec4<f32> {
+    if in.uv.x > 0.1 && in.uv.x < 0.3 && in.uv.y > 0.05 && in.uv.y < 0.15 {
+        return vec4<f32>(1.0);
+    }
+    return textureSample(se_input, se_sampler, in.uv);
+}
+"#);
+    let mut h = Harness::new(dir.path());
+    h.set("show.scene.program", "s");
+    h.set("show.scene.preview", "s");
+    h.set("patch.marker.env", 1.0);
+    let mut camera = h.video("cam");
+    let mut rgba = Vec::with_capacity(128 * 72 * 4);
+    for y in 0..72 {
+        for x in 0..128 {
+            rgba.extend_from_slice(match (x < 64, y < 36) {
+                (true, true) => &[255, 0, 0, 255],
+                (false, true) => &[0, 0, 255, 255],
+                (true, false) => &[0, 255, 0, 255],
+                (false, false) => &[255, 255, 0, 255],
+            });
+        }
+    }
+    camera.write(128, 72, 128 * 4, se_hub::media::PixelFormat::Rgba8, 1, &rgba);
+    h.frame();
+    for canvas in [WIDE, TALL] {
+        let image = h.read(canvas);
+        near(px(&image, image.0 / 5, image.1 / 10), [255, 255, 255, 255]);
+        near(px(&image, image.0 * 4 / 5, image.1 * 9 / 10), [255, 0, 0, 255]);
+        near(px(&image, image.0 * 3 / 4, image.1 / 4), [0, 255, 0, 255]);
+        near(px(&image, image.0 / 4, image.1 * 3 / 4), [0, 0, 255, 255]);
+    }
+}
+
+#[test]
 fn source_scene_layout_canvas_and_output_slots_stack_and_master_survives_scene_switch() {
     let scene = "fx=[{id='scene',name='fade_to_black',amount=0.5}]\n[canvas.wide]\nfx=[{id='layout',name='fade_to_black',amount=0.5}]\nnodes=[{id='video',src='cam',fx=[{id='node',name='fade_to_black',amount=0.5}]}]";
     let project = "\n[render.canvas_fx]\nwide=[{id='canvas',name='fade_to_black',amount=0.5}]\n[render.output_fx]\nwide=[{id='output',name='fade_to_black',amount=0.5}]";

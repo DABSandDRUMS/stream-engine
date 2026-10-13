@@ -85,7 +85,10 @@ async fn mb_lookup(State(api): State<Arc<Api>>, h: axum::http::HeaderMap, Path((
     api.mb.lock().push((format!("{kind}/{id}"), user_agent(&h)));
     match mb_fixture(&format!("{kind}_{id}.json")) {
         Some(j) => (axum::http::StatusCode::OK, Json(j)),
-        None => (axum::http::StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "Not Found", "help": "For usage, please see: https://musicbrainz.org/development/mmd" }))),
+        None => (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "Not Found", "help": "For usage, please see: https://musicbrainz.org/development/mmd" })),
+        ),
     }
 }
 
@@ -147,7 +150,8 @@ async fn rig_unverified(extra_songs: &str, key: Option<&str>, configured: bool, 
     let (api, base) = api_server().await;
     let account = if configured { format!("youtube_channel = \"{CHANNEL}\"\nyoutube_delegate = \"{DELEGATE}\"\n") } else { String::new() };
     let mb = base.replace("/youtube/v3", "/ws/2");
-    let project = format!("schema = 1\n[songs]\nregion = \"US\"\napi_base = \"{base}\"\nmetadata_base = \"{mb}\"\ncrossfade = \"0ms\"\n{account}{extra_songs}\n");
+    let project =
+        format!("schema = 1\n[songs]\nregion = \"US\"\napi_base = \"{base}\"\nmetadata_base = \"{mb}\"\ncrossfade = \"0ms\"\n{account}{extra_songs}\n");
     let files = vec![SourceFile { kind: "project".into(), name: "project".into(), path: "project.toml".into(), table: project.parse().unwrap() }];
     let config = Config::build(&files);
     assert!(config.errors.is_empty(), "{:?}", config.errors);
@@ -783,4 +787,92 @@ async fn queue_theme_survives_restart_without_releasing_the_player_hold() {
     restarted.operator("queue.theme.set", Value::map().with("theme", "win31"));
     wait_state(&restarted, "queue.theme", Value::from("win31")).await;
     assert_eq!(restarted.queue().await.get_path("paused"), Some(&Value::Bool(true)));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn selected_queued_song_starts_from_idle_or_active_and_preserves_other_entries() {
+    use se_songs::queue::{Entry, Status};
+    use se_songs::store::Store;
+    let db = se_store::Db::memory().unwrap();
+    let store = Store::open(db.clone()).unwrap();
+    store.kv_set("paused", &Value::Bool(true)).unwrap();
+    let mut ids = Vec::new();
+    for (index, video) in ["dQw4w9WgXcQ", "fJ9rUzIMcZQ", "ZZZZZZZZZZZ"].iter().enumerate() {
+        let entry = Entry {
+            id: 0,
+            video: (*video).into(),
+            title: format!("Waiting song {index}"),
+            channel: "Artist".into(),
+            duration_s: 200,
+            user: "fan".into(),
+            user_id: None,
+            role: Role::Everyone,
+            status: Status::Queued,
+            paid: None,
+            requested_at: 1,
+            started_at: None,
+            ended_at: None,
+            note: None,
+        };
+        ids.push(store.insert_entry(&entry).unwrap());
+    }
+    store.save_order(&ids).unwrap();
+    let r = rig_unverified("metadata = false", None, true, db).await;
+
+    // A selected entry cannot bypass the account hold or clear the persisted pause.
+    r.operator("queue.play", Value::map().with("id", ids[1]));
+    r.operator("queue.theme.set", Value::map().with("theme", "modern"));
+    wait_state(&r, "queue.theme", Value::from("modern")).await;
+    let held = r.queue().await;
+    assert_eq!(held.get_path("now"), Some(&Value::Null));
+    assert_eq!(held.get_path("upcoming.0.id").and_then(Value::as_i64), Some(ids[0]));
+    assert_eq!(store.kv_get("paused"), Some(Value::Bool(true)));
+    assert_stopped_slots(&r.state("song.player").await);
+    r.connect_verified("test").await;
+
+    // Viewers cannot select another request, even while the queue is idle.
+    r.chat_cmd("queue.play", Value::map().with("id", ids[1]), &viewer("fan", Role::Everyone));
+    r.operator("queue.theme.set", Value::map().with("theme", "win31"));
+    wait_state(&r, "queue.theme", Value::from("win31")).await;
+    assert_eq!(r.queue().await.get_path("now"), Some(&Value::Null));
+    assert_eq!(store.kv_get("paused"), Some(Value::Bool(true)));
+
+    r.operator("queue.play", Value::map().with("id", ids[1]));
+    wait_state(&r, "queue.now.entry", Value::from(ids[1])).await;
+    wait_state(&r, "queue.paused", Value::Bool(false)).await;
+    let selected = r.queue().await;
+    assert_eq!(selected.get_path("upcoming.0.id").and_then(Value::as_i64), Some(ids[0]));
+    assert_eq!(selected.get_path("upcoming.1.id").and_then(Value::as_i64), Some(ids[2]));
+    assert_eq!(store.kv_get("paused"), Some(Value::Bool(false)));
+    let player = r.state("song.player").await;
+    let slot = player.get_path("active").and_then(Value::as_str).unwrap();
+    assert_eq!(player.get_path(&format!("{slot}.id")).and_then(Value::as_str), Some("fJ9rUzIMcZQ"));
+    assert_eq!(player.get_path(&format!("{slot}.cmd")).and_then(Value::as_str), Some("play"));
+    assert_eq!(player.get_path(&format!("{slot}.start")).and_then(Value::as_f64), Some(0.0));
+
+    // Selecting while active switches immediately, not merely "play next".
+    r.operator("queue.play", Value::map().with("id", ids[2]));
+    wait_state(&r, "queue.now.entry", Value::from(ids[2])).await;
+    let switched = r.queue().await;
+    assert_eq!(switched.get_path("upcoming.0.id").and_then(Value::as_i64), Some(ids[0]));
+    assert_eq!(switched.get_path("history.0.id").and_then(Value::as_i64), Some(ids[1]));
+    assert_eq!(switched.get_path("history.0.status").and_then(Value::as_str), Some("skipped"));
+
+    r.operator("queue.pause", Value::Null);
+    wait_state(&r, "queue.paused", Value::Bool(true)).await;
+    let before = r.state("song.player").await;
+    // Stale clicks never skip the current song or release a pause.
+    r.operator("queue.play", Value::map().with("id", ids[1]));
+    r.operator("queue.theme.set", Value::map().with("theme", "modern"));
+    wait_state(&r, "queue.theme", Value::from("modern")).await;
+    assert_eq!(r.queue().await.get_path("now.id").and_then(Value::as_i64), Some(ids[2]));
+    assert_eq!(r.state("song.player").await, before);
+    assert_eq!(store.kv_get("paused"), Some(Value::Bool(true)));
+
+    // An explicit selection also starts immediately from a paused current song.
+    r.operator("queue.play", Value::map().with("id", ids[0]));
+    wait_state(&r, "queue.now.entry", Value::from(ids[0])).await;
+    wait_state(&r, "queue.paused", Value::Bool(false)).await;
+    assert!(r.queue().await.get_path("upcoming").and_then(Value::as_list).unwrap().is_empty());
+    assert_eq!(store.kv_get("paused"), Some(Value::Bool(false)));
 }

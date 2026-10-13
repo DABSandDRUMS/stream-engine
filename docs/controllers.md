@@ -71,11 +71,19 @@ keys are sent to the device. Unplugging and replugging the deck reconnects withi
 
 | Row | Column 1 | Column 2 | Column 3 | Column 4 | Column 5 |
 |---|---|---|---|---|---|
-| Top (keys 0–4) | Starting | Drum chat | Main | Ambient | Effects |
-| Middle (keys 5–9) | Pink | Cyan | Storm | Round Room | Default Lights |
-| Bottom (keys 10–14) | Play | Pause | Next | Strobe | Cameras |
+| Top (keys 0–4) | Starting | Drum chat | Main | Apple Play / Pause | Effects |
+| Middle (keys 5–9) | Apple Back | Apple Next | Apple Volume Up | Apple Volume Down | Lighting |
+| Bottom (keys 10–14) | Queue Play | Queue Pause | Queue Next | Auto Scenes | Cameras |
 
-**Default Lights** (main page key 9, middle-right) runs `lights.default`: stops lighting
+**Lighting** (main key 9) opens a page with Pink, Cyan, Storm, Ambient, and Round Room
+across the top row. Default Lights is key 9, Cameras is key 10 (bottom-left),
+Strobe is key 13, and Main / Back is key 14. Cameras opens the camera page without
+changing the scene. The looks retain their presets and custom key images.
+Navigation alone changes no lighting.
+**Auto Scenes** (main key 13) runs `autoseq.toggle drum_cycle` and follows
+`show.autoseq.active`, matching Cameras key 9.
+
+**Default Lights** (lighting page key 9, middle-right) runs `lights.default`: stops lighting
 looks and pauses AUTO LIGHTS, restoring the configured idle room. This project's idle
 requests Main smart plug ON and pink (`#ff69b4`) mirrored Mega Pixel LED bars at 30%, with other
 fixtures dark. It replaces the unavailable Spoiler Alert media button. The same action
@@ -92,9 +100,8 @@ independent, state-backed masters (keys 9–11), with **Back** in the lower-righ
 | 11 | **AUTO FX** | `fx.auto.toggle` | `fx.auto` |
 
 **Effects** is one press from **Main key 4** or **Cameras key 12**. The clock formerly on
-Main key 4 is now **Cameras key 13**; all lighting, queue, camera and automation buttons
-keep their existing positions. Page order is `main`, `cameras`, `effects`, `sprinkles`,
-`apple_music`.
+Main key 4 is now **Cameras key 13**. Page order is `main`, `effects`, `sprinkles`,
+`lighting`, `cameras`, `apple_music`; Effects occupies pages 2 and 3.
 Both Effects pages use labeled, colored built-in icons and fire existing presets at manual
 priority, so AUTO FX being off never blocks these buttons.
 
@@ -111,7 +118,7 @@ priority, so AUTO FX being off never blocks these buttons.
 | 8 | Window cascade (`fx_cascade`) | Kit lights (`sp_kit_lights`) |
 | 9 | Solitaire (`fx_solitaire`) | Apple Music → `apple_music` |
 | 10 | Song end (`fx_song_end`) | Cameras |
-| 11 | Kit light show (`fx_kit_show`) | Spare |
+| 11 | Kit light show (`fx_kit_show`) | Lighting → `lighting` |
 | 12 | AUTO FX (`fx.auto.toggle`, state `fx.auto`) | AUTO FX (same master/state) |
 | 13 | Next Effects → `sprinkles` | Previous Effects → `effects` |
 | 14 | Main / Back → `main` | Main / Back → `main` |
@@ -150,21 +157,24 @@ deck is disconnected. After switching to Cameras, its `page` field must be `came
 ### Apple Music controls
 
 The drum project has an **Apple Music** page, reached from **Effects 2/2 key 10**
-(`sprinkles` key 9; UI key numbers start at 1). Its first four keys are **Play**,
-**Pause**, **Volume Up**, and **Volume Down**. Middle-row buttons 6 and 7 are
+(`sprinkles` key 9; UI key numbers start at 1). Key 0 is **Play / Pause**; keys 2 and 3
+are **Volume Up** and **Volume Down**. Middle-row buttons 6 and 7 are
 **Back** (previous track) and **Forward** (next track); the lower-right **Main**
 key returns to the main deck page. Main's existing Play/Pause/Next buttons still
 control the YouTube queue.
 
 Open **Automation → Buttons & pedals → Stream Deck → Apple music** to edit the
-buttons in the same place as the rest of the deck. The six **Apple Music · …**
+buttons in the same place as the rest of the deck. The five **Apple Music · …**
 saved actions are also in **Drag onto a key → Saved actions**. Drop an action onto
 the desired key, or click a key and choose **Run a saved action**. Clear the old
 key if moving rather than copying. Assignments persist in `controllers/deck.toml`.
 
 Each saved action emits
-`apple_music.control action=play|pause|next|previous|volume_up|volume_down`.
-Play and Pause request distinct states; repeated presses never toggle playback.
+`apple_music.control action=toggle|next|previous|volume_up|volume_down`.
+The unified **Play / Pause** button appears on Main key 3 and Apple Music key 0.
+`toggle` reads MusicKit's current playback state in the browser and requests the opposite
+state, waiting for that state to be confirmed; it does not invert a cached engine flag.
+The native bridge also accepts explicit `play` and `pause` for idempotent API controls.
 Volume changes Apple Music's own MusicKit volume by five percentage points,
 clamped to 0–100%; it does not change system, mixer, or queue volume.
 Choose a song or album in Apple Music before using Play after opening the app.
@@ -207,8 +217,17 @@ Music app windows/tabs if health reports ambiguity. If editing the bridge, reloa
 only **Stream Engine Apple Music Control** at `chrome://extensions`; do not restart
 the engine. Keep generated `__pycache__` out of the extension directory (Chromium
 rejects it); use `python -B` when importing the host for development.
+
+Chromium left open across bridge updates can still run the previous extension code.
+If Play / Pause fails with an unsupported-action error whose accepted actions omit
+`toggle`, reload that extension even when connection health passes. Verify with
+`preset.fire apple_music_toggle` and the resulting `apple_music.playing` transition;
+connection health alone does not prove that the running extension accepts new controls.
+
 `python -B scripts/test_apple_music.py` covers control recovery when the launcher
 has closed its stderr pipe; a diagnostic write must not disable subsequent controls.
+`node --test scripts/test-apple-music.mjs` covers play/pause transitions, external playback
+changes, delayed MusicKit state updates, and toggling without a selected track.
 
 
 ## MIDI (`kind = "midi"`)

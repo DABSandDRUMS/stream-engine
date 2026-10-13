@@ -155,6 +155,12 @@ fn dtw_preset(model: &str) -> Option<DtwModelPreset> {
     })
 }
 
+/// Whisper calls this synchronously during `WhisperState::full`.
+unsafe extern "C" fn abort_requested(data: *mut std::ffi::c_void) -> bool {
+    // SAFETY: decode passes a Halt borrowed until full returns; Whisper only reads it.
+    unsafe { &*data.cast::<crate::live::Halt>() }.stop_now()
+}
+
 impl Transcriber {
     pub fn load(path: &Path, cfg: &WhisperConfig) -> Result<Transcriber, String> {
         whisper_rs::install_logging_hooks();
@@ -221,8 +227,13 @@ impl Transcriber {
             if h.stop_now() {
                 return Err(h.error());
             }
-            let h = h.clone();
-            p.set_abort_callback_safe(move || h.stop_now());
+            // whisper-rs 0.16's safe wrapper stores a boxed trait object but reads it as
+            // the concrete closure, corrupting the guard. Borrow the actual Halt instead.
+            // SAFETY: halt stays alive and unmoved until synchronous full returns.
+            unsafe {
+                p.set_abort_callback(Some(abort_requested));
+                p.set_abort_callback_user_data((h as *const crate::live::Halt).cast_mut().cast());
+            }
         }
         let res = state.full(p, pcm);
         if let Some(h) = halt.filter(|h| h.stop_now()) {
@@ -370,6 +381,28 @@ pub fn niced<T: Send + 'static>(nice: i32, f: impl FnOnce() -> T + Send + 'stati
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn whisper_abort_tracks_live_and_operator_transitions() {
+        use crate::live::{LiveGuard, OnHold};
+        let (guard, sender) = LiveGuard::manual(None);
+        let halt = guard.halt(OnHold::Cancel);
+        let requested = || {
+            // SAFETY: same borrowed Halt contract as decode.
+            unsafe { abort_requested((&halt as *const crate::live::Halt).cast_mut().cast()) }
+        };
+        assert!(!requested());
+        sender.send(Some("show went live".into())).unwrap();
+        assert!(requested());
+        sender.send(None).unwrap();
+        assert!(!requested());
+        halt.set_hold(true);
+        assert!(requested());
+        halt.set_hold(false);
+        assert!(!requested());
+        halt.abort();
+        assert!(requested());
+    }
 
     #[test]
     fn speech_regions_skip_silence_and_bridge_short_pauses() {

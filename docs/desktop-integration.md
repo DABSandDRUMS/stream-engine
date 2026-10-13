@@ -196,8 +196,10 @@ offline and does not restart the engine or change its playback/audio settings.
   and focus; then disables the TV and parks its HDMI port to prevent standby hotplug freezes.
 - **Saved mode:** Lua monitor overrides survive reload/login. The existing privileged
   `tv-port` helper saves the HDMI detection choice for boot. A disconnected TV leaves the
-  desk monitors enabled when the TV profile is loaded. Closed windows and layout trees
-  cannot be recreated after a compositor restart/reboot.
+  desk monitors enabled when the TV profile is loaded. If the TV disappears after a completed
+  handoff, monitor hotplug callbacks restore the saved desk; a usable TV reconnect resumes
+  TV-only mode. Connected reloads do not briefly re-enable the desk screens. Closed windows
+  and layout trees cannot be recreated after a compositor restart/reboot.
 
 Requires Lua-configured Hyprland, Python 3, and the configured executable `~/.local/bin/tv`
 helper (with its existing `tv-port` authorization). The development/package installers
@@ -217,6 +219,10 @@ to recover the saved desk or `stream-engine-drum-screen tv` to retry TV mode.
 `stream-engine-drum-screen status` is read-only and reports `desk`/`tv`, or an actionable
 error when saved TV mode cannot be used. Concurrent changes are serialized.
 
+The desk fallback is asynchronous: a remote-desktop client can still exit during the brief
+loss of its last output. A surviving engine process alone does not prove broadcast continuity.
+
 Regression coverage: `python3 -B -m unittest discover -s omarchy/tests -v` exercises
-workspace migration with the compositor's replacement empty workspaces in both directions.
+workspace migration in both directions and executes the generated Lua's runtime loss,
+reconnect, reload and profile-replacement behavior.
 

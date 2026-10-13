@@ -212,6 +212,13 @@ say "waiting for the show to end (…)" meanwhile.
    still use `sessions/<id>/clips/`); rows in the `clips` table feed the UI. Progress is exposed
    through `clips.progress`, `clips.job.*`, `clips.done` and `clips.failed`.
 
+**Whisper encoder error `-6`.** If a saved recording plays but clip generation immediately
+fails with `whisper: Generic whisper error ... Error code: -6`, older builds could falsely
+abort transcription through whisper-rs 0.16's cancellation callback. The engine now borrows
+the live guard directly for the synchronous Whisper call; going live still stops transcription.
+Install the fixed engine and restart it only while offline, then rerun
+`clips.process session=<id>`. The original recording does not need repair or re-recording.
+
 ### Audio sources and complete mixes
 
 Select the audio feed in **Settings → Accounts & app → Recording**, whether it is an interface input,

@@ -36,7 +36,14 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         .exact_size(380.0)
         .resizable(false)
         .frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin { left: 18, right: 20, top: 16, bottom: 12 }).stroke(Stroke::new(1.0, t.border)))
-        .show(ui, |ui| rail_panel(app, ui));
+        .show(ui, |ui| {
+            // Reserve the rail's viewport, not the potentially wider bounds of its contents.
+            let rect = ui.available_rect_before_wrap();
+            let mut rail_ui = ui.new_child(egui::UiBuilder::new().id_salt("rail-viewport").max_rect(rect));
+            rail_ui.set_clip_rect(rect.intersect(ui.clip_rect()));
+            rail_panel(app, &mut rail_ui);
+            ui.allocate_rect(rect, Sense::hover());
+        });
     egui::Panel::bottom("sound")
         .exact_size(112.0)
         .resizable(false)
@@ -44,8 +51,9 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         .show(ui, |ui| sound_bar(app, ui));
     egui::CentralPanel::default().frame(egui::Frame::new().fill(t.bg).inner_margin(egui::Margin { left: 28, right: 24, top: 20, bottom: 16 })).show(ui, |ui| {
         let body_h = ui.available_height();
-        egui::ScrollArea::vertical().id_salt("live").auto_shrink([false, false]).show(ui, |ui| {
-            ui.set_max_width(ui.available_width());
+        egui::ScrollArea::both().id_salt("live").auto_shrink([false, false]).min_scrolled_width(0.0).show(ui, |ui| {
+            // Keep the controls usable during narrow tiling; overflow scrolls inside the centre.
+            ui.set_min_width(ui.available_width().max(640.0));
             let top = ui.cursor().top();
             setup_banner(app, ui);
             // height left for the page once the banner (if any) is drawn
@@ -558,11 +566,13 @@ fn rail_panel(app: &mut App, ui: &mut egui::Ui) {
     ui.add_space(spacing::S);
     let body = ui.available_rect_before_wrap();
     // Chat stays pinned; tabs select only the lower pane. Both panes scroll independently.
-    // Leave room for the search, at least one message, and the composer on short windows.
+    // The fixed controls and a message row need the minimum before applying the preferred
+    // split. A percentage ceiling undoes that minimum when another panel reduces the rail.
     let available = (body.height() - spacing::M).max(0.0);
-    let chat_h = (available * 0.6).max(220.0).min(available * 0.7);
+    let chat_h = (available * 0.6).max(220.0).min(available);
     let chat_rect = Rect::from_min_size(body.min, Vec2::new(body.width(), chat_h));
-    let detail_rect = Rect::from_min_max(egui::pos2(body.left(), chat_rect.bottom() + spacing::M), body.max);
+    let detail_top = (chat_rect.bottom() + spacing::M).min(body.bottom());
+    let detail_rect = Rect::from_min_max(egui::pos2(body.left(), detail_top), body.max);
     ui.scope_builder(egui::UiBuilder::new().id_salt("pinned-chat").max_rect(chat_rect), |ui| {
         ui.set_clip_rect(chat_rect.intersect(ui.clip_rect()));
         ui.label(RichText::new("Chat").font(font_semibold(type_scale::LARGE)).color(t.fg));
@@ -688,6 +698,211 @@ mod tests {
     }
 
     #[test]
+    fn accumulated_chat_remains_readable_through_docked_resize_and_tabs() {
+        struct LiveApp(App);
+        impl eframe::App for LiveApp {
+            fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
+                crate::views::health::tick(&mut self.0, ui.ctx());
+                egui::Panel::top("topbar")
+                    .exact_size(100.0)
+                    .frame(egui::Frame::new().fill(self.0.t.chrome).inner_margin(egui::Margin { left: 24, right: 24, top: 0, bottom: 0 }))
+                    .show(ui, |ui| crate::views::status::ui(&mut self.0, ui));
+                let alerts = crate::views::health::banner_items(&self.0);
+                if !alerts.is_empty() {
+                    egui::Panel::top("alerts")
+                        .resizable(false)
+                        .frame(crate::views::health::banner_frame(&self.0, &alerts))
+                        .show(ui, |ui| crate::views::health::banner(&mut self.0, ui, &alerts));
+                }
+                super::ui(&mut self.0, ui);
+            }
+        }
+        let mut h = Harness::builder().with_size([1085.6, 820.8]).with_pixels_per_point(1.25).build_eframe(|cc| {
+            let mut app = App::new(
+                cc,
+                crate::UiOpts { socket: Some("/nonexistent/se-ui-accumulated-chat-test.sock".into()), layout: Some("single".into()), program_only: false },
+            );
+            app.m.connected = true;
+            app.m.state.insert("twitch.auth.status".into(), Value::from("authorized"));
+            app.m.queries.insert("queue".into(), Value::map().with("open", true).with("upcoming", Value::List(vec![])));
+            LiveApp(app)
+        });
+        let sizes = [
+            Vec2::new(1085.6, 820.8),
+            Vec2::new(640.0, 600.0),
+            Vec2::new(1886.4, 973.6),
+            Vec2::new(1024.0, 600.0),
+        ];
+        for frame in 0..160 {
+            for j in 0..4 {
+                let n = frame * 4 + j;
+                let text = match n % 4 {
+                    0 => format!("https://example.com/{}", "w".repeat(480)),
+                    1 => "A longer chat message with several ordinary words and lines.\n".repeat(6),
+                    2 => "🥁 漢字 music café ".repeat(15),
+                    _ => format!("Readable latest {frame}"),
+                };
+                let mut payload = Value::map().with("message_id", format!("chat-{n}")).with("user", "viewer").with("message", text.clone());
+                if n % 4 == 1 {
+                    payload = payload.with(
+                        "fragments",
+                        Value::List(vec![
+                            Value::map().with("type", "text").with("text", text),
+                            Value::map().with("type", "emote").with("text", "Kappa"),
+                            Value::map().with("type", "mention").with("text", "@drummer"),
+                            Value::map().with("type", "text").with("text", " and more words ".repeat(12)),
+                            Value::map().with("type", "cheermote").with("text", "Cheer100"),
+                        ]),
+                    );
+                }
+                h.state_mut().0.m.apply(se_proto::wire::ServerMsg::Event {
+                    event: se_proto::Event::new("twitch.chat", se_proto::Origin::Twitch, payload),
+                });
+            }
+            if frame == 125 || frame == 145 {
+                h.state_mut().0.m.apply(se_proto::wire::ServerMsg::State {
+                    changes: ["relay", "obs", "stream"]
+                        .into_iter()
+                        .map(|name| (format!("health.{name}"), Value::map().with("status", if frame == 125 { "fail" } else { "pass" }).with("detail", "A transient integration status change")))
+                        .collect(),
+                });
+            }
+            let size = sizes[(frame / 10) % sizes.len()];
+            h.set_size(size);
+            h.state_mut().0.show.rail = RailTab::ALL[(frame / 7) % RailTab::ALL.len()].0;
+            h.state_mut().0.show.chat_filter = if frame == 138 { "Readable".into() } else { String::new() };
+            h.state_mut().0.show.chat_input = "A draft that remains editable during chat history changes ".repeat(20);
+            h.run_steps(3);
+            let send = h.get_by_label("Send").rect();
+            let search = h.get_by(|node| {
+                node.role() == egui::accesskit::Role::TextInput
+                    && node.data().placeholder().is_some_and(|hint| hint.ends_with("Search chat"))
+            });
+            let composer = h.get_by(|node| {
+                node.role() == egui::accesskit::Role::TextInput
+                    && node.data().placeholder() == Some("Say something as yourself…")
+            });
+            assert_eq!(search.value().unwrap_or_default(), h.state().0.show.chat_filter);
+            assert_eq!(composer.value().unwrap_or_default(), h.state().0.show.chat_input);
+            let fields = [search.rect(), composer.rect()];
+            let detail_heading = match h.state().0.show.rail {
+                RailTab::Queue => "Song queue",
+                RailTab::Events => "Activity",
+                RailTab::Mod => "Mod",
+            };
+            let detail = h.get_by_label(detail_heading).rect();
+            assert!(send.bottom() <= detail.top() - spacing::M, "chat must not consume the lower pane at frame {frame}");
+            let heading = h.get_by_label("Chat").rect();
+            let rail_left = size.x - 380.0;
+            assert!(
+                send.left() >= rail_left && send.right() <= size.x && send.bottom() <= size.y,
+                "composer must remain visibly inside the dock at frame {frame}: {send:?}, size {size:?}"
+            );
+            let latest = format!("Readable latest {frame}");
+            let mut visible_latest = false;
+            let mut visible_composer = false;
+            let mut visible_detail = false;
+            for shape in &h.output().shapes {
+                let egui::Shape::Text(text) = &shape.shape else { continue };
+                if text.galley.rows.iter().all(|row| row.visuals.mesh.vertices.is_empty()) {
+                    continue;
+                }
+                let painted = text.visual_bounding_rect();
+                let visible = painted.intersect(shape.clip_rect);
+                if text.galley.job.text == "Send" {
+                    assert!(
+                        shape.clip_rect.expand(1.0).contains_rect(send) && fields.iter().all(|rect| shape.clip_rect.expand(1.0).contains_rect(*rect)),
+                        "the actual search and whole composer must fit the chat clip at frame {frame}: fields {fields:?}, send {send:?}, clip {:?}",
+                        shape.clip_rect
+                    );
+                    visible_composer = shape.clip_rect.expand(1.0).contains_rect(painted);
+                }
+                if text.galley.job.text == detail_heading {
+                    visible_detail = shape.clip_rect.expand(1.0).contains_rect(painted);
+                }
+                if text.galley.job.text == latest {
+                    assert!(
+                        shape.clip_rect.expand(1.0).contains_rect(painted) && painted.bottom() <= send.top(),
+                        "latest chat must be painted in full above the composer at frame {frame}: {painted:?}, clip {:?}, send {send:?}",
+                        shape.clip_rect
+                    );
+                    visible_latest = visible.is_positive();
+                }
+                if visible.is_positive() && visible.top() > heading.bottom() && visible.bottom() < send.top() && visible.left() >= rail_left {
+                    assert!(
+                        painted.left() >= shape.clip_rect.left() - 1.0 && painted.right() <= shape.clip_rect.right() + 1.0,
+                        "visible chat text must wrap rather than be horizontally clipped at frame {frame}: {:?}, painted {painted:?}, clip {:?}",
+                        text.galley.job.text, shape.clip_rect
+                    );
+                }
+            }
+            assert!(visible_latest, "the latest chat must have actual visible glyphs at frame {frame}");
+            assert!(visible_composer, "the composer must be actually painted at frame {frame}");
+            assert!(visible_detail, "the lower pane must remain actually visible at frame {frame}");
+        }
+        assert_eq!(h.state().0.m.chat_messages.len(), crate::model::CHAT_CAP);
+    }
+
+    #[test]
+    fn docked_chat_recovers_after_transient_viewport_collapse() {
+        struct LiveApp(App);
+        impl eframe::App for LiveApp {
+            fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
+                egui::Panel::top("header").exact_size(100.0).show(ui, |_| {});
+                super::ui(&mut self.0, ui);
+            }
+        }
+        let mut h = Harness::builder().with_size([1085.6, 820.8]).with_pixels_per_point(1.25).build_eframe(|cc| {
+            let mut app = App::new(
+                cc,
+                crate::UiOpts { socket: Some("/nonexistent/se-ui-collapsed-chat-test.sock".into()), layout: Some("single".into()), program_only: false },
+            );
+            app.m.connected = true;
+            app.m.state.insert("twitch.auth.status".into(), Value::from("authorized"));
+            for n in 0..crate::model::CHAT_CAP {
+                app.m.apply(se_proto::wire::ServerMsg::Event {
+                    event: se_proto::Event::new(
+                        "twitch.chat",
+                        se_proto::Origin::Twitch,
+                        Value::map().with("message_id", format!("message-{n}")).with("user", "viewer").with("message", format!("Message {n}")),
+                    ),
+                });
+            }
+            LiveApp(app)
+        });
+        for size in [Vec2::ZERO, Vec2::new(160.0, 128.0), Vec2::new(380.0, 240.0), Vec2::new(640.0, 360.0)] {
+            h.set_size(size);
+            h.run_steps(3);
+            let message = format!("Recovered at {}px", size.x);
+            h.state_mut().0.m.apply(se_proto::wire::ServerMsg::Event {
+                event: se_proto::Event::new(
+                    "twitch.chat",
+                    se_proto::Origin::Twitch,
+                    Value::map().with("user", "viewer").with("message", message.clone()),
+                ),
+            });
+            h.set_size(Vec2::new(1085.6, 820.8));
+            h.run_steps(3);
+            let send = h.get_by_label("Send").rect();
+            let mut latest = false;
+            for shape in &h.output().shapes {
+                if let egui::Shape::Text(text) = &shape.shape
+                    && text.galley.job.text == message
+                {
+                    let painted = text.visual_bounding_rect();
+                    assert!(
+                        shape.clip_rect.expand(1.0).contains_rect(painted) && painted.bottom() <= send.top(),
+                        "chat must recover real visible text after a {size:?} viewport: {painted:?}, clip {:?}",
+                        shape.clip_rect
+                    );
+                    latest = true;
+                }
+            }
+            assert!(latest, "chat must resume painting after a {size:?} viewport");
+        }
+    }
+
+    #[test]
     fn compact_rail_keeps_chat_and_composer_above_queue() {
         struct LiveApp(App);
         impl eframe::App for LiveApp {
@@ -707,7 +922,10 @@ mod tests {
                 app.m.chat_messages.push_back(se_proto::Event::new(
                     "twitch.chat",
                     se_proto::Origin::System,
-                    Value::map().with("user", "viewer").with("message", if i == 19 { "Latest visible message".into() } else { format!("Message {i}") }),
+                    Value::map().with("user", "viewer").with(
+                        "message",
+                        if i == 19 { "Latest visible message".into() } else if i == 0 { "https://example.com/".to_string() + &"x".repeat(1000) } else { format!("Message {i}") },
+                    ),
                 ));
             }
             app.m.queries.insert("queue".into(), Value::map().with("open", true).with("upcoming", Value::List(vec![])));
@@ -725,6 +943,27 @@ mod tests {
             h.run_steps(4);
             h.get_by_label("Latest visible message");
             h.get_by_label("Send");
+        }
+        for size in [Vec2::new(1886.0, 973.0), Vec2::new(640.0, 600.0), Vec2::new(1024.0, 600.0), Vec2::new(1600.0, 1000.0)] {
+            h.set_size(size);
+            h.run_steps(4);
+            let rail_left = size.x - 380.0;
+            let bg = h.state().0.t.bg;
+            for shape in &h.output().shapes {
+                if let egui::Shape::Rect(rect) = &shape.shape
+                    && rect.fill == bg
+                    && rect.rect.left() < rail_left
+                    && rect.rect.top() >= 100.0
+                    && rect.rect.height() > 200.0
+                {
+                    assert!(
+                        rect.rect.intersect(shape.clip_rect).right() <= rail_left + 1.0,
+                        "the overview background must not paint over the chat and queue at {size:?}: {shape:?}"
+                    );
+                }
+            }
+            assert!(h.get_by_label("Send").rect().left() >= rail_left);
+            assert!(h.get_by_label("Song queue").rect().left() >= rail_left);
         }
     }
 }

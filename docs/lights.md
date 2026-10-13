@@ -28,6 +28,20 @@ lights/
   cuelists/<name>.toml  tracked cue lists, selected through the shared layer contract
 ```
 
+**Drum project's alert cop lights.** `rules/effects.toml` adds `lights.cue cue=lx_alert_cop`
+to the existing sub, resub, single/small gift, gift-bomb, small-raid and big-raid actions.
+Confetti, gift roulette and raid video effects remain unchanged. Gift recipient `twitch.sub`
+events do not duplicate the effect; their canonical `twitch.gift` event starts it once.
+These rules retain their live/rehearsal mode gate and work independently of AUTO LIGHTS.
+
+`lights/cuelists/lx_alert_cop.toml` is a separate priority-299 playback, not a replacement
+for the base/rhythm/accent slots. The two `lx_alert_cop_*` color chases alternate opposing
+Par/Stick banks and the mirrored bars between red and blue at 1.5 cycles per second.
+Scanner position and hardware strobe are untouched, and the output safety limiter stays enabled.
+The terminal cue has zero fade-in and `follow = "45s"` before autorelease, then a 400 ms
+release. Each new alert restarts that hold. Underlying lighting continues and is revealed
+after release; automation preferences are not changed.
+
 The output chain, every frame (default 44 Hz):
 
 ```mermaid

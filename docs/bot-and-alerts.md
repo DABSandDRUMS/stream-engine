@@ -51,6 +51,14 @@ the Twitch adapter), then cooldowns (global and per user; mods and the broadcast
 as actor, so chat priority, chat caps, `chat_ttl`, and `[policy] effect_modes` apply exactly as
 for rules; the broadcaster's own commands run at preset priority.
 
+**Drum-project moderator replies.** `commands/custom.toml` defines these plain replies with
+`role = "mod"` (moderators and broadcaster only). They hot-reload without restarting the engine:
+
+- `!ahh` → `All hallows hour is when the ghouls and goblins feast on the devils delight! This is just our little way of giving back to the demons.`
+- `!1965` → `1 dabsan169 9 dabsan169 6 dabsan169 5 dabsan169`
+
+Emote tokens are literal text; all four digits are followed by `dabsan169`.
+
 **Built-in command handlers** (available to assign explicitly; no chat commands are installed):
 
 | builtin | chat | notes |

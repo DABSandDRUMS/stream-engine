@@ -437,15 +437,16 @@ pub fn chat(app: &mut App, ui: &mut egui::Ui) {
         return;
     }
     ui.add_space(spacing::S);
+    let composer_id = ui.make_persistent_id("chat-composer");
     ui.horizontal(|ui| {
         let w = ui.available_width() - 84.0;
-        let r = ui.add(se_ui_kit::widgets::field(&mut app.show.chat_input).hint_text("Say something as your bot…").desired_width(w));
+        let r = ui.add(se_ui_kit::widgets::field(&mut app.show.chat_input).id(composer_id).hint_text("Say something as yourself…").desired_width(w));
         let ready = !app.show.chat_input.trim().is_empty();
         let clicked = widgets::button_ex(ui, &t, None, "Send", Kind::Primary, Size::Medium, 76.0, ready).clicked();
         let send = clicked || (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
         if send && ready {
             let text = std::mem::take(&mut app.show.chat_input);
-            app.m.action("bot.say", Value::map().with("args", vec![text.trim().to_string()]));
+            app.m.action("twitch.chat.send", Value::map().with("text", text.trim().to_string()).with("as", "broadcaster"));
             r.request_focus();
         }
     });
@@ -619,12 +620,20 @@ pub fn queue(app: &mut App, ui: &mut egui::Ui) {
                             if widgets::icon_button(ui, &t, ic, tip).clicked() {
                                 act = Some((a, Value::Null));
                             }
+                            if widgets::icon_button(ui, &t, icon::UNDO, "Restart song from beginning").clicked() {
+                                act = Some(("queue.seek", Value::map().with("t", 0.0)));
+                            }
                         });
                     });
                 });
             }
             None => {
-                widgets::hint(ui, &t, "Nothing is playing right now.");
+                ui.horizontal(|ui| {
+                    widgets::hint(ui, &t, if paused { "Song queue paused." } else { "Nothing is playing right now." });
+                    if widgets::button_ex(ui, &t, Some(icon::PLAY), "Play", Kind::Primary, Size::Small, 0.0, !upcoming.is_empty()).clicked() {
+                        act = Some(("queue.resume", Value::Null));
+                    }
+                });
             }
         }
         if !pending.is_empty() {
@@ -671,7 +680,14 @@ pub fn queue(app: &mut App, ui: &mut egui::Ui) {
                         } else {
                             s(e, "title").to_string()
                         };
-                        ui.add(egui::Label::new(RichText::new(title).font(font_medium(type_scale::BODY)).color(t.fg)).truncate());
+                        if ui
+                            .add(egui::Label::new(RichText::new(title).font(font_medium(type_scale::BODY)).color(t.fg)).sense(egui::Sense::click()).truncate())
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .on_hover_text("Play this song now")
+                            .clicked()
+                        {
+                            act = Some(("queue.play", Value::map().with("id", id.clone())));
+                        }
                         let dur = e.get_path("duration").and_then(Value::as_f64).unwrap_or(0.0);
                         ui.label(RichText::new(format!("{} · {}", s(e, "user"), mmss(dur))).size(type_scale::SMALL).color(t.text_dim));
                     });
@@ -829,6 +845,47 @@ pub fn moderation(app: &mut App, ui: &mut egui::Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_composer_keeps_focus_when_first_message_adds_search() {
+        use egui_kittest::{Harness, kittest::Queryable};
+
+        struct ChatApp(App);
+        impl eframe::App for ChatApp {
+            fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
+                egui::CentralPanel::default().show(ui, |ui| chat(&mut self.0, ui));
+            }
+        }
+        let mut h = Harness::builder().with_size([320.0, 400.0]).build_eframe(|cc| {
+            let mut app = App::new(
+                cc,
+                crate::UiOpts { socket: Some("/nonexistent/se-ui-composer-test.sock".into()), layout: Some("single".into()), program_only: false },
+            );
+            app.m.connected = true;
+            app.m.state.insert("twitch.auth.status".into(), Value::from("authorized"));
+            ChatApp(app)
+        });
+        h.run_steps(3);
+        h.get_by_role(egui::accesskit::Role::TextInput).click();
+        h.run_steps(2);
+        h.get_by_role(egui::accesskit::Role::TextInput).type_text("first message");
+        h.run_steps(2);
+        h.key_press(egui::Key::Enter);
+        h.run_steps(2);
+        assert!(h.state().0.show.chat_input.is_empty());
+        h.state_mut().0.m.apply(se_proto::wire::ServerMsg::Event {
+            event: Event::new("twitch.chat", se_proto::Origin::Twitch, Value::map().with("user", "owner").with("message", "first message")),
+        });
+        h.run_steps(3);
+        let composer = h.query_all_by_role(egui::accesskit::Role::TextInput).last().unwrap();
+        assert!(composer.is_focused(), "the arriving message must not move keyboard input away from chat");
+        composer.type_text("second message");
+        h.run_steps(2);
+        assert_eq!(h.state().0.show.chat_input, "second message");
+        h.key_press(egui::Key::Enter);
+        h.run_steps(2);
+        assert!(h.state().0.show.chat_input.is_empty(), "the next message still submits with Enter");
+    }
 
     #[test]
     fn chat_audience_tracks_updates_without_presenting_unknown_or_cached_counts_as_live() {

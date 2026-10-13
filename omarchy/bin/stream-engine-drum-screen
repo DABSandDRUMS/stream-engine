@@ -62,6 +62,8 @@ def query(*args):
 def lua(value):
     if isinstance(value, dict):
         return "{ " + ", ".join(f"{key} = {lua(item)}" for key, item in value.items()) + " }"
+    if isinstance(value, list):
+        return "{ " + ", ".join(lua(item) for item in value) + " }"
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (int, float)):
@@ -309,20 +311,38 @@ def reload_config():
 
 
 def tv_override(desk, tv):
-    # At login/reload keep a usable desk if the physical TV is disconnected.
-    # tv-port on persists /var/lib/tv-port/state; its existing udev boot rule
-    # leaves the connector in normal detection mode on the next boot.
+    # Keep the saved desk usable both at login/reload and if the TV disappears
+    # later. These subscriptions belong to this config load: staging/desk
+    # overrides replace them on reload before intentionally parking the TV.
+    # tv-port on persists normal connector detection for the next boot.
     paths = sorted(str(path) for path in Path("/sys/class/drm").glob(f"card*-{tv['name']}/status"))
     if not paths:
         raise SwitchError(f"No physical DRM connector for {tv['name']}; refusing a TV-only profile")
-    content = "-- stream-engine drum screen: TV-only, with disconnected-TV desk fallback.\n" + rules(desk)
-    content += "local connected = false\n"
+    content = "-- stream-engine drum screen: TV-only, with disconnected-TV desk fallback.\n"
+    content += "local desk = " + lua([monitor_rule(monitor) for monitor in desk]) + "\n"
+    content += """local function restore_desk()
+  for _, monitor in ipairs(desk) do hl.monitor(monitor) end
+end
+local function park_desk()
+  for _, monitor in ipairs(desk) do hl.monitor({ output = monitor.output, disabled = true }) end
+end
+"""
+    content += "local tv_name = " + lua(tv["name"]) + "\n"
+    content += """hl.on("monitor.removed", function(monitor)
+  if monitor.name == tv_name then restore_desk() end
+end)
+hl.on("monitor.added", function(monitor)
+  if monitor.name == tv_name and monitor.width > 0 and monitor.height > 0
+      and monitor.refresh_rate > 0 and monitor.dpms_status and not monitor.is_mirror then
+    park_desk()
+  end
+end)
+local connected = false
+"""
     for path in paths:
         content += f"do local f = io.open({lua(path)}, 'r'); if f then connected = connected or f:read('*l') == 'connected'; f:close() end end\n"
-    content += rules([tv]) + "if connected then\n"
-    for monitor in desk:
-        content += "  hl.monitor(" + lua({"output": monitor["name"], "disabled": True}) + ")\n"
-    return content + "end\n"
+    content += rules([tv])
+    return content + "if connected then park_desk() else restore_desk() end\n"
 
 
 def status(state):
@@ -331,7 +351,7 @@ def status(state):
     televisions = [monitor for monitor in active if is_tv(monitor)]
     if state["mode"] == "tv":
         if len(televisions) != 1 or desks:
-            raise SwitchError("Saved TV mode is not active (TV offline or desk fallback). Run 'desk' to recover, or turn on the TV and run 'tv'")
+            raise SwitchError("Saved TV mode is not active (TV offline or desk fallback). Reconnect the TV to resume automatically, or run 'tv'; run 'desk' to restore the saved desk profile")
         return "tv"
     if not desks:
         raise SwitchError("Desk screens are unavailable; run 'desk' to restore the saved profile")

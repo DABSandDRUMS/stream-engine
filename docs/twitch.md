@@ -201,6 +201,18 @@ and alerts. Commands after a `wait` are only scheduled, so they can't refund it.
 `lane` whose lane is busy waits its turn and counts as run (fulfilled); a ninth waiting firing
 in the same lane fails and refunds. A `quantize` start is likewise only delayed.
 
+The local reward file's `cost` is the price source of truth. Change it there, not only in
+Twitch's dashboard: the next sync writes the local price
+back to Twitch. Until the prices match, a lower-priced redemption is rejected with
+`paid <amount>, costs <local price>`. Keep the reward's file/key and Twitch ID unchanged when
+repricing. Check `twitch.rewards` and Twitch's displayed price after the reload.
+
+To exercise the priced redemption-to-effect path without spending points, use
+`streamctl --trace sim redeem 'reward="Freeze Frame"' cost=500` (substitute the exact reward
+title and price). The simulator uses the core's reward policy and `fires`, but bypasses the
+mode gate and does not fulfill/refund real Twitch redemptions. Use `rehearsal` mode to test
+real viewer redemptions without starting a public stream.
+
 Rewards with `fx = true` follow the operator's **Effects on/off** switch (`fx.enabled`): when it
 turns false, the next reward sync (about half a second after the switch settles) sets them
 `is_paused` on Twitch, and turning effects back on unpauses them. `paused = true` keeps a

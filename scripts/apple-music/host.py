@@ -20,7 +20,7 @@ import time
 import uuid
 
 
-ACTIONS = frozenset({"play", "pause", "next", "previous", "volume_up", "volume_down"})
+ACTIONS = frozenset({"play", "pause", "toggle", "next", "previous", "volume_up", "volume_down"})
 ORIGINS = frozenset({"deck", "cli", "ui", "api", "midi", "voice", "osc", "system"})
 MAX_MESSAGE = 1024 * 1024
 MAX_WATCH_LINE = 256 * 1024

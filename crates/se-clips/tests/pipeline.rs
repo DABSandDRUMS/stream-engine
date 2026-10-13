@@ -6,6 +6,7 @@
 
 use se_clips::config::ClipsConfig;
 use se_clips::job::{self, JobEnv};
+use se_clips::live::{self, LiveGuard, OnHold};
 use se_clips::store;
 use se_store::Db;
 use std::path::{Path, PathBuf};
@@ -123,7 +124,11 @@ fn synthetic_session_produces_ranked_wide_and_tall_clips() {
     let mut cfg = ClipsConfig { auto_rank: false, ..ClipsConfig::default() };
     cfg.audio.drop = vec!["music".into(), "program".into()]; // explicit opt-in for this separate-track fixture
     let env = JobEnv { db: db.clone(), project_root: project.clone(), data_dir: se_store::data_dir(), cfg };
-    let report = job::process(&env, "20260925-200000", &|p| eprintln!("  [{}] {}/{} {}", p.stage, p.done, p.total, p.detail)).unwrap();
+    let (guard, _sender) = LiveGuard::manual(None);
+    let report = live::with_halt(guard.halt(OnHold::Cancel), || {
+        job::process(&env, "20260925-200000", &|p| eprintln!("  [{}] {}/{} {}", p.stage, p.done, p.total, p.detail))
+    })
+    .unwrap();
     eprintln!("report: {report:?}");
     assert_eq!((report.clips, report.failed), (3, 0), "{report:?}");
 
